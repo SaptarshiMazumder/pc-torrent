@@ -1,0 +1,3 @@
+[This is a mock .blend file for testing]
+You can use any file when testing with MOCK_MODE=true
+The agent doesn't actually parse it, just uses it as input

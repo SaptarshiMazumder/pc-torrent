@@ -73,7 +73,7 @@ function SubmitJobPage({ machine, onBack, onSubmitted }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!file) return setError("Select a .blend file first");
+    if (!file) return setError("Select a .blend file or .zip project bundle first");
     setLoading(true);
     setError(null);
     try {
@@ -95,13 +95,17 @@ function SubmitJobPage({ machine, onBack, onSubmitted }) {
       </div>
       <form onSubmit={handleSubmit} className="submit-form">
         <label>
-          Blender File (.blend)
+          Project File (.blend or .zip)
           <input
             type="file"
-            accept=".blend"
+            accept=".blend,.zip"
             onChange={e => setFile(e.target.files[0])}
           />
         </label>
+        <p className="status">
+          Use a single `.blend` only if textures and linked libraries are packed into it.
+          Otherwise upload a `.zip` with the full project folder.
+        </p>
         {file && <p className="file-name">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>}
         {error && <p className="error">{error}</p>}
         <button className="btn-primary" type="submit" disabled={loading}>
@@ -148,13 +152,17 @@ function JobStatusPage({ jobId, onBack }) {
   if (error) return <p className="error">{error}</p>;
   if (!job) return <p className="status">Loading...</p>;
 
+  const statusLabel = job.status === "done" && job.error
+    ? "Done with warnings"
+    : (STATUS_LABEL[job.status] || job.status);
+
   return (
     <div>
       <button className="btn-back" onClick={onBack}>← Browse Machines</button>
       <h2>Job Status</h2>
       <div className="job-card">
         <div className="job-id">Job ID: <code>{jobId}</code></div>
-        <div className={`status-badge status-${job.status}`}>{STATUS_LABEL[job.status] || job.status}</div>
+        <div className={`status-badge status-${job.status}`}>{statusLabel}</div>
 
         {(job.status === "pending" || job.status === "running") && (
           <div className="spinner-wrap">
@@ -172,6 +180,11 @@ function JobStatusPage({ jobId, onBack }) {
         {job.status === "done" && (
           <div className="done-section">
             <p>Rendered <strong>{job.output_files.length}</strong> file(s)</p>
+            {job.error && (
+              <p className="status">
+                <strong>Warning:</strong> {job.error}
+              </p>
+            )}
             <a className="btn-primary" href={downloadUrl(jobId)} download>
               Download Output
             </a>

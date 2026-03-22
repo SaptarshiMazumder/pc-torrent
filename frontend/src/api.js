@@ -12,7 +12,7 @@ export async function submitJob(machineId, file) {
   const r = await fetch(`${BASE}/jobs`, { method: "POST", body: form });
   if (!r.ok) {
     const err = await r.json();
-    throw new Error(err.error || "Failed to submit job");
+    throw new Error(err.detail || err.error || "Failed to submit job");
   }
   return r.json();
 }

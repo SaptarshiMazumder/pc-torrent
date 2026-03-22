@@ -21,6 +21,10 @@ def _ensure_machine_columns() -> None:
         conn.execute("ALTER TABLE machines ADD COLUMN machine_key TEXT")
     if "last_seen_at" not in machine_columns:
         conn.execute("ALTER TABLE machines ADD COLUMN last_seen_at TEXT")
+    if "os_version" not in machine_columns:
+        conn.execute("ALTER TABLE machines ADD COLUMN os_version TEXT")
+    if "nvidia_driver" not in machine_columns:
+        conn.execute("ALTER TABLE machines ADD COLUMN nvidia_driver TEXT")
 
     # Unique per physical machine when machine_key is provided.
     conn.execute(
@@ -45,7 +49,9 @@ def init_db() -> None:
               ram_gb REAL NOT NULL,
               status TEXT NOT NULL DEFAULT 'idle',
               registered_at TEXT NOT NULL,
-              last_seen_at TEXT
+              last_seen_at TEXT,
+              os_version TEXT,
+              nvidia_driver TEXT
             );
 
             CREATE TABLE IF NOT EXISTS jobs (

@@ -143,10 +143,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Download Blender portable (headless)
-RUN wget -q https://download.blender.org/release/Blender4.3/blender-4.3.0-linux-x64.tar.xz \
-    && tar xf blender-4.3.0-linux-x64.tar.xz \
-    && mv blender-4.3.0-linux-x64 /opt/blender \
-    && rm blender-4.3.0-linux-x64.tar.xz
+RUN wget -q https://download.blender.org/release/Blender4.5/blender-4.5.1-linux-x64.tar.xz \
+    && tar xf blender-4.5.1-linux-x64.tar.xz \
+    && mv blender-4.5.1-linux-x64 /opt/blender \
+    && rm blender-4.5.1-linux-x64.tar.xz
 
 # Create working directories
 RUN mkdir -p /input /output

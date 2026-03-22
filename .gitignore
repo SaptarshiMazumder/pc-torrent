@@ -18,6 +18,16 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+agent/output/
+
+# Local app/runtime data
+server/pcrent.db
+server/jobs/
+
+# Generated Docker render artifacts
+server/docker/pcrent-render.tar
+server/docker/pcrent-render.tar.gz
+server/docker/pcrent-render.sha256
 
 # OS/IDE
 .DS_Store

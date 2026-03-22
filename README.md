@@ -57,7 +57,7 @@ python agent.py
 | Variable       | Default                                                        | Description |
 |----------------|----------------------------------------------------------------|-------------|
 | `BACKEND_URL`  | `http://localhost:8000`                                        | API server URL |
-| `BLENDER_PATH` | `C:\Program Files\Blender Foundation\Blender 4.3\blender.exe` | Blender executable path |
+| `BLENDER_PATH` | `C:\Program Files\Blender Foundation\Blender 4.5\blender.exe` | Blender executable path |
 | `USE_SANDBOX`  | `false`                                                        | Set `true` to use Windows Sandbox |
 | `MOCK_MODE`    | `false`                                                        | Set `true` to simulate renders without Blender |
 

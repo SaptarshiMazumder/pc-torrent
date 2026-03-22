@@ -2,7 +2,7 @@ import io
 import json
 import shutil
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -20,6 +20,7 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent
 JOBS_DIR = BASE_DIR / "jobs"
+MACHINE_STALE_SECONDS = 15
 
 app = FastAPI(title="PC Rent Python Server")
 
@@ -38,6 +39,8 @@ class RegisterMachinePayload(BaseModel):
     gpu_vram_gb: float
     cpu_cores: int
     ram_gb: float
+    os_version: str | None = None
+    nvidia_driver: str | None = None
 
 
 class UpdateJobStatusPayload(BaseModel):
@@ -69,6 +72,15 @@ def sanitize_filename(name: str) -> str:
     if not safe:
         raise HTTPException(status_code=400, detail="Invalid filename")
     return safe
+
+
+def validate_job_input_filename(name: str) -> None:
+    ext = Path(name).suffix.lower()
+    if ext not in {".blend", ".zip"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Upload a .blend file or a .zip project bundle.",
+        )
 
 
 @app.on_event("startup")
@@ -112,6 +124,7 @@ def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
                 """
                 UPDATE machines
                 SET machine_key = ?, gpu_model = ?, gpu_vram_gb = ?, cpu_cores = ?, ram_gb = ?,
+                    os_version = ?, nvidia_driver = ?,
                     status = 'idle', registered_at = ?, last_seen_at = ?
                 WHERE id = ?
                 """,
@@ -121,6 +134,8 @@ def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
                     payload.gpu_vram_gb,
                     payload.cpu_cores,
                     payload.ram_gb,
+                    payload.os_version,
+                    payload.nvidia_driver,
                     current_time,
                     current_time,
                     machine_id,
@@ -131,9 +146,10 @@ def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
             conn.execute(
                 """
                 INSERT INTO machines (
-                    id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb, status, registered_at, last_seen_at
+                    id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb,
+                    os_version, nvidia_driver, status, registered_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'idle', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?)
                 """,
                 (
                     machine_id,
@@ -142,6 +158,8 @@ def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
                     payload.gpu_vram_gb,
                     payload.cpu_cores,
                     payload.ram_gb,
+                    payload.os_version,
+                    payload.nvidia_driver,
                     current_time,
                     current_time,
                 ),
@@ -178,9 +196,25 @@ def mark_machine_idle(machine_id: str) -> dict[str, bool]:
 
 @app.get("/machines")
 def list_available_machines() -> list[dict[str, Any]]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=MACHINE_STALE_SECONDS)).isoformat()
     with lock:
+        conn.execute(
+            """
+            UPDATE machines
+            SET status = 'idle'
+            WHERE status = 'available' AND (last_seen_at IS NULL OR last_seen_at < ?)
+            """,
+            (cutoff,),
+        )
+        conn.commit()
         rows = conn.execute(
-            "SELECT * FROM machines WHERE status = 'available' ORDER BY gpu_vram_gb DESC"
+            """
+            SELECT *
+            FROM machines
+            WHERE status = 'available' AND last_seen_at >= ?
+            ORDER BY gpu_vram_gb DESC
+            """,
+            (cutoff,),
         ).fetchall()
     return [row_to_dict(row) for row in rows]
 
@@ -205,6 +239,7 @@ async def submit_job(
     input_dir.mkdir(parents=True, exist_ok=True)
 
     input_filename = sanitize_filename(blender_file.filename or "scene.blend")
+    validate_job_input_filename(input_filename)
     input_path = input_dir / input_filename
     with input_path.open("wb") as out_file:
         shutil.copyfileobj(blender_file.file, out_file)
@@ -381,3 +416,26 @@ def download_job_output_archive(job_id: str) -> Response:
 
     headers = {"Content-Disposition": f"attachment; filename=job_{job_id}_output.zip"}
     return StreamingResponse(zip_buffer, media_type="application/zip", headers=headers)
+
+
+# -----------------------------------------------
+# Docker image distribution
+# -----------------------------------------------
+DOCKER_DIR = BASE_DIR / "docker"
+
+
+@app.get("/docker/image/version")
+def get_docker_image_version() -> dict[str, str]:
+    sha_file = DOCKER_DIR / "pcrent-render.sha256"
+    if not sha_file.exists():
+        raise HTTPException(status_code=404, detail="No image available")
+    sha = sha_file.read_text().strip().split()[0]
+    return {"version": "v1.0.0", "sha256": sha}
+
+
+@app.get("/docker/image")
+def download_docker_image() -> FileResponse:
+    image_path = DOCKER_DIR / "pcrent-render.tar.gz"
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(path=image_path, filename="pcrent-render.tar.gz")

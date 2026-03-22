@@ -1,0 +1,23 @@
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+# Install Blender dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget xz-utils libxi6 libxxf86vm1 libxfixes3 \
+    libxrender1 libgl1-mesa-glx libxkbcommon0 \
+    libsm6 libice6 libxrandr2 libxinerama1 libxcursor1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download Blender 4.3 portable (headless, no GUI needed)
+RUN wget -q https://download.blender.org/release/Blender4.3/blender-4.3.0-linux-x64.tar.xz \
+    && tar xf blender-4.3.0-linux-x64.tar.xz \
+    && mv blender-4.3.0-linux-x64 /opt/blender \
+    && rm blender-4.3.0-linux-x64.tar.xz
+
+# Create working directories
+RUN mkdir -p /input /output
+
+# Entry script
+COPY render.sh /render.sh
+RUN chmod +x /render.sh
+
+ENTRYPOINT ["/render.sh"]

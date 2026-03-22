@@ -13,12 +13,15 @@ import tempfile
 import shutil
 import signal
 import threading
+import hashlib
+import socket
+import uuid
 import requests
 
 # -----------------------------------------------
 # CONFIG
 # -----------------------------------------------
-BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:3001")
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 POLL_INTERVAL = 5  # seconds between job polls
 BLENDER_PATH = os.environ.get("BLENDER_PATH", r"C:\Program Files\Blender Foundation\Blender 4.3\blender.exe")
 USE_SANDBOX = os.environ.get("USE_SANDBOX", "false").lower() == "true"
@@ -30,6 +33,37 @@ running = True
 # -----------------------------------------------
 # HARDWARE DETECTION
 # -----------------------------------------------
+def get_machine_key():
+    """
+    Build a stable identity for this physical machine so server can dedupe registrations.
+    """
+    parts = []
+
+    # Windows machine GUID is usually stable across agent restarts.
+    try:
+        import winreg  # type: ignore
+
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+            machine_guid, _ = winreg.QueryValueEx(key, "MachineGuid")
+            if machine_guid:
+                parts.append(str(machine_guid))
+    except Exception:
+        pass
+
+    host = os.environ.get("COMPUTERNAME") or socket.gethostname()
+    if host:
+        parts.append(host)
+
+    # Usually real MAC. If unavailable, Python may synthesize one.
+    parts.append(str(uuid.getnode()))
+
+    if not parts:
+        parts.append(platform.node() or "unknown-machine")
+
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def get_gpu_info():
     """Try nvidia-smi first, fall back to wmic."""
     try:
@@ -82,6 +116,7 @@ def detect_specs():
     cpu_cores = get_cpu_cores()
     ram_gb = get_ram_gb()
     return {
+        "machine_key": get_machine_key(),
         "gpu_model": gpu_model,
         "gpu_vram_gb": gpu_vram,
         "cpu_cores": cpu_cores,

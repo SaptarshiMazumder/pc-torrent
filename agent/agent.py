@@ -2,6 +2,10 @@
 PC Rent - Desktop Agent (v2 - Dockerized GPU Rendering)
 Runs on provider's Windows PC. Detects specs, bootstraps Docker,
 registers with backend, polls for jobs, executes them in GPU containers.
+
+Supports two modes:
+  - Console mode: `python agent.py` (prints to terminal)
+  - Sidecar mode: launched by Tauri via sidecar_main.py (emits JSON events)
 """
 
 import os
@@ -25,6 +29,34 @@ from config import (
 )
 from system_check import check_requirements, get_windows_version, check_nvidia_gpu
 from docker_setup import full_bootstrap, check_docker_running
+
+
+# -----------------------------------------------
+# IPC BRIDGE (optional, for sidecar mode)
+# -----------------------------------------------
+# When running as a Tauri sidecar, ipc.py is used for structured events.
+# In console mode, we just print() as usual.
+try:
+    from ipc import emit_log as _ipc_log, emit_status as _ipc_status
+    _has_ipc = True
+except ImportError:
+    _has_ipc = False
+
+_sidecar_mode_active = False
+
+
+def set_sidecar_mode(enabled):
+    """Enable/disable sidecar IPC mode."""
+    global _sidecar_mode_active
+    _sidecar_mode_active = enabled
+
+
+def _log(message, source="agent", level="info"):
+    """Log a message. In sidecar mode, emits JSON; in console mode, prints."""
+    if _sidecar_mode_active and _has_ipc:
+        _ipc_log(message, source=source, level=level)
+    else:
+        print(message)
 
 # -----------------------------------------------
 # CONFIG
@@ -226,7 +258,7 @@ def prepare_job_input(downloaded_file, input_dir):
     validate_input_filename(os.path.basename(downloaded_file))
 
     if downloaded_file.lower().endswith(".zip"):
-        print("[JOB] Extracting project archive...")
+        _log("[JOB] Extracting project archive...")
         safe_extract_zip(downloaded_file, input_dir)
         try:
             os.remove(downloaded_file)
@@ -248,7 +280,7 @@ def prepare_job_input(downloaded_file, input_dir):
         )
 
     blend_file = blend_files[0]
-    print(f"[JOB] Render target: {os.path.relpath(blend_file, input_dir)}")
+    _log(f"[JOB] Render target: {os.path.relpath(blend_file, input_dir)}")
     return blend_file
 
 
@@ -284,7 +316,7 @@ def persist_job_outputs(job_id, source_output_dir, status, error=None):
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-    print(f"[JOB] Local output snapshot: {job_output_dir}")
+    _log(f"[JOB] Local output snapshot: {job_output_dir}")
     return job_output_dir, copied_files
 
 
@@ -386,7 +418,7 @@ def request_stop_current_job(reason):
         snapshot = dict(active_job_state)
 
     if first_request:
-        print(f"[AGENT] Stopping active render job: {snapshot['id']}")
+        _log(f"[AGENT] Stopping active render job: {snapshot['id']}")
 
     _stop_active_job_runtime(snapshot)
     return True
@@ -398,11 +430,11 @@ def should_offer_capacity():
 
 def pause_agent(reason="Paused by operator"):
     if pause_event.is_set():
-        print("[AGENT] Agent is already paused.")
+        _log("[AGENT] Agent is already paused.")
         return
 
     pause_event.set()
-    print(f"[AGENT] {reason}. The machine will stop taking new jobs.")
+    _log(f"[AGENT] {reason}. The machine will stop taking new jobs.")
 
     if not request_stop_current_job("Render stopped because the machine was paused") and machine_id:
         set_idle(machine_id)
@@ -410,17 +442,17 @@ def pause_agent(reason="Paused by operator"):
 
 def resume_agent():
     if shutdown_event.is_set():
-        print("[AGENT] Cannot resume because shutdown is already in progress.")
+        _log("[AGENT] Cannot resume because shutdown is already in progress.")
         return
 
     if not pause_event.is_set():
-        print("[AGENT] Agent is already available.")
+        _log("[AGENT] Agent is already available.")
         return
 
     pause_event.clear()
     if machine_id:
         set_available(machine_id)
-    print("[AGENT] Agent resumed and is available for jobs.")
+    _log("[AGENT] Agent resumed and is available for jobs.")
 
 
 def shutdown_agent(reason="Shutdown requested"):
@@ -429,7 +461,7 @@ def shutdown_agent(reason="Shutdown requested"):
     if shutdown_event.is_set():
         return
 
-    print(f"\n[AGENT] {reason}")
+    _log(f"[AGENT] {reason}")
     running = False
     shutdown_event.set()
     pause_event.set()
@@ -521,20 +553,20 @@ def ensure_docker_image():
     if not server_version:
         # Server doesn't have an image yet - check if we have one locally
         if check_image_loaded():
-            print("[IMAGE] Using locally cached image (server has no image info).")
+            _log("[IMAGE] Using locally cached image (server has no image info).")
             return True
-        print("[IMAGE] No render image available on server or locally.")
+        _log("[IMAGE] No render image available on server or locally.")
         return False
 
     server_sha = server_version.get("sha256", "")
     local_sha = load_image_sha() or ""
 
     if check_image_loaded() and server_sha == local_sha:
-        print("[IMAGE] Render image is up to date.")
+        _log("[IMAGE] Render image is up to date.")
         return True
 
     # Need to download
-    print("[IMAGE] Downloading render image from server...")
+    _log("[IMAGE] Downloading render image from server...")
     tmp_path = os.path.join(tempfile.gettempdir(), "pcrent-render.tar.gz")
 
     try:
@@ -550,19 +582,18 @@ def ensure_docker_image():
                 downloaded += len(chunk)
                 if total > 0:
                     pct = int(downloaded / total * 100)
-                    print(f"\r[IMAGE] Downloading... {pct}% ({downloaded // (1024*1024)}MB)", end="", flush=True)
+                    _log(f"[IMAGE] Downloading... {pct}% ({downloaded // (1024*1024)}MB)")
 
-        print()
-        print("[IMAGE] Loading image into Docker...")
+        _log("[IMAGE] Loading image into Docker...")
         result = subprocess.run(
             ["docker", "load", "-i", tmp_path],
             capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
-            print(f"[IMAGE] Failed to load image: {result.stderr}")
+            _log(f"[IMAGE] Failed to load image: {result.stderr}")
             return False
 
-        print("[IMAGE] Image loaded successfully.")
+        _log("[IMAGE] Image loaded successfully.")
         save_image_sha(server_sha)
 
         # Cleanup temp file
@@ -574,7 +605,7 @@ def ensure_docker_image():
         return True
 
     except Exception as e:
-        print(f"[IMAGE] Failed to download image: {e}")
+        _log(f"[IMAGE] Failed to download image: {e}")
         return False
 
 
@@ -601,7 +632,7 @@ def execute_job(job):
     try:
         # 1. Download blend file
         blend_file = os.path.join(input_dir, input_filename)
-        print(f"[JOB] Downloading: {input_filename}")
+        _log(f"[JOB] Downloading: {input_filename}")
         download_input_file(input_url, blend_file)
         blend_file = prepare_job_input(blend_file, input_dir)
 
@@ -635,8 +666,8 @@ def execute_job(job):
             DOCKER_IMAGE,
         ]
 
-        print(f"[JOB] Starting Docker render container...")
-        print(f"[JOB] Command: {' '.join(cmd)}")
+        _log(f"[JOB] Starting Docker render container...")
+        _log(f"[JOB] Command: {' '.join(cmd)}")
 
         process = subprocess.Popen(
             cmd,
@@ -653,7 +684,7 @@ def execute_job(job):
                 line = line.rstrip()
                 if line:
                     container_log.append(line)
-                    print(f"[CONTAINER] {line}")
+                    _log(line, source="container")
         finally:
             if process.stdout:
                 process.stdout.close()
@@ -674,7 +705,7 @@ def execute_job(job):
             raise RuntimeError(f"Container exited with code {process.returncode}")
 
         # 4. Upload output files
-        print(f"[JOB] Uploading output files...")
+        _log(f"[JOB] Uploading output files...")
         output_files = upload_output_files(job_id, output_dir)
 
         if not output_files:
@@ -689,20 +720,20 @@ def execute_job(job):
         if missing_assets:
             final_error = MISSING_ASSETS_WARNING
             update_job_status(job_id, "done", error=final_error, output_files=output_files)
-            print(f"[JOB] Done with warnings! Files: {output_files}")
-            print(f"[JOB] Warning: {final_error}")
+            _log(f"[JOB] Done with warnings! Files: {output_files}")
+            _log(f"[JOB] Warning: {final_error}")
         else:
             update_job_status(job_id, "done", output_files=output_files)
-            print(f"[JOB] Done! Files: {output_files}")
+            _log(f"[JOB] Done! Files: {output_files}")
         final_status = "done"
 
     except JobStopped as e:
-        print(f"[JOB] {e}")
+        _log(f"[JOB] {e}")
         final_error = str(e)
         update_job_status(job_id, "failed", error=final_error)
 
     except subprocess.TimeoutExpired:
-        print(f"[JOB] Render timed out after {RENDER_TIMEOUT}s, killing container...")
+        _log(f"[JOB] Render timed out after {RENDER_TIMEOUT}s, killing container...")
         try:
             subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=10)
         except Exception:
@@ -711,7 +742,7 @@ def execute_job(job):
         update_job_status(job_id, "failed", error=final_error)
 
     except Exception as e:
-        print(f"[JOB] Error: {e}")
+        _log(f"[JOB] Error: {e}")
         final_error = str(e)
         update_job_status(job_id, "failed", error=final_error)
 
@@ -743,88 +774,78 @@ def main():
 
     ensure_config_dir()
 
-    print("=== PC Rent Agent v2 (Docker GPU) ===")
-    print(f"Backend: {BACKEND_URL}")
-    print()
+    _log("=== PC Rent Agent v2 (Docker GPU) ===")
+    _log(f"Backend: {BACKEND_URL}")
 
     # Step 1: System requirements check
-    print("[AGENT] Checking system requirements...")
+    _log("[AGENT] Checking system requirements...")
     req = check_requirements()
-    print(f"  OS:     {req['os_version']}")
+    _log(f"  OS:     {req['os_version']}")
     if req["gpu_name"]:
-        print(f"  GPU:    {req['gpu_name']} ({req['gpu_vram_gb']} GB VRAM)")
-        print(f"  Driver: {req['nvidia_driver']}")
-    print()
+        _log(f"  GPU:    {req['gpu_name']} ({req['gpu_vram_gb']} GB VRAM)")
+        _log(f"  Driver: {req['nvidia_driver']}")
 
     if not req["ready"]:
-        print("[AGENT] System requirements not met:")
+        _log("[AGENT] System requirements not met:")
         for issue in req["issues"]:
             for line in issue.split("\n"):
-                print(f"  {line}")
-        print()
-        print("[AGENT] Please fix the above issues and restart the agent.")
-        input("Press Enter to exit...")
+                _log(f"  {line}")
+        _log("[AGENT] Please fix the above issues and restart the agent.")
         sys.exit(1)
 
     # Step 2: Docker bootstrap
-    print("[AGENT] Setting up Docker...")
+    _log("[AGENT] Setting up Docker...")
     docker_result = full_bootstrap()
 
     if docker_result.get("needs_reboot"):
-        print()
-        print(f"[AGENT] {docker_result['message']}")
-        input("Press Enter to exit...")
+        _log(f"[AGENT] {docker_result['message']}")
         sys.exit(0)
 
     if not docker_result.get("ready"):
-        print(f"[AGENT] Docker setup failed: {docker_result['message']}")
-        input("Press Enter to exit...")
+        _log(f"[AGENT] Docker setup failed: {docker_result['message']}")
         sys.exit(1)
 
     if docker_result.get("gpu_verified"):
-        print("[AGENT] GPU rendering verified in Docker.")
+        _log("[AGENT] GPU rendering verified in Docker.")
     else:
-        print("[AGENT] WARNING: GPU not verified in Docker. Renders may use CPU only.")
-    print()
+        _log("[AGENT] WARNING: GPU not verified in Docker. Renders may use CPU only.")
 
     # Step 3: Ensure render image is loaded
-    print("[AGENT] Checking render image...")
+    _log("[AGENT] Checking render image...")
     if not ensure_docker_image():
-        print("[AGENT] WARNING: No render image available. Will retry when jobs arrive.")
-    print()
+        _log("[AGENT] WARNING: No render image available. Will retry when jobs arrive.")
 
     # Step 4: Detect hardware specs
-    print("[AGENT] Detecting hardware specs...")
+    _log("[AGENT] Detecting hardware specs...")
     specs = detect_specs()
-    print(f"  GPU:    {specs['gpu_model']} ({specs['gpu_vram_gb']} GB VRAM)")
-    print(f"  CPU:    {specs['cpu_cores']} cores")
-    print(f"  RAM:    {specs['ram_gb']} GB")
-    print(f"  OS:     {specs['os_version']}")
-    print(f"  Driver: {specs['nvidia_driver']}")
-    print()
+    _log(f"  GPU:    {specs['gpu_model']} ({specs['gpu_vram_gb']} GB VRAM)")
+    _log(f"  CPU:    {specs['cpu_cores']} cores")
+    _log(f"  RAM:    {specs['ram_gb']} GB")
+    _log(f"  OS:     {specs['os_version']}")
+    _log(f"  Driver: {specs['nvidia_driver']}")
 
     # Step 5: Register with backend (or reconnect with saved ID)
     saved_id = load_machine_id()
 
-    print("[AGENT] Registering with backend...")
+    _log("[AGENT] Registering with backend...")
     try:
         machine_id = register_machine(specs)
         save_machine_id(machine_id)
         if saved_id and saved_id == machine_id:
-            print(f"[AGENT] Reconnected. Machine ID: {machine_id}")
+            _log(f"[AGENT] Reconnected. Machine ID: {machine_id}")
         else:
-            print(f"[AGENT] Registered. Machine ID: {machine_id}")
+            _log(f"[AGENT] Registered. Machine ID: {machine_id}")
     except Exception as e:
-        print(f"[AGENT] Failed to register: {e}")
+        _log(f"[AGENT] Failed to register: {e}")
         if saved_id:
-            print(f"[AGENT] Using saved machine ID: {saved_id}")
+            _log(f"[AGENT] Using saved machine ID: {saved_id}")
             machine_id = saved_id
         else:
             sys.exit(1)
 
     # Step 6: Mark available and start polling
     set_available(machine_id)
-    print("[AGENT] Marked as available. Polling for jobs...\n")
+    _log("[AGENT] Marked as available. Polling for jobs...")
 
     if sys.stdin and sys.stdin.isatty():
         threading.Thread(target=operator_command_loop, daemon=True).start()
@@ -838,19 +859,19 @@ def main():
 
                 # Make sure Docker is still running
                 if not check_docker_running():
-                    print("[AGENT] Docker is not running. Waiting...")
+                    _log("[AGENT] Docker is not running. Waiting...")
                     time.sleep(POLL_INTERVAL * 2)
                     continue
 
                 job = poll_for_job(machine_id)
                 if job:
-                    print(f"[AGENT] Got job: {job['id']} ({job['input_filename']})")
+                    _log(f"[AGENT] Got job: {job['id']} ({job['input_filename']})")
 
                     # Ensure image is loaded before running
                     if not check_image_loaded():
-                        print("[AGENT] Render image not loaded, downloading...")
+                        _log("[AGENT] Render image not loaded, downloading...")
                         if not ensure_docker_image():
-                            print("[AGENT] Cannot load render image, failing job.")
+                            _log("[AGENT] Cannot load render image, failing job.")
                             update_job_status(job["id"], "failed", error="Render image not available")
                             continue
 
@@ -859,22 +880,22 @@ def main():
                     # Re-mark available after job only if still accepting work
                     if should_offer_capacity():
                         set_available(machine_id)
-                        print("[AGENT] Back to polling...\n")
+                        _log("[AGENT] Back to polling...")
                     elif pause_event.is_set() and not shutdown_event.is_set():
-                        print("[AGENT] Agent is paused.\n")
+                        _log("[AGENT] Agent is paused.")
                 else:
                     time.sleep(POLL_INTERVAL)
 
             except requests.exceptions.ConnectionError:
-                print(f"[AGENT] Cannot reach backend, retrying in {POLL_INTERVAL}s...")
+                _log(f"[AGENT] Cannot reach backend, retrying in {POLL_INTERVAL}s...")
                 time.sleep(POLL_INTERVAL)
             except Exception as e:
-                print(f"[AGENT] Unexpected error: {e}")
+                _log(f"[AGENT] Unexpected error: {e}")
                 time.sleep(POLL_INTERVAL)
     finally:
         if machine_id:
             set_idle(machine_id)
-        print("[AGENT] Shutdown complete.")
+        _log("[AGENT] Shutdown complete.")
 
 
 if __name__ == "__main__":

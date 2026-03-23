@@ -1,10 +1,29 @@
 use serde_json::json;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
+use crate::persistence::save_agent_state;
 use crate::sidecar::{SidecarHandle, spawn_sidecar};
 use crate::state::{AgentState, LogEntry};
+
+async fn ensure_sidecar_running(
+    app: &AppHandle,
+    state: &State<'_, Arc<Mutex<AgentState>>>,
+    sidecar: &State<'_, Arc<Mutex<SidecarHandle>>>,
+) -> Result<(), String> {
+    let handle = sidecar.lock().await;
+    if !handle.is_running() {
+        drop(handle);
+        spawn_sidecar(
+            app,
+            state.inner().clone(),
+            sidecar.inner().clone(),
+        )?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn connect_agent(
@@ -13,19 +32,9 @@ pub async fn connect_agent(
     state: State<'_, Arc<Mutex<AgentState>>>,
     sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
 ) -> Result<(), String> {
-    let mut handle = sidecar.lock().await;
-    if !handle.is_running() {
-        drop(handle);
-        spawn_sidecar(
-            &app,
-            state.inner().clone(),
-            sidecar.inner().clone(),
-        )?;
-        // Give the sidecar a moment to start
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        handle = sidecar.lock().await;
-    }
+    ensure_sidecar_running(&app, &state, &sidecar).await?;
 
+    let mut handle = sidecar.lock().await;
     handle.send_command(&json!({
         "cmd": "connect",
         "backend_url": backend_url
@@ -37,6 +46,11 @@ pub async fn connect_agent(
         source: "app".to_string(),
         message: format!("Connecting to {}", backend_url),
     });
+    let snapshot = s.clone();
+    drop(s);
+    if let Err(err) = save_agent_state(&app, &snapshot) {
+        eprintln!("[state] {err}");
+    }
 
     Ok(())
 }
@@ -83,6 +97,7 @@ pub async fn get_agent_state(
         "message": s.message,
         "machine_id": s.machine_id,
         "system_info": s.system_info,
+        "runtime_info": s.runtime_info,
         "current_job": s.current_job,
         "logs": s.logs.iter().collect::<Vec<_>>()
     }))
@@ -90,8 +105,44 @@ pub async fn get_agent_state(
 
 #[tauri::command]
 pub async fn get_system_info(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AgentState>>>,
     sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
 ) -> Result<(), String> {
+    ensure_sidecar_running(&app, &state, &sidecar).await?;
     let mut handle = sidecar.lock().await;
     handle.send_command(&json!({"cmd": "get_system_info"}))
+}
+
+#[tauri::command]
+pub async fn get_runtime_status(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AgentState>>>,
+    sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
+) -> Result<(), String> {
+    ensure_sidecar_running(&app, &state, &sidecar).await?;
+    let mut handle = sidecar.lock().await;
+    handle.send_command(&json!({"cmd": "get_runtime_status"}))
+}
+
+#[tauri::command]
+pub async fn run_preflight(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AgentState>>>,
+    sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
+) -> Result<(), String> {
+    ensure_sidecar_running(&app, &state, &sidecar).await?;
+    let mut handle = sidecar.lock().await;
+    handle.send_command(&json!({"cmd": "run_preflight"}))
+}
+
+#[tauri::command]
+pub async fn remove_image(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AgentState>>>,
+    sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
+) -> Result<(), String> {
+    ensure_sidecar_running(&app, &state, &sidecar).await?;
+    let mut handle = sidecar.lock().await;
+    handle.send_command(&json!({"cmd": "remove_image"}))
 }

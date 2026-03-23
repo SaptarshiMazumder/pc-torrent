@@ -1,28 +1,21 @@
 import io
 import json
-import shutil
 import zipfile
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
-try:
-    from .db import conn, init_db, lock
-except ImportError:
-    from db import conn, init_db, lock
+from db import execute, init_db, query_all, query_one
+import storage
 
-BASE_DIR = Path(__file__).resolve().parent
-JOBS_DIR = BASE_DIR / "jobs"
 MACHINE_STALE_SECONDS = 15
 
-app = FastAPI(title="PC Rent Python Server")
+app = FastAPI(title="PC Rent Server")
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,10 +46,6 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def row_to_dict(row: Any) -> dict[str, Any]:
-    return dict(row) if row is not None else {}
-
-
 def parse_output_files(raw: str | None) -> list[str]:
     if not raw:
         return []
@@ -68,6 +57,7 @@ def parse_output_files(raw: str | None) -> list[str]:
 
 
 def sanitize_filename(name: str) -> str:
+    from pathlib import Path
     safe = Path(name).name
     if not safe:
         raise HTTPException(status_code=400, detail="Invalid filename")
@@ -75,6 +65,7 @@ def sanitize_filename(name: str) -> str:
 
 
 def validate_job_input_filename(name: str) -> None:
+    from pathlib import Path
     ext = Path(name).suffix.lower()
     if ext not in {".blend", ".zip"}:
         raise HTTPException(
@@ -86,309 +77,282 @@ def validate_job_input_filename(name: str) -> None:
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
-    JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# -----------------------------------------------
+# Health
+# -----------------------------------------------
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"status": "PC Rent python server running"}
+    return {"status": "PC Rent server running"}
 
 
+# -----------------------------------------------
+# Machines
+# -----------------------------------------------
 @app.post("/machines/register")
 def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
-    if (
-        not payload.gpu_model
-        or payload.gpu_vram_gb is None
-        or payload.cpu_cores is None
-        or payload.ram_gb is None
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Missing required fields: gpu_model, gpu_vram_gb, cpu_cores, ram_gb",
-        )
+    if not payload.gpu_model or payload.gpu_vram_gb is None:
+        raise HTTPException(status_code=400, detail="Missing required fields")
 
     machine_key = payload.machine_key.strip() if payload.machine_key else None
     current_time = now_iso()
 
-    with lock:
-        existing = None
-        if machine_key:
-            existing = conn.execute(
-                "SELECT id FROM machines WHERE machine_key = ?",
-                (machine_key,),
-            ).fetchone()
+    existing = None
+    if machine_key:
+        existing = query_one(
+            "SELECT id FROM machines WHERE machine_key = %s", (machine_key,)
+        )
 
-        if existing:
-            machine_id = existing["id"]
-            conn.execute(
-                """
-                UPDATE machines
-                SET machine_key = ?, gpu_model = ?, gpu_vram_gb = ?, cpu_cores = ?, ram_gb = ?,
-                    os_version = ?, nvidia_driver = ?,
-                    status = 'idle', registered_at = ?, last_seen_at = ?
-                WHERE id = ?
-                """,
-                (
-                    machine_key,
-                    payload.gpu_model,
-                    payload.gpu_vram_gb,
-                    payload.cpu_cores,
-                    payload.ram_gb,
-                    payload.os_version,
-                    payload.nvidia_driver,
-                    current_time,
-                    current_time,
-                    machine_id,
-                ),
+    if existing:
+        machine_id = existing["id"]
+        execute(
+            """
+            UPDATE machines
+            SET machine_key = %s, gpu_model = %s, gpu_vram_gb = %s, cpu_cores = %s, ram_gb = %s,
+                os_version = %s, nvidia_driver = %s,
+                status = 'idle', registered_at = %s, last_seen_at = %s
+            WHERE id = %s
+            """,
+            (
+                machine_key, payload.gpu_model, payload.gpu_vram_gb,
+                payload.cpu_cores, payload.ram_gb,
+                payload.os_version, payload.nvidia_driver,
+                current_time, current_time, machine_id,
+            ),
+        )
+    else:
+        machine_id = str(uuid4())
+        execute(
+            """
+            INSERT INTO machines (
+                id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb,
+                os_version, nvidia_driver, status, registered_at, last_seen_at
             )
-        else:
-            machine_id = str(uuid4())
-            conn.execute(
-                """
-                INSERT INTO machines (
-                    id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb,
-                    os_version, nvidia_driver, status, registered_at, last_seen_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?)
-                """,
-                (
-                    machine_id,
-                    machine_key,
-                    payload.gpu_model,
-                    payload.gpu_vram_gb,
-                    payload.cpu_cores,
-                    payload.ram_gb,
-                    payload.os_version,
-                    payload.nvidia_driver,
-                    current_time,
-                    current_time,
-                ),
-            )
-        conn.commit()
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'idle', %s, %s)
+            """,
+            (
+                machine_id, machine_key, payload.gpu_model, payload.gpu_vram_gb,
+                payload.cpu_cores, payload.ram_gb,
+                payload.os_version, payload.nvidia_driver,
+                current_time, current_time,
+            ),
+        )
 
     return {"machine_id": machine_id}
 
 
 @app.put("/machines/{machine_id}/available")
 def mark_machine_available(machine_id: str) -> dict[str, bool]:
-    with lock:
-        machine = conn.execute("SELECT * FROM machines WHERE id = ?", (machine_id,)).fetchone()
-        if not machine:
-            raise HTTPException(status_code=404, detail="Machine not found")
-        conn.execute(
-            "UPDATE machines SET status = 'available', last_seen_at = ? WHERE id = ?",
-            (now_iso(), machine_id),
-        )
-        conn.commit()
+    machine = query_one("SELECT id FROM machines WHERE id = %s", (machine_id,))
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    execute(
+        "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
+        (now_iso(), machine_id),
+    )
     return {"success": True}
 
 
 @app.put("/machines/{machine_id}/idle")
 def mark_machine_idle(machine_id: str) -> dict[str, bool]:
-    with lock:
-        conn.execute(
-            "UPDATE machines SET status = 'idle', last_seen_at = ? WHERE id = ?",
-            (now_iso(), machine_id),
-        )
-        conn.commit()
+    execute(
+        "UPDATE machines SET status = 'idle', last_seen_at = %s WHERE id = %s",
+        (now_iso(), machine_id),
+    )
     return {"success": True}
 
 
 @app.get("/machines")
 def list_available_machines() -> list[dict[str, Any]]:
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=MACHINE_STALE_SECONDS)).isoformat()
-    with lock:
-        conn.execute(
-            """
-            UPDATE machines
-            SET status = 'idle'
-            WHERE status = 'available' AND (last_seen_at IS NULL OR last_seen_at < ?)
-            """,
-            (cutoff,),
-        )
-        conn.commit()
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM machines
-            WHERE status = 'available' AND last_seen_at >= ?
-            ORDER BY gpu_vram_gb DESC
-            """,
-            (cutoff,),
-        ).fetchall()
-    return [row_to_dict(row) for row in rows]
+    execute(
+        """
+        UPDATE machines
+        SET status = 'idle'
+        WHERE status = 'available' AND (last_seen_at IS NULL OR last_seen_at < %s)
+        """,
+        (cutoff,),
+    )
+    rows = query_all(
+        """
+        SELECT *
+        FROM machines
+        WHERE status = 'available' AND last_seen_at >= %s
+        ORDER BY gpu_vram_gb DESC
+        """,
+        (cutoff,),
+    )
+    return rows
 
 
-@app.post("/jobs")
-async def submit_job(
-    machine_id: str = Form(...), blender_file: UploadFile = File(...)
-) -> dict[str, str]:
-    if not machine_id or not blender_file:
-        raise HTTPException(status_code=400, detail="machine_id and blender_file are required")
+# -----------------------------------------------
+# Jobs
+# -----------------------------------------------
+class RequestUploadPayload(BaseModel):
+    machine_id: str
+    filename: str
 
-    with lock:
-        machine = conn.execute(
-            "SELECT * FROM machines WHERE id = ? AND status = 'available'",
-            (machine_id,),
-        ).fetchone()
+
+@app.post("/jobs/request-upload")
+def request_upload(payload: RequestUploadPayload) -> dict[str, str]:
+    """Get a presigned URL to upload directly to R2."""
+    machine = query_one(
+        "SELECT id FROM machines WHERE id = %s AND status = 'available'",
+        (payload.machine_id,),
+    )
     if not machine:
         raise HTTPException(status_code=400, detail="Machine not available")
 
-    job_id = str(uuid4())
-    input_dir = JOBS_DIR / job_id / "input"
-    input_dir.mkdir(parents=True, exist_ok=True)
-
-    input_filename = sanitize_filename(blender_file.filename or "scene.blend")
+    input_filename = sanitize_filename(payload.filename)
     validate_job_input_filename(input_filename)
-    input_path = input_dir / input_filename
-    with input_path.open("wb") as out_file:
-        shutil.copyfileobj(blender_file.file, out_file)
 
-    with lock:
-        conn.execute(
-            """
-            INSERT INTO jobs (id, machine_id, input_filename, status, output_files, submitted_at)
-            VALUES (?, ?, ?, 'pending', '[]', ?)
-            """,
-            (job_id, machine_id, input_filename, now_iso()),
-        )
-        conn.execute("UPDATE machines SET status = 'processing' WHERE id = ?", (machine_id,))
-        conn.commit()
+    job_id = str(uuid4())
+    r2_key = f"jobs/{job_id}/input/{input_filename}"
+    upload_url = storage.generate_presigned_upload_url(r2_key)
+
+    # Create job in 'uploading' state
+    execute(
+        """
+        INSERT INTO jobs (id, machine_id, input_filename, status, output_files, submitted_at)
+        VALUES (%s, %s, %s, 'uploading', '[]', %s)
+        """,
+        (job_id, payload.machine_id, input_filename, now_iso()),
+    )
+
+    return {"job_id": job_id, "upload_url": upload_url, "r2_key": r2_key}
+
+
+@app.post("/jobs/{job_id}/confirm-upload")
+def confirm_upload(job_id: str) -> dict[str, str]:
+    """Confirm the file was uploaded to R2 and start the job."""
+    job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "uploading":
+        raise HTTPException(status_code=400, detail="Job not in uploading state")
+
+    # Verify the file exists in R2
+    r2_key = f"jobs/{job_id}/input/{job['input_filename']}"
+    if not storage.file_exists(r2_key):
+        raise HTTPException(status_code=400, detail="File not found in storage. Upload may have failed.")
+
+    execute("UPDATE jobs SET status = 'pending' WHERE id = %s", (job_id,))
+    execute("UPDATE machines SET status = 'processing' WHERE id = %s", (job["machine_id"],))
 
     return {"job_id": job_id, "status": "pending"}
 
 
 @app.get("/jobs/next-for-machine/{machine_id}")
 def get_next_job_for_machine(machine_id: str, request: Request) -> dict[str, Any] | None:
-    with lock:
-        conn.execute(
-            "UPDATE machines SET last_seen_at = ? WHERE id = ?",
-            (now_iso(), machine_id),
-        )
-        conn.commit()
-        job = conn.execute(
-            """
-            SELECT * FROM jobs
-            WHERE machine_id = ? AND status = 'pending'
-            ORDER BY submitted_at ASC
-            LIMIT 1
-            """,
-            (machine_id,),
-        ).fetchone()
+    execute(
+        "UPDATE machines SET last_seen_at = %s WHERE id = %s",
+        (now_iso(), machine_id),
+    )
+    job = query_one(
+        """
+        SELECT * FROM jobs
+        WHERE machine_id = %s AND status = 'pending'
+        ORDER BY submitted_at ASC
+        LIMIT 1
+        """,
+        (machine_id,),
+    )
     if not job:
         return None
 
-    job_data = row_to_dict(job)
-    encoded_name = quote(job_data["input_filename"])
     base = str(request.base_url).rstrip("/")
-    job_data["input_url"] = f"{base}/jobs/{job_data['id']}/input/{encoded_name}"
-    return job_data
+    job["input_url"] = f"{base}/jobs/{job['id']}/input/{job['input_filename']}"
+    return job
 
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
-    with lock:
-        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    if not row:
+    job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    job_data = row_to_dict(row)
-    job_data["output_files"] = parse_output_files(job_data.get("output_files"))
-    return job_data
+    job["output_files"] = parse_output_files(job.get("output_files"))
+    return job
 
 
 @app.put("/jobs/{job_id}/status")
 def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str, bool]:
-    with lock:
-        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
+    job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-        job_data = row_to_dict(job)
-        completed_at = job_data.get("completed_at")
-        if payload.status in ("done", "failed"):
-            completed_at = now_iso()
-            conn.execute(
-                "UPDATE machines SET status = 'available', last_seen_at = ? WHERE id = ?",
-                (completed_at, job_data["machine_id"]),
-            )
-
-        output_files_json = job_data["output_files"]
-        if payload.output_files is not None:
-            output_files_json = json.dumps(payload.output_files)
-
-        conn.execute(
-            """
-            UPDATE jobs
-            SET status = ?, completed_at = ?, error = ?, output_files = ?
-            WHERE id = ?
-            """,
-            (
-                payload.status,
-                completed_at,
-                payload.error,
-                output_files_json,
-                job_id,
-            ),
+    completed_at = job.get("completed_at")
+    if payload.status in ("done", "failed"):
+        completed_at = now_iso()
+        execute(
+            "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
+            (completed_at, job["machine_id"]),
         )
-        conn.commit()
+
+    output_files_json = job["output_files"]
+    if payload.output_files is not None:
+        output_files_json = json.dumps(payload.output_files)
+
+    execute(
+        """
+        UPDATE jobs
+        SET status = %s, completed_at = %s, error = %s, output_files = %s
+        WHERE id = %s
+        """,
+        (payload.status, completed_at, payload.error, output_files_json, job_id),
+    )
 
     return {"success": True}
 
 
 @app.post("/jobs/{job_id}/output")
 async def upload_job_output(job_id: str, files: list[UploadFile] = File(...)) -> dict[str, Any]:
-    with lock:
-        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    output_dir = JOBS_DIR / job_id / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     uploaded_names: list[str] = []
     for file in files:
         filename = sanitize_filename(file.filename or "output.bin")
-        destination = output_dir / filename
-        with destination.open("wb") as out_file:
-            shutil.copyfileobj(file.file, out_file)
+        file_data = await file.read()
+        r2_key = f"jobs/{job_id}/output/{filename}"
+        storage.upload_file(r2_key, file_data)
         uploaded_names.append(filename)
 
     existing = parse_output_files(job["output_files"])
     merged = list(dict.fromkeys(existing + uploaded_names))
 
-    with lock:
-        conn.execute(
-            "UPDATE jobs SET output_files = ? WHERE id = ?",
-            (json.dumps(merged), job_id),
-        )
-        conn.commit()
+    execute(
+        "UPDATE jobs SET output_files = %s WHERE id = %s",
+        (json.dumps(merged), job_id),
+    )
 
     return {"success": True, "files": merged}
 
 
 @app.get("/jobs/{job_id}/input/{filename}")
-def download_job_input_file(job_id: str, filename: str) -> FileResponse:
+def download_job_input_file(job_id: str, filename: str):
     safe_name = sanitize_filename(filename)
-    input_file_path = JOBS_DIR / job_id / "input" / safe_name
-    if not input_file_path.exists():
+    r2_key = f"jobs/{job_id}/input/{safe_name}"
+    if not storage.file_exists(r2_key):
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path=input_file_path, filename=safe_name)
+    url = storage.generate_presigned_url(r2_key)
+    return RedirectResponse(url=url)
 
 
 @app.get("/jobs/{job_id}/output/{filename}")
-def download_job_output_file(job_id: str, filename: str) -> FileResponse:
+def download_job_output_file(job_id: str, filename: str):
     safe_name = sanitize_filename(filename)
-    output_file_path = JOBS_DIR / job_id / "output" / safe_name
-    if not output_file_path.exists():
+    r2_key = f"jobs/{job_id}/output/{safe_name}"
+    if not storage.file_exists(r2_key):
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path=output_file_path, filename=safe_name)
+    url = storage.generate_presigned_url(r2_key)
+    return RedirectResponse(url=url)
 
 
-@app.get("/jobs/{job_id}/download", response_model=None)
-def download_job_output_archive(job_id: str) -> Response:
-    with lock:
-        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+@app.get("/jobs/{job_id}/download")
+def download_job_output_archive(job_id: str):
+    job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job["status"] != "done":
@@ -398,20 +362,22 @@ def download_job_output_archive(job_id: str) -> Response:
     if not files:
         raise HTTPException(status_code=404, detail="No output files found")
 
-    output_dir = JOBS_DIR / job_id / "output"
-    existing_files = [output_dir / sanitize_filename(name) for name in files]
-    existing_files = [path for path in existing_files if path.exists()]
-    if not existing_files:
-        raise HTTPException(status_code=404, detail="No output files found")
+    # Single file → redirect to presigned URL
+    if len(files) == 1:
+        r2_key = f"jobs/{job_id}/output/{files[0]}"
+        url = storage.generate_presigned_url(r2_key)
+        return RedirectResponse(url=url)
 
-    if len(existing_files) == 1:
-        single = existing_files[0]
-        return FileResponse(path=single, filename=single.name)
-
+    # Multiple files → zip them in memory
     zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for file_path in existing_files:
-            zip_file.write(file_path, arcname=file_path.name)
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for filename in files:
+            r2_key = f"jobs/{job_id}/output/{filename}"
+            try:
+                data = storage.download_file(r2_key)
+                zf.writestr(filename, data)
+            except Exception:
+                continue
     zip_buffer.seek(0)
 
     headers = {"Content-Disposition": f"attachment; filename=job_{job_id}_output.zip"}
@@ -421,21 +387,30 @@ def download_job_output_archive(job_id: str) -> Response:
 # -----------------------------------------------
 # Docker image distribution
 # -----------------------------------------------
-DOCKER_DIR = BASE_DIR / "docker"
-
-
 @app.get("/docker/image/version")
 def get_docker_image_version() -> dict[str, str]:
-    sha_file = DOCKER_DIR / "pcrent-render.sha256"
-    if not sha_file.exists():
+    try:
+        sha_data = storage.download_file("docker/pcrent-render.sha256")
+        sha = sha_data.decode().strip().split()[0]
+        return {"version": "v1.0.0", "sha256": sha}
+    except Exception:
         raise HTTPException(status_code=404, detail="No image available")
-    sha = sha_file.read_text().strip().split()[0]
-    return {"version": "v1.0.0", "sha256": sha}
 
 
 @app.get("/docker/image")
-def download_docker_image() -> FileResponse:
-    image_path = DOCKER_DIR / "pcrent-render.tar.gz"
-    if not image_path.exists():
+def download_docker_image():
+    if not storage.file_exists("docker/pcrent-render.tar.gz"):
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(path=image_path, filename="pcrent-render.tar.gz")
+    url = storage.generate_presigned_url("docker/pcrent-render.tar.gz", expires_in=7200)
+    return RedirectResponse(url=url)
+
+
+# -----------------------------------------------
+# Desktop installer distribution
+# -----------------------------------------------
+@app.get("/releases/latest")
+def download_latest_release():
+    if not storage.file_exists("releases/PCRentAgent-Setup.exe"):
+        raise HTTPException(status_code=404, detail="No release available")
+    url = storage.generate_presigned_url("releases/PCRentAgent-Setup.exe", expires_in=7200)
+    return RedirectResponse(url=url)

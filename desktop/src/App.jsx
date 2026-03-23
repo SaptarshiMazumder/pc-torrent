@@ -7,7 +7,7 @@ import { useAgent } from "./hooks/useAgent";
 
 export default function App() {
   const [page, setPage] = useState("dashboard");
-  const [backendUrl, setBackendUrl] = useState("http://localhost:8000");
+  const [backendUrl, setBackendUrl] = useState("https://pcrent-server-wbifmyiivq-an.a.run.app");
   const agent = useAgent();
 
   return (
@@ -19,15 +19,16 @@ export default function App() {
       />
       <main className="main-content">
         {page === "dashboard" && (
-          <DashboardPage
-            status={agent.status}
-            message={agent.message}
-            machineId={agent.machineId}
-            systemInfo={agent.systemInfo}
-            currentJob={agent.currentJob}
-            backendUrl={backendUrl}
-          />
-        )}
+            <DashboardPage
+              status={agent.status}
+              message={agent.message}
+              machineId={agent.machineId}
+              systemInfo={agent.systemInfo}
+              runtimeInfo={agent.runtimeInfo}
+              currentJob={agent.currentJob}
+              backendUrl={backendUrl}
+            />
+          )}
         {page === "logs" && <LogsPage logs={agent.logs} />}
         {page === "settings" && (
           <SettingsPage

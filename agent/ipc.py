@@ -61,6 +61,11 @@ def emit_system_info(info):
     emit("system_info", **info)
 
 
+def emit_runtime_info(info):
+    """Emit runtime state (requirements, Docker, image cache, progress)."""
+    emit("runtime_info", **info)
+
+
 def emit_error(message):
     """Emit an error event."""
     emit("error", message=message)

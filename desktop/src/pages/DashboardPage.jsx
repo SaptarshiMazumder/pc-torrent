@@ -2,12 +2,14 @@ import GpuInfoCard from "../components/GpuInfoCard";
 import ConnectButton from "../components/ConnectButton";
 import StatusIndicator from "../components/StatusIndicator";
 import JobCard from "../components/JobCard";
+import RuntimeCard from "../components/RuntimeCard";
 
 export default function DashboardPage({
   status,
   message,
   machineId,
   systemInfo,
+  runtimeInfo,
   currentJob,
   backendUrl,
 }) {
@@ -15,10 +17,8 @@ export default function DashboardPage({
     <div className="page dashboard-page">
       <h2>Dashboard</h2>
 
-      <GpuInfoCard systemInfo={systemInfo} />
-
       <div className="connect-section">
-        <ConnectButton status={status} backendUrl={backendUrl} />
+        <ConnectButton status={status} backendUrl={backendUrl} runtimeInfo={runtimeInfo} />
         <StatusIndicator status={status} message={message} />
         {machineId && (
           <div className="machine-id">
@@ -27,6 +27,8 @@ export default function DashboardPage({
         )}
       </div>
 
+      <RuntimeCard runtimeInfo={runtimeInfo} status={status} />
+      <GpuInfoCard systemInfo={systemInfo} />
       <JobCard currentJob={currentJob} status={status} />
     </div>
   );

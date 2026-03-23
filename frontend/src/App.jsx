@@ -69,6 +69,7 @@ function MachinesPage({ onRent }) {
 function SubmitJobPage({ machine, onBack, onSubmitted }) {
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
 
   const handleSubmit = async (e) => {
@@ -76,8 +77,9 @@ function SubmitJobPage({ machine, onBack, onSubmitted }) {
     if (!file) return setError("Select a .blend file or .zip project bundle first");
     setLoading(true);
     setError(null);
+    setProgress(0);
     try {
-      const job = await submitJob(machine.id, file);
+      const job = await submitJob(machine.id, file, setProgress);
       onSubmitted(job.job_id);
     } catch (err) {
       setError(err.message);
@@ -108,8 +110,14 @@ function SubmitJobPage({ machine, onBack, onSubmitted }) {
         </p>
         {file && <p className="file-name">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>}
         {error && <p className="error">{error}</p>}
+        {loading && (
+          <div className="progress-bar-wrap">
+            <div className="progress-bar" style={{ width: `${progress}%` }} />
+            <span className="progress-text">Uploading... {progress}%</span>
+          </div>
+        )}
         <button className="btn-primary" type="submit" disabled={loading}>
-          {loading ? "Submitting..." : "Start Render"}
+          {loading ? `Uploading... ${progress}%` : "Start Render"}
         </button>
       </form>
     </div>

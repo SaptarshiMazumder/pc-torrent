@@ -647,3 +647,298 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+/* Mode Selector */
+.mode-select-wrap {
+  padding: 8px 12px 4px;
+}
+
+.mode-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M3 5l3 3 3-3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.mode-select:focus {
+  border-color: var(--accent);
+}
+
+.mode-select option {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.nav-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 12px;
+}
+
+/* Machine Cards */
+.machine-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.machine-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.machine-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.machine-gpu-name {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: var(--text-primary);
+}
+
+.machine-specs {
+  display: flex;
+  gap: 24px;
+}
+
+.machine-specs .info-item {
+  flex-direction: column;
+  gap: 2px;
+}
+
+.selected-machine-card {
+  margin-bottom: 20px;
+}
+
+.selected-machine-card .machine-specs {
+  gap: 24px;
+}
+
+/* Submit Section */
+.submit-section {
+  max-width: 560px;
+}
+
+.submit-btn {
+  margin-top: 16px;
+  padding: 10px 24px;
+  font-size: 14px;
+}
+
+.file-input-wrap {
+  margin-top: 4px;
+}
+
+.file-input-btn {
+  display: inline-block;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-meta {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.error-text {
+  font-size: 13px;
+  color: var(--danger);
+  margin: 8px 0;
+}
+
+.btn-back {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 16px;
+}
+
+.btn-back:hover {
+  text-decoration: underline;
+}
+
+/* Job List */
+.job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rentee-job-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rentee-job-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rentee-job-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.rentee-job-info .job-filename {
+  font-size: 15px;
+  font-weight: 500;
+  margin-bottom: 2px;
+  word-break: break-all;
+}
+
+.rentee-job-info .job-id {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Status Badges */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.status-pending {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning);
+}
+
+.status-running {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--blue);
+}
+
+.status-done {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+}
+
+.status-failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--danger);
+}
+
+.status-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* Job Details */
+.rentee-job-error {
+  font-size: 13px;
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.08);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+}
+
+.rentee-job-done {
+  font-size: 13px;
+}
+
+.rentee-job-warning {
+  font-size: 12px;
+  color: var(--warning);
+  margin-top: 4px;
+}
+
+.rentee-job-success {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: rgba(34, 197, 94, 0.08);
+  color: var(--success);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.rentee-job-success code {
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  word-break: break-all;
+}
+
+.output-file-list {
+  list-style: none;
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.output-file-list li {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+}
+
+.rentee-job-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.job-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.rentee-job-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Empty State */
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-secondary);
+}
+
+.empty-state .muted {
+  margin-top: 8px;
+}

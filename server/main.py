@@ -336,7 +336,7 @@ def download_job_input_file(job_id: str, filename: str):
     r2_key = f"jobs/{job_id}/input/{safe_name}"
     if not storage.file_exists(r2_key):
         raise HTTPException(status_code=404, detail="File not found")
-    url = storage.generate_presigned_url(r2_key)
+    url = storage.generate_presigned_url(r2_key, download_name=safe_name)
     return RedirectResponse(url=url)
 
 
@@ -346,7 +346,7 @@ def download_job_output_file(job_id: str, filename: str):
     r2_key = f"jobs/{job_id}/output/{safe_name}"
     if not storage.file_exists(r2_key):
         raise HTTPException(status_code=404, detail="File not found")
-    url = storage.generate_presigned_url(r2_key)
+    url = storage.generate_presigned_url(r2_key, download_name=safe_name)
     return RedirectResponse(url=url)
 
 
@@ -365,7 +365,7 @@ def download_job_output_archive(job_id: str):
     # Single file → redirect to presigned URL
     if len(files) == 1:
         r2_key = f"jobs/{job_id}/output/{files[0]}"
-        url = storage.generate_presigned_url(r2_key)
+        url = storage.generate_presigned_url(r2_key, download_name=files[0])
         return RedirectResponse(url=url)
 
     # Multiple files → zip them in memory

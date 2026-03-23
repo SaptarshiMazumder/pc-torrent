@@ -763,10 +763,7 @@ def execute_job(job):
         if stop_reason:
             raise JobStopped(stop_reason)
 
-        # 2. Mark job running
-        update_job_status(job_id, "running")
-
-        # 3. Run Docker container with GPU
+        # 2. Run Docker container with GPU
         # Convert Windows paths to forward-slash format for Docker
         input_mount = input_dir.replace("\\", "/")
         output_mount = output_dir.replace("\\", "/")
@@ -990,6 +987,7 @@ def main():
                 job = poll_for_job(machine_id)
                 if job:
                     _log(f"[AGENT] Got job: {job['id']} ({job['input_filename']})")
+                    update_job_status(job["id"], "running")
 
                     # Ensure image is loaded before running
                     if not check_image_loaded():

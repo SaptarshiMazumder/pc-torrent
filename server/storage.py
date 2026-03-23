@@ -62,11 +62,20 @@ def download_fileobj(key: str) -> io.BytesIO:
     return io.BytesIO(data)
 
 
-def generate_presigned_url(key: str, expires_in: int = 3600) -> str:
+def generate_presigned_url(
+    key: str,
+    expires_in: int = 3600,
+    download_name: str | None = None,
+) -> str:
     """Generate a presigned URL for direct download (1 hour default)."""
+    params = {"Bucket": R2_BUCKET_NAME, "Key": key}
+    if download_name:
+        safe_name = download_name.replace('"', "")
+        params["ResponseContentDisposition"] = f'attachment; filename="{safe_name}"'
+
     return _get_client().generate_presigned_url(
         "get_object",
-        Params={"Bucket": R2_BUCKET_NAME, "Key": key},
+        Params=params,
         ExpiresIn=expires_in,
     )
 

@@ -102,9 +102,9 @@ else
 fi
 
 # -----------------------------------------------
-# [3/5] Upload Docker render image to R2
+# [3/5] Sync Docker render image to R2
 # -----------------------------------------------
-log_step "[3/5] Uploading Docker render image -> Cloudflare R2"
+log_step "[3/5] Syncing Docker render image -> Cloudflare R2"
 
 if [ -f "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" ]; then
     IMAGE_SIZE=$(du -sh "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" | cut -f1)
@@ -114,7 +114,7 @@ if [ -f "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" ]; then
     cd "$PROJECT_ROOT"
     python upload_docker_image.py
     cd - > /dev/null
-    log_ok "Docker render image uploaded to R2"
+    log_ok "Docker render image synced to R2"
 else
     log_info "No Docker image found at server/docker/pcrent-render.tar.gz (skipping)"
 fi

@@ -39,3 +39,7 @@ export async function runPreflight() {
 export async function removeImage() {
   return invoke("remove_image");
 }
+
+export async function downloadJobOutputToDownloads(url) {
+  return invoke("download_job_output_to_downloads", { url });
+}

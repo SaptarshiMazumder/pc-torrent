@@ -1,12 +1,31 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { getAgentState } from "../lib/sidecar";
+import { getAgentState, runPreflight } from "../lib/sidecar";
+
+const INITIAL_RUNTIME_INFO = {
+  preflight_complete: false,
+  preflight_passed: null,
+  preflight_message: "Preflight has not run yet.",
+  requirements_checked: false,
+  requirements_ready: null,
+  requirement_issues: [],
+  docker_installed: null,
+  docker_running: null,
+  gpu_verified: null,
+  image_present: null,
+  image_stage: "idle",
+  image_downloaded_bytes: null,
+  image_total_bytes: null,
+  image_progress_pct: null,
+  image_status: "Not checked yet.",
+};
 
 const INITIAL_STATE = {
   status: "disconnected",
   message: "Ready",
   machineId: "",
   systemInfo: null,
+  runtimeInfo: INITIAL_RUNTIME_INFO,
   currentJob: null,
   logs: [],
 };
@@ -21,22 +40,7 @@ export function useAgent() {
   }, []);
 
   useEffect(() => {
-    // Load initial state
-    getAgentState()
-      .then((data) => {
-        if (data) {
-          logsRef.current = data.logs || [];
-          setState({
-            status: data.status || "disconnected",
-            message: data.message || "Ready",
-            machineId: data.machine_id || "",
-            systemInfo: data.system_info || null,
-            currentJob: data.current_job || null,
-            logs: data.logs || [],
-          });
-        }
-      })
-      .catch(() => {});
+    let unlistenFn = null;
 
     // Listen for sidecar events
     const unlisten = listen("agent-event", (event) => {
@@ -79,6 +83,56 @@ export function useAgent() {
           }));
           break;
 
+        case "runtime_info":
+          setState((prev) => ({
+            ...prev,
+            runtimeInfo: {
+              preflight_complete: data.preflight_complete || false,
+              preflight_passed:
+                typeof data.preflight_passed === "boolean"
+                  ? data.preflight_passed
+                  : null,
+              preflight_message: data.preflight_message || "Preflight has not run yet.",
+              requirements_checked: data.requirements_checked || false,
+              requirements_ready:
+                typeof data.requirements_ready === "boolean"
+                  ? data.requirements_ready
+                  : null,
+              requirement_issues: data.requirement_issues || [],
+              docker_installed:
+                typeof data.docker_installed === "boolean"
+                  ? data.docker_installed
+                  : null,
+              docker_running:
+                typeof data.docker_running === "boolean"
+                  ? data.docker_running
+                  : null,
+              gpu_verified:
+                typeof data.gpu_verified === "boolean"
+                  ? data.gpu_verified
+                  : null,
+              image_present:
+                typeof data.image_present === "boolean"
+                  ? data.image_present
+                  : null,
+              image_stage: data.image_stage || "idle",
+              image_downloaded_bytes:
+                typeof data.image_downloaded_bytes === "number"
+                  ? data.image_downloaded_bytes
+                  : null,
+              image_total_bytes:
+                typeof data.image_total_bytes === "number"
+                  ? data.image_total_bytes
+                  : null,
+              image_progress_pct:
+                typeof data.image_progress_pct === "number"
+                  ? data.image_progress_pct
+                  : null,
+              image_status: data.image_status || "",
+            },
+          }));
+          break;
+
         case "log":
           addLog({
             level: data.level || "info",
@@ -107,10 +161,39 @@ export function useAgent() {
           });
           break;
       }
+    }).then((fn) => {
+      unlistenFn = fn;
+
+      getAgentState()
+        .then((data) => {
+          if (data) {
+            logsRef.current = data.logs || [];
+            setState({
+              status: data.status || "disconnected",
+              message: data.message || "Ready",
+              machineId: data.machine_id || "",
+              systemInfo: data.system_info || null,
+              runtimeInfo: data.runtime_info || INITIAL_RUNTIME_INFO,
+              currentJob: data.current_job || null,
+              logs: data.logs || [],
+            });
+          }
+
+          runPreflight().catch(() => {});
+        })
+        .catch(() => {
+          runPreflight().catch(() => {});
+        });
+
+      return fn;
     });
 
     return () => {
-      unlisten.then((fn) => fn());
+      if (unlistenFn) {
+        unlistenFn();
+      } else {
+        unlisten.then((fn) => fn());
+      }
     };
   }, [addLog]);
 

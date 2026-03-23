@@ -56,6 +56,36 @@ def save_image_sha(sha):
     get_config_path("image.sha256").write_text(sha)
 
 
+def clear_image_sha():
+    path = get_config_path("image.sha256")
+    if path.exists():
+        path.unlink()
+
+
+# -----------------------------------------------
+# GPU-in-Docker verification cache
+# -----------------------------------------------
+def load_gpu_check_cache():
+    path = get_config_path("gpu_check.json")
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def save_gpu_check_cache(cache):
+    ensure_config_dir()
+    get_config_path("gpu_check.json").write_text(json.dumps(cache, indent=2))
+
+
+def clear_gpu_check_cache():
+    path = get_config_path("gpu_check.json")
+    if path.exists():
+        path.unlink()
+
+
 # -----------------------------------------------
 # Setup state (tracks first-time setup progress for reboot resume)
 # -----------------------------------------------

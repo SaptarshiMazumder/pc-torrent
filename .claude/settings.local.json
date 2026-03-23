@@ -42,7 +42,19 @@
       "Bash(python -c \":*)",
       "Bash(npx vite:*)",
       "Bash(pkill -f \"tauri dev\")",
-      "Bash(pkill -f \"vite\")"
+      "Bash(pkill -f \"vite\")",
+      "Bash(gcloud config:*)",
+      "Bash(chmod +x \"c:/Users/googler/OneDrive/Desktop/Projects/pc-rent/deploy.sh\")",
+      "Bash(gcloud run:*)",
+      "Bash(grep -v '^$')",
+      "Bash(curl -s https://pcrent-server-930713698987.asia-northeast1.run.app/)",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(npx wrangler:*)",
+      "Bash(curl -s https://pcrent-server-930713698987.asia-northeast1.run.app/machines)",
+      "Bash(python build_sidecar.py)",
+      "Bash(curl -s -X POST https://pcrent-server-930713698987.asia-northeast1.run.app/jobs/request-upload -H \"Content-Type: application/json\" -d '{\"\"machine_id\"\":\"\"test\"\",\"\"filename\"\":\"\"test.blend\"\"}')",
+      "Bash(python:*)"
     ]
   }
 }

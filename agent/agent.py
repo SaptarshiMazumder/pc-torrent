@@ -25,10 +25,16 @@ from config import (
     save_machine_id,
     load_image_sha,
     save_image_sha,
+    clear_image_sha,
     ensure_config_dir,
 )
 from system_check import check_requirements, get_windows_version, check_nvidia_gpu
-from docker_setup import full_bootstrap, check_docker_running
+from docker_setup import (
+    full_bootstrap,
+    check_docker_installed,
+    check_docker_running,
+    get_cached_gpu_verification,
+)
 
 
 # -----------------------------------------------
@@ -544,17 +550,119 @@ def get_server_image_version():
         return None
 
 
-def ensure_docker_image():
+def get_runtime_status():
+    """Collect local runtime status for the desktop app."""
+    requirements = check_requirements()
+    docker_installed = check_docker_installed()
+    docker_running = check_docker_running() if docker_installed else False
+    cached_gpu = get_cached_gpu_verification() if docker_running else None
+    if not docker_installed:
+        image_present = False
+        image_stage = "missing"
+        image_status = "Docker is not installed."
+    elif not docker_running:
+        image_present = None
+        image_stage = "idle"
+        image_status = "Start Docker to inspect the render image."
+    else:
+        image_present = check_image_loaded()
+        image_stage = "ready" if image_present else "missing"
+        image_status = "Render image is installed." if image_present else "Render image not installed."
+
+    return {
+        "requirements_checked": True,
+        "requirements_ready": requirements["ready"],
+        "requirement_issues": requirements["issues"],
+        "docker_installed": docker_installed,
+        "docker_running": docker_running,
+        "gpu_verified": cached_gpu["gpu_verified"] if cached_gpu else None,
+        "image_present": image_present,
+        "image_stage": image_stage,
+        "image_downloaded_bytes": None,
+        "image_total_bytes": None,
+        "image_progress_pct": None,
+        "image_status": image_status,
+    }
+
+
+def remove_docker_image():
+    """Delete the locally cached render image and related metadata."""
+    snapshot = get_active_job_snapshot()
+    if snapshot["id"]:
+        return {
+            "ok": False,
+            "message": "Cannot remove the render image while a job is running.",
+            "image_present": True,
+        }
+
+    tmp_path = os.path.join(tempfile.gettempdir(), "pcrent-render.tar.gz")
+    docker_installed = check_docker_installed()
+    docker_running = check_docker_running() if docker_installed else False
+    if docker_installed and not docker_running:
+        return {
+            "ok": False,
+            "message": "Start Docker Desktop before deleting the render image.",
+            "image_present": None,
+        }
+
+    image_present = check_image_loaded() if docker_running else False
+
+    if image_present:
+        try:
+            result = subprocess.run(
+                ["docker", "image", "rm", "-f", DOCKER_IMAGE],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                stderr = (result.stderr or result.stdout or "").strip()
+                return {
+                    "ok": False,
+                    "message": stderr or "Failed to remove the render image from Docker.",
+                    "image_present": True,
+                }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "message": f"Failed to remove the render image: {exc}",
+                "image_present": True,
+            }
+
+    clear_image_sha()
+    try:
+        os.remove(tmp_path)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    still_present = check_image_loaded() if docker_running else False
+    return {
+        "ok": not still_present,
+        "message": "Render image removed." if image_present else "Render image was already absent.",
+        "image_present": still_present,
+    }
+
+
+def ensure_docker_image(on_stage=None, on_progress=None):
     """
     Make sure the render image is loaded and up to date.
     Downloads from server if needed.
     """
+    def stage(stage_name, message, **extra):
+        if on_stage:
+            on_stage(stage_name, message, **extra)
+
+    stage("checking", "Checking render image...")
     server_version = get_server_image_version()
     if not server_version:
         # Server doesn't have an image yet - check if we have one locally
         if check_image_loaded():
+            stage("ready", "Using locally cached render image.")
             _log("[IMAGE] Using locally cached image (server has no image info).")
             return True
+        stage("missing", "No render image available on server or locally.")
         _log("[IMAGE] No render image available on server or locally.")
         return False
 
@@ -562,10 +670,12 @@ def ensure_docker_image():
     local_sha = load_image_sha() or ""
 
     if check_image_loaded() and server_sha == local_sha:
+        stage("ready", "Render image is up to date.")
         _log("[IMAGE] Render image is up to date.")
         return True
 
     # Need to download
+    stage("downloading", "Downloading render image from server...", progress=0)
     _log("[IMAGE] Downloading render image from server...")
     tmp_path = os.path.join(tempfile.gettempdir(), "pcrent-render.tar.gz")
 
@@ -575,24 +685,36 @@ def ensure_docker_image():
 
         total = int(resp.headers.get("content-length", 0))
         downloaded = 0
+        last_pct = -1
+        last_logged_pct = -5
 
         with open(tmp_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
                 f.write(chunk)
                 downloaded += len(chunk)
                 if total > 0:
                     pct = int(downloaded / total * 100)
-                    _log(f"[IMAGE] Downloading... {pct}% ({downloaded // (1024*1024)}MB)")
+                    if pct != last_pct and on_progress:
+                        on_progress(downloaded, total, pct)
+                        last_pct = pct
+                    if pct >= last_logged_pct + 5 or pct == 100:
+                        _log(f"[IMAGE] Downloading... {pct}% ({downloaded // (1024*1024)}MB)")
+                        last_logged_pct = pct
 
+        stage("installing", "Installing render image into Docker...")
         _log("[IMAGE] Loading image into Docker...")
         result = subprocess.run(
             ["docker", "load", "-i", tmp_path],
             capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
+            stage("error", "Failed to install render image into Docker.")
             _log(f"[IMAGE] Failed to load image: {result.stderr}")
             return False
 
+        stage("ready", "Render image installed.")
         _log("[IMAGE] Image loaded successfully.")
         save_image_sha(server_sha)
 
@@ -605,6 +727,7 @@ def ensure_docker_image():
         return True
 
     except Exception as e:
+        stage("error", f"Failed to download render image: {e}")
         _log(f"[IMAGE] Failed to download image: {e}")
         return False
 
@@ -805,10 +928,11 @@ def main():
         _log(f"[AGENT] Docker setup failed: {docker_result['message']}")
         sys.exit(1)
 
-    if docker_result.get("gpu_verified"):
-        _log("[AGENT] GPU rendering verified in Docker.")
+    gpu_docker = docker_result.get("gpu_docker_name", "")
+    if gpu_docker:
+        _log(f"[AGENT] GPU in Docker: {gpu_docker} — ready for rendering.")
     else:
-        _log("[AGENT] WARNING: GPU not verified in Docker. Renders may use CPU only.")
+        _log("[AGENT] WARNING: GPU not accessible in Docker. Renders will use CPU only.")
 
     # Step 3: Ensure render image is loaded
     _log("[AGENT] Checking render image...")

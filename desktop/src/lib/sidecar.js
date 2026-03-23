@@ -27,3 +27,15 @@ export async function getAgentState() {
 export async function getSystemInfo() {
   return invoke("get_system_info");
 }
+
+export async function getRuntimeStatus() {
+  return invoke("get_runtime_status");
+}
+
+export async function runPreflight() {
+  return invoke("run_preflight");
+}
+
+export async function removeImage() {
+  return invoke("remove_image");
+}

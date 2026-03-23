@@ -7,7 +7,9 @@ const STATUS_MAP = {
   checking_requirements: { color: "#a78bfa", label: "Checking System" },
   setting_up_docker: { color: "#a78bfa", label: "Setting Up Docker" },
   downloading_image: { color: "#a78bfa", label: "Downloading Image" },
+  installing_image: { color: "#a78bfa", label: "Installing Image" },
   registering: { color: "#a78bfa", label: "Registering" },
+  removing_image: { color: "#f59e0b", label: "Removing Image" },
   needs_reboot: { color: "#f59e0b", label: "Reboot Required" },
 };
 

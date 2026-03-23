@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod persistence;
 mod sidecar;
 mod state;
 
@@ -19,6 +20,7 @@ use state::AgentState;
 fn main() {
     let agent_state = Arc::new(Mutex::new(AgentState::default()));
     let sidecar_handle = Arc::new(Mutex::new(SidecarHandle::new()));
+    let startup_state = agent_state.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -32,8 +34,26 @@ fn main() {
             commands::stop_job,
             commands::get_agent_state,
             commands::get_system_info,
+            commands::get_runtime_status,
+            commands::run_preflight,
+            commands::remove_image,
         ])
         .setup(move |app| {
+            match persistence::load_agent_state(&app.handle()) {
+                Ok(mut saved_state) => {
+                    saved_state.status = "disconnected".to_string();
+                    saved_state.message = "Ready".to_string();
+                    saved_state.current_job = None;
+                    saved_state.runtime_info.preflight_complete = false;
+                    saved_state.runtime_info.preflight_passed = None;
+                    saved_state.runtime_info.preflight_message = "Preflight is pending this launch.".to_string();
+                    tauri::async_runtime::block_on(async {
+                        *startup_state.lock().await = saved_state;
+                    });
+                }
+                Err(err) => eprintln!("[state] {err}"),
+            }
+
             // Build system tray
             let show = MenuItemBuilder::with_id("show", "Show Window").build(app)?;
             let pause = MenuItemBuilder::with_id("pause", "Pause Agent").build(app)?;

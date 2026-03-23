@@ -267,6 +267,33 @@ header h1 {
   padding-top: 0.8rem;
 }
 
+/* Upload progress bar */
+.progress-bar-wrap {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  height: 32px;
+  position: relative;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: #6c63ff;
+  transition: width 0.3s ease;
+  border-radius: 6px;
+}
+
+.progress-text {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+}
+
 /* Misc */
 .status { color: #555; font-size: 0.9rem; padding: 1rem 0; }
 .error  { color: #f44336; font-size: 0.85rem; padding: 0.5rem 0; }

@@ -10,11 +10,19 @@ import tempfile
 import time
 import urllib.request
 
-from config import load_setup_state, save_setup_state, clear_setup_state
+from config import (
+    load_gpu_check_cache,
+    save_gpu_check_cache,
+    load_setup_state,
+    save_setup_state,
+    clear_setup_state,
+)
 
 DOCKER_DESKTOP_URL = (
     "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
 )
+GPU_CHECK_SUCCESS_CACHE_TTL = 24 * 60 * 60
+GPU_CHECK_FAILURE_CACHE_TTL = 10 * 60
 
 
 def check_docker_installed():
@@ -192,39 +200,111 @@ def wait_for_docker_ready(timeout=120):
     return False
 
 
+def get_cached_gpu_verification():
+    """Return a recent cached Docker GPU verification result, if available."""
+    cache = load_gpu_check_cache()
+    if not cache:
+        return None
+
+    verified = cache.get("gpu_verified")
+    checked_at = cache.get("checked_at")
+    if not isinstance(verified, bool) or not isinstance(checked_at, (int, float)):
+        return None
+
+    ttl = GPU_CHECK_SUCCESS_CACHE_TTL if verified else GPU_CHECK_FAILURE_CACHE_TTL
+    age = time.time() - checked_at
+    if age < 0 or age > ttl:
+        return None
+
+    gpu_name = cache.get("gpu_docker_name", "")
+    if not isinstance(gpu_name, str):
+        gpu_name = ""
+
+    return {
+        "gpu_verified": verified,
+        "gpu_docker_name": gpu_name,
+        "checked_at": checked_at,
+    }
+
+
+def _save_gpu_verification(gpu_name):
+    save_gpu_check_cache({
+        "gpu_verified": bool(gpu_name),
+        "gpu_docker_name": gpu_name,
+        "checked_at": time.time(),
+    })
+
+
+def resolve_gpu_verification(use_cache=True):
+    """Return a Docker GPU verification result, reusing a recent cache when allowed."""
+    if use_cache:
+        cached = get_cached_gpu_verification()
+        if cached is not None:
+            print("[SETUP] Using cached Docker GPU verification result.")
+            return cached
+
+    gpu_name = verify_gpu_in_docker()
+    return {
+        "gpu_verified": bool(gpu_name),
+        "gpu_docker_name": gpu_name,
+        "checked_at": time.time(),
+    }
+
+
 def verify_gpu_in_docker():
     """
     Run a quick GPU test inside Docker to confirm GPU passthrough works.
-    Returns True if GPU is accessible inside containers.
+    Returns the GPU name string if accessible, or empty string on failure.
+    Pulls the test image first if needed, then retries the GPU check once.
     """
-    print("[SETUP] Verifying GPU access in Docker...")
+    image = "nvidia/cuda:12.2.0-base-ubuntu22.04"
+
+    # Ensure the test image is available locally
     try:
-        result = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--gpus",
-                "all",
-                "nvidia/cuda:12.2.0-base-ubuntu22.04",
-                "nvidia-smi",
-                "--query-gpu=name",
-                "--format=csv,noheader",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
+        check = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True, text=True, timeout=10,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            gpu = result.stdout.strip().split("\n")[0]
-            print(f"[SETUP] GPU verified in Docker: {gpu}")
-            return True
-        else:
-            print(f"[SETUP] GPU test failed: {result.stderr}")
-            return False
-    except Exception as e:
-        print(f"[SETUP] GPU verification error: {e}")
-        return False
+        if check.returncode != 0:
+            print(f"[SETUP] Pulling GPU test image ({image})...")
+            subprocess.run(
+                ["docker", "pull", image],
+                capture_output=True, text=True, timeout=300,
+            )
+    except Exception:
+        pass
+
+    # Try the GPU test (retry once on failure)
+    for attempt in range(2):
+        try:
+            result = subprocess.run(
+                [
+                    "docker", "run", "--rm",
+                    "--gpus", "all",
+                    image,
+                    "nvidia-smi",
+                    "--query-gpu=name",
+                    "--format=csv,noheader",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                gpu = result.stdout.strip().split("\n")[0]
+                _save_gpu_verification(gpu)
+                print(f"[SETUP] GPU verified in Docker: {gpu}")
+                return gpu
+            else:
+                print(f"[SETUP] GPU test attempt {attempt + 1} failed: {result.stderr.strip()}")
+        except Exception as e:
+            print(f"[SETUP] GPU test attempt {attempt + 1} error: {e}")
+
+        if attempt == 0:
+            time.sleep(2)
+
+    _save_gpu_verification("")
+    return ""
 
 
 def full_bootstrap(on_status=None):
@@ -252,7 +332,14 @@ def full_bootstrap(on_status=None):
     if check_docker_installed() and check_docker_running():
         status("[SETUP] Docker is already installed and running.")
         clear_setup_state()
-        return {"ready": True, "needs_reboot": False, "message": "Docker ready"}
+        gpu_result = resolve_gpu_verification()
+        return {
+            "ready": True,
+            "needs_reboot": False,
+            "gpu_verified": gpu_result["gpu_verified"],
+            "gpu_docker_name": gpu_result["gpu_docker_name"],
+            "message": "Docker is ready.",
+        }
 
     # Step 2: Check/install WSL2
     if not check_wsl2_installed():
@@ -322,16 +409,15 @@ def full_bootstrap(on_status=None):
 
     # Step 5: Verify GPU passthrough
     status("[SETUP] Verifying GPU access in Docker containers...")
-    gpu_ok = verify_gpu_in_docker()
-    if not gpu_ok:
-        status("[SETUP] WARNING: GPU not accessible in Docker. Rendering will use CPU.")
+    gpu_result = resolve_gpu_verification()
 
     clear_setup_state()
     return {
         "ready": True,
         "needs_reboot": False,
-        "gpu_verified": gpu_ok,
-        "message": "Docker is ready." + (" GPU verified." if gpu_ok else " GPU NOT available."),
+        "gpu_verified": gpu_result["gpu_verified"],
+        "gpu_docker_name": gpu_result["gpu_docker_name"],
+        "message": "Docker is ready.",
     }
 
 

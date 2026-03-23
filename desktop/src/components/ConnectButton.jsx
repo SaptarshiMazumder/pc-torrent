@@ -1,13 +1,21 @@
 import { connectAgent, disconnectAgent } from "../lib/sidecar";
 
-export default function ConnectButton({ status, backendUrl }) {
-  const isConnected =
-    status !== "disconnected" && status !== "error" && status !== "needs_reboot";
-  const isLoading =
+export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
+  const isConnected = ["connected", "rendering", "paused"].includes(status);
+  const preflightRunning =
     status === "checking_requirements" ||
-    status === "setting_up_docker" ||
+    status === "setting_up_docker";
+  const connectRunning =
     status === "downloading_image" ||
+    status === "installing_image" ||
     status === "registering";
+  const removingImage = status === "removing_image";
+  const isLoading =
+    preflightRunning ||
+    connectRunning ||
+    removingImage;
+  const preflightComplete = runtimeInfo?.preflight_complete === true;
+  const disabled = isConnected ? connectRunning : isLoading || !preflightComplete;
 
   const handleClick = async () => {
     try {
@@ -26,12 +34,17 @@ export default function ConnectButton({ status, backendUrl }) {
     <button
       className={`connect-btn ${isConnected ? "connected" : ""} ${isLoading ? "loading" : ""}`}
       onClick={handleClick}
-      disabled={isLoading}
+      disabled={disabled}
     >
-      {isLoading ? (
+      {preflightRunning ? (
         <>
           <span className="spinner" />
-          Setting up...
+          Checking...
+        </>
+      ) : connectRunning ? (
+        <>
+          <span className="spinner" />
+          Connecting...
         </>
       ) : isConnected ? (
         "Disconnect"

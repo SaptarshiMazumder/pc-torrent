@@ -11,20 +11,36 @@ const STATUS_COLORS = {
   needs_reboot: "#f59e0b",
 };
 
-export default function Sidebar({ activePage, onNavigate, status }) {
-  const pages = [
-    { id: "dashboard", label: "Dashboard", icon: "⬡" },
-    { id: "logs", label: "Logs", icon: "☰" },
-    { id: "settings", label: "Settings", icon: "⚙" },
-  ];
+const RENTER_PAGES = [
+  { id: "dashboard", label: "Dashboard", icon: "\u2B21" },
+  { id: "logs", label: "Logs", icon: "\u2630" },
+];
 
+const RENTEE_PAGES = [
+  { id: "marketplace", label: "Marketplace", icon: "\u25CE" },
+  { id: "myjobs", label: "My Jobs", icon: "\u25A4" },
+];
+
+export default function Sidebar({ activePage, onNavigate, status, mode, onModeChange }) {
+  const pages = mode === "renter" ? RENTER_PAGES : RENTEE_PAGES;
   const dotColor = STATUS_COLORS[status] || "#6b7280";
 
   return (
     <nav className="sidebar">
       <div className="sidebar-brand">
-        <span className="brand-icon">◈</span>
+        <span className="brand-icon">{"\u25C8"}</span>
         <span className="brand-text">PC Rent</span>
+      </div>
+
+      <div className="mode-select-wrap">
+        <select
+          className="mode-select"
+          value={mode}
+          onChange={(e) => onModeChange(e.target.value)}
+        >
+          <option value="rentee">Rent a PC</option>
+          <option value="renter">Offer My PC</option>
+        </select>
       </div>
 
       <div className="sidebar-nav">
@@ -38,6 +54,16 @@ export default function Sidebar({ activePage, onNavigate, status }) {
             <span className="nav-label">{page.label}</span>
           </button>
         ))}
+
+        <div className="nav-divider" />
+
+        <button
+          className={`nav-item ${activePage === "settings" ? "active" : ""}`}
+          onClick={() => onNavigate("settings")}
+        >
+          <span className="nav-icon">{"\u2699"}</span>
+          <span className="nav-label">Settings</span>
+        </button>
       </div>
 
       <div className="sidebar-footer">

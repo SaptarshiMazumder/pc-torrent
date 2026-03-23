@@ -37,6 +37,7 @@ fn main() {
             commands::get_runtime_status,
             commands::run_preflight,
             commands::remove_image,
+            commands::download_job_output_to_downloads,
         ])
         .setup(move |app| {
             match persistence::load_agent_state(&app.handle()) {

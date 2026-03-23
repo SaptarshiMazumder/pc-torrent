@@ -495,6 +495,7 @@ def run_connect_flow():
                         job_id = job["id"]
                         filename = job["input_filename"]
                         emit_log(f"Got job: {job_id} ({filename})", source="agent")
+                        agent.update_job_status(job_id, "running")
 
                         if not agent.check_image_loaded():
                             emit_log("Render image not loaded, downloading...", source="agent")

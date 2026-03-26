@@ -465,6 +465,16 @@ body {
   gap: 8px;
 }
 
+.job-progress-wrap {
+  margin-bottom: 14px;
+}
+
+.job-progress-caption {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* Buttons */
 .btn {
   padding: 8px 16px;
@@ -791,6 +801,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.rentee-job-progress {
+  margin-top: 2px;
 }
 
 .rentee-job-header {

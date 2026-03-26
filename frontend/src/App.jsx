@@ -163,6 +163,19 @@ function JobStatusPage({ jobId, onBack }) {
   const statusLabel = job.status === "done" && job.error
     ? "Done with warnings"
     : (STATUS_LABEL[job.status] || job.status);
+  const totalFrames =
+    typeof job.total_frames === "number" ? job.total_frames : null;
+  const renderedFrames =
+    typeof job.rendered_frames === "number" ? job.rendered_frames : 0;
+  const progressPct =
+    typeof job.progress_pct === "number"
+      ? Math.max(0, Math.min(100, job.progress_pct))
+      : null;
+  const hasTotalFrames = typeof totalFrames === "number" && totalFrames > 0;
+  const showRenderProgress =
+    job.status === "running" ||
+    hasTotalFrames ||
+    renderedFrames > 0;
 
   return (
     <div>
@@ -176,6 +189,25 @@ function JobStatusPage({ jobId, onBack }) {
           <div className="spinner-wrap">
             <div className="spinner" />
             <p>{job.status === "pending" ? "Waiting for machine to pick up job..." : "Rendering in progress..."}</p>
+          </div>
+        )}
+
+        {showRenderProgress && (
+          <div className="render-progress-wrap">
+            <div className={`render-progress-track ${progressPct === null ? "indeterminate" : ""}`}>
+              <div
+                className="render-progress-fill"
+                style={{ width: `${progressPct ?? 100}%` }}
+              />
+            </div>
+            <div className="render-progress-meta">
+              <span>
+                {hasTotalFrames
+                  ? `${Math.min(renderedFrames, totalFrames)} / ${totalFrames} frames rendered`
+                  : "Preparing render..."}
+              </span>
+              <span>{progressPct !== null ? `${Math.round(progressPct)}%` : "Working..."}</span>
+            </div>
           </div>
         )}
 

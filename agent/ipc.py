@@ -66,6 +66,11 @@ def emit_runtime_info(info):
     emit("runtime_info", **info)
 
 
+def emit_job_progress(**progress):
+    """Emit per-job render progress updates."""
+    emit("job_progress", **progress)
+
+
 def emit_error(message):
     """Emit an error event."""
     emit("error", message=message)

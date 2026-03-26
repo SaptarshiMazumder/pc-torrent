@@ -21,6 +21,7 @@ run_render() {
     local -a cmd=(
         /opt/blender/blender
         -b "$BLEND_FILE"
+        -P /progress_handler.py
         -o /output/frame####
         -E CYCLES
         -a

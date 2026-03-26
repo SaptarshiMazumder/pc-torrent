@@ -18,6 +18,7 @@ RUN mkdir -p /input /output
 
 # Entry script
 COPY render.sh /render.sh
+COPY progress_handler.py /progress_handler.py
 RUN chmod +x /render.sh
 
 ENTRYPOINT ["/render.sh"]

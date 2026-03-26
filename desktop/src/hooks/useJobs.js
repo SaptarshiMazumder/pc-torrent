@@ -40,6 +40,9 @@ export function useJobs(backendUrl) {
         completed_at: null,
         output_files: [],
         error: null,
+        total_frames: null,
+        rendered_frames: 0,
+        progress_pct: null,
       },
       ...prev,
     ]);
@@ -74,6 +77,18 @@ export function useJobs(backendUrl) {
                       completed_at: updated.completed_at,
                       output_files: updated.output_files || [],
                       error: updated.error,
+                      total_frames:
+                        typeof updated.total_frames === "number"
+                          ? updated.total_frames
+                          : null,
+                      rendered_frames:
+                        typeof updated.rendered_frames === "number"
+                          ? updated.rendered_frames
+                          : 0,
+                      progress_pct:
+                        typeof updated.progress_pct === "number"
+                          ? updated.progress_pct
+                          : null,
                     }
                   : j
               )

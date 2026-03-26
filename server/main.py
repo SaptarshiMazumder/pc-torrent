@@ -42,6 +42,11 @@ class UpdateJobStatusPayload(BaseModel):
     output_files: list[str] | None = None
 
 
+class UpdateJobProgressPayload(BaseModel):
+    total_frames: int | None = None
+    rendered_frames: int
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -54,6 +59,42 @@ def parse_output_files(raw: str | None) -> list[str]:
         return parsed if isinstance(parsed, list) else []
     except json.JSONDecodeError:
         return []
+
+
+def compute_progress_pct(
+    status: str,
+    rendered_frames: int | None,
+    total_frames: int | None,
+) -> float | None:
+    rendered = max(0, rendered_frames or 0)
+    if total_frames and total_frames > 0:
+        pct = rendered / total_frames * 100
+        if status == "done":
+            pct = 100.0
+        return round(max(0.0, min(100.0, pct)), 1)
+    if status == "done":
+        return 100.0
+    return None
+
+
+def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
+    output_files = parse_output_files(job.get("output_files"))
+    total_frames = job.get("total_frames")
+    rendered_frames = max(0, job.get("rendered_frames") or 0)
+    if total_frames is not None and total_frames > 0:
+        rendered_frames = min(rendered_frames, total_frames)
+
+    return {
+        **job,
+        "output_files": output_files,
+        "total_frames": total_frames,
+        "rendered_frames": rendered_frames,
+        "progress_pct": compute_progress_pct(
+            job.get("status", ""),
+            rendered_frames,
+            total_frames,
+        ),
+    }
 
 
 def sanitize_filename(name: str) -> str:
@@ -271,8 +312,45 @@ def get_job(job_id: str) -> dict[str, Any]:
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    job["output_files"] = parse_output_files(job.get("output_files"))
-    return job
+    return serialize_job(job)
+
+
+@app.put("/jobs/{job_id}/progress")
+def update_job_progress(job_id: str, payload: UpdateJobProgressPayload) -> dict[str, bool]:
+    job = query_one(
+        "SELECT id, status, total_frames, rendered_frames FROM jobs WHERE id = %s",
+        (job_id,),
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "running":
+        raise HTTPException(status_code=409, detail="Job is not running")
+
+    current_total = job.get("total_frames")
+    incoming_total = payload.total_frames
+    if incoming_total is not None and incoming_total < 0:
+        raise HTTPException(status_code=400, detail="total_frames must be non-negative")
+    if payload.rendered_frames < 0:
+        raise HTTPException(status_code=400, detail="rendered_frames must be non-negative")
+
+    next_total = current_total
+    if incoming_total is not None:
+        next_total = max(current_total or 0, incoming_total)
+
+    next_rendered = max(job.get("rendered_frames") or 0, payload.rendered_frames)
+    if next_total and next_total > 0:
+        next_rendered = min(next_rendered, next_total)
+
+    execute(
+        """
+        UPDATE jobs
+        SET total_frames = %s, rendered_frames = %s
+        WHERE id = %s
+        """,
+        (next_total, next_rendered, job_id),
+    )
+
+    return {"success": True}
 
 
 @app.put("/jobs/{job_id}/status")
@@ -282,12 +360,17 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
         raise HTTPException(status_code=404, detail="Job not found")
 
     completed_at = job.get("completed_at")
+    total_frames = job.get("total_frames")
+    rendered_frames = max(0, job.get("rendered_frames") or 0)
     if payload.status in ("done", "failed"):
         completed_at = now_iso()
         execute(
             "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
             (completed_at, job["machine_id"]),
         )
+    if payload.status == "done":
+        if total_frames and total_frames > 0:
+            rendered_frames = total_frames
 
     output_files_json = job["output_files"]
     if payload.output_files is not None:
@@ -296,10 +379,18 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
     execute(
         """
         UPDATE jobs
-        SET status = %s, completed_at = %s, error = %s, output_files = %s
+        SET status = %s, completed_at = %s, error = %s, output_files = %s,
+            rendered_frames = %s
         WHERE id = %s
         """,
-        (payload.status, completed_at, payload.error, output_files_json, job_id),
+        (
+            payload.status,
+            completed_at,
+            payload.error,
+            output_files_json,
+            rendered_frames,
+            job_id,
+        ),
     )
 
     return {"success": True}

@@ -56,6 +56,20 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
         <div className="job-list">
           {jobs.map((job) => {
             const downloadState = downloadResults[job.job_id];
+            const totalFrames =
+              typeof job.total_frames === "number" ? job.total_frames : null;
+            const renderedFrames =
+              typeof job.rendered_frames === "number" ? job.rendered_frames : 0;
+            const progressPct =
+              typeof job.progress_pct === "number"
+                ? Math.max(0, Math.min(100, job.progress_pct))
+                : null;
+            const hasTotalFrames =
+              typeof totalFrames === "number" && totalFrames > 0;
+            const showRenderProgress =
+              job.status === "running" ||
+              hasTotalFrames ||
+              renderedFrames > 0;
 
             return (
               <div key={job.job_id} className="card rentee-job-card">
@@ -73,6 +87,25 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
                   {STATUS_LABELS[job.status] || job.status}
                 </span>
               </div>
+
+              {showRenderProgress && (
+                <div className="rentee-job-progress">
+                  <div className={`runtime-progress-track ${progressPct === null ? "indeterminate" : ""}`}>
+                    <div
+                      className="runtime-progress-fill"
+                      style={{ width: `${progressPct ?? 100}%` }}
+                    />
+                  </div>
+                  <div className="runtime-progress-meta">
+                    <span>
+                      {hasTotalFrames
+                        ? `${Math.min(renderedFrames, totalFrames)} / ${totalFrames} frames rendered`
+                        : "Preparing render..."}
+                    </span>
+                    <span>{progressPct !== null ? `${Math.round(progressPct)}%` : "Working..."}</span>
+                  </div>
+                </div>
+              )}
 
               {job.status === "failed" && job.error && (
                 <div className="rentee-job-error">

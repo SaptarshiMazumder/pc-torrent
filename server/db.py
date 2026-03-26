@@ -87,12 +87,20 @@ def init_db():
                     machine_id TEXT NOT NULL,
                     input_filename TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    total_frames INTEGER,
+                    rendered_frames INTEGER NOT NULL DEFAULT 0,
                     output_files TEXT NOT NULL DEFAULT '[]',
                     submitted_at TEXT NOT NULL,
                     completed_at TEXT,
                     error TEXT,
                     FOREIGN KEY (machine_id) REFERENCES machines(id)
                 );
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS total_frames INTEGER;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS rendered_frames INTEGER NOT NULL DEFAULT 0;
 
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_machine_key_unique
                 ON machines(machine_key)

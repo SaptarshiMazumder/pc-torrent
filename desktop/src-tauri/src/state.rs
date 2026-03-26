@@ -32,10 +32,29 @@ impl Default for SystemInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct JobInfo {
     pub job_id: String,
     pub filename: String,
     pub status: String,
+    pub current_frame: Option<u32>,
+    pub rendered_frames: Option<u32>,
+    pub total_frames: Option<u32>,
+    pub progress_pct: Option<f64>,
+}
+
+impl Default for JobInfo {
+    fn default() -> Self {
+        Self {
+            job_id: String::new(),
+            filename: String::new(),
+            status: "rendering".to_string(),
+            current_frame: None,
+            rendered_frames: None,
+            total_frames: None,
+            progress_pct: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

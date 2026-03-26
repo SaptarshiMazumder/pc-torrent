@@ -43,10 +43,15 @@ from docker_setup import (
 # When running as a Tauri sidecar, ipc.py is used for structured events.
 # In console mode, we just print() as usual.
 try:
-    from ipc import emit_log as _ipc_log, emit_status as _ipc_status
+    from ipc import (
+        emit_job_progress as _ipc_job_progress,
+        emit_log as _ipc_log,
+        emit_status as _ipc_status,
+    )
     _has_ipc = True
 except ImportError:
     _has_ipc = False
+    _ipc_job_progress = None
 
 _sidecar_mode_active = False
 
@@ -63,6 +68,12 @@ def _log(message, source="agent", level="info"):
         _ipc_log(message, source=source, level=level)
     else:
         print(message)
+
+
+def _emit_job_progress(**payload):
+    """Emit structured per-job progress to the desktop app when available."""
+    if _sidecar_mode_active and _has_ipc and _ipc_job_progress:
+        _ipc_job_progress(**payload)
 
 # -----------------------------------------------
 # CONFIG
@@ -83,6 +94,8 @@ MISSING_ASSETS_WARNING = (
     "Render finished, but the project referenced external Blender libraries or assets that were not uploaded. "
     "Output files were produced, but materials or linked data may be incomplete."
 )
+PROGRESS_EVENT_PREFIX = "PCR_PROGRESS "
+BACKEND_PROGRESS_MIN_INTERVAL = 1.0
 
 machine_id = None
 running = True
@@ -202,9 +215,21 @@ def update_job_status(job_id, status, error=None, output_files=None):
     payload = {"status": status}
     if error:
         payload["error"] = error
-    if output_files:
+    if output_files is not None:
         payload["output_files"] = output_files
     requests.put(f"{BACKEND_URL}/jobs/{job_id}/status", json=payload).raise_for_status()
+
+
+def update_job_progress(job_id, rendered_frames, total_frames=None):
+    payload = {
+        "rendered_frames": rendered_frames,
+        "total_frames": total_frames,
+    }
+    requests.put(
+        f"{BACKEND_URL}/jobs/{job_id}/progress",
+        json=payload,
+        timeout=10,
+    ).raise_for_status()
 
 
 def upload_output_files(job_id, output_dir):
@@ -293,6 +318,54 @@ def prepare_job_input(downloaded_file, input_dir):
 def detect_missing_project_assets(log_lines):
     combined = "\n".join(log_lines)
     return any(marker in combined for marker in MISSING_LIBRARY_MARKERS)
+
+
+def compute_progress_pct(rendered_frames, total_frames):
+    if total_frames and total_frames > 0:
+        pct = rendered_frames / total_frames * 100
+        return round(max(0.0, min(100.0, pct)), 1)
+    return None
+
+
+def parse_progress_event_line(line):
+    if not line.startswith(PROGRESS_EVENT_PREFIX):
+        return None
+
+    raw_payload = line[len(PROGRESS_EVENT_PREFIX):].strip()
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    kind = payload.get("kind")
+    if kind not in {"meta", "frame"}:
+        return None
+
+    total_frames = payload.get("total_frames")
+    rendered_frames = payload.get("rendered_frames")
+    current_frame = payload.get("current_frame")
+
+    try:
+        if total_frames is not None:
+            total_frames = max(0, int(total_frames))
+        rendered_frames = max(0, int(rendered_frames or 0))
+        if current_frame is not None:
+            current_frame = int(current_frame)
+    except (TypeError, ValueError):
+        return None
+
+    if total_frames and total_frames > 0:
+        rendered_frames = min(rendered_frames, total_frames)
+
+    return {
+        "kind": kind,
+        "total_frames": total_frames,
+        "rendered_frames": rendered_frames,
+        "current_frame": current_frame,
+    }
 
 
 def persist_job_outputs(job_id, source_output_dir, status, error=None):
@@ -751,6 +824,93 @@ def execute_job(job):
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
     begin_active_job(job_id, work_dir)
+    progress_state = {
+        "current_frame": None,
+        "rendered_frames": 0,
+        "total_frames": None,
+        "last_backend_push_at": 0.0,
+        "last_reported_rendered_frames": None,
+        "last_reported_total_frames": None,
+    }
+
+    def emit_progress_update():
+        total_frames = progress_state["total_frames"]
+        rendered_frames = progress_state["rendered_frames"]
+        if total_frames and total_frames > 0:
+            rendered_frames = min(rendered_frames, total_frames)
+        _emit_job_progress(
+            job_id=job_id,
+            filename=input_filename,
+            current_frame=progress_state["current_frame"],
+            rendered_frames=rendered_frames,
+            total_frames=total_frames,
+            progress_pct=compute_progress_pct(rendered_frames, total_frames),
+        )
+
+    def push_progress_to_backend(force=False):
+        total_frames = progress_state["total_frames"]
+        rendered_frames = progress_state["rendered_frames"]
+        if total_frames and total_frames > 0:
+            rendered_frames = min(rendered_frames, total_frames)
+
+        if (
+            progress_state["last_reported_rendered_frames"] == rendered_frames
+            and progress_state["last_reported_total_frames"] == total_frames
+        ):
+            return
+
+        now = time.monotonic()
+        if not force and (now - progress_state["last_backend_push_at"]) < BACKEND_PROGRESS_MIN_INTERVAL:
+            return
+
+        try:
+            update_job_progress(
+                job_id,
+                rendered_frames=rendered_frames,
+                total_frames=total_frames,
+            )
+        except Exception as exc:
+            progress_state["last_backend_push_at"] = now
+            _log(f"[JOB] Failed to report progress: {exc}", level="warn")
+            return
+
+        progress_state["last_backend_push_at"] = now
+        progress_state["last_reported_rendered_frames"] = rendered_frames
+        progress_state["last_reported_total_frames"] = total_frames
+
+    def apply_progress_event(event):
+        total_frames = event.get("total_frames")
+        if total_frames is not None:
+            existing_total = progress_state["total_frames"]
+            progress_state["total_frames"] = (
+                total_frames
+                if existing_total is None
+                else max(existing_total, total_frames)
+            )
+
+        progress_state["rendered_frames"] = max(
+            progress_state["rendered_frames"],
+            event.get("rendered_frames") or 0,
+        )
+
+        if progress_state["total_frames"] and progress_state["total_frames"] > 0:
+            progress_state["rendered_frames"] = min(
+                progress_state["rendered_frames"],
+                progress_state["total_frames"],
+            )
+
+        if event.get("current_frame") is not None:
+            progress_state["current_frame"] = event["current_frame"]
+
+        emit_progress_update()
+        push_progress_to_backend(force=event["kind"] == "meta")
+
+    def finalize_progress(force_complete=False):
+        total_frames = progress_state["total_frames"]
+        if force_complete and total_frames and total_frames > 0:
+            progress_state["rendered_frames"] = total_frames
+        emit_progress_update()
+        push_progress_to_backend(force=True)
 
     try:
         # 1. Download blend file
@@ -803,6 +963,10 @@ def execute_job(job):
             for line in iter(process.stdout.readline, ""):
                 line = line.rstrip()
                 if line:
+                    progress_event = parse_progress_event_line(line)
+                    if progress_event:
+                        apply_progress_event(progress_event)
+                        continue
                     container_log.append(line)
                     _log(line, source="container")
         finally:
@@ -823,6 +987,8 @@ def execute_job(job):
                     "Upload a packed .blend file or a .zip bundle containing the full project folder."
                 )
             raise RuntimeError(f"Container exited with code {process.returncode}")
+
+        finalize_progress(force_complete=True)
 
         # 4. Upload output files
         _log(f"[JOB] Uploading output files...")
@@ -850,6 +1016,7 @@ def execute_job(job):
     except JobStopped as e:
         _log(f"[JOB] {e}")
         final_error = str(e)
+        finalize_progress()
         update_job_status(job_id, "failed", error=final_error)
 
     except subprocess.TimeoutExpired:
@@ -859,11 +1026,13 @@ def execute_job(job):
         except Exception:
             pass
         final_error = "Render timed out"
+        finalize_progress()
         update_job_status(job_id, "failed", error=final_error)
 
     except Exception as e:
         _log(f"[JOB] Error: {e}")
         final_error = str(e)
+        finalize_progress()
         update_job_status(job_id, "failed", error=final_error)
 
     finally:

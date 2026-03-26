@@ -60,10 +60,41 @@ export function useAgent() {
                     job_id: data.job_id || "",
                     filename: data.filename || "",
                     status: "rendering",
+                    current_frame: null,
+                    rendered_frames: null,
+                    total_frames: null,
+                    progress_pct: null,
                   }
                 : data.state === "connected" || data.state === "disconnected"
                   ? null
                   : prev.currentJob,
+          }));
+          break;
+
+        case "job_progress":
+          setState((prev) => ({
+            ...prev,
+            currentJob: {
+              job_id: data.job_id || prev.currentJob?.job_id || "",
+              filename: data.filename || prev.currentJob?.filename || "",
+              status: "rendering",
+              current_frame:
+                typeof data.current_frame === "number"
+                  ? data.current_frame
+                  : prev.currentJob?.current_frame ?? null,
+              rendered_frames:
+                typeof data.rendered_frames === "number"
+                  ? data.rendered_frames
+                  : prev.currentJob?.rendered_frames ?? null,
+              total_frames:
+                typeof data.total_frames === "number"
+                  ? data.total_frames
+                  : prev.currentJob?.total_frames ?? null,
+              progress_pct:
+                typeof data.progress_pct === "number"
+                  ? data.progress_pct
+                  : prev.currentJob?.progress_pct ?? null,
+            },
           }));
           break;
 

@@ -118,8 +118,9 @@ async fn handle_sidecar_event(
     event: &Value,
 ) {
     let event_type = event.get("event").and_then(|v| v.as_str()).unwrap_or("");
-    let snapshot = {
+    let (snapshot, persist_state) = {
         let mut s = state.lock().await;
+        let mut persist_state = true;
 
         match event_type {
             "status" => {
@@ -139,10 +140,41 @@ async fn handle_sidecar_event(
                         job_id: job_id.to_string(),
                         filename: filename.to_string(),
                         status: "rendering".to_string(),
+                        current_frame: None,
+                        rendered_frames: None,
+                        total_frames: None,
+                        progress_pct: None,
                     });
                 } else if new_state == "connected" || new_state == "disconnected" {
                     s.current_job = None;
                 }
+            }
+            "job_progress" => {
+                persist_state = false;
+                let job_id = event.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
+                let filename = event.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+
+                let current_job = s.current_job.get_or_insert_with(JobInfo::default);
+                if !job_id.is_empty() {
+                    current_job.job_id = job_id.to_string();
+                }
+                if !filename.is_empty() {
+                    current_job.filename = filename.to_string();
+                }
+                current_job.status = "rendering".to_string();
+                current_job.current_frame = event
+                    .get("current_frame")
+                    .and_then(|v| v.as_u64())
+                    .map(|value| value as u32);
+                current_job.rendered_frames = event
+                    .get("rendered_frames")
+                    .and_then(|v| v.as_u64())
+                    .map(|value| value as u32);
+                current_job.total_frames = event
+                    .get("total_frames")
+                    .and_then(|v| v.as_u64())
+                    .map(|value| value as u32);
+                current_job.progress_pct = event.get("progress_pct").and_then(|v| v.as_f64());
             }
             "system_info" => {
                 s.system_info = SystemInfo {
@@ -202,11 +234,13 @@ async fn handle_sidecar_event(
             _ => {}
         }
 
-        s.clone()
+        (s.clone(), persist_state)
     };
 
-    if let Err(err) = save_agent_state(app, &snapshot) {
-        eprintln!("[state] {err}");
+    if persist_state {
+        if let Err(err) = save_agent_state(app, &snapshot) {
+            eprintln!("[state] {err}");
+        }
     }
 
     // Forward every event to the React frontend

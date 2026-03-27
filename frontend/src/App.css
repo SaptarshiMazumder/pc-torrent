@@ -335,6 +335,99 @@ header h1 {
   100% { transform: translateX(250%); }
 }
 
+/* ---- Segmented (Torrent-Style) Progress Bar ---- */
+.seg-wrap { margin-top: 14px; }
+
+.seg-track {
+  display: flex;
+  width: 100%;
+  height: 14px;
+  border-radius: 999px;
+  overflow: hidden;
+  gap: 1px;
+  background: #111;
+  border: 1px solid #2a2a2a;
+}
+
+.seg-segment {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  min-width: 2px;
+  background: #1e1e1e;
+  flex-shrink: 0;
+}
+
+.seg-segment:first-child { border-radius: 999px 0 0 999px; }
+.seg-segment:last-child  { border-radius: 0 999px 999px 0; flex-grow: 1; }
+.seg-failed .seg-fill    { width: 100% !important; }
+
+.seg-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.seg-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 8px;
+}
+
+.seg-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #777;
+}
+
+.seg-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.seg-gpu   { font-weight: 600; color: #ccc; }
+.seg-range { opacity: 0.6; }
+.seg-pct   { font-weight: 600; color: #6c63ff; }
+.pct-done  { color: #10b981; }
+.pct-failed { color: #ef4444; }
+
+/* ---- Machine row selection ---- */
+.row-selected { background: rgba(108, 99, 255, 0.08); }
+.row-selected td { border-color: rgba(108, 99, 255, 0.3); }
+
+.check-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid #333;
+  font-size: 10px;
+  font-weight: 700;
+  color: #6c63ff;
+}
+
+.check-box.checked {
+  background: #6c63ff;
+  border-color: #6c63ff;
+  color: #fff;
+}
+
+.selection-hint {
+  padding: 8px 12px;
+  background: rgba(108, 99, 255, 0.1);
+  border: 1px solid rgba(108, 99, 255, 0.25);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #aaa;
+  margin-bottom: 14px;
+}
+
 /* Misc */
 .status { color: #555; font-size: 0.9rem; padding: 1rem 0; }
 .error  { color: #f44336; font-size: 0.85rem; padding: 0.5rem 0; }

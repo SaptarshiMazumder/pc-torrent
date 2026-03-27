@@ -1,8 +1,19 @@
-export default function MachineCard({ machine, onRent }) {
+export default function MachineCard({ machine, selected, onToggle }) {
   return (
-    <div className="card machine-card">
+    <div
+      className={`card machine-card ${selected ? "machine-card-selected" : ""}`}
+      onClick={() => onToggle(machine)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => e.key === "Enter" && onToggle(machine)}
+    >
       <div className="machine-card-body">
-        <div className="machine-gpu-name">{machine.gpu_model}</div>
+        <div className="machine-card-header">
+          <div className="machine-gpu-name">{machine.gpu_model}</div>
+          <div className={`machine-select-check ${selected ? "checked" : ""}`}>
+            {selected ? "\u2713" : ""}
+          </div>
+        </div>
         <div className="machine-specs">
           <div className="info-item">
             <span className="info-label">VRAM</span>
@@ -18,9 +29,6 @@ export default function MachineCard({ machine, onRent }) {
           </div>
         </div>
       </div>
-      <button className="btn btn-primary" onClick={() => onRent(machine)}>
-        Rent
-      </button>
     </div>
   );
 }

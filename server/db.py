@@ -105,5 +105,31 @@ def init_db():
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_machine_key_unique
                 ON machines(machine_key)
                 WHERE machine_key IS NOT NULL AND machine_key != '';
+
+                CREATE TABLE IF NOT EXISTS render_groups (
+                    id TEXT PRIMARY KEY,
+                    input_filename TEXT NOT NULL,
+                    r2_input_key TEXT NOT NULL,
+                    total_frames INTEGER NOT NULL DEFAULT 0,
+                    frame_start INTEGER NOT NULL DEFAULT 1,
+                    frame_end INTEGER NOT NULL DEFAULT 1,
+                    frame_step INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'uploading',
+                    submitted_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    error TEXT
+                );
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS group_id TEXT REFERENCES render_groups(id);
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS frame_start INTEGER;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS frame_end INTEGER;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS frame_step INTEGER DEFAULT 1;
                 """
             )

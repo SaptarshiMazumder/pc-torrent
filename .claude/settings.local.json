@@ -54,7 +54,14 @@
       "Bash(curl -s https://pcrent-server-930713698987.asia-northeast1.run.app/machines)",
       "Bash(python build_sidecar.py)",
       "Bash(curl -s -X POST https://pcrent-server-930713698987.asia-northeast1.run.app/jobs/request-upload -H \"Content-Type: application/json\" -d '{\"\"machine_id\"\":\"\"test\"\",\"\"filename\"\":\"\"test.blend\"\"}')",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(find /c/Users/googler/OneDrive/Desktop/Projects/pc-rent -maxdepth 2 -type d -not -path */node_modules* -not -path */.git* -not -path */venv* -not -path */target*)",
+      "Bash(find /c/Users/googler/OneDrive/Desktop/Projects/pc-rent -name *.json -path */package.json -o -path */Cargo.toml)",
+      "Bash(grep -E \"\\\\.\\(py|sh|toml|yaml|yml|cfg\\)$\")",
+      "Bash(./deploy.sh)",
+      "WebSearch",
+      "WebFetch(domain:www.blender.org)",
+      "WebFetch(domain:download.blender.org)"
     ]
   }
 }

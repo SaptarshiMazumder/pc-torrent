@@ -58,3 +58,71 @@ export async function getJob(jobId) {
 export function downloadUrl(jobId) {
   return `${BASE}/jobs/${jobId}/download`;
 }
+
+// ---- Distributed Rendering (Render Groups) ----
+
+export async function submitDistributedJob(machineIds, file, onProgress) {
+  // Step 1: Create render group
+  const createRes = await fetch(`${BASE}/render-groups/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ machine_ids: machineIds, filename: file.name }),
+  });
+  if (!createRes.ok) {
+    const err = await createRes.json();
+    throw new Error(err.detail || "Failed to create render group");
+  }
+  const { group_id, upload_url } = await createRes.json();
+
+  // Step 2: Upload file to R2
+  await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", upload_url);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`Upload failed with status ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.send(file);
+  });
+
+  // Step 3: Confirm + parse .blend + distribute frames
+  if (onProgress) onProgress(100);
+  return confirmDistributedJob(group_id, machineIds);
+}
+
+export async function confirmDistributedJob(groupId, machineIds, frameRange = null) {
+  const body = { machine_ids: machineIds };
+  if (frameRange) {
+    body.frame_start = frameRange.frame_start;
+    body.frame_end = frameRange.frame_end;
+    body.frame_step = frameRange.frame_step || 1;
+  }
+  const confirmRes = await fetch(`${BASE}/render-groups/${groupId}/confirm-upload`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!confirmRes.ok) {
+    const err = await confirmRes.json();
+    throw new Error(err.detail || "Failed to confirm upload");
+  }
+  return confirmRes.json();
+}
+
+export async function getRenderGroup(groupId) {
+  const r = await fetch(`${BASE}/render-groups/${groupId}`);
+  return r.json();
+}
+
+export function renderGroupDownloadUrl(groupId) {
+  return `${BASE}/render-groups/${groupId}/download`;
+}

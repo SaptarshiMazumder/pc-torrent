@@ -57,6 +57,7 @@ cp "$PROJECT_ROOT/server/requirements.txt" "$BUILD_DIR/"
 cp "$PROJECT_ROOT/server/db.py" "$BUILD_DIR/"
 cp "$PROJECT_ROOT/server/storage.py" "$BUILD_DIR/"
 cp "$PROJECT_ROOT/server/main.py" "$BUILD_DIR/"
+cp "$PROJECT_ROOT/server/blend_parser.py" "$BUILD_DIR/"
 log_ok "Copied source files to build context"
 
 cd "$BUILD_DIR"
@@ -106,7 +107,7 @@ fi
 # -----------------------------------------------
 log_step "[3/5] Syncing Docker render image -> Cloudflare R2"
 
-if [ -f "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" ]; then
+if [[ "${UPLOAD_RENDER_IMAGE:-}" == "1" ]] && [ -f "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" ]; then
     IMAGE_SIZE=$(du -sh "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" | cut -f1)
     log_info "Uploading pcrent-render.tar.gz ($IMAGE_SIZE) to R2..."
     log_info "This may take a few minutes..."
@@ -116,7 +117,7 @@ if [ -f "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" ]; then
     cd - > /dev/null
     log_ok "Docker render image synced to R2"
 else
-    log_info "No Docker image found at server/docker/pcrent-render.tar.gz (skipping)"
+    log_info "Skipping render image upload (run with UPLOAD_RENDER_IMAGE=1 ./deploy.sh to upload)"
 fi
 
 # -----------------------------------------------

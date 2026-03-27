@@ -96,6 +96,7 @@ MISSING_ASSETS_WARNING = (
 )
 PROGRESS_EVENT_PREFIX = "PCR_PROGRESS "
 BACKEND_PROGRESS_MIN_INTERVAL = 1.0
+HEARTBEAT_INTERVAL = 5.0
 
 machine_id = None
 running = True
@@ -228,6 +229,13 @@ def update_job_progress(job_id, rendered_frames, total_frames=None):
     requests.put(
         f"{BACKEND_URL}/jobs/{job_id}/progress",
         json=payload,
+        timeout=10,
+    ).raise_for_status()
+
+
+def send_machine_heartbeat(mid):
+    requests.put(
+        f"{BACKEND_URL}/machines/{mid}/heartbeat",
         timeout=10,
     ).raise_for_status()
 
@@ -813,6 +821,7 @@ def execute_job(job):
     job_id = job["id"]
     input_url = job["input_url"]
     input_filename = job["input_filename"]
+    active_machine_id = machine_id
     final_status = "failed"
     final_error = None
 
@@ -824,6 +833,8 @@ def execute_job(job):
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
     begin_active_job(job_id, work_dir)
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = None
     progress_state = {
         "current_frame": None,
         "rendered_frames": 0,
@@ -832,6 +843,31 @@ def execute_job(job):
         "last_reported_rendered_frames": None,
         "last_reported_total_frames": None,
     }
+
+    def start_heartbeat_loop():
+        if not active_machine_id:
+            return None
+
+        failed_log_at = {"value": 0.0}
+
+        def heartbeat_loop():
+            while not heartbeat_stop.wait(HEARTBEAT_INTERVAL):
+                try:
+                    send_machine_heartbeat(active_machine_id)
+                except Exception as exc:
+                    now = time.monotonic()
+                    if now - failed_log_at["value"] >= 30.0:
+                        _log(f"[AGENT] Heartbeat failed during job {job_id}: {exc}", level="warn")
+                        failed_log_at["value"] = now
+
+        try:
+            send_machine_heartbeat(active_machine_id)
+        except Exception as exc:
+            _log(f"[AGENT] Initial heartbeat failed for job {job_id}: {exc}", level="warn")
+
+        thread = threading.Thread(target=heartbeat_loop, daemon=True)
+        thread.start()
+        return thread
 
     def emit_progress_update():
         total_frames = progress_state["total_frames"]
@@ -913,6 +949,8 @@ def execute_job(job):
         push_progress_to_backend(force=True)
 
     try:
+        heartbeat_thread = start_heartbeat_loop()
+
         # 1. Download blend file
         blend_file = os.path.join(input_dir, input_filename)
         _log(f"[JOB] Downloading: {input_filename}")
@@ -943,8 +981,15 @@ def execute_job(job):
             "-e", f"BLEND_FILE=/input/{blend_rel}",
             "-v", f"{input_mount}:/input:ro",
             "-v", f"{output_mount}:/output",
-            DOCKER_IMAGE,
         ]
+
+        # Add frame range for distributed rendering
+        if job.get("frame_start") is not None and job.get("frame_end") is not None:
+            cmd.extend(["-e", f"FRAME_START={job['frame_start']}"])
+            cmd.extend(["-e", f"FRAME_END={job['frame_end']}"])
+            _log(f"[JOB] Distributed render: frames {job['frame_start']}-{job['frame_end']}")
+
+        cmd.append(DOCKER_IMAGE)
 
         _log(f"[JOB] Starting Docker render container...")
         _log(f"[JOB] Command: {' '.join(cmd)}")
@@ -1036,6 +1081,10 @@ def execute_job(job):
         update_job_status(job_id, "failed", error=final_error)
 
     finally:
+        heartbeat_stop.set()
+        if heartbeat_thread and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=1)
+
         persist_job_outputs(job_id, output_dir, final_status, final_error)
         clear_active_job(job_id)
         if pause_event.is_set() or shutdown_event.is_set():

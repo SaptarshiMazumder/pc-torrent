@@ -24,8 +24,15 @@ run_render() {
         -P /progress_handler.py
         -o /output/frame####
         -E CYCLES
-        -a
     )
+
+    # Add frame range if specified (distributed rendering)
+    if [ -n "${FRAME_START:-}" ] && [ -n "${FRAME_END:-}" ]; then
+        echo "Frame range: ${FRAME_START} - ${FRAME_END}"
+        cmd+=(-s "$FRAME_START" -e "$FRAME_END")
+    fi
+
+    cmd+=(-a)
 
     if [ -n "$device" ]; then
         cmd+=(-- --cycles-device "$device")

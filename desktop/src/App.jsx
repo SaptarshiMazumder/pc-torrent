@@ -32,11 +32,11 @@ export default function App() {
   );
 
   const handleJobSubmitted = useCallback(
-    (jobId, machineGpu, filename) => {
-      jobsHook.addJob(jobId, machineGpu, filename);
+    (groupId, filename, tasks, totalFrames) => {
+      jobsHook.addRenderGroup(groupId, filename, tasks, totalFrames);
       setPage("myjobs");
     },
-    [jobsHook.addJob]
+    [jobsHook.addRenderGroup]
   );
 
   return (

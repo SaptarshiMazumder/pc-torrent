@@ -56,6 +56,11 @@ def download_file(key: str) -> bytes:
     return response["Body"].read()
 
 
+def download_file_to_path(key: str, path: str):
+    """Download a file from R2 directly to a local file path (memory-efficient)."""
+    _get_client().download_file(Bucket=R2_BUCKET_NAME, Key=key, Filename=path)
+
+
 def download_fileobj(key: str) -> io.BytesIO:
     """Download a file from R2 and return as BytesIO."""
     data = download_file(key)

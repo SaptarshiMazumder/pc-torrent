@@ -14,8 +14,8 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
     preflightRunning ||
     connectRunning ||
     removingImage;
-  const preflightComplete = runtimeInfo?.preflight_complete === true;
-  const disabled = isConnected ? connectRunning : isLoading || !preflightComplete;
+  const blockedByReboot = status === "needs_reboot";
+  const disabled = isConnected ? connectRunning : isLoading || blockedByReboot;
 
   const handleClick = async () => {
     try {

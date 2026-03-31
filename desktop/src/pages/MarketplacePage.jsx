@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { getMachines, submitDistributedJob, confirmDistributedJob } from "../lib/api";
+import { getMachines, submitDistributedJob } from "../lib/api";
+import { analyzeProjectFile, pickProjectFile } from "../lib/sidecar";
 import MachineCard from "../components/MachineCard";
 
 export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
@@ -10,14 +11,14 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const [selectedMachines, setSelectedMachines] = useState([]);
 
   // Submit state
-  const [file, setFile] = useState(null);
+  const [projectFile, setProjectFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [submitError, setSubmitError] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
 
   // Manual frame range (shown when auto-parse fails)
-  const [pendingGroupId, setPendingGroupId] = useState(null);
+  const [parseError, setParseError] = useState(null);
   const [frameStart, setFrameStart] = useState("1");
   const [frameEnd, setFrameEnd] = useState("250");
   const [frameStep, setFrameStep] = useState("1");
@@ -45,11 +46,12 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
 
   const handleContinue = () => {
     if (selectedMachines.length === 0) return;
-    setFile(null);
+    setProjectFile(null);
     setUploading(false);
     setProgress(0);
     setSubmitError(null);
     setAnalyzing(false);
+    setParseError(null);
     setView("submit");
   };
 
@@ -57,31 +59,77 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setView("list");
   };
 
+  const handlePickFile = async () => {
+    setSubmitError(null);
+    try {
+      const picked = await pickProjectFile();
+      if (!picked) return;
+      setProjectFile(picked);
+      setParseError(null);
+    } catch (err) {
+      setSubmitError(err.message || "Failed to open file picker");
+    }
+  };
+
+  const submitWithFrameRange = async (frameRange) => {
+    const machineIds = selectedMachines.map((m) => m.id);
+    setUploading(true);
+    setAnalyzing(false);
+    setSubmitError(null);
+    setProgress(0);
+    try {
+      const result = await submitDistributedJob(
+        backendUrl,
+        machineIds,
+        projectFile,
+        frameRange,
+        (pct) => setProgress(pct)
+      );
+      onJobSubmitted(result.group_id, projectFile.name, result.tasks, result.total_frames);
+    } catch (err) {
+      setSubmitError(err.message);
+      setUploading(false);
+      setAnalyzing(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!file) return setSubmitError("Select a .blend or .zip file first");
+    if (!projectFile) return setSubmitError("Select a .blend or .zip file first");
     setUploading(true);
     setSubmitError(null);
     setProgress(0);
     try {
-      const machineIds = selectedMachines.map((m) => m.id);
-      setAnalyzing(false);
-      const result = await submitDistributedJob(
-        backendUrl,
-        machineIds,
-        file,
-        (pct) => {
-          setProgress(pct);
-          if (pct >= 100) setAnalyzing(true);
-        }
-      );
-      if (result.needs_frame_input) {
-        setPendingGroupId(result.group_id);
+      setAnalyzing(true);
+      const analysis = await analyzeProjectFile(projectFile.path);
+      if (!analysis?.ok) {
+        setParseError(
+          analysis?.error ||
+          "Could not auto-detect frames from your project. Enter frame range manually."
+        );
+        setView("frame-input");
+        setUploading(false);
+        setAnalyzing(false);
+        return;
+      }
+
+      if (
+        typeof analysis.frame_start !== "number" ||
+        typeof analysis.frame_end !== "number"
+      ) {
+        setParseError("Local analysis did not return a valid frame range.");
         setView("frame-input");
         setUploading(false);
         setAnalyzing(false);
       } else {
-        onJobSubmitted(result.group_id, file.name, result.tasks, result.total_frames);
+        setFrameStart(String(analysis.frame_start));
+        setFrameEnd(String(analysis.frame_end));
+        setFrameStep(String(analysis.frame_step || 1));
+        await submitWithFrameRange({
+          frame_start: analysis.frame_start,
+          frame_end: analysis.frame_end,
+          frame_step: analysis.frame_step || 1,
+        });
       }
     } catch (err) {
       setSubmitError(err.message);
@@ -96,20 +144,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     const fe = parseInt(frameEnd, 10);
     const fst = parseInt(frameStep, 10) || 1;
     if (isNaN(fs) || isNaN(fe) || fe < fs) return setSubmitError("Invalid frame range");
-    setUploading(true);
-    setSubmitError(null);
-    try {
-      const machineIds = selectedMachines.map((m) => m.id);
-      const result = await confirmDistributedJob(backendUrl, pendingGroupId, machineIds, {
-        frame_start: fs,
-        frame_end: fe,
-        frame_step: fst,
-      });
-      onJobSubmitted(result.group_id, file.name, result.tasks, result.total_frames);
-    } catch (err) {
-      setSubmitError(err.message);
-      setUploading(false);
-    }
+    await submitWithFrameRange({ frame_start: fs, frame_end: fe, frame_step: fst });
   };
 
   // Power score for preview
@@ -124,8 +159,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         <button className="btn-back" onClick={() => setView("list")}>&larr; Back to Marketplace</button>
         <h2>Enter Frame Range</h2>
         <p className="muted" style={{ marginBottom: 16 }}>
-          Could not auto-detect frames from your .blend file (Blender 5.0+ format). Check your Blender Output Properties for the frame range.
+          Could not auto-detect frames from your project file. Check your Blender Output Properties for the frame range.
         </p>
+        {parseError && (
+          <p className="muted" style={{ marginBottom: 16, fontSize: 12, color: "#f59e0b", wordBreak: "break-word" }}>
+            Reason: {parseError}
+          </p>
+        )}
         <form onSubmit={handleFrameConfirm} className="submit-section">
           <div className="setting-row">
             <label>Start Frame</label>
@@ -259,15 +299,9 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         <div className="setting-row">
           <label>Project File (.blend or .zip)</label>
           <div className="file-input-wrap">
-            <label className="btn btn-secondary file-input-btn">
-              {file ? file.name : "Choose file..."}
-              <input
-                type="file"
-                accept=".blend,.zip"
-                onChange={(e) => setFile(e.target.files[0])}
-                hidden
-              />
-            </label>
+            <button type="button" className="btn btn-secondary" onClick={handlePickFile}>
+              {projectFile ? "Change file..." : "Choose file..."}
+            </button>
           </div>
           <p className="setting-hint">
             Use a single .blend only if textures are packed. Otherwise upload a
@@ -275,9 +309,9 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
           </p>
         </div>
 
-        {file && (
+        {projectFile && (
           <p className="file-meta">
-            {file.name} &mdash; {(file.size / 1024 / 1024).toFixed(1)} MB
+            {projectFile.name} &mdash; {(projectFile.size / 1024 / 1024).toFixed(1)} MB
           </p>
         )}
 
@@ -292,8 +326,8 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
               />
             </div>
             <div className="runtime-progress-meta">
-              <span>{analyzing ? "Analyzing frames..." : "Uploading..."}</span>
-              <span>{analyzing ? "Almost ready" : `${progress}%`}</span>
+              <span>{analyzing ? "Analyzing locally..." : "Uploading..."}</span>
+              <span>{analyzing ? "Reading project metadata" : `${progress}%`}</span>
             </div>
           </div>
         )}
@@ -305,7 +339,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         >
           {uploading
             ? analyzing
-              ? "Analyzing..."
+              ? "Analyzing locally..."
               : `Uploading... ${progress}%`
             : `Start Distributed Render (${selectedMachines.length} machines)`}
         </button>

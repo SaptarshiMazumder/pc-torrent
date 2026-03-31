@@ -1,7 +1,11 @@
 import io
 import json
+import logging
+import os
+import tempfile
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -12,7 +16,9 @@ from pydantic import BaseModel
 
 from db import execute, init_db, query_all, query_one
 import storage
-from blend_parser import parse_upload, BlendParseError
+from blend_parser import parse_upload_from_path, BlendParseError
+
+logger = logging.getLogger(__name__)
 
 MACHINE_STALE_SECONDS = 15
 
@@ -745,15 +751,24 @@ def confirm_render_group_upload(
         frame_end = payload.frame_end
         frame_step = payload.frame_step or 1
     else:
-        # Try to auto-parse .blend
+        # Try to auto-parse .blend — download to temp file to avoid OOM on large ZIPs
+        input_filename = group["input_filename"]
+        suffix = Path(input_filename).suffix or ".bin"
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+        os.close(tmp_fd)
         try:
-            file_data = storage.download_file(r2_key)
-            frame_info = parse_upload(file_data, group["input_filename"])
+            storage.download_file_to_path(r2_key, tmp_path)
+            frame_info = parse_upload_from_path(tmp_path, input_filename)
             frame_start = frame_info["frame_start"]
             frame_end = frame_info["frame_end"]
             frame_step = frame_info["frame_step"]
+            logger.info(
+                "Auto-parsed frames for group %s: start=%s end=%s step=%s (blender v%s)",
+                group_id, frame_start, frame_end, frame_step,
+                frame_info.get("blender_version", "?"),
+            )
         except BlendParseError as e:
-            # Can't parse — ask client for manual frame range
+            logger.warning("Blend parse failed for group %s (%s): %s", group_id, input_filename, e)
             execute(
                 "UPDATE render_groups SET status = 'pending' WHERE id = %s",
                 (group_id,),
@@ -763,8 +778,22 @@ def confirm_render_group_upload(
                 "needs_frame_input": True,
                 "parse_error": str(e),
             }
-        except Exception:
-            raise HTTPException(status_code=500, detail="Failed to analyze uploaded file")
+        except Exception as e:
+            logger.exception("Unexpected error analyzing upload for group %s", group_id)
+            execute(
+                "UPDATE render_groups SET status = 'pending' WHERE id = %s",
+                (group_id,),
+            )
+            return {
+                "group_id": group_id,
+                "needs_frame_input": True,
+                "parse_error": f"Server error analyzing file: {type(e).__name__}: {e}",
+            }
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     frame_step = max(1, frame_step)
     total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0

@@ -9,6 +9,7 @@ const INITIAL_RUNTIME_INFO = {
   requirements_checked: false,
   requirements_ready: null,
   requirement_issues: [],
+  wsl_ready: null,
   docker_installed: null,
   docker_running: null,
   gpu_verified: null,
@@ -130,6 +131,10 @@ export function useAgent() {
                   ? data.requirements_ready
                   : null,
               requirement_issues: data.requirement_issues || [],
+              wsl_ready:
+                typeof data.wsl_ready === "boolean"
+                  ? data.wsl_ready
+                  : null,
               docker_installed:
                 typeof data.docker_installed === "boolean"
                   ? data.docker_installed

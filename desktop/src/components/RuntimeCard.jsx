@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { removeImage, runPreflight } from "../lib/sidecar";
+import { removeImage, runDockerSetup, runPreflight, runWslSetup } from "../lib/sidecar";
 
 function formatStatus(flag, whenTrue, whenFalse, whenUnknown = "Not checked") {
   if (flag === true) return whenTrue;
@@ -25,6 +25,7 @@ export default function RuntimeCard({ runtimeInfo, status }) {
     status === "registering";
   const connected = ["connected", "rendering", "paused"].includes(status);
   const refreshDisabled = preflightRunning || connectRunning || removing || connected || status === "removing_image";
+  const setupDisabled = preflightRunning || connectRunning || removing || connected || status === "removing_image";
 
   const handleRefresh = async () => {
     try {
@@ -44,6 +45,24 @@ export default function RuntimeCard({ runtimeInfo, status }) {
       alert(`Failed to delete render image: ${err}`);
     } finally {
       setRemoving(false);
+    }
+  };
+
+  const handleInstallWsl = async () => {
+    try {
+      await runWslSetup();
+    } catch (err) {
+      console.error("Failed to run WSL setup:", err);
+      alert(`Failed to run WSL setup: ${err}`);
+    }
+  };
+
+  const handleInstallDocker = async () => {
+    try {
+      await runDockerSetup();
+    } catch (err) {
+      console.error("Failed to run Docker setup:", err);
+      alert(`Failed to run Docker setup: ${err}`);
     }
   };
 
@@ -72,6 +91,16 @@ export default function RuntimeCard({ runtimeInfo, status }) {
           </p>
         </div>
         <div className="runtime-actions">
+          {runtimeInfo?.wsl_ready === false && (
+            <button className="btn btn-secondary" onClick={handleInstallWsl} disabled={setupDisabled}>
+              Install WSL
+            </button>
+          )}
+          {runtimeInfo?.docker_installed === false && (
+            <button className="btn btn-secondary" onClick={handleInstallDocker} disabled={setupDisabled}>
+              Install Docker
+            </button>
+          )}
           <button className="btn btn-secondary" onClick={handleRefresh} disabled={refreshDisabled}>
             {preflightRunning ? "Checking..." : "Refresh"}
           </button>
@@ -82,6 +111,16 @@ export default function RuntimeCard({ runtimeInfo, status }) {
       </div>
 
       <div className="runtime-grid">
+        <div className="runtime-item">
+          <span className="runtime-label">WSL2</span>
+          <span className="runtime-value">
+            {runtimeInfo?.wsl_ready === true
+              ? "Ready"
+              : runtimeInfo?.wsl_ready === false
+                ? "Missing/Not ready"
+                : "Checking..."}
+          </span>
+        </div>
         <div className="runtime-item">
           <span className="runtime-label">Requirements</span>
           <span className="runtime-value">

@@ -195,6 +195,7 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
   // Manual frame range (shown when auto-parse fails)
   const [needsFrameInput, setNeedsFrameInput] = useState(false);
   const [pendingGroupId, setPendingGroupId] = useState(null);
+  const [parseError, setParseError] = useState(null);
   const [frameStart, setFrameStart] = useState("1");
   const [frameEnd, setFrameEnd] = useState("250");
   const [frameStep, setFrameStep] = useState("1");
@@ -221,6 +222,7 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
       if (result.needs_frame_input) {
         // Auto-parse failed — ask user for frame range
         setPendingGroupId(result.group_id);
+        setParseError(result.parse_error || null);
         setNeedsFrameInput(true);
         setLoading(false);
         setAnalyzing(false);
@@ -296,8 +298,13 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
         <h2>Enter Frame Range</h2>
         <MachineSummary />
         <p className="status" style={{ marginBottom: 16 }}>
-          Could not auto-detect frame range from your .blend file (Blender 5.0+ format). Enter it manually from your Blender scene settings.
+          Could not auto-detect frame range from your .blend file. Enter it manually from your Blender scene settings.
         </p>
+        {parseError && (
+          <p className="status" style={{ marginBottom: 16, fontSize: 12, color: "#f59e0b", wordBreak: "break-word" }}>
+            Reason: {parseError}
+          </p>
+        )}
         <form onSubmit={handleFrameConfirm} className="submit-form">
           <label>
             Start Frame

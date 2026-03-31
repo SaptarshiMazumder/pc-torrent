@@ -203,6 +203,7 @@ async fn handle_sidecar_event(
                         .and_then(|v| v.as_array())
                         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                         .unwrap_or_default(),
+                    wsl_ready: event.get("wsl_ready").and_then(|v| v.as_bool()),
                     docker_installed: event.get("docker_installed").and_then(|v| v.as_bool()),
                     docker_running: event.get("docker_running").and_then(|v| v.as_bool()),
                     gpu_verified: event.get("gpu_verified").and_then(|v| v.as_bool()),

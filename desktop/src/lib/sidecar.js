@@ -36,8 +36,28 @@ export async function runPreflight() {
   return invoke("run_preflight");
 }
 
+export async function runWslSetup() {
+  return invoke("run_wsl_setup");
+}
+
+export async function runDockerSetup() {
+  return invoke("run_docker_setup");
+}
+
 export async function removeImage() {
   return invoke("remove_image");
+}
+
+export async function pickProjectFile() {
+  return invoke("pick_project_file");
+}
+
+export async function analyzeProjectFile(filePath) {
+  return invoke("analyze_project_file", { filePath });
+}
+
+export async function uploadProjectFile(filePath, uploadUrl) {
+  return invoke("upload_project_file", { filePath, uploadUrl });
 }
 
 export async function downloadJobOutputToDownloads(url) {

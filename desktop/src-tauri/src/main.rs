@@ -36,7 +36,12 @@ fn main() {
             commands::get_system_info,
             commands::get_runtime_status,
             commands::run_preflight,
+            commands::run_wsl_setup,
+            commands::run_docker_setup,
             commands::remove_image,
+            commands::pick_project_file,
+            commands::analyze_project_file,
+            commands::upload_project_file,
             commands::download_job_output_to_downloads,
         ])
         .setup(move |app| {

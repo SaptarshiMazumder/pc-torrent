@@ -4,6 +4,8 @@ This is the main entry point when running as a Tauri sidecar.
 Communicates with the Tauri app via stdin/stdout JSON messages.
 """
 
+import argparse
+import json
 import os
 import signal
 import sys
@@ -28,6 +30,7 @@ DEFAULT_RUNTIME_STATE = {
     "requirements_checked": False,
     "requirements_ready": None,
     "requirement_issues": [],
+    "wsl_ready": None,
     "docker_installed": None,
     "docker_running": None,
     "gpu_verified": None,
@@ -107,6 +110,23 @@ def _set_connect_running(value):
         _connect_running = value
 
 
+def _runtime_needs_setup(runtime):
+    return not (
+        runtime.get("preflight_passed") is True
+        and runtime.get("requirements_ready") is True
+        and runtime.get("wsl_ready") is True
+        and runtime.get("docker_installed") is True
+        and runtime.get("docker_running") is True
+    )
+
+
+def _format_setup_message(message):
+    text = (message or "").strip()
+    if text.startswith("[SETUP]"):
+        text = text[len("[SETUP]"):].strip()
+    return text or "Setting up Docker..."
+
+
 def emit_local_runtime_state():
     """Emit a one-shot snapshot of local requirements, specs, and image state."""
     import agent
@@ -143,6 +163,30 @@ def handle_command(cmd):
         _set_preflight_running(True)
         threading.Thread(target=run_preflight_flow, daemon=True).start()
 
+    elif action == "run_wsl_setup":
+        preflight_running, connect_running = _get_flags()
+        if connect_running:
+            emit_error("Disconnect before installing WSL.")
+            return
+        if preflight_running:
+            emit_log("Setup is already running.", source="setup")
+            return
+
+        _set_preflight_running(True)
+        threading.Thread(target=run_wsl_setup_flow, daemon=True).start()
+
+    elif action == "run_docker_setup":
+        preflight_running, connect_running = _get_flags()
+        if connect_running:
+            emit_error("Disconnect before installing Docker.")
+            return
+        if preflight_running:
+            emit_log("Setup is already running.", source="setup")
+            return
+
+        _set_preflight_running(True)
+        threading.Thread(target=run_docker_setup_flow, daemon=True).start()
+
     elif action == "connect":
         backend_url = cmd.get("backend_url", "")
         if backend_url:
@@ -157,12 +201,14 @@ def handle_command(cmd):
             emit_error("Preflight is still running.")
             emit_status("disconnected", "Waiting for preflight to finish")
             return
-        if not runtime.get("preflight_complete"):
-            emit_error("Preflight has not completed yet.")
-            emit_status("disconnected", "Waiting for preflight to finish")
-            return
         if connect_running:
             emit_log("Connect is already in progress.", source="agent", level="warn")
+            return
+
+        if _runtime_needs_setup(runtime):
+            emit_log("Running setup before connect...", source="setup")
+            _set_preflight_running(True)
+            threading.Thread(target=run_preflight_then_connect_flow, daemon=True).start()
             return
 
         _set_connect_running(True)
@@ -262,6 +308,7 @@ def run_preflight_flow():
         set_preflight_state(complete=False, passed=None, message="Running preflight...")
 
         emit_status("checking_requirements", "Checking system requirements...")
+        set_preflight_state(message="Checking system requirements...")
         req = check_requirements()
         emit_system_info({
             "gpu_name": req.get("gpu_name", ""),
@@ -291,10 +338,15 @@ def run_preflight_flow():
             emit_status("error", "System requirements not met")
             return
 
-        emit_status("setting_up_docker", "Setting up Docker...")
+        emit_status("setting_up_docker", "Preparing runtime setup...")
+        set_preflight_state(message="Preparing runtime setup...")
 
         def on_docker_status(msg):
+            display = _format_setup_message(msg)
             emit_log(msg, source="setup")
+            emit_status("setting_up_docker", display)
+            set_preflight_state(message=display)
+            patch_runtime_state(image_status=display)
 
         docker_result = full_bootstrap(on_status=on_docker_status)
         runtime_snapshot = agent.get_runtime_status()
@@ -360,6 +412,143 @@ def run_preflight_flow():
         _set_preflight_running(False)
 
 
+def run_wsl_setup_flow():
+    """Install/repair WSL2 only."""
+    import agent
+    from docker_setup import ensure_wsl2_ready
+
+    ensure_config_dir()
+    agent.BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
+
+    try:
+        set_runtime_state(agent.get_runtime_status())
+        set_preflight_state(complete=False, passed=None, message="Installing WSL2...")
+        emit_status("setting_up_docker", "Installing WSL2...")
+        patch_runtime_state(image_status="Installing WSL2...")
+
+        def on_setup_status(msg):
+            display = _format_setup_message(msg)
+            emit_log(msg, source="setup")
+            emit_status("setting_up_docker", display)
+            set_preflight_state(message=display)
+            patch_runtime_state(image_status=display)
+
+        result = ensure_wsl2_ready(on_status=on_setup_status)
+        runtime_snapshot = agent.get_runtime_status()
+        set_runtime_state(runtime_snapshot)
+
+        if result.get("needs_reboot"):
+            message = result.get("message") or "Reboot required to complete WSL setup."
+            set_preflight_state(complete=True, passed=False, message=message)
+            emit_status("needs_reboot", message)
+            return
+
+        if not result.get("ready"):
+            message = result.get("message") or "WSL setup failed."
+            emit_error(message)
+            set_preflight_state(complete=True, passed=False, message=message)
+            emit_status("error", "WSL setup failed")
+            return
+
+        ready_message = result.get("message") or "WSL2 is ready."
+        ready_for_connect = (
+            runtime_snapshot.get("requirements_ready") is True
+            and runtime_snapshot.get("wsl_ready") is True
+            and runtime_snapshot.get("docker_installed") is True
+            and runtime_snapshot.get("docker_running") is True
+        )
+        set_preflight_state(complete=True, passed=ready_for_connect, message=ready_message)
+        emit_status("disconnected", ready_message)
+    except Exception as exc:
+        failure_message = f"WSL setup failed: {exc}"
+        emit_error(failure_message)
+        set_preflight_state(complete=True, passed=False, message=failure_message)
+        emit_status("error", "WSL setup failed")
+    finally:
+        _set_preflight_running(False)
+
+
+def run_docker_setup_flow():
+    """Install/repair Docker runtime (includes WSL checks)."""
+    import agent
+    from docker_setup import full_bootstrap
+
+    ensure_config_dir()
+    agent.BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
+
+    try:
+        set_runtime_state(agent.get_runtime_status())
+        set_preflight_state(complete=False, passed=None, message="Preparing runtime setup...")
+        emit_status("setting_up_docker", "Preparing runtime setup...")
+        patch_runtime_state(image_status="Preparing runtime setup...")
+
+        def on_setup_status(msg):
+            display = _format_setup_message(msg)
+            emit_log(msg, source="setup")
+            emit_status("setting_up_docker", display)
+            set_preflight_state(message=display)
+            patch_runtime_state(image_status=display)
+
+        result = full_bootstrap(on_status=on_setup_status)
+        runtime_snapshot = agent.get_runtime_status()
+
+        if result.get("ready"):
+            runtime_snapshot.update({
+                "docker_installed": True,
+                "docker_running": True,
+                "gpu_verified": result.get("gpu_verified", False),
+            })
+
+        set_runtime_state(runtime_snapshot)
+
+        if result.get("needs_reboot"):
+            message = result.get("message") or "Reboot required to complete setup."
+            set_preflight_state(complete=True, passed=False, message=message)
+            emit_status("needs_reboot", message)
+            return
+
+        if not result.get("ready"):
+            message = result.get("message") or "Docker setup failed."
+            emit_error(message)
+            set_preflight_state(complete=True, passed=False, message=message)
+            emit_status("error", "Docker setup failed")
+            return
+
+        ready_for_connect = (
+            runtime_snapshot.get("requirements_ready") is True
+            and runtime_snapshot.get("wsl_ready") is True
+            and runtime_snapshot.get("docker_installed") is True
+            and runtime_snapshot.get("docker_running") is True
+        )
+        ready_message = "Docker runtime is ready."
+        set_preflight_state(complete=True, passed=ready_for_connect, message=ready_message)
+        emit_status("disconnected", ready_message)
+    except Exception as exc:
+        failure_message = f"Docker setup failed: {exc}"
+        emit_error(failure_message)
+        set_preflight_state(complete=True, passed=False, message=failure_message)
+        emit_status("error", "Docker setup failed")
+    finally:
+        _set_preflight_running(False)
+
+
+def run_preflight_then_connect_flow():
+    """Run setup and auto-connect only when setup passes."""
+    try:
+        run_preflight_flow()
+
+        runtime = get_runtime_state()
+        if runtime.get("preflight_passed") is not True:
+            emit_log("Setup did not pass. Connect aborted.", source="setup", level="warn")
+            return
+
+        _set_connect_running(True)
+        run_connect_flow()
+    except Exception as exc:
+        emit_error(f"Connect setup failed: {exc}")
+        emit_status("error", "Connect setup failed")
+
+
 def run_connect_flow():
     """Connect to the backend after preflight has already completed."""
     import agent
@@ -421,6 +610,11 @@ def run_connect_flow():
 
         emit_status("downloading_image", "Checking render image...")
         if not agent.ensure_docker_image(on_stage=on_image_stage, on_progress=on_image_progress):
+            if runtime_state.get("image_stage") == "error":
+                emit_error(runtime_state.get("image_status") or "Render runtime setup failed.")
+                emit_status("error", "Render runtime setup failed")
+                return
+
             emit_log(
                 "No render image available. Will retry when jobs arrive.",
                 source="setup",
@@ -554,6 +748,30 @@ def run_connect_flow():
 
 
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--analyze-file", dest="analyze_file")
+    args, _ = parser.parse_known_args()
+
+    if args.analyze_file:
+        try:
+            from project_analyzer import analyze_project_file
+
+            result = analyze_project_file(args.analyze_file)
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "frame_start": None,
+                "frame_end": None,
+                "frame_step": None,
+                "total_frames": None,
+                "method": "manual_required",
+                "error": f"Analyzer crashed: {type(exc).__name__}: {exc}",
+            }
+
+        sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+        sys.stdout.flush()
+        return 0 if result.get("ok") else 2
+
     init_sidecar_mode()
     import agent as _agent
 
@@ -579,7 +797,8 @@ def main():
     signal.signal(signal.SIGTERM, sig_handler)
 
     listen_commands(handle_command)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

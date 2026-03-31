@@ -1,3 +1,6 @@
+import { listen } from "@tauri-apps/api/event";
+import { uploadProjectFile as uploadProjectFileFromPath } from "./sidecar";
+
 export async function getMachines(baseUrl) {
   const r = await fetch(`${baseUrl}/machines`);
   if (!r.ok) throw new Error("Failed to fetch machines");
@@ -61,42 +64,56 @@ export function downloadUrl(baseUrl, jobId) {
 
 // ---- Distributed Rendering (Render Groups) ----
 
-export async function submitDistributedJob(baseUrl, machineIds, file, onProgress) {
-  // Step 1: Create render group
+export async function createRenderGroup(baseUrl, machineIds, filename) {
   const createRes = await fetch(`${baseUrl}/render-groups/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ machine_ids: machineIds, filename: file.name }),
+    body: JSON.stringify({ machine_ids: machineIds, filename }),
   });
   if (!createRes.ok) {
     const err = await createRes.json();
     throw new Error(err.detail || "Failed to create render group");
   }
-  const { group_id, upload_url } = await createRes.json();
+  return createRes.json();
+}
 
-  // Step 2: Upload file to R2
-  await new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", upload_url);
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
-    if (onProgress) {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          onProgress(Math.round((e.loaded / e.total) * 100));
-        }
-      };
+export async function uploadProjectFile(uploadUrl, projectFile, onProgress) {
+  if (!projectFile?.path) {
+    throw new Error("No local project file selected");
+  }
+
+  const unlisten = await listen("project-upload-progress", (event) => {
+    if (!onProgress) return;
+    const payload = event?.payload || {};
+    const pct = Number(payload.progressPct);
+    if (Number.isFinite(pct)) {
+      onProgress(Math.max(0, Math.min(100, Math.round(pct))));
     }
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed with status ${xhr.status}`));
-    };
-    xhr.onerror = () => reject(new Error("Upload failed"));
-    xhr.send(file);
   });
 
-  // Step 3: Confirm upload + parse .blend + distribute frames
-  if (onProgress) onProgress(100);
-  return confirmDistributedJob(baseUrl, group_id, machineIds);
+  try {
+    await uploadProjectFileFromPath(projectFile.path, uploadUrl);
+    if (onProgress) onProgress(100);
+  } finally {
+    if (typeof unlisten === "function") {
+      unlisten();
+    }
+  }
+}
+
+export async function submitDistributedJob(baseUrl, machineIds, projectFile, frameRange, onProgress) {
+  if (!frameRange) {
+    throw new Error("Frame range is required before upload");
+  }
+
+  // Step 1: Create render group
+  const { group_id, upload_url } = await createRenderGroup(baseUrl, machineIds, projectFile.name);
+
+  // Step 2: Upload file to R2
+  await uploadProjectFile(upload_url, projectFile, onProgress);
+
+  // Step 3: Confirm upload with explicit frame range
+  return confirmDistributedJob(baseUrl, group_id, machineIds, frameRange);
 }
 
 export async function confirmDistributedJob(baseUrl, groupId, machineIds, frameRange = null) {

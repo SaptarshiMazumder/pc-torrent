@@ -33,7 +33,10 @@ from docker_setup import (
     full_bootstrap,
     check_docker_installed,
     check_docker_running,
+    check_wsl2_installed,
     get_cached_gpu_verification,
+    resolve_docker_cli,
+    run_docker_cli,
 )
 
 
@@ -545,20 +548,16 @@ def _stop_active_job_runtime(snapshot):
 
     if container_name:
         try:
-            subprocess.run(
-                ["docker", "stop", "-t", "10", container_name],
-                capture_output=True,
-                text=True,
+            run_docker_cli(
+                ["stop", "-t", "10", container_name],
                 timeout=20,
             )
         except Exception:
             pass
 
         try:
-            subprocess.run(
-                ["docker", "kill", container_name],
-                capture_output=True,
-                text=True,
+            run_docker_cli(
+                ["kill", container_name],
                 timeout=10,
             )
         except Exception:
@@ -692,9 +691,9 @@ def operator_command_loop():
 def check_image_loaded():
     """Check if pcrent-render image is loaded in Docker."""
     try:
-        result = subprocess.run(
-            ["docker", "images", "pcrent-render", "--format", "{{.ID}}"],
-            capture_output=True, text=True, timeout=10,
+        result = run_docker_cli(
+            ["images", "pcrent-render", "--format", "{{.ID}}"],
+            timeout=10,
         )
         return result.returncode == 0 and result.stdout.strip() != ""
     except Exception:
@@ -715,10 +714,15 @@ def get_server_image_version():
 def get_runtime_status():
     """Collect local runtime status for the desktop app."""
     requirements = check_requirements()
+    wsl_ready = check_wsl2_installed()
     docker_installed = check_docker_installed()
     docker_running = check_docker_running() if docker_installed else False
     cached_gpu = get_cached_gpu_verification() if docker_running else None
-    if not docker_installed:
+    if not wsl_ready:
+        image_present = False
+        image_stage = "missing"
+        image_status = "Install WSL2 to continue runtime setup."
+    elif not docker_installed:
         image_present = False
         image_stage = "missing"
         image_status = "Docker is not installed."
@@ -735,6 +739,7 @@ def get_runtime_status():
         "requirements_checked": True,
         "requirements_ready": requirements["ready"],
         "requirement_issues": requirements["issues"],
+        "wsl_ready": wsl_ready,
         "docker_installed": docker_installed,
         "docker_running": docker_running,
         "gpu_verified": cached_gpu["gpu_verified"] if cached_gpu else None,
@@ -771,10 +776,8 @@ def remove_docker_image():
 
     if image_present:
         try:
-            result = subprocess.run(
-                ["docker", "image", "rm", "-f", DOCKER_IMAGE],
-                capture_output=True,
-                text=True,
+            result = run_docker_cli(
+                ["image", "rm", "-f", DOCKER_IMAGE],
                 timeout=60,
             )
             if result.returncode != 0:
@@ -815,6 +818,18 @@ def ensure_docker_image(on_stage=None, on_progress=None):
     def stage(stage_name, message, **extra):
         if on_stage:
             on_stage(stage_name, message, **extra)
+
+    if not check_docker_installed():
+        message = "Docker is not installed. Run setup before connecting."
+        stage("error", message)
+        _log(f"[IMAGE] {message}")
+        return False
+
+    if not check_docker_running():
+        message = "Docker is not running. Start Docker Desktop and retry."
+        stage("error", message)
+        _log(f"[IMAGE] {message}")
+        return False
 
     stage("checking", "Checking render image...")
     server_version = get_server_image_version()
@@ -867,9 +882,9 @@ def ensure_docker_image(on_stage=None, on_progress=None):
 
         stage("installing", "Installing render image into Docker...")
         _log("[IMAGE] Loading image into Docker...")
-        result = subprocess.run(
-            ["docker", "load", "-i", tmp_path],
-            capture_output=True, text=True, timeout=300,
+        result = run_docker_cli(
+            ["load", "-i", tmp_path],
+            timeout=300,
         )
         if result.returncode != 0:
             stage("error", "Failed to install render image into Docker.")
@@ -1054,8 +1069,9 @@ def execute_job(job):
         if stop_reason:
             raise JobStopped(stop_reason)
 
+        docker_cli = resolve_docker_cli() or "docker"
         cmd = [
-            "docker", "run", "--rm",
+            docker_cli, "run", "--rm",
             "--gpus", "all",
             "--network", "none",
             "--name", container_name,
@@ -1148,7 +1164,7 @@ def execute_job(job):
     except subprocess.TimeoutExpired:
         _log(f"[JOB] Render timed out after {RENDER_TIMEOUT}s, killing container...")
         try:
-            subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=10)
+            run_docker_cli(["kill", container_name], timeout=10)
         except Exception:
             pass
         final_error = "Render timed out"

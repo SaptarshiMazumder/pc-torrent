@@ -1,0 +1,10 @@
+Requirement already satisfied: paramiko in c:\users\googler\appdata\local\programs\python\python311\lib\site-packages (4.0.0)
+Requirement already satisfied: bcrypt>=3.2 in c:\users\googler\appdata\local\programs\python\python311\lib\site-packages (from paramiko) (5.0.0)
+Requirement already satisfied: cryptography>=3.3 in c:\users\googler\appdata\local\programs\python\python311\lib\site-packages (from paramiko) (45.0.4)
+Requirement already satisfied: invoke>=2.0 in c:\users\googler\appdata\local\programs\python\python311\lib\site-packages (from paramiko) (2.2.1)
+Requirement already satisfied: pynacl>=1.5 in c:\users\googler\appdata\local\programs\python\python311\lib\site-packages (from paramiko) (1.6.2)
+Requirement already satisfied: cffi>=1.14 in c:\users\googler\appdata\local\programs\python\python311\lib\site-packages (from cryptography>=3.3->paramiko) (2.0.0)
+Requirement already satisfied: pycparser in c:\users\googler\appdata\local\programs\python\python311\lib\site-packages (from cffi>=1.14->cryptography>=3.3->paramiko) (2.22)
+
+[notice] A new release of pip available: 22.3.1 -> 26.0.1
+[notice] To update, run: python.exe -m pip install --upgrade pip

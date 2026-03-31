@@ -131,5 +131,8 @@ def init_db():
 
                 ALTER TABLE jobs
                 ADD COLUMN IF NOT EXISTS frame_step INTEGER DEFAULT 1;
+
+                ALTER TABLE machines
+                ADD COLUMN IF NOT EXISTS machine_type TEXT NOT NULL DEFAULT 'windows';
                 """
             )

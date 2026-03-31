@@ -35,6 +35,7 @@ class RegisterMachinePayload(BaseModel):
     ram_gb: float
     os_version: str | None = None
     nvidia_driver: str | None = None
+    machine_type: str = "windows"  # "windows" or "linux_ssh"
 
 
 class UpdateJobStatusPayload(BaseModel):
@@ -152,14 +153,14 @@ def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
             """
             UPDATE machines
             SET machine_key = %s, gpu_model = %s, gpu_vram_gb = %s, cpu_cores = %s, ram_gb = %s,
-                os_version = %s, nvidia_driver = %s,
+                os_version = %s, nvidia_driver = %s, machine_type = %s,
                 status = 'idle', registered_at = %s, last_seen_at = %s
             WHERE id = %s
             """,
             (
                 machine_key, payload.gpu_model, payload.gpu_vram_gb,
                 payload.cpu_cores, payload.ram_gb,
-                payload.os_version, payload.nvidia_driver,
+                payload.os_version, payload.nvidia_driver, payload.machine_type,
                 current_time, current_time, machine_id,
             ),
         )
@@ -169,14 +170,14 @@ def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
             """
             INSERT INTO machines (
                 id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb,
-                os_version, nvidia_driver, status, registered_at, last_seen_at
+                os_version, nvidia_driver, machine_type, status, registered_at, last_seen_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'idle', %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'idle', %s, %s)
             """,
             (
                 machine_id, machine_key, payload.gpu_model, payload.gpu_vram_gb,
                 payload.cpu_cores, payload.ram_gb,
-                payload.os_version, payload.nvidia_driver,
+                payload.os_version, payload.nvidia_driver, payload.machine_type,
                 current_time, current_time,
             ),
         )

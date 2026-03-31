@@ -98,6 +98,22 @@ PROGRESS_EVENT_PREFIX = "PCR_PROGRESS "
 BACKEND_PROGRESS_MIN_INTERVAL = 1.0
 HEARTBEAT_INTERVAL = 5.0
 
+
+def _read_positive_int_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+# Keep each multipart upload below typical platform request limits (e.g. Cloud Run).
+OUTPUT_UPLOAD_MAX_REQUEST_MB = _read_positive_int_env("OUTPUT_UPLOAD_MAX_REQUEST_MB", 24)
+OUTPUT_UPLOAD_MAX_FILES_PER_REQUEST = _read_positive_int_env("OUTPUT_UPLOAD_MAX_FILES_PER_REQUEST", 50)
+
 machine_id = None
 running = True
 pause_event = threading.Event()
@@ -248,12 +264,77 @@ def upload_output_files(job_id, output_dir):
     if not files_found:
         return []
 
-    file_tuples = [("files", (f, open(os.path.join(output_dir, f), "rb"))) for f in files_found]
-    resp = requests.post(f"{BACKEND_URL}/jobs/{job_id}/output", files=file_tuples)
-    resp.raise_for_status()
+    files_with_sizes = []
+    for filename in files_found:
+        file_path = os.path.join(output_dir, filename)
+        files_with_sizes.append((filename, file_path, os.path.getsize(file_path)))
 
-    for _, (_, fobj) in file_tuples:
-        fobj.close()
+    max_request_bytes = OUTPUT_UPLOAD_MAX_REQUEST_MB * 1024 * 1024
+    batches = []
+    current_batch = []
+    current_batch_bytes = 0
+
+    for item in files_with_sizes:
+        _, _, file_size = item
+        exceeds_size_limit = current_batch and (current_batch_bytes + file_size > max_request_bytes)
+        exceeds_file_count = current_batch and (len(current_batch) >= OUTPUT_UPLOAD_MAX_FILES_PER_REQUEST)
+        if exceeds_size_limit or exceeds_file_count:
+            batches.append((current_batch, current_batch_bytes))
+            current_batch = []
+            current_batch_bytes = 0
+
+        current_batch.append(item)
+        current_batch_bytes += file_size
+
+    if current_batch:
+        batches.append((current_batch, current_batch_bytes))
+
+    if len(batches) > 1:
+        _log(
+            f"[JOB] Uploading {len(files_found)} output files in {len(batches)} batches "
+            f"(limit {OUTPUT_UPLOAD_MAX_REQUEST_MB} MB/request)..."
+        )
+
+    for idx, (batch, batch_bytes) in enumerate(batches, start=1):
+        if len(batches) > 1:
+            _log(
+                f"[JOB] Upload batch {idx}/{len(batches)}: {len(batch)} files "
+                f"({batch_bytes / (1024 * 1024):.1f} MB)"
+            )
+
+        file_handles = []
+        file_tuples = []
+        try:
+            for filename, file_path, _ in batch:
+                fobj = open(file_path, "rb")
+                file_handles.append(fobj)
+                file_tuples.append(("files", (filename, fobj)))
+
+            timeout = max(120, min(900, 60 + int(batch_bytes / (1024 * 1024)) * 10))
+            resp = requests.post(
+                f"{BACKEND_URL}/jobs/{job_id}/output",
+                files=file_tuples,
+                timeout=timeout,
+            )
+            try:
+                resp.raise_for_status()
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 413:
+                    if len(batch) == 1:
+                        filename = batch[0][0]
+                        raise RuntimeError(
+                            f"Output upload rejected (413): '{filename}' "
+                            f"is {batch_bytes / (1024 * 1024):.1f} MB, above server request limits. "
+                            "Render to a smaller file or use a compression/output format with smaller frames."
+                        ) from exc
+                    raise RuntimeError(
+                        "Output upload rejected (413): request payload exceeded server request limits. "
+                        "Set OUTPUT_UPLOAD_MAX_REQUEST_MB lower to force smaller upload batches."
+                    ) from exc
+                raise
+        finally:
+            for fobj in file_handles:
+                fobj.close()
 
     return files_found
 

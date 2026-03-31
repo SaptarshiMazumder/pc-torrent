@@ -61,7 +61,8 @@
       "Bash(./deploy.sh)",
       "WebSearch",
       "WebFetch(domain:www.blender.org)",
-      "WebFetch(domain:download.blender.org)"
+      "WebFetch(domain:download.blender.org)",
+      "Bash(ls -la /c/Users/googler/OneDrive/Desktop/Projects/pc-rent/server/*.py)"
     ]
   }
 }

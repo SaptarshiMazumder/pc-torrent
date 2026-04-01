@@ -62,7 +62,10 @@
       "WebSearch",
       "WebFetch(domain:www.blender.org)",
       "WebFetch(domain:download.blender.org)",
-      "Bash(ls -la /c/Users/googler/OneDrive/Desktop/Projects/pc-rent/server/*.py)"
+      "Bash(ls -la /c/Users/googler/OneDrive/Desktop/Projects/pc-rent/server/*.py)",
+      "Bash(find /c/Users/googler/OneDrive/Desktop/Projects/pc-rent -type f \\\\\\(-name *preflight* -o -name DashboardPage* -o -name SettingsPage* -o -name commands.rs -o -name runtime_info* \\\\\\))",
+      "Bash(grep -r \"preflight\\\\|run_preflight\\\\|RuntimeInfo\\\\|runtime_info\\\\|runtime_status\" /c/Users/googler/OneDrive/Desktop/Projects/pc-rent --include=*.py --include=*.rs --include=*.jsx --include=*.ts --include=*.tsx)",
+      "Bash(xargs cat:*)"
     ]
   }
 }

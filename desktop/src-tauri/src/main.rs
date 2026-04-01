@@ -33,6 +33,7 @@ fn main() {
             commands::resume_agent,
             commands::stop_job,
             commands::get_agent_state,
+            commands::clear_logs,
             commands::get_system_info,
             commands::get_runtime_status,
             commands::run_preflight,

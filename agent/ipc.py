@@ -76,6 +76,16 @@ def emit_error(message):
     emit("error", message=message)
 
 
+def emit_uac_prompt(message="Windows will ask for permission to install software. Please click Yes to continue."):
+    """Emit a UAC prompt warning so the frontend can show a banner before the dialog appears."""
+    emit("uac_prompt", message=message)
+
+
+def emit_preflight_steps(steps):
+    """Emit the full ordered list of preflight steps with their statuses."""
+    emit("preflight_steps", steps=steps)
+
+
 def emit_job_complete(job_id, status, files=None, error=None):
     """Emit job completion event."""
     emit("job_complete", job_id=job_id, status=status,

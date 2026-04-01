@@ -57,11 +57,17 @@ export default function App() {
             machineId={agent.machineId}
             systemInfo={agent.systemInfo}
             runtimeInfo={agent.runtimeInfo}
+            preflightSteps={agent.preflightSteps}
             currentJob={agent.currentJob}
             backendUrl={backendUrl}
           />
         )}
-        {page === "logs" && <LogsPage logs={agent.logs} />}
+        {page === "logs" && (
+          <LogsPage
+            logs={agent.logs}
+            onClearLogs={agent.clearLogs}
+          />
+        )}
 
         {/* Rentee pages */}
         {page === "marketplace" && (

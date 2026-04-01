@@ -17,6 +17,8 @@ from ipc import (
     emit_system_info,
     emit_runtime_info,
     emit_error,
+    emit_uac_prompt,
+    emit_preflight_steps,
     listen_commands,
 )
 from config import ensure_config_dir, load_config, save_config
@@ -140,8 +142,10 @@ def handle_command(cmd):
             emit_log("Preflight is already running.", source="setup")
             return
 
+        # force=True when user manually clicks Refresh — bypasses GPU result cache
+        force = cmd.get("force", False)
         _set_preflight_running(True)
-        threading.Thread(target=run_preflight_flow, daemon=True).start()
+        threading.Thread(target=run_preflight_flow, args=(force,), daemon=True).start()
 
     elif action == "connect":
         backend_url = cmd.get("backend_url", "")
@@ -248,11 +252,33 @@ def handle_command(cmd):
             emit_status("disconnected")
 
 
-def run_preflight_flow():
-    """Run launch-time preflight before the user can connect."""
+def _sync_runtime_from_steps(steps_snapshot):
+    """Translate step statuses into existing runtime_info fields for backward compat."""
+    resolved = ("passed", "failed", "warning")
+    patch = {}
+    for step in steps_snapshot:
+        sid = step["id"]
+        passed = step["status"] == "passed"
+        if sid == "docker_install":
+            patch["docker_installed"] = passed if step["status"] in resolved else None
+        elif sid == "docker_running":
+            patch["docker_running"] = passed if step["status"] in resolved else None
+        elif sid == "gpu_verify":
+            patch["gpu_verified"] = passed if step["status"] in resolved else None
+    patch_runtime_state(**patch)
+
+
+def run_preflight_flow(force_gpu_recheck=False):
+    """Run launch-time preflight before the user can connect.
+
+    Uses the modular PreflightRunner to execute ordered steps, emitting
+    both the new ``preflight_steps`` event and the legacy ``runtime_info``
+    fields so the existing UI stays in sync during the transition.
+    """
     import agent
     from system_check import check_requirements
-    from docker_setup import full_bootstrap
+    from docker_setup import clear_gpu_check_cache
+    from preflight_steps import build_preflight_steps, PreflightRunner
 
     ensure_config_dir()
     agent.BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
@@ -261,6 +287,7 @@ def run_preflight_flow():
         set_runtime_state(agent.get_runtime_status())
         set_preflight_state(complete=False, passed=None, message="Running preflight...")
 
+        # ---- System requirements pre-check (populates GpuInfoCard) ----
         emit_status("checking_requirements", "Checking system requirements...")
         req = check_requirements()
         emit_system_info({
@@ -291,62 +318,66 @@ def run_preflight_flow():
             emit_status("error", "System requirements not met")
             return
 
+        # ---- Modular step pipeline ----
         emit_status("setting_up_docker", "Setting up Docker...")
 
-        def on_docker_status(msg):
-            emit_log(msg, source="setup")
+        if force_gpu_recheck:
+            clear_gpu_check_cache()
 
-        docker_result = full_bootstrap(on_status=on_docker_status)
+        steps = build_preflight_steps()
+
+        def on_steps_update(steps_snapshot):
+            emit_preflight_steps(steps_snapshot)
+            _sync_runtime_from_steps(steps_snapshot)
+            # Forward step log lines
+            for step in steps_snapshot:
+                if step["status"] == "running" and step["detail"]:
+                    emit_log(step["detail"], source="setup")
+
+        runner = PreflightRunner(steps, on_update=on_steps_update)
+        all_passed = runner.run(force_recheck=force_gpu_recheck)
+
+        # Sync final runtime state
         runtime_snapshot = agent.get_runtime_status()
-
-        if docker_result.get("ready"):
-            runtime_snapshot.update({
-                "docker_installed": True,
-                "docker_running": True,
-                "gpu_verified": docker_result.get("gpu_verified", False),
-            })
-
+        for step in steps:
+            if step.id == "docker_install" and step.status == "passed":
+                runtime_snapshot["docker_installed"] = True
+            if step.id == "docker_running" and step.status == "passed":
+                runtime_snapshot["docker_running"] = True
+            if step.id == "gpu_verify":
+                runtime_snapshot["gpu_verified"] = step.status == "passed"
         set_runtime_state(runtime_snapshot)
 
-        if docker_result.get("needs_reboot"):
-            set_preflight_state(
-                complete=True,
-                passed=False,
-                message=docker_result["message"],
-            )
-            emit_status("needs_reboot", docker_result["message"])
-            return
+        if all_passed:
+            # Log GPU result
+            gpu_step = next((s for s in steps if s.id == "gpu_verify"), None)
+            if gpu_step and gpu_step.status == "passed":
+                emit_log(f"{gpu_step.detail}", source="setup")
+            elif gpu_step and gpu_step.status == "warning":
+                emit_log(
+                    f"WARNING: {gpu_step.detail}",
+                    source="setup", level="warn",
+                )
 
-        if not docker_result.get("ready"):
-            emit_error(docker_result["message"])
-            set_preflight_state(
-                complete=True,
-                passed=False,
-                message=docker_result["message"],
-            )
-            emit_status("error", "Docker setup failed")
-            return
-
-        gpu_docker = docker_result.get("gpu_docker_name", "")
-        if gpu_docker:
-            emit_log(
-                f"GPU in Docker: {gpu_docker} - ready for rendering.",
-                source="setup",
-            )
+            set_preflight_state(complete=True, passed=True, message="Ready to connect.")
+            emit_status("disconnected", "Ready to connect.")
         else:
-            emit_log(
-                "WARNING: GPU not accessible in Docker. Renders will use CPU only.",
-                source="setup",
-                level="warn",
+            failed = [s for s in steps if s.status == "failed"]
+            msg = failed[0].detail if failed else "Preflight failed."
+            # Only flag reboot for Docker daemon failures, not GPU warnings
+            needs_reboot = any(
+                s.id == "docker_running" and "restart" in s.detail.lower()
+                for s in failed
             )
 
-        ready_message = "Ready to connect."
-        set_preflight_state(
-            complete=True,
-            passed=True,
-            message=ready_message,
-        )
-        emit_status("disconnected", ready_message)
+            set_preflight_state(complete=True, passed=False, message=msg)
+            if needs_reboot:
+                emit_status("needs_reboot", msg)
+            else:
+                for s in failed:
+                    emit_error(s.detail)
+                emit_status("error", "Docker setup failed")
+
     except Exception as exc:
         failure_message = f"Preflight failed: {exc}"
         emit_error(failure_message)

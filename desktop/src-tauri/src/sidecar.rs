@@ -7,7 +7,7 @@ use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 
 use crate::persistence::save_agent_state;
-use crate::state::{AgentState, JobInfo, LogEntry, RuntimeInfo, SystemInfo};
+use crate::state::{AgentState, JobInfo, LogEntry, PreflightStepInfo, RuntimeInfo, SystemInfo};
 
 pub struct SidecarHandle {
     child: Option<CommandChild>,
@@ -212,7 +212,25 @@ async fn handle_sidecar_event(
                     image_total_bytes: event.get("image_total_bytes").and_then(|v| v.as_u64()),
                     image_progress_pct: event.get("image_progress_pct").and_then(|v| v.as_f64()),
                     image_status: event.get("image_status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    // UAC state resets when runtime_info arrives (install complete or moved past that stage)
+                    awaiting_uac: false,
+                    uac_message: String::new(),
                 };
+            }
+            "uac_prompt" => {
+                let message = event.get("message").and_then(|v| v.as_str()).unwrap_or(
+                    "Windows will ask for permission to install software — please click Yes."
+                ).to_string();
+                s.runtime_info.awaiting_uac = true;
+                s.runtime_info.uac_message = message;
+            }
+            "preflight_steps" => {
+                if let Some(steps) = event.get("steps").and_then(|v| v.as_array()) {
+                    s.preflight_steps = steps
+                        .iter()
+                        .filter_map(|step| serde_json::from_value::<PreflightStepInfo>(step.clone()).ok())
+                        .collect();
+                }
             }
             "log" => {
                 s.push_log(LogEntry {

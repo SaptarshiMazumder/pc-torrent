@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { removeImage, runPreflight } from "../lib/sidecar";
+import PreflightChecklist from "./PreflightChecklist";
 
 function formatStatus(flag, whenTrue, whenFalse, whenUnknown = "Not checked") {
   if (flag === true) return whenTrue;
@@ -14,7 +15,7 @@ function formatBytes(bytes) {
   return `${mb.toFixed(0)} MB`;
 }
 
-export default function RuntimeCard({ runtimeInfo, status }) {
+export default function RuntimeCard({ runtimeInfo, preflightSteps, status }) {
   const [removing, setRemoving] = useState(false);
   const preflightRunning =
     status === "checking_requirements" ||
@@ -28,7 +29,7 @@ export default function RuntimeCard({ runtimeInfo, status }) {
 
   const handleRefresh = async () => {
     try {
-      await runPreflight();
+      await runPreflight(true);
     } catch (err) {
       console.error("Failed to run preflight:", err);
       alert(`Failed to run preflight: ${err}`);
@@ -81,64 +82,83 @@ export default function RuntimeCard({ runtimeInfo, status }) {
         </div>
       </div>
 
-      <div className="runtime-grid">
-        <div className="runtime-item">
-          <span className="runtime-label">Requirements</span>
-          <span className="runtime-value">
-            {runtimeInfo?.requirements_checked
-              ? formatStatus(runtimeInfo?.requirements_ready, "Ready", "Issues found")
-              : "Checking..."}
-          </span>
-        </div>
-        <div className="runtime-item">
-          <span className="runtime-label">Docker</span>
-          <span className="runtime-value">
-            {!runtimeInfo?.requirements_checked
-              ? "Checking..."
-              : runtimeInfo?.docker_installed === false
-                ? "Not installed"
-                : runtimeInfo?.docker_running === true
-                  ? "Running"
-                  : runtimeInfo?.docker_running === false
-                    ? "Installed, not running"
-                    : "Checking..."}
-          </span>
-        </div>
-        <div className="runtime-item">
-          <span className="runtime-label">GPU in Docker</span>
-          <span className="runtime-value">
-            {!runtimeInfo?.requirements_checked
-              ? "Checking..."
-              : runtimeInfo?.docker_installed === false
-                ? "Docker required"
-                : runtimeInfo?.docker_running === false
-                  ? "Start Docker"
-                  : isGpuCheckRunning
-                    ? "Checking..."
-                    : runtimeInfo?.gpu_verified === true
-                      ? "Ready"
-                      : runtimeInfo?.gpu_verified === false
-                        ? "CPU only"
-                        : "Not checked"}
-          </span>
-        </div>
-        <div className="runtime-item">
-          <span className="runtime-label">Render Image</span>
-          <span className="runtime-value">
-            {imageStage === "downloading"
-              ? "Downloading"
-              : imageStage === "installing"
-                ? "Installing"
-                : imageStage === "removing"
-                  ? "Removing"
-                  : runtimeInfo?.image_present === true
-                    ? "Installed"
-                    : runtimeInfo?.image_present === false
-                      ? "Missing"
-                      : "Checking..."}
-          </span>
-        </div>
-      </div>
+      {preflightSteps && preflightSteps.length > 0 ? (
+        <PreflightChecklist steps={preflightSteps} />
+      ) : (
+        <>
+          {runtimeInfo?.awaiting_uac && (
+            <div className="uac-warning">
+              <strong>Action needed:</strong>{" "}
+              {runtimeInfo.uac_message || "Windows will ask for permission to install software — please click Yes to continue."}
+            </div>
+          )}
+
+          {status === "needs_reboot" && (
+            <div className="reboot-notice">
+              Your PC needs a restart to finish setup. After restarting, open the app again and setup will continue automatically.
+            </div>
+          )}
+
+          <div className="runtime-grid">
+            <div className="runtime-item">
+              <span className="runtime-label">Requirements</span>
+              <span className="runtime-value">
+                {runtimeInfo?.requirements_checked
+                  ? formatStatus(runtimeInfo?.requirements_ready, "Ready", "Issues found")
+                  : "Checking..."}
+              </span>
+            </div>
+            <div className="runtime-item">
+              <span className="runtime-label">Docker</span>
+              <span className="runtime-value">
+                {!runtimeInfo?.requirements_checked
+                  ? "Checking..."
+                  : runtimeInfo?.docker_installed === false
+                    ? "Not installed"
+                    : runtimeInfo?.docker_running === true
+                      ? "Running"
+                      : runtimeInfo?.docker_running === false
+                        ? "Installed, not running"
+                        : "Checking..."}
+              </span>
+            </div>
+            <div className="runtime-item">
+              <span className="runtime-label">GPU in Docker</span>
+              <span className="runtime-value">
+                {!runtimeInfo?.requirements_checked
+                  ? "Checking..."
+                  : runtimeInfo?.docker_installed === false
+                    ? "Docker required"
+                    : runtimeInfo?.docker_running === false
+                      ? "Start Docker"
+                      : isGpuCheckRunning
+                        ? "Checking..."
+                        : runtimeInfo?.gpu_verified === true
+                          ? "Ready"
+                          : runtimeInfo?.gpu_verified === false
+                            ? "CPU only"
+                            : "Not checked"}
+              </span>
+            </div>
+            <div className="runtime-item">
+              <span className="runtime-label">Render Image</span>
+              <span className="runtime-value">
+                {imageStage === "downloading"
+                  ? "Downloading"
+                  : imageStage === "installing"
+                    ? "Installing"
+                    : imageStage === "removing"
+                      ? "Removing"
+                      : runtimeInfo?.image_present === true
+                        ? "Installed"
+                        : runtimeInfo?.image_present === false
+                          ? "Missing"
+                          : "Checking..."}
+              </span>
+            </div>
+          </div>
+        </>
+      )}
 
       {runtimeInfo?.image_status && (
         <p className="runtime-message">{runtimeInfo.image_status}</p>

@@ -19,6 +19,7 @@ const RENTER_PAGES = [
 const RENTEE_PAGES = [
   { id: "marketplace", label: "Marketplace", icon: "\u25CE" },
   { id: "myjobs", label: "My Jobs", icon: "\u25A4" },
+  { id: "logs", label: "Logs", icon: "\u2630" },
 ];
 
 export default function Sidebar({ activePage, onNavigate, status, mode, onModeChange }) {

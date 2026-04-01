@@ -1,8 +1,9 @@
 """
 Lightweight .blend file parser to extract frame range metadata.
 
-Parses the binary .blend format (Blender 2.8 - 4.x) without requiring
-Blender installed.  Handles gzip-compressed files transparently.
+Parses the binary .blend format (legacy + newer 5.x headers) without
+requiring Blender installed. Handles gzip/zstd-compressed files
+transparently.
 
 Only extracts: frame_start, frame_end, frame_step from the first Scene
 block's embedded RenderData struct via SDNA introspection.
@@ -32,12 +33,20 @@ class BlendParseError(Exception):
 # ---------------------------------------------------------------------------
 
 def _read_header(data: bytes):
-    """Parse the 12-byte .blend header.
+    """Parse .blend header (legacy and newer format variants).
 
-    Returns (pointer_size, endian_char, version_int).
+    Legacy header (format v0):
+        BLENDER + ptr(1) + endian(1) + version(3)  => 12 bytes total.
+    Newer header (format v1):
+        BLENDER + header_size(2) + ptr(1='-') + format(2='01') + endian(1='v') + version(4)
+        => 17 bytes today.
+
+    Returns (pointer_size, endian_char, version_int, header_size, bhead_layout).
     pointer_size: 4 or 8
     endian_char:  '<' (little) or '>' (big)
-    version_int:  e.g. 300 for Blender 3.0
+    version_int:  e.g. 300 for Blender 3.0 or 500 for Blender 5.0
+    header_size:  block stream start offset (12 or 17)
+    bhead_layout: "legacy" (BHead4/SmallBHead8) or "large8" (LargeBHead8)
     """
     if len(data) < 12:
         raise BlendParseError(f"File too small to be a .blend file ({len(data)} bytes)")
@@ -48,54 +57,118 @@ def _read_header(data: bytes):
         raise BlendParseError(f"Not a .blend file (bad magic). Got: {hex_preview}")
 
     ptr_code = data[7:8]
-    if ptr_code == b"_":
-        pointer_size = 4
-    elif ptr_code == b"-":
-        pointer_size = 8
-    else:
-        hex_preview = " ".join(f"{b:02x}" for b in data[:12])
-        raise BlendParseError(f"Unknown pointer size code: {ptr_code!r} (full header: {hex_preview})")
 
-    endian_code = data[8:9]
-    if endian_code == b"v":
-        endian_char = "<"
-    elif endian_code == b"V":
-        endian_char = ">"
-    else:
-        raise BlendParseError(f"Unknown endianness code: {endian_code!r}")
+    # Format v0 header.
+    if ptr_code in (b"_", b"-"):
+        pointer_size = 4 if ptr_code == b"_" else 8
+        endian_code = data[8:9]
+        if endian_code == b"v":
+            endian_char = "<"
+        elif endian_code == b"V":
+            endian_char = ">"
+        else:
+            raise BlendParseError(f"Unknown endianness code: {endian_code!r}")
 
-    version_str = data[9:12].decode("ascii", errors="replace")
-    try:
-        version_int = int(version_str)
-    except ValueError:
-        version_int = 0
+        version_str = data[9:12].decode("ascii", errors="replace")
+        try:
+            version_int = int(version_str)
+        except ValueError:
+            version_int = 0
 
-    return pointer_size, endian_char, version_int
+        return pointer_size, endian_char, version_int, 12, "legacy"
+
+    # Format v1 header (Blender 5.x).
+    # BLENDER17-01v0500
+    if len(data) >= 17:
+        header_size_str = data[7:9].decode("ascii", errors="replace")
+        fmt_version_str = data[10:12].decode("ascii", errors="replace")
+        ptr_marker = data[9:10]
+        endian_code = data[12:13]
+
+        if header_size_str.isdigit() and fmt_version_str.isdigit() and ptr_marker == b"-":
+            header_size = int(header_size_str)
+            file_format_version = int(fmt_version_str)
+            if file_format_version == 1:
+                if header_size < 17 or len(data) < header_size:
+                    raise BlendParseError("Invalid Blender v1 header size")
+                if endian_code not in (b"v", b"V"):
+                    raise BlendParseError(f"Unknown endianness code: {endian_code!r}")
+
+                version_str = data[13:17].decode("ascii", errors="replace")
+                try:
+                    version_int = int(version_str)
+                except ValueError:
+                    version_int = 0
+
+                endian_char = "<" if endian_code == b"v" else ">"
+                return 8, endian_char, version_int, header_size, "large8"
+
+    hex_preview = " ".join(f"{b:02x}" for b in data[:17])
+    raise BlendParseError(f"Unsupported or unknown .blend header format: {hex_preview}")
 
 
-def _iter_blocks(data: bytes, pointer_size: int, endian: str):
-    """Yield (code, size, sdna_index, count, block_data) for each file block."""
-    # Block header layout:
+def _iter_blocks(data: bytes, pointer_size: int, endian: str, header_start: int, bhead_layout: str):
+    """Yield (code, size, sdna_index, count, old_ptr, block_data) for each file block."""
+    offset = header_start
+
+    if bhead_layout == "large8":
+        # LargeBHead8 on-disk layout (32 bytes):
+        #   code:       4 bytes
+        #   sdna_index: 4 bytes (uint32)
+        #   old_ptr:    8 bytes
+        #   size:       8 bytes (int64)
+        #   count:      8 bytes (int64)
+        block_header_size = 32
+        while offset + block_header_size <= len(data):
+            code = data[offset:offset + 4]
+            if code == b"ENDB":
+                break
+            sdna_index = struct.unpack_from(f"{endian}I", data, offset + 4)[0]
+            size = struct.unpack_from(f"{endian}q", data, offset + 16)[0]
+            count = struct.unpack_from(f"{endian}q", data, offset + 24)[0]
+            if size < 0:
+                break
+            old_ptr = struct.unpack_from(f"{endian}Q", data, offset + 8)[0]
+            block_start = offset + block_header_size
+            if block_start + size > len(data):
+                break
+            block_data = data[block_start:block_start + size]
+            yield code, int(size), int(sdna_index), int(count), int(old_ptr), block_data
+            next_offset = block_start + size
+            if next_offset <= offset:
+                break
+            offset = next_offset
+        return
+
+    # Legacy BHead4/SmallBHead8 layout.
     #   code:       4 bytes
     #   size:       4 bytes (uint32)
     #   old_ptr:    pointer_size bytes
     #   sdna_index: 4 bytes (uint32)
     #   count:      4 bytes (uint32)
     #   data:       <size> bytes
-    header_size = 4 + 4 + pointer_size + 4 + 4
-    offset = 12  # skip file header
+    block_header_size = 4 + 4 + pointer_size + 4 + 4
 
-    while offset + header_size <= len(data):
+    while offset + block_header_size <= len(data):
         code = data[offset:offset + 4]
         if code == b"ENDB":
             break
         size = struct.unpack_from(f"{endian}I", data, offset + 4)[0]
         sdna_index = struct.unpack_from(f"{endian}I", data, offset + 8 + pointer_size)[0]
         count = struct.unpack_from(f"{endian}I", data, offset + 12 + pointer_size)[0]
-        block_start = offset + header_size
+        if pointer_size == 8:
+            old_ptr = struct.unpack_from(f"{endian}Q", data, offset + 8)[0]
+        else:
+            old_ptr = struct.unpack_from(f"{endian}I", data, offset + 8)[0]
+        block_start = offset + block_header_size
+        if block_start + size > len(data):
+            break
         block_data = data[block_start:block_start + size]
-        yield code, size, sdna_index, count, block_data
-        offset = block_start + size
+        yield code, size, sdna_index, count, int(old_ptr), block_data
+        next_offset = block_start + size
+        if next_offset <= offset:
+            break
+        offset = next_offset
 
 
 # ---------------------------------------------------------------------------
@@ -282,11 +355,13 @@ def parse_blend_frame_range(file_data: bytes) -> dict:
         except Exception as e:
             raise BlendParseError(f"Failed to decompress zstd .blend: {e}")
 
-    pointer_size, endian, version = _read_header(file_data)
+    pointer_size, endian, version, header_start, bhead_layout = _read_header(file_data)
 
     # First pass: find DNA1 block
     dna_data = None
-    for code, size, sdna_idx, count, bdata in _iter_blocks(file_data, pointer_size, endian):
+    for code, size, sdna_idx, count, old_ptr, bdata in _iter_blocks(
+        file_data, pointer_size, endian, header_start, bhead_layout
+    ):
         if code == b"DNA1":
             dna_data = bdata
             break
@@ -348,15 +423,50 @@ def parse_blend_frame_range(file_data: bytes) -> dict:
         step_size = t_lens[step_type]
         step_fmt = f"{endian}{_int_fmt(step_size)}"
 
-    # Second pass: find first SC (Scene) block and read frame data
-    for code, size, sdna_idx, count, bdata in _iter_blocks(file_data, pointer_size, endian):
-        if code == b"SC\x00\x00" or code[:2] == b"SC":
-            # Verify this block uses the Scene struct
-            if sdna_idx != structs[scene_idx][0] and types[structs[sdna_idx][0]] != "Scene":
-                # Check if the sdna_idx resolves to Scene type
-                block_type_name = types[structs[sdna_idx][0]] if sdna_idx < len(structs) else ""
-                if block_type_name != "Scene":
+    # Try to resolve the active scene pointer from FileGlobal.curscene so we pick
+    # the same scene Blender UI is using, not just the first Scene block.
+    active_scene_old_ptr = None
+    fg_idx = struct_by_name.get("FileGlobal")
+    if fg_idx is not None:
+        curscene_field = _find_field_offset(
+            names, types, t_lens, structs, fg_idx, "curscene", pointer_size
+        )
+        if curscene_field is not None:
+            curscene_off, _ = curscene_field
+            for code, size, sdna_idx, count, old_ptr, bdata in _iter_blocks(
+                file_data, pointer_size, endian, header_start, bhead_layout
+            ):
+                if code != b"GLOB":
                     continue
+                if sdna_idx >= len(structs):
+                    continue
+                fg_type_name = types[structs[sdna_idx][0]]
+                if fg_type_name != "FileGlobal":
+                    continue
+                if curscene_off + pointer_size > len(bdata):
+                    continue
+                if pointer_size == 8:
+                    active_scene_old_ptr = struct.unpack_from(
+                        f"{endian}Q", bdata, curscene_off
+                    )[0]
+                else:
+                    active_scene_old_ptr = struct.unpack_from(
+                        f"{endian}I", bdata, curscene_off
+                    )[0]
+                break
+
+    # Second pass: find first SC (Scene) block and read frame data
+    fallback_result = None
+    for code, size, sdna_idx, count, old_ptr, bdata in _iter_blocks(
+        file_data, pointer_size, endian, header_start, bhead_layout
+    ):
+        if code == b"SC\x00\x00" or code[:2] == b"SC":
+            # Verify this block uses the Scene struct.
+            if sdna_idx >= len(structs):
+                continue
+            block_type_name = types[structs[sdna_idx][0]]
+            if block_type_name != "Scene":
+                continue
 
             # Read sfra and efra from RenderData within Scene data
             rd_start = r_offset
@@ -378,13 +488,24 @@ def parse_blend_frame_range(file_data: bytes) -> dict:
             if frame_end >= frame_start:
                 total_frames = ((frame_end - frame_start) // frame_step) + 1
 
-            return {
+            result = {
                 "frame_start": frame_start,
                 "frame_end": frame_end,
                 "frame_step": frame_step,
                 "total_frames": total_frames,
                 "blender_version": version,
             }
+            if (
+                active_scene_old_ptr is not None
+                and active_scene_old_ptr != 0
+                and old_ptr == active_scene_old_ptr
+            ):
+                return result
+            if fallback_result is None:
+                fallback_result = result
+
+    if fallback_result is not None:
+        return fallback_result
 
     raise BlendParseError("No Scene block found in .blend file")
 
@@ -399,15 +520,35 @@ def parse_blend_from_zip(zip_data: bytes) -> dict:
     """Extract the first .blend file from a zip and parse its frame range."""
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-            blend_names = [n for n in zf.namelist() if n.lower().endswith(".blend")]
+            blend_names = [
+                n
+                for n in zf.namelist()
+                if n.lower().endswith(".blend")
+                and not n.startswith("__MACOSX/")
+                and "/._" not in n
+                and not n.startswith("._")
+            ]
             if not blend_names:
                 raise BlendParseError("No .blend file found inside the zip archive")
-            # Read the first .blend file found
-            blend_path = blend_names[0]
-            blend_data = zf.read(blend_path)
-            if len(blend_data) < 12:
-                raise BlendParseError(f"Extracted .blend file is too small ({len(blend_data)} bytes)")
-            return parse_blend_frame_range(blend_data)
+            # Prefer top-level .blend files first.
+            blend_names.sort(key=lambda n: (n.count("/"), len(n), n.lower()))
+
+            last_error = ""
+            for blend_path in blend_names:
+                try:
+                    blend_data = zf.read(blend_path)
+                    if len(blend_data) < 12:
+                        raise BlendParseError(
+                            f"Extracted .blend file is too small ({len(blend_data)} bytes): {blend_path}"
+                        )
+                    return parse_blend_frame_range(blend_data)
+                except BlendParseError as e:
+                    last_error = str(e)
+                    continue
+
+            raise BlendParseError(
+                f"Could not parse any .blend file found in ZIP. Last error: {last_error or 'unknown'}"
+            )
     except zipfile.BadZipFile:
         raise BlendParseError("Invalid zip archive")
     except BlendParseError:

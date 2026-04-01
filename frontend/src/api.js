@@ -61,7 +61,7 @@ export function downloadUrl(jobId) {
 
 // ---- Distributed Rendering (Render Groups) ----
 
-export async function submitDistributedJob(machineIds, file, onProgress) {
+export async function submitDistributedJob(machineIds, file, onProgress, frameRange = null) {
   // Step 1: Create render group
   const createRes = await fetch(`${BASE}/render-groups/create`, {
     method: "POST",
@@ -94,9 +94,9 @@ export async function submitDistributedJob(machineIds, file, onProgress) {
     xhr.send(file);
   });
 
-  // Step 3: Confirm + parse .blend + distribute frames
+  // Step 3: Confirm upload + distribute frames (pass client-side frame range if available)
   if (onProgress) onProgress(100);
-  return confirmDistributedJob(group_id, machineIds);
+  return confirmDistributedJob(group_id, machineIds, frameRange);
 }
 
 export async function confirmDistributedJob(groupId, machineIds, frameRange = null) {

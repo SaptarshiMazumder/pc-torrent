@@ -6,6 +6,7 @@ import {
   getRenderGroup,
   renderGroupDownloadUrl,
 } from "./api";
+import { parseBlendFile } from "./lib/blend-parser";
 import "./App.css";
 
 const SEGMENT_COLORS = [
@@ -192,11 +193,12 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
   const [progress, setProgress] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState(null);
+  const [autoDetectError, setAutoDetectError] = useState("");
   // Manual frame range (shown when auto-parse fails)
   const [needsFrameInput, setNeedsFrameInput] = useState(false);
   const [pendingGroupId, setPendingGroupId] = useState(null);
-  const [frameStart, setFrameStart] = useState("1");
-  const [frameEnd, setFrameEnd] = useState("250");
+  const [frameStart, setFrameStart] = useState("");
+  const [frameEnd, setFrameEnd] = useState("");
   const [frameStep, setFrameStep] = useState("1");
 
   const powerScore = (m) =>
@@ -206,31 +208,61 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!file) return setError("Select a .blend file or .zip project bundle first");
-    setLoading(true);
     setError(null);
     setProgress(0);
+    setAutoDetectError("");
+
+    // Step 1: Client-side .blend analysis (before upload)
+    setAnalyzing(true);
+    setLoading(false);
+    let frameRange = null;
+    let clientParseError = "";
+    try {
+      const parsed = await parseBlendFile(file);
+      frameRange = {
+        frame_start: parsed.frame_start,
+        frame_end: parsed.frame_end,
+        frame_step: parsed.frame_step,
+      };
+    } catch (err) {
+      console.warn("Client-side blend parse failed:", err.message);
+      clientParseError = `Client parse failed: ${err.message || "Unknown parsing error"}`;
+      setAutoDetectError(clientParseError);
+    }
+    setAnalyzing(false);
+
+    // Step 2: Upload + confirm (pass client-side frame range if available)
+    setLoading(true);
     try {
       const result = await submitDistributedJob(
         machines.map((m) => m.id),
         file,
-        (pct) => {
-          setProgress(pct);
-          if (pct >= 100) setAnalyzing(true);
-        }
+        (pct) => setProgress(pct),
+        frameRange,
       );
       if (result.needs_frame_input) {
-        // Auto-parse failed — ask user for frame range
         setPendingGroupId(result.group_id);
+        const serverReason = result.parse_error
+          ? `Server parse failed: ${result.parse_error}`
+          : "";
+        const reasons = [clientParseError, serverReason].filter(Boolean).join("\n");
+        if (reasons) {
+          setAutoDetectError(reasons);
+        }
+        if (frameRange) {
+          setFrameStart(String(frameRange.frame_start));
+          setFrameEnd(String(frameRange.frame_end));
+          setFrameStep(String(frameRange.frame_step));
+        }
         setNeedsFrameInput(true);
         setLoading(false);
-        setAnalyzing(false);
       } else {
+        setAutoDetectError("");
         onSubmitted(result.group_id, result);
       }
     } catch (err) {
       setError(err.message);
       setLoading(false);
-      setAnalyzing(false);
     }
   };
 
@@ -296,8 +328,13 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
         <h2>Enter Frame Range</h2>
         <MachineSummary />
         <p className="status" style={{ marginBottom: 16 }}>
-          Could not auto-detect frame range from your .blend file (Blender 5.0+ format). Enter it manually from your Blender scene settings.
+          Could not auto-detect frames from your upload. Enter frame range manually.
         </p>
+        {autoDetectError && (
+          <p className="error" style={{ marginBottom: 16, whiteSpace: "pre-wrap" }}>
+            {autoDetectError}
+          </p>
+        )}
         <form onSubmit={handleFrameConfirm} className="submit-form">
           <label>
             Start Frame
@@ -339,18 +376,20 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
         </p>
         {file && <p className="file-name">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>}
         {error && <p className="error">{error}</p>}
-        {loading && (
+        {(loading || analyzing) && (
           <div className="progress-bar-wrap">
-            <div className="progress-bar" style={{ width: `${progress}%` }} />
+            <div className="progress-bar" style={{ width: analyzing ? "100%" : `${progress}%` }} />
             <span className="progress-text">
-              {analyzing ? "Analyzing frames..." : `Uploading... ${progress}%`}
+              {analyzing ? "Analyzing file..." : `Uploading... ${progress}%`}
             </span>
           </div>
         )}
-        <button className="btn-primary" type="submit" disabled={loading}>
-          {loading
-            ? analyzing ? "Analyzing..." : `Uploading... ${progress}%`
-            : `Start Distributed Render (${machines.length} machines)`}
+        <button className="btn-primary" type="submit" disabled={loading || analyzing}>
+          {analyzing
+            ? "Analyzing..."
+            : loading
+              ? `Uploading... ${progress}%`
+              : `Start Distributed Render (${machines.length} machines)`}
         </button>
       </form>
     </div>

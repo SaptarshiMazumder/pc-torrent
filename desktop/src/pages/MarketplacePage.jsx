@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { getMachines, submitDistributedJob, confirmDistributedJob } from "../lib/api";
+import { parseBlendFile } from "../lib/blend-parser";
 import MachineCard from "../components/MachineCard";
 
 export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
@@ -15,11 +16,12 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const [progress, setProgress] = useState(0);
   const [submitError, setSubmitError] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [autoDetectError, setAutoDetectError] = useState("");
 
   // Manual frame range (shown when auto-parse fails)
   const [pendingGroupId, setPendingGroupId] = useState(null);
-  const [frameStart, setFrameStart] = useState("1");
-  const [frameEnd, setFrameEnd] = useState("250");
+  const [frameStart, setFrameStart] = useState("");
+  const [frameEnd, setFrameEnd] = useState("");
   const [frameStep, setFrameStep] = useState("1");
 
   const loadMachines = () => {
@@ -50,6 +52,11 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setProgress(0);
     setSubmitError(null);
     setAnalyzing(false);
+    setPendingGroupId(null);
+    setAutoDetectError("");
+    setFrameStart("");
+    setFrameEnd("");
+    setFrameStep("1");
     setView("submit");
   };
 
@@ -60,33 +67,63 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!file) return setSubmitError("Select a .blend or .zip file first");
-    setUploading(true);
     setSubmitError(null);
     setProgress(0);
+    setAutoDetectError("");
+
+    // Step 1: Client-side .blend analysis (before upload)
+    setAnalyzing(true);
+    setUploading(false);
+    let frameRange = null;
+    let clientParseError = "";
+    try {
+      const parsed = await parseBlendFile(file);
+      frameRange = {
+        frame_start: parsed.frame_start,
+        frame_end: parsed.frame_end,
+        frame_step: parsed.frame_step,
+      };
+    } catch (err) {
+      console.warn("Client-side blend parse failed:", err.message);
+      clientParseError = `Client parse failed: ${err.message || "Unknown parsing error"}`;
+      setAutoDetectError(clientParseError);
+    }
+    setAnalyzing(false);
+
+    // Step 2: Upload + confirm (pass client-side frame range if available)
+    setUploading(true);
     try {
       const machineIds = selectedMachines.map((m) => m.id);
-      setAnalyzing(false);
       const result = await submitDistributedJob(
         backendUrl,
         machineIds,
         file,
-        (pct) => {
-          setProgress(pct);
-          if (pct >= 100) setAnalyzing(true);
-        }
+        (pct) => setProgress(pct),
+        frameRange,
       );
       if (result.needs_frame_input) {
         setPendingGroupId(result.group_id);
+        const serverReason = result.parse_error
+          ? `Server parse failed: ${result.parse_error}`
+          : "";
+        const reasons = [clientParseError, serverReason].filter(Boolean).join("\n");
+        if (reasons) {
+          setAutoDetectError(reasons);
+        }
+        if (frameRange) {
+          setFrameStart(String(frameRange.frame_start));
+          setFrameEnd(String(frameRange.frame_end));
+          setFrameStep(String(frameRange.frame_step));
+        }
         setView("frame-input");
         setUploading(false);
-        setAnalyzing(false);
       } else {
+        setAutoDetectError("");
         onJobSubmitted(result.group_id, file.name, result.tasks, result.total_frames);
       }
     } catch (err) {
       setSubmitError(err.message);
       setUploading(false);
-      setAnalyzing(false);
     }
   };
 
@@ -124,8 +161,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         <button className="btn-back" onClick={() => setView("list")}>&larr; Back to Marketplace</button>
         <h2>Enter Frame Range</h2>
         <p className="muted" style={{ marginBottom: 16 }}>
-          Could not auto-detect frames from your .blend file (Blender 5.0+ format). Check your Blender Output Properties for the frame range.
+          Could not auto-detect frames from your upload. Enter frame range manually.
         </p>
+        {autoDetectError && (
+          <p className="error-text" style={{ whiteSpace: "pre-wrap", marginBottom: 16 }}>
+            {autoDetectError}
+          </p>
+        )}
         <form onSubmit={handleFrameConfirm} className="submit-section">
           <div className="setting-row">
             <label>Start Frame</label>
@@ -283,17 +325,17 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
 
         {submitError && <p className="error-text">{submitError}</p>}
 
-        {uploading && (
+        {(uploading || analyzing) && (
           <div className="runtime-progress-wrap">
             <div className="runtime-progress-track">
               <div
                 className="runtime-progress-fill"
-                style={{ width: `${progress}%` }}
+                style={{ width: analyzing ? "100%" : `${progress}%` }}
               />
             </div>
             <div className="runtime-progress-meta">
-              <span>{analyzing ? "Analyzing frames..." : "Uploading..."}</span>
-              <span>{analyzing ? "Almost ready" : `${progress}%`}</span>
+              <span>{analyzing ? "Analyzing file..." : "Uploading..."}</span>
+              <span>{analyzing ? "Detecting frames" : `${progress}%`}</span>
             </div>
           </div>
         )}
@@ -301,13 +343,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         <button
           className="btn btn-primary submit-btn"
           type="submit"
-          disabled={uploading}
+          disabled={uploading || analyzing}
         >
-          {uploading
-            ? analyzing
-              ? "Analyzing..."
-              : `Uploading... ${progress}%`
-            : `Start Distributed Render (${selectedMachines.length} machines)`}
+          {analyzing
+            ? "Analyzing..."
+            : uploading
+              ? `Uploading... ${progress}%`
+              : `Start Distributed Render (${selectedMachines.length} machines)`}
         </button>
       </form>
     </div>

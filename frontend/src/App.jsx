@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import {
   getMachines,
-  submitDistributedJob,
+  createDistributedRenderGroup,
+  uploadDistributedRenderInput,
   confirmDistributedJob,
   getRenderGroup,
   renderGroupDownloadUrl,
@@ -189,13 +190,15 @@ function MachinesPage({ onContinue }) {
 // -----------------------------------------------
 function SubmitJobPage({ machines, onBack, onSubmitted }) {
   const [file, setFile] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [flowStage, setFlowStage] = useState("idle");
   const [analyzing, setAnalyzing] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
-  const [autoDetectError, setAutoDetectError] = useState("");
-  // Manual frame range (shown when auto-parse fails)
-  const [needsFrameInput, setNeedsFrameInput] = useState(false);
+  const [analysisResult, setAnalysisResult] = useState(null);
+  const [clientParseError, setClientParseError] = useState("");
+  const [serverParseError, setServerParseError] = useState("");
   const [pendingGroupId, setPendingGroupId] = useState(null);
   const [frameStart, setFrameStart] = useState("");
   const [frameEnd, setFrameEnd] = useState("");
@@ -205,87 +208,167 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
     (m.gpu_vram_gb || 0) * 4 + (m.cpu_cores || 0) + (m.ram_gb || 0) * 0.3;
   const totalPower = machines.reduce((s, m) => s + powerScore(m), 0);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!file) return setError("Select a .blend file or .zip project bundle first");
+  const parseManualFrameRange = () => {
+    const fs = parseInt(frameStart, 10);
+    const fe = parseInt(frameEnd, 10);
+    const fst = parseInt(frameStep, 10);
+    if (Number.isNaN(fs) || Number.isNaN(fe) || fs < 1 || fe < fs) {
+      return null;
+    }
+    return {
+      frame_start: fs,
+      frame_end: fe,
+      frame_step: Number.isNaN(fst) || fst < 1 ? 1 : fst,
+    };
+  };
+
+  const resetFlowForInputChange = () => {
+    setFlowStage("idle");
+    setAnalyzing(false);
+    setUploading(false);
+    setStarting(false);
+    setProgress(0);
+    setAnalysisResult(null);
+    setClientParseError("");
+    setServerParseError("");
+    setPendingGroupId(null);
+    setFrameStart("");
+    setFrameEnd("");
+    setFrameStep("1");
+    setError(null);
+  };
+
+  const handleAnalyze = async () => {
+    if (!file) {
+      setError("Select a .blend file or .zip project bundle first");
+      return;
+    }
+
     setError(null);
     setProgress(0);
-    setAutoDetectError("");
-
-    // Step 1: Client-side .blend analysis (before upload)
+    setServerParseError("");
+    setPendingGroupId(null);
     setAnalyzing(true);
-    setLoading(false);
-    let frameRange = null;
-    let clientParseError = "";
+
     try {
       const parsed = await parseBlendFile(file);
-      frameRange = {
-        frame_start: parsed.frame_start,
-        frame_end: parsed.frame_end,
-        frame_step: parsed.frame_step,
-      };
+      setAnalysisResult(parsed);
+      setClientParseError("");
+      setFrameStart(String(parsed.frame_start));
+      setFrameEnd(String(parsed.frame_end));
+      setFrameStep(String(parsed.frame_step || 1));
     } catch (err) {
-      console.warn("Client-side blend parse failed:", err.message);
-      clientParseError = `Client parse failed: ${err.message || "Unknown parsing error"}`;
-      setAutoDetectError(clientParseError);
-    }
-    setAnalyzing(false);
-
-    // Step 2: Upload + confirm (pass client-side frame range if available)
-    setLoading(true);
-    try {
-      const result = await submitDistributedJob(
-        machines.map((m) => m.id),
-        file,
-        (pct) => setProgress(pct),
-        frameRange,
-      );
-      if (result.needs_frame_input) {
-        setPendingGroupId(result.group_id);
-        const serverReason = result.parse_error
-          ? `Server parse failed: ${result.parse_error}`
-          : "";
-        const reasons = [clientParseError, serverReason].filter(Boolean).join("\n");
-        if (reasons) {
-          setAutoDetectError(reasons);
-        }
-        if (frameRange) {
-          setFrameStart(String(frameRange.frame_start));
-          setFrameEnd(String(frameRange.frame_end));
-          setFrameStep(String(frameRange.frame_step));
-        }
-        setNeedsFrameInput(true);
-        setLoading(false);
-      } else {
-        setAutoDetectError("");
-        onSubmitted(result.group_id, result);
-      }
-    } catch (err) {
-      setError(err.message);
-      setLoading(false);
+      setAnalysisResult(null);
+      setClientParseError(`Client parse failed: ${err.message || "Unknown parsing error"}`);
+      setFrameStart("");
+      setFrameEnd("");
+      setFrameStep("1");
+    } finally {
+      setAnalyzing(false);
+      setFlowStage("analyzed");
     }
   };
 
-  const handleFrameConfirm = async (e) => {
-    e.preventDefault();
-    const fs = parseInt(frameStart, 10);
-    const fe = parseInt(frameEnd, 10);
-    const fst = parseInt(frameStep, 10) || 1;
-    if (isNaN(fs) || isNaN(fe) || fe < fs) return setError("Invalid frame range");
-    setLoading(true);
+  const handleUpload = async () => {
+    if (flowStage !== "analyzed") return;
+    if (!file) {
+      setError("Select a .blend file or .zip project bundle first");
+      return;
+    }
+
     setError(null);
+    setServerParseError("");
+    setProgress(0);
+    setUploading(true);
+
+    try {
+      const created = await createDistributedRenderGroup(
+        machines.map((m) => m.id),
+        file.name
+      );
+      setPendingGroupId(created.group_id || null);
+
+      await uploadDistributedRenderInput(created.upload_url, file, (pct) => {
+        setProgress(pct);
+      });
+
+      setFlowStage("uploaded");
+    } catch (err) {
+      setError(err.message || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleStartRendering = async () => {
+    if (flowStage !== "uploaded") return;
+    if (!pendingGroupId) {
+      setError("Upload must complete before starting render");
+      return;
+    }
+
+    const manualRange = parseManualFrameRange();
+    const frameRange = analysisResult
+      ? {
+          frame_start: analysisResult.frame_start,
+          frame_end: analysisResult.frame_end,
+          frame_step: analysisResult.frame_step || 1,
+        }
+      : manualRange;
+
+    if (!frameRange) {
+      setError("Enter a valid manual frame range before starting render");
+      return;
+    }
+
+    setError(null);
+    setServerParseError("");
+    setStarting(true);
+    setFlowStage("starting");
+
     try {
       const result = await confirmDistributedJob(
         pendingGroupId,
         machines.map((m) => m.id),
-        { frame_start: fs, frame_end: fe, frame_step: fst }
+        frameRange
       );
+
+      if (result.needs_frame_input) {
+        const detail = result.parse_error
+          ? `Server parse failed: ${result.parse_error}`
+          : "Server requires manual frame range";
+        setServerParseError(detail);
+        setError("Could not start render. Provide frame range and retry.");
+        setFlowStage("uploaded");
+        return;
+      }
+
+      setFlowStage("submitted");
       onSubmitted(result.group_id, result);
     } catch (err) {
-      setError(err.message);
-      setLoading(false);
+      setError(err.message || "Failed to start render");
+      setFlowStage("uploaded");
+    } finally {
+      setStarting(false);
     }
   };
+
+  const handleFileChange = (event) => {
+    setFile(event.target.files[0] || null);
+    resetFlowForInputChange();
+  };
+
+  const canUpload = flowStage === "analyzed" && !analyzing && !uploading && !starting;
+  const manualRangeValid = parseManualFrameRange() !== null;
+  const canStart =
+    flowStage === "uploaded" &&
+    !analyzing &&
+    !uploading &&
+    !starting &&
+    !!pendingGroupId &&
+    (analysisResult ? true : manualRangeValid);
+
+  const stepLabel = analyzing ? "Analyzing" : uploading ? "Uploading" : starting ? "Starting" : "";
 
   const MachineSummary = () => (
     <div className="machine-card" style={{ marginBottom: 16 }}>
@@ -321,82 +404,125 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
     </div>
   );
 
-  if (needsFrameInput) {
-    return (
-      <div>
-        <button className="btn-back" onClick={onBack}>← Back</button>
-        <h2>Enter Frame Range</h2>
-        <MachineSummary />
-        <p className="status" style={{ marginBottom: 16 }}>
-          Could not auto-detect frames from your upload. Enter frame range manually.
-        </p>
-        {autoDetectError && (
-          <p className="error" style={{ marginBottom: 16, whiteSpace: "pre-wrap" }}>
-            {autoDetectError}
-          </p>
-        )}
-        <form onSubmit={handleFrameConfirm} className="submit-form">
-          <label>
-            Start Frame
-            <input type="number" value={frameStart} onChange={(e) => setFrameStart(e.target.value)} min="1" style={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 6, padding: "0.5rem", color: "#ccc" }} />
-          </label>
-          <label>
-            End Frame
-            <input type="number" value={frameEnd} onChange={(e) => setFrameEnd(e.target.value)} min="1" style={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 6, padding: "0.5rem", color: "#ccc" }} />
-          </label>
-          <label>
-            Frame Step
-            <input type="number" value={frameStep} onChange={(e) => setFrameStep(e.target.value)} min="1" style={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 6, padding: "0.5rem", color: "#ccc" }} />
-          </label>
-          {error && <p className="error">{error}</p>}
-          <button className="btn-primary" type="submit" disabled={loading}>
-            {loading ? "Starting..." : `Start Distributed Render (${machines.length} machines)`}
-          </button>
-        </form>
-      </div>
-    );
-  }
-
   return (
     <div>
-      <button className="btn-back" onClick={onBack}>← Back</button>
+      <button className="btn-back" onClick={onBack}>{"<- Back"}</button>
       <h2>Distributed Render Job</h2>
       <MachineSummary />
-      <form onSubmit={handleSubmit} className="submit-form">
+
+      <div className="submit-form">
         <label>
           Project File (.blend or .zip)
           <input
             type="file"
             accept=".blend,.zip"
-            onChange={(e) => setFile(e.target.files[0])}
+            onChange={handleFileChange}
           />
         </label>
         <p className="status">
           Use a single `.blend` only if textures are packed. Otherwise upload a `.zip` with the full project folder.
         </p>
         {file && <p className="file-name">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>}
-        {error && <p className="error">{error}</p>}
-        {(loading || analyzing) && (
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {flowStage === "idle" && (
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={handleAnalyze}
+              disabled={!file || analyzing || uploading || starting}
+            >
+              {analyzing ? "Analyzing..." : "Analyze"}
+            </button>
+          )}
+
+          {flowStage === "analyzed" && (
+            <button className="btn-primary" type="button" onClick={handleUpload} disabled={!canUpload}>
+              {uploading ? `Uploading... ${progress}%` : "Upload"}
+            </button>
+          )}
+
+          {flowStage === "uploaded" && (
+            <button className="btn-primary" type="button" onClick={handleStartRendering} disabled={!canStart}>
+              {starting ? "Starting..." : "Start Rendering"}
+            </button>
+          )}
+
+          {flowStage !== "idle" && (
+            <button className="btn-secondary" type="button" onClick={resetFlowForInputChange} disabled={analyzing || uploading || starting}>
+              Reset
+            </button>
+          )}
+        </div>
+
+        {(analyzing || uploading || starting) && (
           <div className="progress-bar-wrap">
-            <div className="progress-bar" style={{ width: analyzing ? "100%" : `${progress}%` }} />
+            <div
+              className="progress-bar"
+              style={{ width: uploading ? `${progress}%` : "100%", opacity: uploading ? 1 : 0.75 }}
+            />
             <span className="progress-text">
-              {analyzing ? "Analyzing file..." : `Uploading... ${progress}%`}
+              {uploading ? `${stepLabel}... ${progress}%` : `${stepLabel}...`}
             </span>
           </div>
         )}
-        <button className="btn-primary" type="submit" disabled={loading || analyzing}>
-          {analyzing
-            ? "Analyzing..."
-            : loading
-              ? `Uploading... ${progress}%`
-              : `Start Distributed Render (${machines.length} machines)`}
-        </button>
-      </form>
+
+        {flowStage !== "idle" && (
+          <div>
+            <p className="status" style={{ paddingTop: 0 }}>
+              {analysisResult
+                ? `Analyzed ${file?.name || "file"}: frames ${analysisResult.frame_start}..${analysisResult.frame_end}${
+                    (analysisResult.frame_step || 1) > 1
+                      ? `, every ${analysisResult.frame_step} frames`
+                      : ""
+                  }`
+                : "Analyze could not detect frames. Upload can continue, but manual frame range is required before Start Rendering."}
+            </p>
+            {clientParseError && <p className="error">{clientParseError}</p>}
+            {serverParseError && <p className="error">{serverParseError}</p>}
+          </div>
+        )}
+
+        {flowStage !== "idle" && !analysisResult && (
+          <>
+            <label>
+              Start Frame
+              <input
+                type="number"
+                value={frameStart}
+                onChange={(e) => setFrameStart(e.target.value)}
+                min="1"
+                style={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 6, padding: "0.5rem", color: "#ccc" }}
+              />
+            </label>
+            <label>
+              End Frame
+              <input
+                type="number"
+                value={frameEnd}
+                onChange={(e) => setFrameEnd(e.target.value)}
+                min="1"
+                style={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 6, padding: "0.5rem", color: "#ccc" }}
+              />
+            </label>
+            <label>
+              Frame Step
+              <input
+                type="number"
+                value={frameStep}
+                onChange={(e) => setFrameStep(e.target.value)}
+                min="1"
+                style={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 6, padding: "0.5rem", color: "#ccc" }}
+              />
+            </label>
+          </>
+        )}
+
+        {error && <p className="error">{error}</p>}
+      </div>
     </div>
   );
 }
-
-// -----------------------------------------------
 // Page: Render Group Status
 // -----------------------------------------------
 const STATUS_LABEL = {

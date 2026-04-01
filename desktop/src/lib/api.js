@@ -4,23 +4,10 @@ export async function getMachines(baseUrl) {
   return r.json();
 }
 
-export async function submitJob(baseUrl, machineId, file, onProgress) {
-  // Step 1: Get presigned upload URL
-  const reqRes = await fetch(`${baseUrl}/jobs/request-upload`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ machine_id: machineId, filename: file.name }),
-  });
-  if (!reqRes.ok) {
-    const err = await reqRes.json();
-    throw new Error(err.detail || "Failed to request upload URL");
-  }
-  const { job_id, upload_url } = await reqRes.json();
-
-  // Step 2: Upload file directly to R2 via presigned URL
+async function uploadFileToPresignedUrl(uploadUrl, file, onProgress) {
   await new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("PUT", upload_url);
+    xhr.open("PUT", uploadUrl);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     if (onProgress) {
       xhr.upload.onprogress = (e) => {
@@ -36,6 +23,23 @@ export async function submitJob(baseUrl, machineId, file, onProgress) {
     xhr.onerror = () => reject(new Error("Upload failed"));
     xhr.send(file);
   });
+}
+
+export async function submitJob(baseUrl, machineId, file, onProgress) {
+  // Step 1: Get presigned upload URL
+  const reqRes = await fetch(`${baseUrl}/jobs/request-upload`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ machine_id: machineId, filename: file.name }),
+  });
+  if (!reqRes.ok) {
+    const err = await reqRes.json();
+    throw new Error(err.detail || "Failed to request upload URL");
+  }
+  const { job_id, upload_url } = await reqRes.json();
+
+  // Step 2: Upload file directly to R2 via presigned URL
+  await uploadFileToPresignedUrl(upload_url, file, onProgress);
 
   // Step 3: Confirm upload
   const confirmRes = await fetch(`${baseUrl}/jobs/${job_id}/confirm-upload`, {
@@ -61,42 +65,22 @@ export function downloadUrl(baseUrl, jobId) {
 
 // ---- Distributed Rendering (Render Groups) ----
 
-export async function submitDistributedJob(baseUrl, machineIds, file, onProgress, frameRange = null) {
-  // Step 1: Create render group
+export async function createDistributedRenderGroup(baseUrl, machineIds, filename) {
   const createRes = await fetch(`${baseUrl}/render-groups/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ machine_ids: machineIds, filename: file.name }),
+    body: JSON.stringify({ machine_ids: machineIds, filename }),
   });
   if (!createRes.ok) {
     const err = await createRes.json();
     throw new Error(err.detail || "Failed to create render group");
   }
-  const { group_id, upload_url } = await createRes.json();
+  return createRes.json();
+}
 
-  // Step 2: Upload file to R2
-  await new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", upload_url);
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
-    if (onProgress) {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          onProgress(Math.round((e.loaded / e.total) * 100));
-        }
-      };
-    }
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed with status ${xhr.status}`));
-    };
-    xhr.onerror = () => reject(new Error("Upload failed"));
-    xhr.send(file);
-  });
-
-  // Step 3: Confirm upload + distribute frames (pass client-side frame range if available)
+export async function uploadDistributedRenderInput(uploadUrl, file, onProgress) {
+  await uploadFileToPresignedUrl(uploadUrl, file, onProgress);
   if (onProgress) onProgress(100);
-  return confirmDistributedJob(baseUrl, group_id, machineIds, frameRange);
 }
 
 export async function confirmDistributedJob(baseUrl, groupId, machineIds, frameRange = null) {

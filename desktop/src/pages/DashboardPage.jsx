@@ -10,6 +10,7 @@ export default function DashboardPage({
   machineId,
   systemInfo,
   runtimeInfo,
+  preflightSteps,
   currentJob,
   backendUrl,
 }) {
@@ -27,7 +28,7 @@ export default function DashboardPage({
         )}
       </div>
 
-      <RuntimeCard runtimeInfo={runtimeInfo} status={status} />
+      <RuntimeCard runtimeInfo={runtimeInfo} preflightSteps={preflightSteps} status={status} />
       <GpuInfoCard systemInfo={systemInfo} />
       <JobCard currentJob={currentJob} status={status} />
     </div>

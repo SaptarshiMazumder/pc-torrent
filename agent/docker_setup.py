@@ -1,11 +1,12 @@
 """
-PC Rent Agent - Docker & WSL2 Bootstrap
-Handles first-time installation of WSL2 and Docker Desktop.
+PC Rent Agent - Docker Bootstrap
+Handles first-time installation of Docker Desktop on Windows.
+WSL2 installation is delegated entirely to the Docker Desktop installer.
 """
 
+import ctypes
 import os
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.request
@@ -13,6 +14,7 @@ import urllib.request
 from config import (
     load_gpu_check_cache,
     save_gpu_check_cache,
+    clear_gpu_check_cache,
     load_setup_state,
     save_setup_state,
     clear_setup_state,
@@ -24,9 +26,17 @@ DOCKER_DESKTOP_URL = (
 GPU_CHECK_SUCCESS_CACHE_TTL = 24 * 60 * 60
 GPU_CHECK_FAILURE_CACHE_TTL = 10 * 60
 
+# Standard Windows exit codes indicating a reboot is required
+_REBOOT_EXIT_CODES = {3010, 1641}
+
 
 def check_docker_installed():
-    """Check if Docker CLI is available."""
+    """
+    Check if Docker is installed.
+    First tries the CLI (fast path), then falls back to checking known
+    Docker Desktop install paths — handles the case where Docker was just
+    installed and PATH is not yet updated (pre-reboot).
+    """
     try:
         result = subprocess.run(
             ["docker", "--version"],
@@ -34,9 +44,23 @@ def check_docker_installed():
             text=True,
             timeout=10,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+        pass
+
+    # Filesystem fallback — Docker Desktop install location on Windows
+    candidates = [
+        os.path.join(
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            "Docker", "Docker", "Docker Desktop.exe",
+        ),
+        os.path.join(
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            "Docker", "Docker", "Docker Desktop.exe",
+        ),
+    ]
+    return any(os.path.exists(p) for p in candidates)
 
 
 def check_docker_running():
@@ -53,150 +77,168 @@ def check_docker_running():
         return False
 
 
-def check_wsl2_installed():
-    """Check if WSL2 is installed and ready."""
-    try:
-        result = subprocess.run(
-            ["wsl", "--status"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+def download_docker_desktop(on_status=None, on_progress=None):
+    """Download Docker Desktop installer to temp directory.
 
+    Args:
+        on_status: Optional callback(message: str) for status messages.
+        on_progress: Optional callback(downloaded_bytes, total_bytes, pct)
+                     called during the download for real-time progress.
 
-def install_wsl2():
+    Returns path on success, or None on failure.
     """
-    Install WSL2 (requires admin/UAC).
-    Returns True if installed (may need reboot), False if failed.
-    """
-    print("[SETUP] Installing WSL2...")
-    try:
-        result = subprocess.run(
-            ["wsl", "--install", "--no-distribution"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if result.returncode == 0:
-            print("[SETUP] WSL2 installed successfully.")
-            return True
-        else:
-            print(f"[SETUP] WSL2 install returned code {result.returncode}")
-            print(f"  stdout: {result.stdout}")
-            print(f"  stderr: {result.stderr}")
-            return False
-    except subprocess.TimeoutExpired:
-        print("[SETUP] WSL2 install timed out.")
-        return False
-    except FileNotFoundError:
-        print("[SETUP] 'wsl' command not found.")
-        return False
-
-
-def needs_reboot():
-    """
-    Check if a reboot is needed after WSL2 install.
-    WSL2 needs a reboot if it was just installed and wsl --status fails.
-    """
-    state = load_setup_state()
-    if state.get("wsl2_installed") and not check_wsl2_installed():
-        return True
-    return False
-
-
-def schedule_resume_after_reboot():
-    """
-    Add agent to Windows RunOnce registry key so it auto-resumes after reboot.
-    """
-    try:
-        import winreg
-
-        exe_path = sys.executable
-        # If running as PyInstaller bundle, use the exe path
-        if getattr(sys, "frozen", False):
-            exe_path = sys.executable
-
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
-            0,
-            winreg.KEY_SET_VALUE,
-        )
-        winreg.SetValueEx(key, "PCRentAgentSetup", 0, winreg.REG_SZ, f'"{exe_path}"')
-        winreg.CloseKey(key)
-        print("[SETUP] Registered for auto-resume after reboot.")
-        return True
-    except Exception as e:
-        print(f"[SETUP] Failed to set RunOnce key: {e}")
-        return False
-
-
-def download_docker_desktop():
-    """Download Docker Desktop installer to temp directory."""
     dest = os.path.join(tempfile.gettempdir(), "DockerDesktopInstaller.exe")
     if os.path.exists(dest) and os.path.getsize(dest) > 100_000_000:
-        print("[SETUP] Docker Desktop installer already downloaded.")
+        if on_status:
+            on_status("[SETUP] Docker Desktop installer already downloaded.")
         return dest
 
-    print("[SETUP] Downloading Docker Desktop (~500MB)...")
+    if on_status:
+        on_status("[SETUP] Downloading Docker Desktop (~500MB)...")
     try:
-        urllib.request.urlretrieve(DOCKER_DESKTOP_URL, dest)
-        print("[SETUP] Download complete.")
+        resp = urllib.request.urlopen(DOCKER_DESKTOP_URL)
+        total = int(resp.headers.get("Content-Length", 0))
+        downloaded = 0
+        chunk_size = 64 * 1024  # 64 KB
+        with open(dest, "wb") as f:
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if on_progress and total > 0:
+                    pct = min(100.0, (downloaded / total) * 100)
+                    on_progress(downloaded, total, pct)
+        if on_status:
+            on_status("[SETUP] Download complete.")
         return dest
     except Exception as e:
-        print(f"[SETUP] Download failed: {e}")
+        if on_status:
+            on_status(f"[SETUP] Download failed: {e}")
+        # Clean up partial download
+        if os.path.exists(dest):
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
         return None
 
 
-def install_docker_desktop():
+def install_docker_desktop(on_status=None):
     """
-    Install Docker Desktop silently (requires admin/UAC).
-    Returns True if install succeeded.
-    """
-    installer_path = download_docker_desktop()
-    if not installer_path:
-        return False
+    Install Docker Desktop using ShellExecute with the 'runas' verb so the UAC
+    dialog appears in the foreground. The Docker installer handles WSL2 setup
+    automatically via --backend=wsl-2.
 
-    print("[SETUP] Installing Docker Desktop (this may take a few minutes)...")
+    Polls for Docker's presence after launching (ShellExecute is async/fire-and-forget).
+
+    Returns dict: {success, needs_reboot, message}
+    """
+    if on_status:
+        on_status("[SETUP] Installing Docker Desktop — Windows will ask for permission to install...")
+
+    # Expect the installer to already be downloaded by the caller.
+    installer_path = os.path.join(tempfile.gettempdir(), "DockerDesktopInstaller.exe")
+    if not os.path.exists(installer_path) or os.path.getsize(installer_path) < 100_000_000:
+        return {
+            "success": False,
+            "needs_reboot": False,
+            "message": "Docker Desktop installer not found. Download it first.",
+        }
+
     try:
-        result = subprocess.run(
-            [installer_path, "install", "--quiet", "--accept-license"],
-            capture_output=True,
-            text=True,
-            timeout=600,
+        # ShellExecute with 'runas' verb — brings UAC dialog to the foreground
+        # rather than having it appear silently behind the app window.
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None,                                        # hwnd
+            "runas",                                     # verb
+            installer_path,                              # file
+            "install --quiet --accept-license --backend=wsl-2",  # params
+            None,                                        # working dir
+            1,                                           # SW_SHOWNORMAL
         )
-        if result.returncode == 0:
-            print("[SETUP] Docker Desktop installed successfully.")
-            return True
-        else:
-            print(f"[SETUP] Docker install returned code {result.returncode}")
-            print(f"  stderr: {result.stderr}")
-            return False
-    except subprocess.TimeoutExpired:
-        print("[SETUP] Docker install timed out (10 min).")
-        return False
+        # ShellExecute returns an HINSTANCE value > 32 on success
+        if ret <= 32:
+            # Common error codes
+            if ret == 5:
+                msg = "Docker installation was cancelled (UAC was declined). Click Refresh to try again."
+            elif ret == 2:
+                msg = "Docker installer file not found. Click Refresh to re-download."
+            else:
+                msg = (
+                    f"Could not launch the Docker installer (error code {ret}). "
+                    "Try running the app as administrator."
+                )
+            return {"success": False, "needs_reboot": False, "message": msg}
+    except Exception as e:
+        return {
+            "success": False,
+            "needs_reboot": False,
+            "message": f"Failed to launch Docker installer: {e}",
+        }
+
+    # Poll until Docker Desktop appears on disk (up to 10 minutes).
+    # We cannot waitpid on an elevated child process launched via ShellExecute.
+    deadline = time.time() + 600
+    poll_interval = 5
+    elapsed = 0
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        if check_docker_installed():
+            if on_status:
+                on_status("[SETUP] Docker Desktop installed successfully.")
+            return {"success": True, "needs_reboot": False, "message": "Docker installed."}
+        if on_status and elapsed % 15 == 0:
+            on_status(f"[SETUP] Installing Docker Desktop... ({elapsed}s)")
+
+    return {
+        "success": False,
+        "needs_reboot": False,
+        "message": (
+            "Docker installation timed out (10 min). "
+            "Please install Docker Desktop manually from https://www.docker.com/products/docker-desktop/"
+        ),
+    }
 
 
-def wait_for_docker_ready(timeout=120):
+def _try_start_docker_desktop(on_status=None):
+    """Attempt to launch Docker Desktop if it's installed but not running."""
+    docker_exe = os.path.join(
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        "Docker", "Docker", "Docker Desktop.exe",
+    )
+    if os.path.exists(docker_exe):
+        if on_status:
+            on_status("[SETUP] Starting Docker Desktop...")
+        try:
+            subprocess.Popen([docker_exe])
+        except Exception:
+            pass
+
+
+def wait_for_docker_ready(timeout=120, on_status=None):
     """
-    Wait for Docker daemon to be ready.
+    Wait for Docker daemon to become responsive.
     Returns True when ready, False on timeout.
     """
-    print("[SETUP] Waiting for Docker daemon to start...")
+    if on_status:
+        on_status("[SETUP] Waiting for Docker to start...")
     waited = 0
     interval = 5
     while waited < timeout:
         if check_docker_running():
-            print("[SETUP] Docker daemon is ready.")
+            if on_status:
+                on_status("[SETUP] Docker is ready.")
             return True
         time.sleep(interval)
         waited += interval
-        print(f"[SETUP] Still waiting... ({waited}s)")
+        if on_status and waited % 20 == 0:
+            on_status(f"[SETUP] Still waiting for Docker... ({waited}s)")
 
-    print(f"[SETUP] Docker not ready after {timeout}s.")
+    if on_status:
+        on_status(f"[SETUP] Docker not ready after {timeout}s.")
     return False
 
 
@@ -219,23 +261,32 @@ def get_cached_gpu_verification():
     gpu_name = cache.get("gpu_docker_name", "")
     if not isinstance(gpu_name, str):
         gpu_name = ""
+    gpu_error = cache.get("gpu_error", "")
+    if not isinstance(gpu_error, str):
+        gpu_error = ""
+    # Legacy cache entries (before gpu_error existed) can preserve
+    # stale false negatives. Force a fresh probe in that case.
+    if not verified and not gpu_error:
+        return None
 
     return {
         "gpu_verified": verified,
         "gpu_docker_name": gpu_name,
+        "gpu_error": gpu_error,
         "checked_at": checked_at,
     }
 
 
-def _save_gpu_verification(gpu_name):
+def _save_gpu_verification(gpu_name, gpu_error=""):
     save_gpu_check_cache({
         "gpu_verified": bool(gpu_name),
         "gpu_docker_name": gpu_name,
+        "gpu_error": gpu_error,
         "checked_at": time.time(),
     })
 
 
-def resolve_gpu_verification(use_cache=True):
+def resolve_gpu_verification(use_cache=True, on_status=None):
     """Return a Docker GPU verification result, reusing a recent cache when allowed."""
     if use_cache:
         cached = get_cached_gpu_verification()
@@ -243,21 +294,70 @@ def resolve_gpu_verification(use_cache=True):
             print("[SETUP] Using cached Docker GPU verification result.")
             return cached
 
-    gpu_name = verify_gpu_in_docker()
+    probe = verify_gpu_in_docker(on_status=on_status)
+    gpu_name = probe.get("gpu_name", "")
+    gpu_error = probe.get("error", "")
     return {
         "gpu_verified": bool(gpu_name),
         "gpu_docker_name": gpu_name,
+        "gpu_error": gpu_error,
         "checked_at": time.time(),
     }
 
 
-def verify_gpu_in_docker():
+def _check_nvidia_runtime_in_docker():
+    """
+    Check if Docker has the nvidia container runtime configured.
+    Returns (available: bool, detail: str).
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        if result.returncode != 0:
+            detail = stderr or stdout or f"exit code {result.returncode}"
+            return False, f"docker info failed: {detail}"
+        if stderr:
+            return False, f"docker info reported an error: {stderr}"
+        if not stdout or stdout == "null":
+            return False, f"Docker runtimes unavailable: {stdout or 'empty output'}"
+        if "nvidia" in stdout.lower():
+            return True, "nvidia runtime found"
+        return False, f"nvidia runtime not found in Docker runtimes: {stdout}"
+    except Exception as e:
+        return False, f"Could not query Docker runtimes: {e}"
+    return False, "docker info returned an unknown error"
+
+
+def verify_gpu_in_docker(on_status=None):
     """
     Run a quick GPU test inside Docker to confirm GPU passthrough works.
-    Returns the GPU name string if accessible, or empty string on failure.
+    Returns dict:
+        gpu_name: GPU name string if accessible, else ""
+        error: failure detail string when unavailable
+
     Pulls the test image first if needed, then retries the GPU check once.
+    Surfaces real Docker error messages via on_status.
     """
+    def status(msg):
+        print(msg)
+        if on_status:
+            on_status(msg)
+
     image = "nvidia/cuda:12.2.0-base-ubuntu22.04"
+
+    # First check if nvidia runtime is registered in Docker
+    runtime_ok, runtime_detail = _check_nvidia_runtime_in_docker()
+    precheck_warning = ""
+    if not runtime_ok:
+        precheck_warning = runtime_detail
+        status(
+            f"[SETUP] Docker GPU pre-check warning: {runtime_detail}. "
+            "Continuing with direct GPU probe..."
+        )
 
     # Ensure the test image is available locally
     try:
@@ -266,7 +366,7 @@ def verify_gpu_in_docker():
             capture_output=True, text=True, timeout=10,
         )
         if check.returncode != 0:
-            print(f"[SETUP] Pulling GPU test image ({image})...")
+            status(f"[SETUP] Pulling GPU test image ({image})...")
             subprocess.run(
                 ["docker", "pull", image],
                 capture_output=True, text=True, timeout=300,
@@ -275,6 +375,7 @@ def verify_gpu_in_docker():
         pass
 
     # Try the GPU test (retry once on failure)
+    last_error = ""
     for attempt in range(2):
         try:
             result = subprocess.run(
@@ -292,24 +393,39 @@ def verify_gpu_in_docker():
             )
             if result.returncode == 0 and result.stdout.strip():
                 gpu = result.stdout.strip().split("\n")[0]
-                _save_gpu_verification(gpu)
-                print(f"[SETUP] GPU verified in Docker: {gpu}")
-                return gpu
+                _save_gpu_verification(gpu, "")
+                status(f"[SETUP] GPU verified in Docker: {gpu}")
+                return {"gpu_name": gpu, "error": ""}
             else:
-                print(f"[SETUP] GPU test attempt {attempt + 1} failed: {result.stderr.strip()}")
+                last_error = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+                status(f"[SETUP] GPU test attempt {attempt + 1} failed: {last_error}")
         except Exception as e:
-            print(f"[SETUP] GPU test attempt {attempt + 1} error: {e}")
+            last_error = str(e)
+            status(f"[SETUP] GPU test attempt {attempt + 1} error: {last_error}")
 
         if attempt == 0:
             time.sleep(2)
 
-    _save_gpu_verification("")
-    return ""
+    if last_error:
+        combined_error = (
+            f"{last_error} (runtime pre-check: {precheck_warning})"
+            if precheck_warning
+            else last_error
+        )
+        status(
+            f"[SETUP] GPU not accessible in Docker. Error: {combined_error}. "
+            "Check Docker Desktop GPU support and restart Docker Desktop."
+        )
+    else:
+        combined_error = precheck_warning or "Unknown GPU verification failure."
+
+    _save_gpu_verification("", combined_error)
+    return {"gpu_name": "", "error": combined_error}
 
 
-def full_bootstrap(on_status=None):
+def full_bootstrap(on_status=None, force_gpu_recheck=False):
     """
-    Run the full Docker bootstrap flow.
+    Run the full Docker bootstrap flow. WSL2 is handled by Docker's own installer.
 
     Args:
         on_status: Optional callback(message: str) for status updates.
@@ -319,6 +435,8 @@ def full_bootstrap(on_status=None):
             ready: bool
             needs_reboot: bool
             message: str
+            gpu_verified: bool  (only when ready=True)
+            gpu_docker_name: str (only when ready=True)
     """
 
     def status(msg):
@@ -326,90 +444,57 @@ def full_bootstrap(on_status=None):
         if on_status:
             on_status(msg)
 
-    state = load_setup_state()
+    if force_gpu_recheck:
+        clear_gpu_check_cache()
 
-    # Step 1: Check if Docker is already installed and running
+    # Fast path: Docker already installed and running
     if check_docker_installed() and check_docker_running():
         status("[SETUP] Docker is already installed and running.")
         clear_setup_state()
-        gpu_result = resolve_gpu_verification()
+        gpu_result = resolve_gpu_verification(use_cache=not force_gpu_recheck, on_status=on_status)
         return {
             "ready": True,
             "needs_reboot": False,
             "gpu_verified": gpu_result["gpu_verified"],
             "gpu_docker_name": gpu_result["gpu_docker_name"],
+            "gpu_error": gpu_result.get("gpu_error", ""),
             "message": "Docker is ready.",
         }
 
-    # Step 2: Check/install WSL2
-    if not check_wsl2_installed():
-        if state.get("wsl2_installed"):
-            # WSL2 was installed last run but needs reboot
-            status("[SETUP] WSL2 was installed. A reboot is required.")
-            schedule_resume_after_reboot()
-            save_setup_state({"wsl2_installed": True, "stage": "needs_reboot"})
+    # Install Docker Desktop if not present
+    if not check_docker_installed():
+        install_result = install_docker_desktop(on_status=on_status)
+        if not install_result["success"]:
+            return {
+                "ready": False,
+                "needs_reboot": False,
+                "message": install_result["message"],
+            }
+
+    # Docker is now installed — try to start it and wait for the daemon
+    if not check_docker_running():
+        _try_start_docker_desktop(on_status=on_status)
+        if not wait_for_docker_ready(timeout=120, on_status=on_status):
+            # Docker installed but daemon won't start — likely needs a reboot
+            # to activate the WSL2 kernel that Docker's installer enabled.
             return {
                 "ready": False,
                 "needs_reboot": True,
-                "message": "Please restart your PC to complete WSL2 setup, then run the agent again.",
+                "message": (
+                    "Docker is installed but needs a restart to finish setup. "
+                    "Please restart your PC, then open the app again."
+                ),
             }
 
-        status("[SETUP] WSL2 not found. Installing...")
-        if install_wsl2():
-            save_setup_state({"wsl2_installed": True, "stage": "wsl2_done"})
-            # Check if reboot is needed
-            if not check_wsl2_installed():
-                status("[SETUP] Reboot required to activate WSL2.")
-                schedule_resume_after_reboot()
-                save_setup_state({"wsl2_installed": True, "stage": "needs_reboot"})
-                return {
-                    "ready": False,
-                    "needs_reboot": True,
-                    "message": "Please restart your PC to complete WSL2 setup, then run the agent again.",
-                }
-        else:
-            return {
-                "ready": False,
-                "needs_reboot": False,
-                "message": "Failed to install WSL2. Please run as administrator.",
-            }
-
-    # Step 3: Install Docker Desktop if not present
-    if not check_docker_installed():
-        status("[SETUP] Docker not found. Installing Docker Desktop...")
-        if not install_docker_desktop():
-            return {
-                "ready": False,
-                "needs_reboot": False,
-                "message": "Failed to install Docker Desktop.",
-            }
-
-    # Step 4: Wait for Docker to be ready
-    if not check_docker_running():
-        # Try to start Docker Desktop
-        status("[SETUP] Starting Docker Desktop...")
-        try:
-            docker_path = os.path.join(
-                os.environ.get("ProgramFiles", "C:\\Program Files"),
-                "Docker",
-                "Docker",
-                "Docker Desktop.exe",
-            )
-            if os.path.exists(docker_path):
-                subprocess.Popen([docker_path])
-        except Exception:
-            pass
-
-        if not wait_for_docker_ready(timeout=120):
-            return {
-                "ready": False,
-                "needs_reboot": False,
-                "message": "Docker daemon failed to start. Please start Docker Desktop manually.",
-            }
-
-    # Step 5: Verify GPU passthrough
+    # Verify GPU passthrough
     status("[SETUP] Verifying GPU access in Docker containers...")
     gpu_result = resolve_gpu_verification()
+
+    if gpu_result["gpu_verified"]:
+        status(f"[SETUP] GPU verified in Docker: {gpu_result['gpu_docker_name']} - ready for rendering.")
+    else:
+        detail = gpu_result.get("gpu_error", "GPU verification failed.")
+        status(f"[SETUP] WARNING: GPU not accessible in Docker. {detail}")
 
     clear_setup_state()
     return {
@@ -417,6 +502,7 @@ def full_bootstrap(on_status=None):
         "needs_reboot": False,
         "gpu_verified": gpu_result["gpu_verified"],
         "gpu_docker_name": gpu_result["gpu_docker_name"],
+        "gpu_error": gpu_result.get("gpu_error", ""),
         "message": "Docker is ready.",
     }
 

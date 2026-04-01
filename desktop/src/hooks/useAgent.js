@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { getAgentState, runPreflight } from "../lib/sidecar";
+import { clearLogs as clearLogsCommand, getAgentState, runPreflight } from "../lib/sidecar";
 
 const INITIAL_RUNTIME_INFO = {
   preflight_complete: false,
@@ -18,6 +18,8 @@ const INITIAL_RUNTIME_INFO = {
   image_total_bytes: null,
   image_progress_pct: null,
   image_status: "Not checked yet.",
+  awaiting_uac: false,
+  uac_message: "",
 };
 
 const INITIAL_STATE = {
@@ -26,6 +28,7 @@ const INITIAL_STATE = {
   machineId: "",
   systemInfo: null,
   runtimeInfo: INITIAL_RUNTIME_INFO,
+  preflightSteps: [],
   currentJob: null,
   logs: [],
 };
@@ -35,7 +38,7 @@ export function useAgent() {
   const logsRef = useRef([]);
 
   const addLog = useCallback((entry) => {
-    logsRef.current = [...logsRef.current.slice(-499), entry];
+    logsRef.current = [...logsRef.current.slice(-999), entry];
     setState((prev) => ({ ...prev, logs: logsRef.current }));
   }, []);
 
@@ -160,7 +163,28 @@ export function useAgent() {
                   ? data.image_progress_pct
                   : null,
               image_status: data.image_status || "",
+              // UAC state resets to false when runtime_info arrives (install finished)
+              awaiting_uac: false,
+              uac_message: "",
             },
+          }));
+          break;
+
+        case "uac_prompt":
+          setState((prev) => ({
+            ...prev,
+            runtimeInfo: {
+              ...prev.runtimeInfo,
+              awaiting_uac: true,
+              uac_message: data.message || "Windows will ask for permission to install software — please click Yes to continue.",
+            },
+          }));
+          break;
+
+        case "preflight_steps":
+          setState((prev) => ({
+            ...prev,
+            preflightSteps: data.steps || [],
           }));
           break;
 
@@ -205,6 +229,7 @@ export function useAgent() {
               machineId: data.machine_id || "",
               systemInfo: data.system_info || null,
               runtimeInfo: data.runtime_info || INITIAL_RUNTIME_INFO,
+              preflightSteps: data.preflight_steps || [],
               currentJob: data.current_job || null,
               logs: data.logs || [],
             });
@@ -228,5 +253,14 @@ export function useAgent() {
     };
   }, [addLog]);
 
-  return state;
+  const clearLogs = useCallback(async () => {
+    await clearLogsCommand();
+    logsRef.current = [];
+    setState((prev) => ({ ...prev, logs: [] }));
+  }, []);
+
+  return {
+    ...state,
+    clearLogs,
+  };
 }

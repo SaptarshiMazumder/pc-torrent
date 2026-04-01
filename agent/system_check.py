@@ -8,8 +8,9 @@ import subprocess
 import sys
 
 
-# Minimum NVIDIA driver for WSL2 GPU passthrough on Windows 10
-MIN_DRIVER_WIN10 = 510
+# Minimum NVIDIA driver for WSL2 GPU passthrough
+MIN_DRIVER_WIN10 = 510   # Windows 10
+MIN_DRIVER_WIN11 = 470   # Windows 11 (WSL2 GPU support added in 470.76)
 # Windows 10 21H2 build number
 MIN_BUILD_WIN10 = 19044
 
@@ -120,11 +121,17 @@ def check_requirements():
             "  AMD GPU support is not yet available."
         )
     else:
-        # 3. Check driver version (only matters for Win10)
+        # 3. Check driver version (required for WSL2 GPU passthrough)
         driver_major = get_driver_major(driver_version)
         if win_major == 10 and driver_major < MIN_DRIVER_WIN10:
             issues.append(
                 f"NVIDIA driver {MIN_DRIVER_WIN10}+ required for GPU in Docker on Windows 10.\n"
+                f"  Current driver: {driver_version} (major: {driver_major}).\n"
+                f"  Update at: https://www.nvidia.com/drivers"
+            )
+        elif win_major >= 11 and driver_major < MIN_DRIVER_WIN11:
+            issues.append(
+                f"NVIDIA driver {MIN_DRIVER_WIN11}+ required for GPU in Docker on Windows 11.\n"
                 f"  Current driver: {driver_version} (major: {driver_major}).\n"
                 f"  Update at: https://www.nvidia.com/drivers"
             )

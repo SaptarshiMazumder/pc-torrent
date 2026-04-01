@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-const MAX_LOGS: usize = 500;
+const MAX_LOGS: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -82,6 +82,8 @@ pub struct RuntimeInfo {
     pub image_total_bytes: Option<u64>,
     pub image_progress_pct: Option<f64>,
     pub image_status: String,
+    pub awaiting_uac: bool,
+    pub uac_message: String,
 }
 
 impl Default for RuntimeInfo {
@@ -102,6 +104,32 @@ impl Default for RuntimeInfo {
             image_total_bytes: None,
             image_progress_pct: None,
             image_status: "Not checked yet.".to_string(),
+            awaiting_uac: false,
+            uac_message: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreflightStepInfo {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub detail: String,
+    pub progress: Option<f64>,
+    pub awaiting_uac: bool,
+}
+
+impl Default for PreflightStepInfo {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            status: "pending".to_string(),
+            detail: String::new(),
+            progress: None,
+            awaiting_uac: false,
         }
     }
 }
@@ -114,6 +142,7 @@ pub struct AgentState {
     pub machine_id: String,
     pub system_info: SystemInfo,
     pub runtime_info: RuntimeInfo,
+    pub preflight_steps: Vec<PreflightStepInfo>,
     pub current_job: Option<JobInfo>,
     pub logs: VecDeque<LogEntry>,
 }
@@ -126,6 +155,7 @@ impl Default for AgentState {
             machine_id: String::new(),
             system_info: SystemInfo::default(),
             runtime_info: RuntimeInfo::default(),
+            preflight_steps: vec![],
             current_job: None,
             logs: VecDeque::with_capacity(MAX_LOGS),
         }

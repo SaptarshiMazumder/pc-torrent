@@ -192,6 +192,21 @@ pub async fn get_agent_state(
 }
 
 #[tauri::command]
+pub async fn clear_logs(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AgentState>>>,
+) -> Result<(), String> {
+    let snapshot = {
+        let mut s = state.lock().await;
+        s.logs.clear();
+        s.clone()
+    };
+
+    save_agent_state(&app, &snapshot)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_system_info(
     app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<AgentState>>>,
@@ -218,10 +233,11 @@ pub async fn run_preflight(
     app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<AgentState>>>,
     sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
+    force: Option<bool>,
 ) -> Result<(), String> {
     ensure_sidecar_running(&app, &state, &sidecar).await?;
     let mut handle = sidecar.lock().await;
-    handle.send_command(&json!({"cmd": "run_preflight"}))
+    handle.send_command(&json!({"cmd": "run_preflight", "force": force.unwrap_or(false)}))
 }
 
 #[tauri::command]

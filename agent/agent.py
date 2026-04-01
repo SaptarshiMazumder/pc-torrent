@@ -738,6 +738,7 @@ def get_runtime_status():
         "docker_installed": docker_installed,
         "docker_running": docker_running,
         "gpu_verified": cached_gpu["gpu_verified"] if cached_gpu else None,
+        "gpu_error": cached_gpu.get("gpu_error") if cached_gpu else None,
         "image_present": image_present,
         "image_stage": image_stage,
         "image_downloaded_bytes": None,
@@ -866,14 +867,32 @@ def ensure_docker_image(on_stage=None, on_progress=None):
                         last_logged_pct = pct
 
         stage("installing", "Installing render image into Docker...")
-        _log("[IMAGE] Loading image into Docker...")
-        result = subprocess.run(
-            ["docker", "load", "-i", tmp_path],
-            capture_output=True, text=True, timeout=300,
-        )
-        if result.returncode != 0:
+        _log("[IMAGE] Loading image into Docker (this may take several minutes)...")
+        try:
+            proc = subprocess.Popen(
+                ["docker", "load", "-i", tmp_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            # Stream docker load output so the user sees progress (e.g. "Loaded image: ...")
+            load_output = []
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    _log(f"[IMAGE] {line}")
+                    load_output.append(line)
+            proc.wait(timeout=1200)  # 20 min — large images on slow disks can take time
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             stage("error", "Failed to install render image into Docker.")
-            _log(f"[IMAGE] Failed to load image: {result.stderr}")
+            _log("[IMAGE] docker load timed out after 20 minutes. Disk may be too slow or image is corrupt.")
+            return False
+
+        if proc.returncode != 0:
+            stage("error", "Failed to install render image into Docker.")
+            _log(f"[IMAGE] Failed to load image (exit code {proc.returncode}): {' '.join(load_output[-3:])}")
             return False
 
         stage("ready", "Render image installed.")
@@ -1085,6 +1104,7 @@ def execute_job(job):
 
         # Stream container output
         container_log = []
+        render_device = ""
         try:
             for line in iter(process.stdout.readline, ""):
                 line = line.rstrip()
@@ -1094,6 +1114,11 @@ def execute_job(job):
                         apply_progress_event(progress_event)
                         continue
                     container_log.append(line)
+                    lower_line = line.lower()
+                    if line.startswith("Rendering with:"):
+                        render_device = line.split(":", 1)[1].strip()
+                    elif "falling back to cpu rendering" in lower_line:
+                        render_device = "CPU"
                     _log(line, source="container")
         finally:
             if process.stdout:
@@ -1115,6 +1140,10 @@ def execute_job(job):
             raise RuntimeError(f"Container exited with code {process.returncode}")
 
         finalize_progress(force_complete=True)
+        if render_device:
+            _log(f"[JOB] Render device used: {render_device}")
+        else:
+            _log("[JOB] Render device used: unknown (no device marker in container logs).", level="warn")
 
         # 4. Upload output files
         _log(f"[JOB] Uploading output files...")
@@ -1228,7 +1257,8 @@ def main():
     if gpu_docker:
         _log(f"[AGENT] GPU in Docker: {gpu_docker} — ready for rendering.")
     else:
-        _log("[AGENT] WARNING: GPU not accessible in Docker. Renders will use CPU only.")
+        gpu_error = docker_result.get("gpu_error", "GPU verification failed.")
+        _log(f"[AGENT] WARNING: GPU not accessible in Docker. {gpu_error}")
 
     # Step 3: Ensure render image is loaded
     _log("[AGENT] Checking render image...")

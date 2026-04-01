@@ -24,6 +24,10 @@ export async function getAgentState() {
   return invoke("get_agent_state");
 }
 
+export async function clearLogs() {
+  return invoke("clear_logs");
+}
+
 export async function getSystemInfo() {
   return invoke("get_system_info");
 }
@@ -32,8 +36,8 @@ export async function getRuntimeStatus() {
   return invoke("get_runtime_status");
 }
 
-export async function runPreflight() {
-  return invoke("run_preflight");
+export async function runPreflight(force = false) {
+  return invoke("run_preflight", { force });
 }
 
 export async function removeImage() {

@@ -83,12 +83,29 @@ export async function uploadDistributedRenderInput(uploadUrl, file, onProgress) 
   if (onProgress) onProgress(100);
 }
 
-export async function confirmDistributedJob(baseUrl, groupId, machineIds, frameRange = null) {
+export async function confirmDistributedJob(
+  baseUrl,
+  groupId,
+  machineIds,
+  frameRange = null,
+  renderOverrides = null,
+  scheduling = null,
+  analysisSnapshot = null
+) {
   const body = { machine_ids: machineIds };
   if (frameRange) {
     body.frame_start = frameRange.frame_start;
     body.frame_end = frameRange.frame_end;
     body.frame_step = frameRange.frame_step || 1;
+  }
+  if (renderOverrides) {
+    body.render_overrides = renderOverrides;
+  }
+  if (scheduling) {
+    body.scheduling = scheduling;
+  }
+  if (analysisSnapshot) {
+    body.analysis_snapshot = analysisSnapshot;
   }
   const confirmRes = await fetch(`${baseUrl}/render-groups/${groupId}/confirm-upload`, {
     method: "POST",

@@ -13,6 +13,7 @@ import sys
 import time
 import signal
 import shutil
+import base64
 import tempfile
 import subprocess
 import threading
@@ -455,6 +456,20 @@ def parse_progress_event_line(line):
         "rendered_frames": rendered_frames,
         "current_frame": current_frame,
     }
+
+
+def parse_job_render_overrides(job):
+    raw = job.get("render_overrides_json")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
 
 
 def persist_job_outputs(job_id, source_output_dir, status, error=None):
@@ -1087,7 +1102,29 @@ def execute_job(job):
         if job.get("frame_start") is not None and job.get("frame_end") is not None:
             cmd.extend(["-e", f"FRAME_START={job['frame_start']}"])
             cmd.extend(["-e", f"FRAME_END={job['frame_end']}"])
-            _log(f"[JOB] Distributed render: frames {job['frame_start']}-{job['frame_end']}")
+            _log(
+                f"[JOB] Distributed render: frames {job['frame_start']}-{job['frame_end']}"
+            )
+
+        frame_step = job.get("frame_step") or 1
+        try:
+            frame_step = max(1, int(frame_step))
+        except (TypeError, ValueError):
+            frame_step = 1
+        cmd.extend(["-e", f"FRAME_STEP={frame_step}"])
+
+        render_overrides = parse_job_render_overrides(job)
+        if render_overrides:
+            overrides_json = json.dumps(render_overrides, separators=(",", ":"), ensure_ascii=True)
+            overrides_b64 = base64.b64encode(overrides_json.encode("utf-8")).decode("ascii")
+            cmd.extend(["-e", f"RENDER_OVERRIDES_B64={overrides_b64}"])
+            device_policy = (
+                render_overrides.get("render", {}).get("device_policy")
+                if isinstance(render_overrides.get("render"), dict)
+                else None
+            )
+            if isinstance(device_policy, str) and device_policy.strip():
+                cmd.extend(["-e", f"DEVICE_POLICY={device_policy.strip().upper()}"])
 
         cmd.append(DOCKER_IMAGE)
 

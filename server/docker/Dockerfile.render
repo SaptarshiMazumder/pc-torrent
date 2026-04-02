@@ -19,6 +19,7 @@ RUN mkdir -p /input /output
 # Entry script
 COPY render.sh /render.sh
 COPY progress_handler.py /progress_handler.py
+COPY render_driver.py /render_driver.py
 RUN sed -i 's/\r$//' /render.sh && chmod +x /render.sh
 
 ENTRYPOINT ["/render.sh"]

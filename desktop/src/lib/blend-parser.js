@@ -268,29 +268,39 @@ function fieldByteSize(sdna, fTypeIdx, fNameIdx, ptrSize) {
   return size;
 }
 
-function findFieldOffset(sdna, structIdx, fieldName, ptrSize) {
+function normalizeFieldName(rawName) {
+  let clean = rawName.replace(/^\*+/, "");
+  const bracket = clean.indexOf("[");
+  if (bracket !== -1) clean = clean.substring(0, bracket);
+  if (clean.startsWith("(") && clean.includes(")")) {
+    clean = clean.split(")")[0].replace(/^\(/, "").replace(/^\*+/, "");
+  }
+  return clean;
+}
+
+function findFieldInfo(sdna, structIdx, fieldName, ptrSize) {
   const { fields } = sdna.structs[structIdx];
   let offset = 0;
 
   for (const { typeIdx, nameIdx } of fields) {
     const rawName = sdna.names[nameIdx];
-
-    // Clean name: strip pointer prefix, array suffix, function pointer syntax
-    let clean = rawName.replace(/^\*+/, "");
-    const bracket = clean.indexOf("[");
-    if (bracket !== -1) clean = clean.substring(0, bracket);
-    if (clean.startsWith("(") && clean.includes(")")) {
-      clean = clean.split(")")[0].replace(/^\(/, "").replace(/^\*+/, "");
-    }
+    const clean = normalizeFieldName(rawName);
+    const size = fieldByteSize(sdna, typeIdx, nameIdx, ptrSize);
 
     if (clean === fieldName) {
-      return { offset, typeIdx };
+      return { offset, typeIdx, size, rawName };
     }
 
-    offset += fieldByteSize(sdna, typeIdx, nameIdx, ptrSize);
+    offset += size;
   }
 
   return null;
+}
+
+function findFieldOffset(sdna, structIdx, fieldName, ptrSize) {
+  const info = findFieldInfo(sdna, structIdx, fieldName, ptrSize);
+  if (!info) return null;
+  return { offset: info.offset, typeIdx: info.typeIdx };
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +382,175 @@ function extractBlendFromZip(uint8) {
 // Main parse
 // ---------------------------------------------------------------------------
 
+function readFixedString(view, offset, maxBytes) {
+  const end = Math.min(view.byteLength, offset + maxBytes);
+  let out = "";
+  for (let i = offset; i < end; i++) {
+    const b = view.getUint8(i);
+    if (b === 0) break;
+    out += String.fromCharCode(b);
+  }
+  return out;
+}
+
+function readIntegerBySize(view, offset, size, littleEndian, signed = true) {
+  if (offset < 0 || offset + size > view.byteLength) {
+    return null;
+  }
+  if (size === 1) return signed ? view.getInt8(offset) : view.getUint8(offset);
+  if (size === 2) return signed ? view.getInt16(offset, littleEndian) : view.getUint16(offset, littleEndian);
+  if (size === 4) return signed ? view.getInt32(offset, littleEndian) : view.getUint32(offset, littleEndian);
+  if (size === 8) {
+    const v = signed ? view.getBigInt64(offset, littleEndian) : view.getBigUint64(offset, littleEndian);
+    return Number(v);
+  }
+  return null;
+}
+
+function readFloatBySize(view, offset, size, littleEndian) {
+  if (offset < 0 || offset + size > view.byteLength) return null;
+  if (size === 4) return view.getFloat32(offset, littleEndian);
+  if (size === 8) return view.getFloat64(offset, littleEndian);
+  return null;
+}
+
+function readPointer(view, offset, ptrSize, littleEndian) {
+  if (offset < 0 || offset + ptrSize > view.byteLength) return null;
+  if (ptrSize === 8) {
+    return view.getBigUint64(offset, littleEndian);
+  }
+  return BigInt(view.getUint32(offset, littleEndian));
+}
+
+function normalizeBlenderIdName(name) {
+  if (!name) return "";
+  if (name.length >= 3 && /^[A-Za-z]{2}/.test(name)) {
+    return name.slice(2);
+  }
+  return name;
+}
+
+function findFirstField(sdna, structIdx, ptrSize, candidates) {
+  for (const candidate of candidates) {
+    const info = findFieldInfo(sdna, structIdx, candidate, ptrSize);
+    if (info) return info;
+  }
+  return null;
+}
+
+function buildBlockCatalog(view, ptrSize, littleEndian, dataStart, bheadLayout, sdna) {
+  const blocks = [];
+  const byPtr = new Map();
+  const byType = new Map();
+
+  for (const block of iterBlocks(view, ptrSize, littleEndian, dataStart, bheadLayout)) {
+    let typeName = null;
+    if (block.sdnaIndex >= 0 && block.sdnaIndex < sdna.structs.length) {
+      const structDef = sdna.structs[block.sdnaIndex];
+      typeName = sdna.types[structDef.typeIdx];
+    }
+    const enriched = { ...block, typeName };
+    blocks.push(enriched);
+    byPtr.set(block.oldPtr.toString(), enriched);
+    if (typeName) {
+      if (!byType.has(typeName)) byType.set(typeName, []);
+      byType.get(typeName).push(enriched);
+    }
+  }
+
+  return { blocks, byPtr, byType };
+}
+
+function readIdNameFromBlock(view, block, sdna, ptrSize) {
+  if (!block || block.sdnaIndex < 0 || block.sdnaIndex >= sdna.structs.length) return "";
+  const structIdx = block.sdnaIndex;
+  const idField = findFieldInfo(sdna, structIdx, "id", ptrSize);
+  if (!idField) return "";
+  const idStructName = sdna.types[idField.typeIdx];
+  const idStructIdx = sdna.structByName[idStructName];
+  if (idStructIdx === undefined) return "";
+  const nameField = findFieldInfo(sdna, idStructIdx, "name", ptrSize);
+  if (!nameField) return "";
+  const abs = block.dataOffset + idField.offset + nameField.offset;
+  const raw = readFixedString(view, abs, nameField.size || 66);
+  return normalizeBlenderIdName(raw);
+}
+
+function listFromListBase(
+  view,
+  ownerBlock,
+  listField,
+  listBaseInfo,
+  ptrSize,
+  littleEndian,
+  byPtr,
+  sdna,
+  expectedTypeName = null,
+) {
+  if (!ownerBlock || !listField || !listBaseInfo) return [];
+  const firstField = findFieldInfo(sdna, listBaseInfo, "first", ptrSize);
+  if (!firstField) return [];
+
+  const firstAbs = ownerBlock.dataOffset + listField.offset + firstField.offset;
+  const firstPtr = readPointer(view, firstAbs, ptrSize, littleEndian);
+  if (!firstPtr || firstPtr === 0n) return [];
+
+  const out = [];
+  const seen = new Set();
+  let ptr = firstPtr;
+  while (ptr && ptr !== 0n) {
+    const key = ptr.toString();
+    if (seen.has(key)) break;
+    seen.add(key);
+
+    const node = byPtr.get(key);
+    if (!node) break;
+    if (!expectedTypeName || node.typeName === expectedTypeName) {
+      out.push(node);
+    }
+
+    if (node.sdnaIndex < 0 || node.sdnaIndex >= sdna.structs.length) break;
+    const nextField = findFieldInfo(sdna, node.sdnaIndex, "next", ptrSize);
+    if (!nextField) break;
+    const nextAbs = node.dataOffset + nextField.offset;
+    const nextPtr = readPointer(view, nextAbs, ptrSize, littleEndian);
+    if (!nextPtr || nextPtr === 0n) break;
+    ptr = nextPtr;
+  }
+
+  return out;
+}
+
+function mapImageFormatCodeToName(code) {
+  const map = {
+    0: "TGA",
+    1: "IRIS",
+    2: "HAMX",
+    3: "FTYPE",
+    4: "JPEG90",
+    5: "MOVIE",
+    6: "IRIZ",
+    7: "RAWTGA",
+    8: "AVIRAW",
+    9: "AVIJPEG",
+    10: "PNG",
+    11: "BMP",
+    12: "HDR",
+    13: "TIFF",
+    14: "OPEN_EXR",
+    15: "FFMPEG",
+    16: "FRAMESERVER",
+    17: "CINEON",
+    18: "DPX",
+    19: "MULTILAYER",
+    20: "DDS",
+    21: "JP2",
+    22: "OPEN_EXR_MULTILAYER",
+    23: "WEBP",
+  };
+  return map[code] || null;
+}
+
 function parseBlendBuffer(input) {
   let uint8 = input instanceof Uint8Array ? new Uint8Array(input) : new Uint8Array(input);
 
@@ -390,6 +569,8 @@ function parseBlendBuffer(input) {
     }
   }
   if (!sdna) throw new BlendParseError("No SDNA found in .blend file");
+
+  const catalog = buildBlockCatalog(view, ptrSize, littleEndian, dataStart, bheadLayout, sdna);
 
   // Locate Scene struct
   const sceneIdx = sdna.structByName["Scene"];
@@ -411,21 +592,82 @@ function parseBlendBuffer(input) {
   }
 
   // Find sfra, efra, frame_step within RenderData
-  const sfra = findFieldOffset(sdna, rdIdx, "sfra", ptrSize);
-  const efra = findFieldOffset(sdna, rdIdx, "efra", ptrSize);
-  const fstep = findFieldOffset(sdna, rdIdx, "frame_step", ptrSize);
+  const sfra = findFieldInfo(sdna, rdIdx, "sfra", ptrSize);
+  const efra = findFieldInfo(sdna, rdIdx, "efra", ptrSize);
+  const fstep = findFieldInfo(sdna, rdIdx, "frame_step", ptrSize);
 
   if (!sfra || !efra) {
     throw new BlendParseError("Could not find sfra/efra fields in RenderData");
+  }
+
+  const fpsField = findFirstField(sdna, rdIdx, ptrSize, ["frs_sec", "fps"]);
+  const fpsBaseField = findFirstField(sdna, rdIdx, ptrSize, ["frs_sec_base", "fps_base"]);
+  const mapOldField = findFirstField(sdna, rdIdx, ptrSize, ["framapto", "frame_map_old"]);
+  const mapNewField = findFirstField(sdna, rdIdx, ptrSize, ["images", "frame_map_new", "framelen"]);
+  const xschField = findFirstField(sdna, rdIdx, ptrSize, ["xsch"]);
+  const yschField = findFirstField(sdna, rdIdx, ptrSize, ["ysch"]);
+  const sizeField = findFirstField(sdna, rdIdx, ptrSize, ["size", "resolution_percentage"]);
+  const engineField = findFirstField(sdna, rdIdx, ptrSize, ["engine"]);
+  const picField = findFirstField(sdna, rdIdx, ptrSize, ["pic"]);
+  const imFormatField = findFirstField(sdna, rdIdx, ptrSize, ["im_format"]);
+
+  const listBaseIdx = sdna.structByName["ListBase"];
+  const sceneMarkersField = findFirstField(sdna, sceneIdx, ptrSize, ["markers"]);
+  const sceneViewLayersField = findFirstField(sdna, sceneIdx, ptrSize, ["view_layers"]);
+  const sceneCameraField = findFirstField(sdna, sceneIdx, ptrSize, ["camera"]);
+  const sceneCyclesField = findFirstField(sdna, sceneIdx, ptrSize, ["cycles"]);
+
+  const viewLayerIdx = sdna.structByName["ViewLayer"];
+  const viewLayerNameField = viewLayerIdx !== undefined
+    ? findFirstField(sdna, viewLayerIdx, ptrSize, ["name"])
+    : null;
+
+  const markerIdx = sdna.structByName["TimeMarker"];
+  const markerFrameField = markerIdx !== undefined
+    ? findFirstField(sdna, markerIdx, ptrSize, ["frame"])
+    : null;
+  const markerCameraField = markerIdx !== undefined
+    ? findFirstField(sdna, markerIdx, ptrSize, ["camera"])
+    : null;
+
+  const objectIdx = sdna.structByName["Object"];
+  const objectDataField = objectIdx !== undefined
+    ? findFirstField(sdna, objectIdx, ptrSize, ["data"])
+    : null;
+
+  const unsupportedFields = [];
+
+  // Build object -> camera map for human camera names.
+  const objectNameByPtr = new Map();
+  const cameraObjectNames = [];
+  if (objectIdx !== undefined && objectDataField) {
+    const objectBlocks = catalog.byType.get("Object") || [];
+    for (const objBlock of objectBlocks) {
+      const objectName = readIdNameFromBlock(view, objBlock, sdna, ptrSize) || "Camera";
+      objectNameByPtr.set(objBlock.oldPtr.toString(), objectName);
+      const dataPtr = readPointer(
+        view,
+        objBlock.dataOffset + objectDataField.offset,
+        ptrSize,
+        littleEndian
+      );
+      if (!dataPtr || dataPtr === 0n) continue;
+      const dataBlock = catalog.byPtr.get(dataPtr.toString());
+      if (dataBlock && dataBlock.typeName === "Camera") {
+        cameraObjectNames.push(objectName);
+      }
+    }
+  } else {
+    unsupportedFields.push("cameras");
   }
 
   // Resolve active scene pointer from FileGlobal.curscene so we match Blender UI.
   let activeSceneOldPtr = null;
   const fileGlobalIdx = sdna.structByName["FileGlobal"];
   if (fileGlobalIdx !== undefined) {
-    const curSceneField = findFieldOffset(sdna, fileGlobalIdx, "curscene", ptrSize);
+    const curSceneField = findFieldInfo(sdna, fileGlobalIdx, "curscene", ptrSize);
     if (curSceneField) {
-      for (const block of iterBlocks(view, ptrSize, littleEndian, dataStart, bheadLayout)) {
+      for (const block of catalog.blocks) {
         if (block.code !== "GLOB") continue;
         if (block.sdnaIndex >= sdna.structs.length) continue;
         const blockTypeIdx = sdna.structs[block.sdnaIndex].typeIdx;
@@ -441,81 +683,349 @@ function parseBlendBuffer(input) {
     }
   }
 
-  // Pass 2: find first Scene block and read frame data
+  // Pass 2: collect scene metadata
   const sceneTypeIdx = sdna.structs[sceneIdx].typeIdx;
-  let fallbackResult = null;
+  const scenes = [];
+  const sceneBlocks = catalog.byType.get("Scene") || [];
 
-  for (const block of iterBlocks(view, ptrSize, littleEndian, dataStart, bheadLayout)) {
-    if (block.code.startsWith("SC")) {
-      // Verify this block uses the Scene struct
-      if (block.sdnaIndex >= sdna.structs.length) {
-        continue;
-      }
-      const blockTypeIdx = sdna.structs[block.sdnaIndex].typeIdx;
-      if (blockTypeIdx !== sceneTypeIdx && sdna.types[blockTypeIdx] !== "Scene") {
-        continue;
-      }
+  for (const block of sceneBlocks) {
+    if (block.sdnaIndex >= sdna.structs.length) continue;
+    const blockTypeIdx = sdna.structs[block.sdnaIndex].typeIdx;
+    if (blockTypeIdx !== sceneTypeIdx && sdna.types[blockTypeIdx] !== "Scene") continue;
 
-      const rdStart = block.dataOffset + rField.offset;
-      const blockEnd = block.dataOffset + block.size;
+    const rdStart = block.dataOffset + rField.offset;
+    const blockEnd = block.dataOffset + block.size;
+    const readIntField = (fieldInfo, signed = true) => {
+      if (!fieldInfo) return null;
+      const absOff = rdStart + fieldInfo.offset;
+      if (absOff + fieldInfo.size > blockEnd) return null;
+      return readIntegerBySize(view, absOff, fieldInfo.size, littleEndian, signed);
+    };
 
-      const readInt = (off, typeIdx) => {
-        const absOff = rdStart + off;
-        const sz = sdna.typeLens[typeIdx];
-        if (absOff + sz > blockEnd) {
-          throw new BlendParseError("Frame field extends beyond block data");
+    const frameStart = readIntField(sfra);
+    const frameEnd = readIntField(efra);
+    let frameStep = readIntField(fstep);
+    if (!Number.isInteger(frameStart) || !Number.isInteger(frameEnd)) {
+      continue;
+    }
+    if (!Number.isInteger(frameStep) || frameStep < 1) frameStep = 1;
+    const totalFrames = frameEnd >= frameStart ? Math.floor((frameEnd - frameStart) / frameStep) + 1 : 0;
+
+    const fps = readIntField(fpsField, false);
+    const fpsBase = fpsBaseField
+      ? readFloatBySize(view, rdStart + fpsBaseField.offset, fpsBaseField.size, littleEndian)
+      : null;
+    const frameMapOld = readIntField(mapOldField, false);
+    const frameMapNew = readIntField(mapNewField, false);
+    const resolutionX = readIntField(xschField, false);
+    const resolutionY = readIntField(yschField, false);
+    const resolutionPctRaw = readIntField(sizeField, false);
+    const resolutionPercentage = Number.isFinite(resolutionPctRaw) ? resolutionPctRaw : 100;
+    const engine = engineField
+      ? readFixedString(view, rdStart + engineField.offset, engineField.size || 32)
+      : "";
+    const outputPathPattern = picField
+      ? readFixedString(view, rdStart + picField.offset, picField.size || 1024)
+      : "";
+
+    let output = {
+      path_pattern: outputPathPattern || null,
+      file_format: null,
+      color_mode: null,
+      color_depth: null,
+      compression: null,
+      quality: null,
+      exr_codec: null,
+    };
+    if (imFormatField) {
+      const imStructName = sdna.types[imFormatField.typeIdx];
+      const imStructIdx = sdna.structByName[imStructName];
+      if (imStructIdx !== undefined) {
+        const imStart = rdStart + imFormatField.offset;
+        const imFmtField = findFirstField(sdna, imStructIdx, ptrSize, ["imtype", "file_format"]);
+        const planesField = findFirstField(sdna, imStructIdx, ptrSize, ["planes", "color_mode"]);
+        const depthField = findFirstField(sdna, imStructIdx, ptrSize, ["depth", "color_depth"]);
+        const qualityField = findFirstField(sdna, imStructIdx, ptrSize, ["quality"]);
+        const compressField = findFirstField(sdna, imStructIdx, ptrSize, ["compress", "compression"]);
+        const exrCodecField = findFirstField(sdna, imStructIdx, ptrSize, ["exr_codec"]);
+
+        if (imFmtField) {
+          const code = readIntegerBySize(
+            view,
+            imStart + imFmtField.offset,
+            imFmtField.size,
+            littleEndian,
+            false
+          );
+          output.file_format = mapImageFormatCodeToName(code) || (code != null ? String(code) : null);
         }
-        if (sz === 4) return view.getInt32(absOff, littleEndian);
-        if (sz === 2) return view.getInt16(absOff, littleEndian);
-        if (sz === 8) return Number(view.getBigInt64(absOff, littleEndian));
-        return view.getInt32(absOff, littleEndian);
-      };
+        if (planesField) {
+          const v = readIntegerBySize(view, imStart + planesField.offset, planesField.size, littleEndian, false);
+          output.color_mode = v != null ? String(v) : null;
+        }
+        if (depthField) {
+          const v = readIntegerBySize(view, imStart + depthField.offset, depthField.size, littleEndian, false);
+          output.color_depth = v != null ? String(v) : null;
+        }
+        if (qualityField) {
+          output.quality = readIntegerBySize(
+            view, imStart + qualityField.offset, qualityField.size, littleEndian, false
+          );
+        }
+        if (compressField) {
+          output.compression = readIntegerBySize(
+            view, imStart + compressField.offset, compressField.size, littleEndian, false
+          );
+        }
+        if (exrCodecField) {
+          const v = readIntegerBySize(
+            view, imStart + exrCodecField.offset, exrCodecField.size, littleEndian, false
+          );
+          output.exr_codec = v != null ? String(v) : null;
+        }
+      } else {
+        unsupportedFields.push("output.image_format");
+      }
+    } else {
+      unsupportedFields.push("output.image_format");
+    }
 
-      // Bounds check
-      const sfraEnd = rdStart + sfra.offset + sdna.typeLens[sfra.typeIdx];
-      const efraEnd = rdStart + efra.offset + sdna.typeLens[efra.typeIdx];
-      if (sfraEnd > blockEnd || efraEnd > blockEnd) continue;
+    let cycles = {
+      samples: null,
+      adaptive_sampling: null,
+      denoise: null,
+    };
 
-      const frameStart = readInt(sfra.offset, sfra.typeIdx);
-      const frameEnd = readInt(efra.offset, efra.typeIdx);
+    if (sceneCyclesField) {
+      let cyclesStructIdx = sdna.structByName[sdna.types[sceneCyclesField.typeIdx]];
+      let cyclesDataOffset = block.dataOffset + sceneCyclesField.offset;
 
-      let frameStep = 1;
-      if (fstep) {
-        const stepEnd = rdStart + fstep.offset + sdna.typeLens[fstep.typeIdx];
-        if (stepEnd <= blockEnd) {
-          try {
-            frameStep = readInt(fstep.offset, fstep.typeIdx);
-          } catch {
-            // ignore
+      const isPointerLike =
+        sceneCyclesField.rawName.startsWith("*") || sceneCyclesField.size === ptrSize;
+
+      if (isPointerLike) {
+        const cyclesPtr = readPointer(
+          view,
+          block.dataOffset + sceneCyclesField.offset,
+          ptrSize,
+          littleEndian
+        );
+        if (cyclesPtr && cyclesPtr !== 0n) {
+          const cyclesBlock = catalog.byPtr.get(cyclesPtr.toString());
+          if (cyclesBlock && cyclesBlock.sdnaIndex >= 0 && cyclesBlock.sdnaIndex < sdna.structs.length) {
+            cyclesStructIdx = cyclesBlock.sdnaIndex;
+            cyclesDataOffset = cyclesBlock.dataOffset;
           }
         }
       }
-      if (frameStep < 1) frameStep = 1;
 
-      const totalFrames =
-        frameEnd >= frameStart ? Math.floor((frameEnd - frameStart) / frameStep) + 1 : 0;
+      if (cyclesStructIdx !== undefined && cyclesStructIdx !== null) {
+        const samplesField = findFirstField(sdna, cyclesStructIdx, ptrSize, ["samples", "aa_samples"]);
+        const adaptiveField = findFirstField(sdna, cyclesStructIdx, ptrSize, [
+          "use_adaptive_sampling",
+          "use_adaptive_sample",
+        ]);
+        const denoiseField = findFirstField(sdna, cyclesStructIdx, ptrSize, [
+          "use_denoising",
+          "use_preview_denoising",
+          "use_denoise",
+        ]);
 
-      const result = {
-        frame_start: frameStart,
-        frame_end: frameEnd,
-        frame_step: frameStep,
-        total_frames: totalFrames,
-        blender_version: version,
-      };
-      if (activeSceneOldPtr !== null && activeSceneOldPtr !== 0n && block.oldPtr === activeSceneOldPtr) {
-        return result;
-      }
-      if (!fallbackResult) {
-        fallbackResult = result;
+        if (samplesField) {
+          cycles.samples = readIntegerBySize(
+            view,
+            cyclesDataOffset + samplesField.offset,
+            samplesField.size,
+            littleEndian,
+            false
+          );
+        }
+        if (adaptiveField) {
+          const v = readIntegerBySize(
+            view,
+            cyclesDataOffset + adaptiveField.offset,
+            adaptiveField.size,
+            littleEndian,
+            false
+          );
+          cycles.adaptive_sampling = v != null ? Boolean(v) : null;
+        }
+        if (denoiseField) {
+          const v = readIntegerBySize(
+            view,
+            cyclesDataOffset + denoiseField.offset,
+            denoiseField.size,
+            littleEndian,
+            false
+          );
+          cycles.denoise = v != null ? Boolean(v) : null;
+        }
       }
     }
+
+    let activeCameraName = null;
+    const cameraNames = [];
+    if (sceneCameraField) {
+      const camPtr = readPointer(view, block.dataOffset + sceneCameraField.offset, ptrSize, littleEndian);
+      if (camPtr && camPtr !== 0n) {
+        activeCameraName = objectNameByPtr.get(camPtr.toString()) || null;
+        if (activeCameraName) cameraNames.push(activeCameraName);
+      }
+    } else {
+      unsupportedFields.push("scene.camera");
+    }
+
+    const viewLayers = [];
+    if (sceneViewLayersField && listBaseIdx !== undefined && viewLayerNameField) {
+      const layerBlocks = listFromListBase(
+        view,
+        block,
+        sceneViewLayersField,
+        listBaseIdx,
+        ptrSize,
+        littleEndian,
+        catalog.byPtr,
+        sdna,
+        "ViewLayer"
+      );
+      for (const layerBlock of layerBlocks) {
+        const name = readFixedString(
+          view,
+          layerBlock.dataOffset + viewLayerNameField.offset,
+          viewLayerNameField.size || 64
+        );
+        if (name) viewLayers.push(name);
+      }
+    } else {
+      unsupportedFields.push("scene.view_layers");
+    }
+
+    const cameraCuts = [];
+    if (sceneMarkersField && listBaseIdx !== undefined && markerIdx !== undefined && markerFrameField) {
+      const markerBlocks = listFromListBase(
+        view,
+        block,
+        sceneMarkersField,
+        listBaseIdx,
+        ptrSize,
+        littleEndian,
+        catalog.byPtr,
+        sdna,
+        "TimeMarker"
+      );
+      for (const markerBlock of markerBlocks) {
+        const frame = readIntegerBySize(
+          view,
+          markerBlock.dataOffset + markerFrameField.offset,
+          markerFrameField.size,
+          littleEndian,
+          true
+        );
+        let cameraName = null;
+        if (markerCameraField) {
+          const camPtr = readPointer(
+            view,
+            markerBlock.dataOffset + markerCameraField.offset,
+            ptrSize,
+            littleEndian
+          );
+          if (camPtr && camPtr !== 0n) {
+            cameraName = objectNameByPtr.get(camPtr.toString()) || null;
+            if (!cameraName) {
+              const camObjBlock = catalog.byPtr.get(camPtr.toString());
+              if (camObjBlock) {
+                cameraName = readIdNameFromBlock(view, camObjBlock, sdna, ptrSize) || null;
+              }
+            }
+          }
+        }
+        if (Number.isInteger(frame)) {
+          cameraCuts.push({ frame, camera_name: cameraName });
+          if (cameraName) cameraNames.push(cameraName);
+        }
+      }
+      cameraCuts.sort((a, b) => a.frame - b.frame);
+    } else {
+      unsupportedFields.push("scene.camera_cuts");
+    }
+
+    for (const globalCameraName of cameraObjectNames) {
+      cameraNames.push(globalCameraName);
+    }
+
+    const uniqueCameraNames = Array.from(new Set(cameraNames.filter(Boolean)));
+    if (activeCameraName && uniqueCameraNames.includes(activeCameraName)) {
+      uniqueCameraNames.splice(uniqueCameraNames.indexOf(activeCameraName), 1);
+      uniqueCameraNames.unshift(activeCameraName);
+    }
+
+    const sceneName = readIdNameFromBlock(view, block, sdna, ptrSize) || `Scene_${scenes.length + 1}`;
+    scenes.push({
+      name: sceneName,
+      is_active: activeSceneOldPtr !== null && activeSceneOldPtr !== 0n
+        ? block.oldPtr === activeSceneOldPtr
+        : scenes.length === 0,
+      frame_start: frameStart,
+      frame_end: frameEnd,
+      frame_step: frameStep,
+      total_frames: totalFrames,
+      fps: fps,
+      fps_base: fpsBase,
+      frame_map_old: frameMapOld,
+      frame_map_new: frameMapNew,
+      engine: engine || null,
+      resolution_x: resolutionX,
+      resolution_y: resolutionY,
+      resolution_percentage: resolutionPercentage,
+      output,
+      cycles,
+      active_camera: activeCameraName,
+      cameras: uniqueCameraNames,
+      view_layers: Array.from(new Set(viewLayers)),
+      camera_cuts: cameraCuts,
+    });
   }
 
-  if (fallbackResult) {
-    return fallbackResult;
+  if (scenes.length === 0) {
+    throw new BlendParseError("No Scene block found in .blend file");
   }
 
-  throw new BlendParseError("No Scene block found in .blend file");
+  const activeScene = scenes.find((scene) => scene.is_active) || scenes[0];
+  if (!activeScene) {
+    throw new BlendParseError("No active Scene could be determined");
+  }
+
+  return {
+    frame_start: activeScene.frame_start,
+    frame_end: activeScene.frame_end,
+    frame_step: activeScene.frame_step,
+    total_frames: activeScene.total_frames,
+    blender_version: version,
+    active_scene: activeScene.name,
+    cameras: activeScene.cameras || [],
+    camera_cuts: activeScene.camera_cuts || [],
+    view_layers: activeScene.view_layers || [],
+    timeline_defaults: {
+      frame_start: activeScene.frame_start,
+      frame_end: activeScene.frame_end,
+      frame_step: activeScene.frame_step,
+      fps: activeScene.fps,
+      frame_map_old: activeScene.frame_map_old,
+      frame_map_new: activeScene.frame_map_new,
+    },
+    output_defaults: activeScene.output || null,
+    render_defaults: {
+      engine: activeScene.engine || null,
+      resolution_x: activeScene.resolution_x,
+      resolution_y: activeScene.resolution_y,
+      resolution_percentage: activeScene.resolution_percentage,
+      cycles_samples: activeScene.cycles?.samples ?? null,
+      cycles_adaptive_sampling: activeScene.cycles?.adaptive_sampling ?? null,
+      cycles_denoise: activeScene.cycles?.denoise ?? null,
+    },
+    scenes,
+    unsupported_fields: Array.from(new Set(unsupportedFields)),
+  };
 }
 
 // ---------------------------------------------------------------------------

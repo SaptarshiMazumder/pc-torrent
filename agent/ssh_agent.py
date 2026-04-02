@@ -23,10 +23,12 @@ Config file format (runpod_machines.json):
 """
 
 import argparse
+import base64
 import hashlib
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import threading
@@ -66,6 +68,7 @@ MISSING_LIBRARY_MARKERS = (
 AGENT_DIR = Path(__file__).parent
 RENDER_SH = AGENT_DIR.parent / "server" / "docker" / "render.sh"
 PROGRESS_HANDLER = AGENT_DIR.parent / "server" / "docker" / "progress_handler.py"
+RENDER_DRIVER = AGENT_DIR.parent / "server" / "docker" / "render_driver.py"
 
 
 def _read_positive_int_env(name: str, default: int) -> int:
@@ -265,7 +268,7 @@ def ensure_blender(client: paramiko.SSHClient, label: str) -> bool:
 
 
 def upload_render_scripts(client: paramiko.SSHClient, label: str) -> bool:
-    """Upload render.sh and progress_handler.py to the remote machine."""
+    """Upload render scripts to the remote machine."""
     sftp = client.open_sftp()
     try:
         ssh_run(client, f"mkdir -p {REMOTE_SCRIPTS}")
@@ -285,6 +288,13 @@ def upload_render_scripts(client: paramiko.SSHClient, label: str) -> bool:
             log(label, f"progress_handler.py not found at {PROGRESS_HANDLER}, writing inline", level="warn")
             _write_inline_progress_handler(client)
 
+        # Upload render_driver.py
+        if RENDER_DRIVER.exists():
+            sftp.put(str(RENDER_DRIVER), f"{REMOTE_SCRIPTS}/render_driver.py")
+        else:
+            log(label, f"render_driver.py not found at {RENDER_DRIVER}, writing inline", level="warn")
+            _write_inline_render_driver(client)
+
         log(label, "Render scripts uploaded")
         return True
     except Exception as e:
@@ -298,36 +308,84 @@ def _write_inline_render_sh(client: paramiko.SSHClient):
     """Fallback: write render.sh inline if the local file is missing."""
     script = r"""#!/bin/bash
 set -euo pipefail
+BLENDER_BIN="${BLENDER_BIN:-/tmp/pcrent/blender/blender}"
+INPUT_DIR="${INPUT_DIR:-/tmp/pcrent/jobs/input}"
+OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pcrent/jobs/output}"
+PROGRESS_SCRIPT="${PROGRESS_SCRIPT:-/tmp/pcrent/scripts/progress_handler.py}"
+RENDER_DRIVER_SCRIPT="${RENDER_DRIVER_SCRIPT:-/tmp/pcrent/scripts/render_driver.py}"
+DEVICE_POLICY="${DEVICE_POLICY:-AUTO}"
+FRAME_STEP="${FRAME_STEP:-1}"
 BLEND_FILE="${BLEND_FILE:-}"
-if [ -z "$BLEND_FILE" ]; then
-    BLEND_FILE=$(find /input -name "*.blend" -print -quit 2>/dev/null || find "$INPUT_DIR" -name "*.blend" -print -quit)
-fi
-BLENDER="${BLENDER_BIN:-/tmp/pcrent/blender/blender}"
-OUTPUT_DIR="${OUTPUT_DIR:-/output}"
-INPUT_DIR="${INPUT_DIR:-/input}"
-BLEND_FILE="${BLEND_FILE:-$(find "$INPUT_DIR" -name '*.blend' | head -1)}"
-if [ -z "$BLEND_FILE" ] || [ ! -f "$BLEND_FILE" ]; then
-    echo "ERROR: No .blend file found"; exit 1
-fi
-echo "=== PC Rent Render (Linux SSH) ==="
-echo "Blend file: $BLEND_FILE"
+DEVICE_POLICY="$(echo "$DEVICE_POLICY" | tr '[:lower:]' '[:upper:]')"
+if ! [[ "$FRAME_STEP" =~ ^[0-9]+$ ]] || [ "$FRAME_STEP" -lt 1 ]; then FRAME_STEP=1; fi
+export OUTPUT_DIR INPUT_DIR FRAME_STEP DEVICE_POLICY
+if [ -z "$BLEND_FILE" ]; then BLEND_FILE=$(find "$INPUT_DIR" -name "*.blend" -print -quit); fi
+if [ -z "$BLEND_FILE" ] || [ ! -f "$BLEND_FILE" ]; then echo "ERROR: No .blend file found in $INPUT_DIR"; exit 1; fi
 run_render() {
-    local device="$1" label="$2"
-    local cmd=("$BLENDER" -b "$BLEND_FILE" -P /tmp/pcrent/scripts/progress_handler.py -o "$OUTPUT_DIR/frame####" -E CYCLES)
-    if [ -n "${FRAME_START:-}" ] && [ -n "${FRAME_END:-}" ]; then
-        cmd+=(-s "$FRAME_START" -e "$FRAME_END")
-    fi
-    cmd+=(-a)
-    if [ -n "$device" ]; then cmd+=(-- --cycles-device "$device"); fi
-    echo "Rendering with: $label"
-    "${cmd[@]}" 2>&1
+  local device="$1" label="$2" log_file="$3"
+  local -a cmd=("$BLENDER_BIN" -b "$BLEND_FILE" -P "$PROGRESS_SCRIPT" -P "$RENDER_DRIVER_SCRIPT")
+  if [ -n "$device" ]; then cmd+=(-- --cycles-device "$device"); fi
+  echo "Rendering with: $label"
+  set +e
+  "${cmd[@]}" 2>&1 | tee "$log_file"
+  local rc=${PIPESTATUS[0]}
+  set -e
+  return "$rc"
 }
-if nvidia-smi > /dev/null 2>&1; then
-    for device in OPTIX CUDA; do
-        if run_render "$device" "$device (GPU)"; then exit 0; fi
-    done
-fi
-run_render "" "CPU"
+contains_unavailable() {
+  local log_file="$1"
+  grep -q "Found no Cycles device of the specified type" "$log_file" || \
+  grep -q "Requested Cycles device not available" "$log_file"
+}
+attempt_render() {
+  local log_file
+  log_file=$(mktemp)
+  local last_exit=0
+  case "$DEVICE_POLICY" in
+    AUTO)
+      if nvidia-smi >/dev/null 2>&1; then
+        for device in OPTIX CUDA; do
+          if run_render "$device" "$device (GPU)" "$log_file"; then rm -f "$log_file"; return 0; fi
+          last_exit=$?
+          if contains_unavailable "$log_file"; then : > "$log_file"; continue; fi
+          rm -f "$log_file"; return "$last_exit"
+        done
+      fi
+      if run_render "" "CPU" "$log_file"; then rm -f "$log_file"; return 0; fi
+      last_exit=$?
+      rm -f "$log_file"
+      return "$last_exit"
+      ;;
+    CPU)
+      if run_render "" "CPU (strict)" "$log_file"; then rm -f "$log_file"; return 0; fi
+      last_exit=$?
+      rm -f "$log_file"
+      return "$last_exit"
+      ;;
+    OPTIX|CUDA)
+      if ! nvidia-smi >/dev/null 2>&1; then
+        echo "ERROR: Requested device '$DEVICE_POLICY', but GPU is not accessible."
+        rm -f "$log_file"
+        return 2
+      fi
+      if run_render "$DEVICE_POLICY" "$DEVICE_POLICY (GPU, strict)" "$log_file"; then rm -f "$log_file"; return 0; fi
+      last_exit=$?
+      if contains_unavailable "$log_file"; then
+        echo "ERROR: Requested Cycles device '$DEVICE_POLICY' is unavailable on this worker."
+        rm -f "$log_file"
+        return 3
+      fi
+      rm -f "$log_file"
+      return "$last_exit"
+      ;;
+    *)
+      echo "ERROR: Unsupported DEVICE_POLICY '$DEVICE_POLICY'"
+      rm -f "$log_file"
+      return 2
+      ;;
+  esac
+}
+attempt_render
 """
     _, stdin, _ = client.exec_command(f"cat > {REMOTE_SCRIPTS}/render.sh && chmod +x {REMOTE_SCRIPTS}/render.sh")
     stdin.write(script)
@@ -364,6 +422,167 @@ bpy.app.handlers.render_init.append(on_init)
 bpy.app.handlers.render_write.append(on_write)
 '''
     _, stdin, _ = client.exec_command(f"cat > {REMOTE_SCRIPTS}/progress_handler.py")
+    stdin.write(script)
+    stdin.channel.shutdown_write()
+
+
+def _write_inline_render_driver(client: paramiko.SSHClient):
+    """Fallback: write render_driver.py inline if the local file is missing."""
+    script = '''import base64, json, os, re, sys
+import bpy
+PFX = "PCR_PROGRESS "
+def _ci(v, mn=None, mx=None):
+    if v is None: return None
+    try: n = int(v)
+    except Exception: return None
+    if mn is not None and n < mn: n = mn
+    if mx is not None and n > mx: n = mx
+    return n
+def _cb(v):
+    if isinstance(v, bool): return v
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in {"1","true","yes","on"}: return True
+        if t in {"0","false","no","off"}: return False
+    if isinstance(v, (int,float)): return bool(v)
+    return None
+def _ov():
+    raw = os.environ.get("RENDER_OVERRIDES_JSON","").strip()
+    b64 = os.environ.get("RENDER_OVERRIDES_B64","").strip()
+    if not raw and b64:
+        try: raw = base64.b64decode(b64).decode("utf-8")
+        except Exception: raw = ""
+    if not raw: return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+def _cam(name):
+    if not name: return None
+    o = bpy.data.objects.get(name)
+    if o is None or getattr(o, "type", None) != "CAMERA": return None
+    return o
+def _emit(kind, cur, rf, tf):
+    print(PFX + json.dumps({"kind": kind, "current_frame": int(cur), "rendered_frames": int(rf), "total_frames": int(tf)}, sort_keys=True), flush=True)
+def _p(path, frame):
+    m = re.search(r"#+", path or "")
+    if m:
+        w = m.end() - m.start()
+        return f"{path[:m.start()]}{str(frame).zfill(w)}{path[m.end():]}"
+    if (path or "").endswith("/") or (path or "").endswith("\\\\"):
+        return f"{path}frame{frame:04d}"
+    return f"{path}{frame:04d}"
+def _apply(scene, ov):
+    tl = ov.get("timeline") if isinstance(ov.get("timeline"), dict) else {}
+    fs = _ci(os.environ.get("FRAME_START"), 1) or _ci(tl.get("frame_start"), 1) or int(scene.frame_start)
+    fe = _ci(os.environ.get("FRAME_END"), 1) or _ci(tl.get("frame_end"), 1) or int(scene.frame_end)
+    st = _ci(os.environ.get("FRAME_STEP"), 1) or _ci(tl.get("frame_step"), 1) or int(scene.frame_step or 1)
+    if fe < fs: raise RuntimeError(f"Invalid frame range {fs}..{fe}")
+    scene.frame_start, scene.frame_end, scene.frame_step = int(fs), int(fe), int(max(1, st))
+    out = ov.get("output") if isinstance(ov.get("output"), dict) else {}
+    path = out.get("path_pattern")
+    if not isinstance(path, str) or not path.strip():
+        path = f"{os.environ.get('OUTPUT_DIR','/output').rstrip('/')}/frame####"
+    scene.render.filepath = path
+    r = ov.get("render") if isinstance(ov.get("render"), dict) else {}
+    eng = r.get("engine")
+    if isinstance(eng, str) and eng: scene.render.engine = eng
+    rx, ry = _ci(r.get("resolution_x"), 1), _ci(r.get("resolution_y"), 1)
+    rp = _ci(r.get("resolution_percentage"), 1, 1000)
+    if rx is not None: scene.render.resolution_x = rx
+    if ry is not None: scene.render.resolution_y = ry
+    if rp is not None: scene.render.resolution_percentage = rp
+    cyc = getattr(scene, "cycles", None)
+    if cyc is not None:
+        smp = _ci(r.get("cycles_samples"), 1)
+        if smp is not None: cyc.samples = smp
+        ads, dns = _cb(r.get("cycles_adaptive_sampling")), _cb(r.get("cycles_denoise"))
+        if ads is not None: cyc.use_adaptive_sampling = ads
+        if dns is not None: cyc.use_denoising = dns
+        pol = r.get("device_policy")
+        if isinstance(pol, str):
+            p = pol.strip().upper()
+            if p == "CPU": cyc.device = "CPU"
+            elif p in {"AUTO","CUDA","OPTIX"}: cyc.device = "GPU"
+    mode = ov.get("camera_mode") if isinstance(ov.get("camera_mode"), str) else "auto_markers"
+    c = _cam(ov.get("camera_name") if isinstance(ov.get("camera_name"), str) else "")
+    if mode == "force_camera":
+        if c is None: raise RuntimeError("force_camera requires valid camera_name")
+        scene.camera = c
+        for m in scene.timeline_markers:
+            try: m.camera = c
+            except Exception: pass
+    elif c is not None:
+        scene.camera = c
+    return mode
+def _render_ranges(scene, layer, ov):
+    rows = []
+    for i, row in enumerate(ov.get("camera_ranges") if isinstance(ov.get("camera_ranges"), list) else []):
+        if not isinstance(row, dict): continue
+        if _cb(row.get("enabled")) is False: continue
+        cam = _cam(row.get("camera_name"))
+        if cam is None: raise RuntimeError(f"camera_ranges[{i}] camera not found")
+        rs, re = _ci(row.get("frame_start"), 1), _ci(row.get("frame_end"), 1)
+        rst = _ci(row.get("frame_step"), 1) or 1
+        if rs is None or re is None or re < rs: raise RuntimeError(f"camera_ranges[{i}] invalid frame range")
+        rows.append({"cam": cam, "start": rs, "end": re, "step": rst})
+    if not rows: raise RuntimeError("camera_ranges mode requires enabled rows")
+    rows.sort(key=lambda x: (x["start"], x["end"]))
+    frames = list(range(int(scene.frame_start), int(scene.frame_end) + 1, max(1, int(scene.frame_step))))
+    if not frames: raise RuntimeError("No frames to render")
+    fallback = scene.camera
+    assignments = []
+    for f in frames:
+        picked = None
+        for r in rows:
+            if f < r["start"] or f > r["end"]: continue
+            if (f - r["start"]) % r["step"] == 0:
+                picked = r["cam"]
+                break
+        if picked is None: picked = fallback
+        if picked is None: raise RuntimeError(f"No camera resolved for frame {f}")
+        assignments.append((f, picked))
+    for hl in (bpy.app.handlers.render_init, bpy.app.handlers.render_write):
+        for h in list(hl):
+            if getattr(h, "__name__", "") in {"on_render_init","on_render_write"}:
+                try: hl.remove(h)
+                except Exception: pass
+    _emit("meta", assignments[0][0], 0, len(assignments))
+    base = scene.render.filepath
+    kw = dict(write_still=True, scene=scene.name, use_viewport=False)
+    if layer and any(vl.name == layer for vl in scene.view_layers):
+        kw["layer"] = layer
+    try:
+        for idx, (f, cam) in enumerate(assignments, start=1):
+            scene.camera = cam
+            scene.frame_set(f)
+            scene.render.filepath = _p(base, f)
+            bpy.ops.render.render(**kw)
+            _emit("frame", f, idx, len(assignments))
+    finally:
+        scene.render.filepath = base
+def main():
+    ov = _ov()
+    sn = ov.get("scene_name") if isinstance(ov.get("scene_name"), str) else ""
+    scene = bpy.data.scenes.get(sn) if sn else bpy.context.scene
+    if scene is None: raise RuntimeError("No renderable scene found")
+    mode = _apply(scene, ov)
+    layer = ov.get("view_layer") if isinstance(ov.get("view_layer"), str) else ""
+    if mode == "camera_ranges":
+        _render_ranges(scene, layer, ov)
+    else:
+        kw = dict(animation=True, scene=scene.name, write_still=False, use_viewport=False)
+        if layer and any(vl.name == layer for vl in scene.view_layers):
+            kw["layer"] = layer
+        bpy.ops.render.render(**kw)
+if __name__ == "__main__":
+    try: main()
+    except Exception as e:
+        print(f"[RENDER_DRIVER] ERROR: {e}", file=sys.stderr, flush=True)
+        raise
+'''
+    _, stdin, _ = client.exec_command(f"cat > {REMOTE_SCRIPTS}/render_driver.py")
     stdin.write(script)
     stdin.channel.shutdown_write()
 
@@ -514,6 +733,20 @@ def parse_progress_line(line: str) -> dict | None:
         return None
 
 
+def parse_job_render_overrides(job: dict) -> dict:
+    raw = job.get("render_overrides_json")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
 # -----------------------------------------------
 # JOB EXECUTION (over SSH)
 # -----------------------------------------------
@@ -605,36 +838,41 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
             raise RuntimeError("Stop requested")
 
         # 4. Build render command
-        blender_bin = f"{REMOTE_BLENDER}/blender"
-        render_cmd = (
-            f"BLEND_FILE={blend_path} "
-            f"OUTPUT_DIR={remote_output_dir} "
-            f"INPUT_DIR={remote_input_dir} "
-        )
-        if job.get("frame_start") is not None and job.get("frame_end") is not None:
-            render_cmd += f"FRAME_START={job['frame_start']} FRAME_END={job['frame_end']} "
-            log(label, f"[JOB {job_id[:8]}] Distributed render: frames {job['frame_start']}-{job['frame_end']}")
+        render_overrides = parse_job_render_overrides(job)
+        overrides_json = json.dumps(render_overrides, separators=(",", ":"), ensure_ascii=True)
+        overrides_b64 = base64.b64encode(overrides_json.encode("utf-8")).decode("ascii")
 
-        render_cmd += (
-            f"{blender_bin} -b {blend_path} "
-            f"-P {REMOTE_SCRIPTS}/progress_handler.py "
-            f"-o {remote_output_dir}/frame#### "
-            f"-E CYCLES "
-        )
+        frame_step = job.get("frame_step") or 1
+        try:
+            frame_step = max(1, int(frame_step))
+        except (TypeError, ValueError):
+            frame_step = 1
+
+        device_policy = "AUTO"
+        render_block = render_overrides.get("render")
+        if isinstance(render_block, dict):
+            value = render_block.get("device_policy")
+            if isinstance(value, str) and value.strip():
+                device_policy = value.strip().upper()
+
+        env_parts = [
+            f"BLENDER_BIN={shlex.quote(f'{REMOTE_BLENDER}/blender')}",
+            f"BLEND_FILE={shlex.quote(blend_path)}",
+            f"OUTPUT_DIR={shlex.quote(remote_output_dir)}",
+            f"INPUT_DIR={shlex.quote(remote_input_dir)}",
+            f"PROGRESS_SCRIPT={shlex.quote(f'{REMOTE_SCRIPTS}/progress_handler.py')}",
+            f"RENDER_DRIVER_SCRIPT={shlex.quote(f'{REMOTE_SCRIPTS}/render_driver.py')}",
+            f"FRAME_STEP={frame_step}",
+            f"DEVICE_POLICY={shlex.quote(device_policy)}",
+            f"RENDER_OVERRIDES_B64={shlex.quote(overrides_b64)}",
+        ]
 
         if job.get("frame_start") is not None and job.get("frame_end") is not None:
-            render_cmd += f"-s {job['frame_start']} -e {job['frame_end']} "
+            env_parts.append(f"FRAME_START={int(job['frame_start'])}")
+            env_parts.append(f"FRAME_END={int(job['frame_end'])}")
+            log(label, f"[JOB {job_id[:8]}] Distributed render: frames {job['frame_start']}-{job['frame_end']} step {frame_step}")
 
-        render_cmd += "-a -- --cycles-device CUDA 2>&1 || "
-        render_cmd += (
-            f"{blender_bin} -b {blend_path} "
-            f"-P {REMOTE_SCRIPTS}/progress_handler.py "
-            f"-o {remote_output_dir}/frame#### "
-            f"-E CYCLES "
-        )
-        if job.get("frame_start") is not None and job.get("frame_end") is not None:
-            render_cmd += f"-s {job['frame_start']} -e {job['frame_end']} "
-        render_cmd += "-a"
+        render_cmd = " ".join(env_parts) + f" {shlex.quote(f'{REMOTE_SCRIPTS}/render.sh')} 2>&1"
 
         container_log = []
 
@@ -659,7 +897,7 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
                 push_progress(force=(event["kind"] == "meta"))
             else:
                 container_log.append(line)
-                log(label, line, source="blender" if False else "info")
+                log(label, line)
 
         log(label, f"[JOB {job_id[:8]}] Starting Blender render...")
         exit_code = ssh_run_stream(client, render_cmd, on_line=on_line, stop_event=stop_event)

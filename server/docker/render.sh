@@ -85,7 +85,7 @@ attempt_render() {
                 echo "GPU detected:"
                 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
-                for device in OPTIX CUDA; do
+                for device in CUDA OPTIX; do
                     if run_render "$device" "$device (GPU)" "$log_file"; then
                         rm -f "$log_file"
                         return 0

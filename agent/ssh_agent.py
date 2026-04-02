@@ -114,11 +114,38 @@ def make_ssh_client(host: str, port: int, username: str,
 
 
 def ssh_run(client: paramiko.SSHClient, command: str, timeout: int = 60) -> tuple[int, str, str]:
-    """Run a command on remote, return (exit_code, stdout, stderr)."""
-    _, stdout, stderr = client.exec_command(command, timeout=timeout, get_pty=False)
-    out = stdout.read().decode("utf-8", errors="replace").strip()
-    err = stderr.read().decode("utf-8", errors="replace").strip()
-    exit_code = stdout.channel.recv_exit_status()
+    """Run a command on remote, return (exit_code, stdout, stderr).
+
+    Reads stdout/stderr concurrently to avoid deadlocks when one stream fills.
+    """
+    _, stdout, _ = client.exec_command(command, timeout=timeout, get_pty=False)
+    chan = stdout.channel
+
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+    started = time.monotonic()
+
+    while True:
+        if chan.recv_ready():
+            out_chunks.append(chan.recv(4096))
+        if chan.recv_stderr_ready():
+            err_chunks.append(chan.recv_stderr(4096))
+
+        if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
+            break
+
+        if timeout and (time.monotonic() - started) > timeout:
+            try:
+                chan.close()
+            except Exception:
+                pass
+            raise RuntimeError(f"Remote command timed out after {timeout}s: {command}")
+
+        time.sleep(0.05)
+
+    exit_code = chan.recv_exit_status()
+    out = b"".join(out_chunks).decode("utf-8", errors="replace").strip()
+    err = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
     return exit_code, out, err
 
 
@@ -223,9 +250,12 @@ def detect_remote_specs(client: paramiko.SSHClient, machine_key: str) -> dict:
     }
 
 
-def make_machine_key(host: str, username: str) -> str:
+def make_machine_key(host: str, username: str, machine_key_seed: str | None = None) -> str:
     """Stable identity key for a RunPod machine."""
-    raw = f"runpod|{username}@{host}"
+    if machine_key_seed:
+        raw = f"runpod|seed|{machine_key_seed.strip()}"
+    else:
+        raw = f"runpod|{username}@{host}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -244,23 +274,49 @@ def ensure_blender(client: paramiko.SSHClient, label: str) -> bool:
     # Create dirs
     ssh_run(client, f"mkdir -p {REMOTE_BASE} {REMOTE_SCRIPTS} {REMOTE_JOBS}")
 
+    # Install Blender runtime prerequisites on Debian/Ubuntu images.
+    deps_cmd = (
+        "if command -v apt-get >/dev/null 2>&1; then "
+        "export DEBIAN_FRONTEND=noninteractive; "
+        "apt-get update -y >/dev/null 2>&1 && "
+        "apt-get install -y --no-install-recommends "
+        "ca-certificates wget curl xz-utils unzip "
+        "libx11-6 libxi6 libxxf86vm1 libxrender1 libxfixes3 "
+        "libxkbcommon0 libxrandr2 libxinerama1 libxcursor1 "
+        "libgl1 libegl1 libsm6 libice6 libglib2.0-0 libdbus-1-3 "
+        "libfontconfig1 libfreetype6 >/dev/null 2>&1; "
+        "fi"
+    )
+    dep_rc, _, dep_err = ssh_run(client, deps_cmd, timeout=600)
+    if dep_rc != 0:
+        log(label, f"Dependency install command failed (continuing): {dep_err}", level="warn")
+
     # Download + extract
     download_cmd = (
         f"cd {REMOTE_BASE} && "
-        f"wget -q --show-progress '{BLENDER_URL}' -O {BLENDER_ARCHIVE} && "
+        f"rm -rf blender {BLENDER_DIR} && "
+        f"(wget -q --show-progress '{BLENDER_URL}' -O {BLENDER_ARCHIVE} "
+        f"|| curl -fL '{BLENDER_URL}' -o {BLENDER_ARCHIVE}) && "
         f"tar xf {BLENDER_ARCHIVE} && "
         f"mv {BLENDER_DIR} blender && "
         f"rm {BLENDER_ARCHIVE}"
     )
     rc, out, err = ssh_run(client, download_cmd, timeout=600)
     if rc != 0:
-        log(label, f"Failed to install Blender: {err}", level="error")
+        detail = err or out or "unknown download/extract error"
+        log(label, f"Failed to install Blender: {detail}", level="error")
         return False
 
     # Verify
-    rc, out, _ = ssh_run(client, f"{REMOTE_BLENDER}/blender --version")
+    rc, out, err = ssh_run(client, f"{REMOTE_BLENDER}/blender --version")
     if rc != 0:
-        log(label, "Blender installation verification failed", level="error")
+        detail = err or out or "blender --version failed with no stderr"
+        log(label, f"Blender installation verification failed: {detail}", level="error")
+        # Extra diagnostics for missing shared libs.
+        _, ldd_out, ldd_err = ssh_run(client, f"ldd {REMOTE_BLENDER}/blender | head -n 30")
+        diag = ldd_out or ldd_err
+        if diag:
+            log(label, f"Blender ldd diagnostics: {diag}", level="warn")
         return False
 
     log(label, f"Blender installed: {out.splitlines()[0] if out else '?'}")
@@ -344,7 +400,7 @@ attempt_render() {
   case "$DEVICE_POLICY" in
     AUTO)
       if nvidia-smi >/dev/null 2>&1; then
-        for device in OPTIX CUDA; do
+        for device in CUDA OPTIX; do
           if run_render "$device" "$device (GPU)" "$log_file"; then rm -f "$log_file"; return 0; fi
           last_exit=$?
           if contains_unavailable "$log_file"; then : > "$log_file"; continue; fi
@@ -661,7 +717,7 @@ def upload_output_files(job_id: str, local_files: list[tuple[str, bytes]]) -> li
         batches.append((current_batch, current_batch_bytes))
 
     uploaded_names: list[str] = []
-    for batch, batch_bytes in batches:
+    for batch_idx, (batch, batch_bytes) in enumerate(batches, start=1):
         streams: list[io.BytesIO] = []
         file_tuples = []
         try:
@@ -671,27 +727,54 @@ def upload_output_files(job_id: str, local_files: list[tuple[str, bytes]]) -> li
                 file_tuples.append(("files", (filename, stream)))
 
             timeout = max(120, min(900, 60 + int(batch_bytes / (1024 * 1024)) * 10))
-            resp = requests.post(
-                f"{BACKEND_URL}/jobs/{job_id}/output",
-                files=file_tuples,
-                timeout=timeout,
+            log(
+                "UPLOAD",
+                f"[JOB {job_id[:8]}] Uploading batch {batch_idx}/{len(batches)} "
+                f"({len(batch)} files, {batch_bytes / (1024 * 1024):.1f} MB)...",
             )
-            try:
-                resp.raise_for_status()
-            except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 413:
-                    if len(batch) == 1:
-                        filename = batch[0][0]
-                        raise RuntimeError(
-                            f"Output upload rejected (413): '{filename}' "
-                            f"is {batch_bytes / (1024 * 1024):.1f} MB, above server request limits. "
-                            "Render to a smaller file or use a compression/output format with smaller frames."
-                        ) from exc
-                    raise RuntimeError(
-                        "Output upload rejected (413): request payload exceeded server request limits. "
-                        "Set OUTPUT_UPLOAD_MAX_REQUEST_MB lower to force smaller upload batches."
-                    ) from exc
-                raise
+            last_exc: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    resp = requests.post(
+                        f"{BACKEND_URL}/jobs/{job_id}/output",
+                        files=file_tuples,
+                        timeout=(20, timeout),
+                    )
+                    try:
+                        resp.raise_for_status()
+                    except requests.HTTPError as exc:
+                        if exc.response is not None and exc.response.status_code == 413:
+                            if len(batch) == 1:
+                                filename = batch[0][0]
+                                raise RuntimeError(
+                                    f"Output upload rejected (413): '{filename}' "
+                                    f"is {batch_bytes / (1024 * 1024):.1f} MB, above server request limits. "
+                                    "Render to a smaller file or use a compression/output format with smaller frames."
+                                ) from exc
+                            raise RuntimeError(
+                                "Output upload rejected (413): request payload exceeded server request limits. "
+                                "Set OUTPUT_UPLOAD_MAX_REQUEST_MB lower to force smaller upload batches."
+                            ) from exc
+                        raise
+                    last_exc = None
+                    break
+                except requests.RequestException as exc:
+                    last_exc = exc
+                    if attempt >= 3:
+                        break
+                    wait_s = attempt * 2
+                    log(
+                        "UPLOAD",
+                        f"[JOB {job_id[:8]}] Batch {batch_idx} upload attempt {attempt}/3 failed: {exc}. "
+                        f"Retrying in {wait_s}s...",
+                        level="warn",
+                    )
+                    time.sleep(wait_s)
+
+            if last_exc is not None:
+                raise RuntimeError(
+                    f"Failed to upload output batch {batch_idx}/{len(batches)} after retries: {last_exc}"
+                ) from last_exc
         finally:
             for stream in streams:
                 stream.close()
@@ -701,12 +784,31 @@ def upload_output_files(job_id: str, local_files: list[tuple[str, bytes]]) -> li
     return uploaded_names
 
 
-def download_input_file(url: str) -> bytes:
-    resp = requests.get(url, stream=True, timeout=120)
+def download_input_file(
+    url: str,
+    stop_event: threading.Event | None = None,
+    on_progress=None,
+    max_seconds: int = 1800,
+) -> bytes:
+    started_at = time.monotonic()
+    resp = requests.get(url, stream=True, timeout=(30, 120))
     resp.raise_for_status()
     buf = io.BytesIO()
+    downloaded = 0
     for chunk in resp.iter_content(chunk_size=65536):
+        if stop_event and stop_event.is_set():
+            raise RuntimeError("Stop requested during input download")
+        if (time.monotonic() - started_at) > max_seconds:
+            raise RuntimeError(f"Input download exceeded {max_seconds}s timeout")
+        if not chunk:
+            continue
         buf.write(chunk)
+        downloaded += len(chunk)
+        if on_progress:
+            try:
+                on_progress(downloaded)
+            except Exception:
+                pass
     return buf.getvalue()
 
 
@@ -796,6 +898,10 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
             progress_state["last_reported_rendered"] = rf
             progress_state["last_reported_total"] = tf
         except Exception as e:
+            message = str(e)
+            if " 409 " in f" {message} " or "Conflict" in message:
+                # Job can transition state before final progress push on failures.
+                return
             log(label, f"Progress push failed: {e}", level="warn")
 
     heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
@@ -806,21 +912,101 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
         ssh_run(client, f"mkdir -p {remote_input_dir} {remote_output_dir}")
 
         # 2. Download blend file locally, SFTP it over
-        log(label, f"[JOB {job_id[:8]}] Downloading {input_filename}...")
-        input_data = download_input_file(input_url)
+        log(label, f"[JOB {job_id[:8]}] Downloading {input_filename} from backend...")
+        dl_started = time.monotonic()
+        last_dl_log_at = {"t": 0.0}
+        last_dl_mb = {"mb": 0}
+
+        def on_download_progress(downloaded_bytes: int):
+            now = time.monotonic()
+            downloaded_mb = downloaded_bytes // (1024 * 1024)
+            if downloaded_mb >= last_dl_mb["mb"] + 25 or (now - last_dl_log_at["t"]) >= 10:
+                last_dl_mb["mb"] = downloaded_mb
+                last_dl_log_at["t"] = now
+                log(label, f"[JOB {job_id[:8]}] Downloaded {downloaded_mb} MB...")
+
+        input_data = download_input_file(
+            input_url,
+            stop_event=stop_event,
+            on_progress=on_download_progress,
+            max_seconds=1800,
+        )
+        log(
+            label,
+            f"[JOB {job_id[:8]}] Download complete: {len(input_data) // (1024 * 1024)} MB "
+            f"in {int(time.monotonic() - dl_started)}s"
+        )
 
         sftp = client.open_sftp()
         try:
             remote_input_path = f"{remote_input_dir}/{input_filename}"
-            with sftp.open(remote_input_path, "wb") as f:
-                f.write(input_data)
+            log(label, f"[JOB {job_id[:8]}] Uploading input to remote worker...")
+            try:
+                sftp_channel = sftp.get_channel()
+                sftp_channel.settimeout(120)
+            except Exception:
+                pass
+
+            total_bytes = len(input_data)
+            total_mb = max(1, total_bytes // (1024 * 1024))
+            upload_state = {
+                "last_log_at": 0.0,
+                "last_log_bytes": 0,
+            }
+
+            def on_sftp_progress(transferred: int, total: int):
+                if stop_event.is_set():
+                    raise RuntimeError("Stop requested during input upload")
+                now = time.monotonic()
+                bytes_delta = transferred - upload_state["last_log_bytes"]
+                should_log = (
+                    bytes_delta >= (5 * 1024 * 1024)
+                    or (now - upload_state["last_log_at"]) >= 10.0
+                    or transferred >= total
+                )
+                if should_log:
+                    upload_state["last_log_at"] = now
+                    upload_state["last_log_bytes"] = transferred
+                    done_mb = transferred // (1024 * 1024)
+                    pct = int((transferred / total) * 100) if total else 0
+                    log(label, f"[JOB {job_id[:8]}] Remote upload {done_mb}/{total_mb} MB ({pct}%)")
+
+            try:
+                sftp.putfo(
+                    io.BytesIO(input_data),
+                    remote_input_path,
+                    file_size=total_bytes,
+                    callback=on_sftp_progress,
+                    confirm=True,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Failed to upload input to remote worker: {exc}") from exc
+            log(label, f"[JOB {job_id[:8]}] Remote upload complete")
 
             # Handle ZIP: extract on remote
             if input_filename.lower().endswith(".zip"):
                 log(label, f"[JOB {job_id[:8]}] Extracting archive...")
-                rc, _, err = ssh_run(client, f"cd {remote_input_dir} && unzip -o {input_filename} && rm {input_filename}")
+                quoted_input = shlex.quote(input_filename)
+                extract_cmd = (
+                    f"cd {shlex.quote(remote_input_dir)} && "
+                    f"if command -v unzip >/dev/null 2>&1; then "
+                    f"unzip -o {quoted_input} && rm {quoted_input}; "
+                    f"elif command -v python3 >/dev/null 2>&1; then "
+                    f"python3 -m zipfile -e {quoted_input} . && rm {quoted_input}; "
+                    f"else "
+                    f"echo 'No unzip or python3 available to extract ZIP' >&2; "
+                    f"exit 1; "
+                    f"fi"
+                )
+                rc, out, err = ssh_run(
+                    client,
+                    extract_cmd,
+                    timeout=900,
+                )
                 if rc != 0:
-                    raise RuntimeError(f"Failed to extract ZIP: {err}")
+                    detail = err or out or "unzip failed with unknown error"
+                    raise RuntimeError(f"Failed to extract ZIP: {detail}")
+                log(label, f"[JOB {job_id[:8]}] Archive extracted")
         finally:
             sftp.close()
 
@@ -917,21 +1103,29 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
 
         # 5. Download output files via SFTP
         log(label, f"[JOB {job_id[:8]}] Collecting output files...")
-        rc, file_list, _ = ssh_run(client, f"ls {remote_output_dir}")
+        rc, file_list, err = ssh_run(client, f"ls -1 {shlex.quote(remote_output_dir)}", timeout=30)
         if rc != 0 or not file_list.strip():
+            detail = err or file_list
             if missing_assets:
                 raise RuntimeError("Project references external assets. No output produced.")
-            raise RuntimeError("Render produced no output files")
+            raise RuntimeError(f"Render produced no output files. ls output: {detail}")
 
         output_filenames = [f for f in file_list.strip().splitlines() if not f.startswith(".")]
         if not output_filenames:
             raise RuntimeError("Render produced no output files")
 
+        log(label, f"[JOB {job_id[:8]}] Found {len(output_filenames)} output files on worker")
         sftp = client.open_sftp()
         output_files_data = []
         try:
+            try:
+                sftp_channel = sftp.get_channel()
+                sftp_channel.settimeout(120)
+            except Exception:
+                pass
             for fname in output_filenames:
                 remote_path = f"{remote_output_dir}/{fname}"
+                log(label, f"[JOB {job_id[:8]}] Downloading output from worker: {fname}")
                 with sftp.open(remote_path, "rb") as f:
                     data = f.read()
                 output_files_data.append((fname, data))
@@ -995,20 +1189,67 @@ class SSHMachineWorker:
         self.key_path = cfg.get("key_path")
         self.password = cfg.get("password")
         self.label = cfg.get("label") or f"{self.username}@{self.host}"
+        self.machine_key_seed = cfg.get("machine_key_seed")
 
         self.machine_id: str | None = None
         self.client: paramiko.SSHClient | None = None
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self._job_stop_event = threading.Event()
+        self._obs_lock = threading.Lock()
+        self._state = "connecting"
+        self._state_changed_at = time.time()
+        self._last_available_at: float | None = None
+        self._last_job_started_at: float | None = None
+        self._last_job_finished_at: float | None = None
+        self._last_error: str | None = None
+
+    def _set_state(self, state: str, *, error: str | None = None):
+        now = time.time()
+        with self._obs_lock:
+            self._state = state
+            self._state_changed_at = now
+            if state == "available":
+                self._last_available_at = now
+            if state == "running":
+                self._last_job_started_at = now
+            if state == "error":
+                self._last_error = error or self._last_error
+
+    def _mark_job_finished(self):
+        now = time.time()
+        with self._obs_lock:
+            self._last_job_finished_at = now
+
+    def get_observability_snapshot(self) -> dict:
+        with self._obs_lock:
+            return {
+                "state": self._state,
+                "state_changed_at": self._state_changed_at,
+                "last_available_at": self._last_available_at,
+                "last_job_started_at": self._last_job_started_at,
+                "last_job_finished_at": self._last_job_finished_at,
+                "last_error": self._last_error,
+                "machine_id": self.machine_id,
+                "host": self.host,
+                "port": self.port,
+                "label": self.label,
+            }
 
     def _connect(self) -> bool:
         try:
+            self._set_state("connecting")
             log(self.label, f"Connecting to {self.username}@{self.host}:{self.port}...")
             self.client = make_ssh_client(
                 self.host, self.port, self.username,
                 self.key_path, self.password
             )
+            try:
+                transport = self.client.get_transport()
+                if transport:
+                    transport.set_keepalive(30)
+            except Exception:
+                pass
             log(self.label, "SSH connection established")
             return True
         except Exception as e:
@@ -1035,13 +1276,16 @@ class SSHMachineWorker:
         """Main worker loop for this machine."""
         while not self.stop_event.is_set():
             if not self._connect():
+                self._set_state("error", error="SSH connection failed")
                 log(self.label, "Retrying in 30s...")
                 self.stop_event.wait(30)
                 continue
 
             try:
+                self._set_state("setup")
                 self._setup_and_poll()
             except Exception as e:
+                self._set_state("error", error=str(e))
                 log(self.label, f"Worker error: {e}", level="error")
             finally:
                 if self.machine_id:
@@ -1056,6 +1300,7 @@ class SSHMachineWorker:
             if not self.stop_event.is_set():
                 log(self.label, "Reconnecting in 15s...")
                 self.stop_event.wait(15)
+        self._set_state("stopping")
 
     def _setup_and_poll(self):
         # 1. Install Blender if needed
@@ -1067,7 +1312,7 @@ class SSHMachineWorker:
             raise RuntimeError("Failed to upload render scripts")
 
         # 3. Detect specs and register
-        machine_key = make_machine_key(self.host, self.username)
+        machine_key = make_machine_key(self.host, self.username, self.machine_key_seed)
         log(self.label, "Detecting hardware specs...")
         specs = detect_remote_specs(self.client, machine_key)
         log(self.label, f"  GPU: {specs['gpu_model']} ({specs['gpu_vram_gb']} GB VRAM)")
@@ -1079,6 +1324,7 @@ class SSHMachineWorker:
         log(self.label, f"Machine ID: {self.machine_id}")
 
         set_available(self.machine_id)
+        self._set_state("available")
         log(self.label, "Available. Polling for jobs...")
 
         # 4. Poll loop
@@ -1088,6 +1334,7 @@ class SSHMachineWorker:
                 if not self._reconnect():
                     raise RuntimeError("Could not reconnect via SSH")
                 set_available(self.machine_id)
+                self._set_state("available")
 
             if self.pause_event.is_set():
                 time.sleep(POLL_INTERVAL)
@@ -1108,25 +1355,31 @@ class SSHMachineWorker:
                 log(self.label, f"Got job: {job['id']} ({job['input_filename']})")
                 self._job_stop_event.clear()
                 try:
+                    self._set_state("running")
                     update_job_status(job["id"], "running")
                     execute_job(
                         self.client, job, self.machine_id, self.label,
                         self._job_stop_event, self.pause_event
                     )
                 except Exception as e:
+                    self._set_state("error", error=str(e))
                     log(self.label, f"Job execution error: {e}", level="error")
                     try:
                         update_job_status(job["id"], "failed", error=str(e))
                     except Exception:
                         pass
+                finally:
+                    self._mark_job_finished()
 
                 if not self.stop_event.is_set() and not self.pause_event.is_set():
                     set_available(self.machine_id)
+                    self._set_state("available")
                     log(self.label, "Back to polling...")
             else:
                 time.sleep(POLL_INTERVAL)
 
     def stop(self):
+        self._set_state("stopping")
         self.stop_event.set()
         self._job_stop_event.set()
 

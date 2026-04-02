@@ -28,14 +28,25 @@ def get_conn():
     """Get a connection from the pool. Auto-commits on success, rolls back on error."""
     pool = _get_pool()
     conn = pool.getconn()
+    if conn.closed:
+        pool.putconn(conn, close=True)
+        conn = pool.getconn()
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        finally:
+            # Drop broken connections from the pool so we don't keep reusing
+            # dead sockets and returning repeated 500s on polling endpoints.
+            pool.putconn(conn, close=True)
+            conn = None
         raise
     finally:
-        pool.putconn(conn)
+        if conn is not None:
+            pool.putconn(conn)
 
 
 def query_one(sql, params=None):

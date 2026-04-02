@@ -4,7 +4,7 @@ set -e
 # ============================================================
 # PC Rent - Full Deployment Script
 # Deploys: Backend (Cloud Run) + Frontend (Cloudflare Pages)
-#          + Docker render image to R2
+#          + Windows/Linux Docker render images to R2
 # ============================================================
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -103,21 +103,35 @@ else
 fi
 
 # -----------------------------------------------
-# [3/5] Sync Docker render image to R2
+# [3/5] Sync Docker render images to R2
 # -----------------------------------------------
-log_step "[3/5] Syncing Docker render image -> Cloudflare R2"
+log_step "[3/5] Syncing Windows/Linux Docker render images -> Cloudflare R2"
 
-if [[ "${UPLOAD_RENDER_IMAGE:-}" == "1" ]] && [ -f "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" ]; then
+# Backward compatibility: UPLOAD_RENDER_IMAGE=1 means upload Windows image.
+if [[ "${UPLOAD_RENDER_IMAGE:-}" == "1" ]] && [[ -z "${UPLOAD_RENDER_IMAGE_WINDOWS:-}" ]]; then
+    export UPLOAD_RENDER_IMAGE_WINDOWS=1
+fi
+
+cd "$PROJECT_ROOT"
+
+if [[ "${UPLOAD_RENDER_IMAGE_WINDOWS:-}" == "1" ]] && [ -f "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" ]; then
     IMAGE_SIZE=$(du -sh "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" | cut -f1)
-    log_info "Uploading pcrent-render.tar.gz ($IMAGE_SIZE) to R2..."
+    log_info "Uploading Windows image pcrent-render.tar.gz ($IMAGE_SIZE) to R2..."
     log_info "This may take a few minutes..."
-
-    cd "$PROJECT_ROOT"
     python upload_docker_image.py
-    cd - > /dev/null
-    log_ok "Docker render image synced to R2"
+    log_ok "Windows Docker render image synced to R2"
 else
-    log_info "Skipping render image upload (run with UPLOAD_RENDER_IMAGE=1 ./deploy.sh to upload)"
+    log_info "Skipping Windows image upload (set UPLOAD_RENDER_IMAGE_WINDOWS=1)"
+fi
+
+if [[ "${UPLOAD_RENDER_IMAGE_LINUX:-}" == "1" ]] && [ -f "$PROJECT_ROOT/server/docker_linux/pcrent-render-linux.tar.gz" ]; then
+    LINUX_IMAGE_SIZE=$(du -sh "$PROJECT_ROOT/server/docker_linux/pcrent-render-linux.tar.gz" | cut -f1)
+    log_info "Uploading Linux image pcrent-render-linux.tar.gz ($LINUX_IMAGE_SIZE) to R2..."
+    log_info "This may take a few minutes..."
+    python upload_docker_image_linux.py
+    log_ok "Linux Docker render image synced to R2"
+else
+    log_info "Skipping Linux image upload (set UPLOAD_RENDER_IMAGE_LINUX=1)"
 fi
 
 # -----------------------------------------------
@@ -166,7 +180,7 @@ echo -e "  ${BOLD}Backend:${NC}   $BACKEND_URL"
 echo -e "  ${BOLD}Frontend:${NC}  https://pcrent.pages.dev"
 echo -e "  ${BOLD}Database:${NC}  Neon PostgreSQL (connected)"
 echo -e "  ${BOLD}Storage:${NC}   Cloudflare R2 ($R2_BUCKET_NAME)"
-echo -e "  ${BOLD}Docker:${NC}    Render image on R2"
+echo -e "  ${BOLD}Docker:${NC}    Windows/Linux render images on R2"
 echo -e ""
 echo -e "  ${YELLOW}To rebuild the desktop installer:${NC}"
 echo -e "    cd agent && python build_sidecar.py"

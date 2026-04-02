@@ -51,7 +51,6 @@ BLENDER_VERSION = "5.0.1"
 BLENDER_URL = f"https://download.blender.org/release/Blender5.0/blender-{BLENDER_VERSION}-linux-x64.tar.xz"
 BLENDER_ARCHIVE = f"blender-{BLENDER_VERSION}-linux-x64.tar.xz"
 BLENDER_DIR = f"blender-{BLENDER_VERSION}-linux-x64"
-
 REMOTE_BASE = "/tmp/pcrent"
 REMOTE_BLENDER = f"{REMOTE_BASE}/blender"
 REMOTE_SCRIPTS = f"{REMOTE_BASE}/scripts"
@@ -64,11 +63,11 @@ MISSING_LIBRARY_MARKERS = (
     "missing from '/",
 )
 
-# Path to render scripts (same directory as this file)
+# Path to Linux render scripts (separate from Windows image sources)
 AGENT_DIR = Path(__file__).parent
-RENDER_SH = AGENT_DIR.parent / "server" / "docker" / "render.sh"
-PROGRESS_HANDLER = AGENT_DIR.parent / "server" / "docker" / "progress_handler.py"
-RENDER_DRIVER = AGENT_DIR.parent / "server" / "docker" / "render_driver.py"
+RENDER_SH = AGENT_DIR.parent / "server" / "docker_linux" / "render.sh"
+PROGRESS_HANDLER = AGENT_DIR.parent / "server" / "docker_linux" / "progress_handler.py"
+RENDER_DRIVER = AGENT_DIR.parent / "server" / "docker_linux" / "render_driver.py"
 
 
 def _read_positive_int_env(name: str, default: int) -> int:
@@ -332,7 +331,7 @@ def upload_render_scripts(client: paramiko.SSHClient, label: str) -> bool:
         # Upload render.sh
         if RENDER_SH.exists():
             sftp.put(str(RENDER_SH), f"{REMOTE_SCRIPTS}/render.sh")
-            ssh_run(client, f"chmod +x {REMOTE_SCRIPTS}/render.sh")
+            ssh_run(client, f"sed -i 's/\\r$//' {REMOTE_SCRIPTS}/render.sh && chmod +x {REMOTE_SCRIPTS}/render.sh")
         else:
             log(label, f"render.sh not found at {RENDER_SH}, writing inline", level="warn")
             _write_inline_render_sh(client)
@@ -641,6 +640,105 @@ if __name__ == "__main__":
     _, stdin, _ = client.exec_command(f"cat > {REMOTE_SCRIPTS}/render_driver.py")
     stdin.write(script)
     stdin.channel.shutdown_write()
+
+
+# -----------------------------------------------
+# GPU ENVIRONMENT (remote)
+# -----------------------------------------------
+def build_gpu_env(client: paramiko.SSHClient) -> str:
+    """Build an env-prefix string with correct LD_LIBRARY_PATH for CUDA/OptiX.
+
+    Finds the real libcuda.so (skipping /usr/local/cuda/lib64/stubs which is
+    a compile-time stub that causes 'cuInit: Unknown CUDA error').
+    """
+    rc, cuda_paths, _ = ssh_run(
+        client,
+        "find /usr/lib /usr/local/nvidia /usr/local/cuda/compat -name 'libcuda.so*' "
+        "-not -path '*/stubs/*' 2>/dev/null | head -5",
+        timeout=10,
+    )
+    extra_lib_dirs = set()
+    for p in (cuda_paths or "").strip().splitlines():
+        d = p.rsplit("/", 1)[0]
+        if d:
+            extra_lib_dirs.add(d)
+
+    ld_path_parts = sorted(extra_lib_dirs) + [
+        "/usr/local/nvidia/lib",
+        "/usr/local/nvidia/lib64",
+        "/usr/local/cuda/compat",
+        "/usr/local/cuda/lib64",   # libnvrtc.so — required for OptiX kernel compilation
+    ]
+    ld_path = ":".join(ld_path_parts) + ":${LD_LIBRARY_PATH:-}"
+
+    return (
+        f"LD_LIBRARY_PATH={ld_path} "
+        "PATH=/usr/local/nvidia/bin:/usr/local/cuda/bin:$PATH "
+        "NVIDIA_VISIBLE_DEVICES=all "
+        "NVIDIA_DRIVER_CAPABILITIES=compute,utility"
+    )
+
+
+def verify_blender_gpu(client: paramiko.SSHClient, label: str) -> bool:
+    """Verify Blender can detect and use GPU devices via Cycles."""
+    gpu_test_py = (
+        "import bpy, json, sys\n"
+        "result = {\"devices\": [], \"type\": None}\n"
+        "try:\n"
+        "    prefs = bpy.context.preferences.addons[\"cycles\"].preferences\n"
+        "    for ctype in (\"OPTIX\", \"CUDA\"):\n"
+        "        try:\n"
+        "            prefs.compute_device_type = ctype\n"
+        "            try:\n"
+        "                prefs.get_devices()\n"
+        "            except Exception:\n"
+        "                try:\n"
+        "                    prefs.refresh_devices()\n"
+        "                except Exception:\n"
+        "                    pass\n"
+        "            devs = [(d.name, d.type) for d in getattr(prefs, \"devices\", []) if d.type != \"CPU\"]\n"
+        "            if devs:\n"
+        "                result[\"devices\"] = devs\n"
+        "                result[\"type\"] = ctype\n"
+        "                break\n"
+        "        except Exception:\n"
+        "            continue\n"
+        "except Exception as e:\n"
+        "    result[\"error\"] = str(e)\n"
+        "print(\"GPU_TEST:\" + json.dumps(result))\n"
+        "sys.exit(0 if result[\"devices\"] else 1)\n"
+    )
+    # Write test script via heredoc to avoid shell quoting issues
+    write_cmd = f"cat << 'PYEOF' > /tmp/pcrent/gpu_test.py\n{gpu_test_py}PYEOF"
+    ssh_run(client, write_cmd, timeout=10)
+
+    gpu_env = build_gpu_env(client)
+
+    # Initialize CUDA driver (required on some RunPod containers)
+    ssh_run(client, "nvidia-smi > /dev/null 2>&1", timeout=15)
+
+    rc, out, err = ssh_run(
+        client,
+        f"{gpu_env} {REMOTE_BLENDER}/blender -b --factory-startup -P /tmp/pcrent/gpu_test.py 2>&1",
+        timeout=120,
+    )
+
+    for line in (out or "").splitlines():
+        if line.startswith("GPU_TEST:"):
+            try:
+                result = json.loads(line[len("GPU_TEST:"):])
+                if result.get("devices"):
+                    devices = result["devices"]
+                    ctype = result.get("type", "?")
+                    log(label, f"Blender GPU check OK: {ctype} devices: {[d[0] for d in devices]}")
+                    return True
+                if result.get("error"):
+                    log(label, f"Blender GPU check error: {result['error']}", level="error")
+            except json.JSONDecodeError:
+                pass
+
+    log(label, f"Blender GPU check failed: no GPU devices found. Output: {(out or err or '')[-500:]}", level="error")
+    return False
 
 
 # -----------------------------------------------
@@ -1023,7 +1121,7 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
         if stop_event.is_set():
             raise RuntimeError("Stop requested")
 
-        # 4. Build render command
+        # 4. Build direct render command
         render_overrides = parse_job_render_overrides(job)
         overrides_json = json.dumps(render_overrides, separators=(",", ":"), ensure_ascii=True)
         overrides_b64 = base64.b64encode(overrides_json.encode("utf-8")).decode("ascii")
@@ -1041,16 +1139,19 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
             if isinstance(value, str) and value.strip():
                 device_policy = value.strip().upper()
 
+        gpu_env = build_gpu_env(client)
+
         env_parts = [
-            f"BLENDER_BIN={shlex.quote(f'{REMOTE_BLENDER}/blender')}",
-            f"BLEND_FILE={shlex.quote(blend_path)}",
-            f"OUTPUT_DIR={shlex.quote(remote_output_dir)}",
+            f"BLENDER_BIN={REMOTE_BLENDER}/blender",
             f"INPUT_DIR={shlex.quote(remote_input_dir)}",
-            f"PROGRESS_SCRIPT={shlex.quote(f'{REMOTE_SCRIPTS}/progress_handler.py')}",
-            f"RENDER_DRIVER_SCRIPT={shlex.quote(f'{REMOTE_SCRIPTS}/render_driver.py')}",
+            f"OUTPUT_DIR={shlex.quote(remote_output_dir)}",
+            f"PROGRESS_SCRIPT={REMOTE_SCRIPTS}/progress_handler.py",
+            f"RENDER_DRIVER_SCRIPT={REMOTE_SCRIPTS}/render_driver.py",
+            f"DEVICE_POLICY={device_policy}",
             f"FRAME_STEP={frame_step}",
-            f"DEVICE_POLICY={shlex.quote(device_policy)}",
-            f"RENDER_OVERRIDES_B64={shlex.quote(overrides_b64)}",
+            f"BLEND_FILE={shlex.quote(blend_path)}",
+            f"RENDER_OVERRIDES_B64={overrides_b64}",
+            gpu_env,
         ]
 
         if job.get("frame_start") is not None and job.get("frame_end") is not None:
@@ -1058,9 +1159,9 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
             env_parts.append(f"FRAME_END={int(job['frame_end'])}")
             log(label, f"[JOB {job_id[:8]}] Distributed render: frames {job['frame_start']}-{job['frame_end']} step {frame_step}")
 
-        render_cmd = " ".join(env_parts) + f" {shlex.quote(f'{REMOTE_SCRIPTS}/render.sh')} 2>&1"
+        render_cmd = " ".join(env_parts) + f" {REMOTE_SCRIPTS}/render.sh 2>&1"
 
-        container_log = []
+        render_log = []
 
         def on_line(line: str):
             event = parse_progress_line(line)
@@ -1082,16 +1183,17 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
                     )
                 push_progress(force=(event["kind"] == "meta"))
             else:
-                container_log.append(line)
+                render_log.append(line)
                 log(label, line)
 
         log(label, f"[JOB {job_id[:8]}] Starting Blender render...")
+        log(label, f"[JOB {job_id[:8]}] Command: {render_cmd}")
         exit_code = ssh_run_stream(client, render_cmd, on_line=on_line, stop_event=stop_event)
 
         if stop_event.is_set():
             raise RuntimeError("Stop requested")
 
-        missing_assets = any(m in "\n".join(container_log) for m in MISSING_LIBRARY_MARKERS)
+        missing_assets = any(m in "\n".join(render_log) for m in MISSING_LIBRARY_MARKERS)
 
         if exit_code != 0:
             if missing_assets:
@@ -1099,7 +1201,7 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
                     "Project references external assets not uploaded. "
                     "Use a packed .blend or .zip bundle."
                 )
-            raise RuntimeError(f"Blender exited with code {exit_code}")
+            raise RuntimeError(f"Render exited with code {exit_code}")
 
         # 5. Download output files via SFTP
         log(label, f"[JOB {job_id[:8]}] Collecting output files...")
@@ -1303,15 +1405,19 @@ class SSHMachineWorker:
         self._set_state("stopping")
 
     def _setup_and_poll(self):
-        # 1. Install Blender if needed
+        # 1. Install Blender directly on the remote machine
         if not ensure_blender(self.client, self.label):
-            raise RuntimeError("Blender setup failed")
+            raise RuntimeError("Blender installation failed")
 
-        # 2. Upload render scripts
+        # 2. Upload render scripts (render.sh, render_driver.py, progress_handler.py)
         if not upload_render_scripts(self.client, self.label):
             raise RuntimeError("Failed to upload render scripts")
 
-        # 3. Detect specs and register
+        # 3. Verify Blender can access GPU via Cycles
+        if not verify_blender_gpu(self.client, self.label):
+            raise RuntimeError("Blender GPU validation failed")
+
+        # 4. Detect specs and register
         machine_key = make_machine_key(self.host, self.username, self.machine_key_seed)
         log(self.label, "Detecting hardware specs...")
         specs = detect_remote_specs(self.client, machine_key)
@@ -1327,7 +1433,7 @@ class SSHMachineWorker:
         self._set_state("available")
         log(self.label, "Available. Polling for jobs...")
 
-        # 4. Poll loop
+        # 5. Poll loop
         while not self.stop_event.is_set():
             if not self._is_connected():
                 log(self.label, "SSH connection lost, reconnecting...")

@@ -73,7 +73,7 @@ from ssh_agent import SSHMachineWorker
 DEFAULT_BACKEND = os.environ.get("BACKEND_URL", "http://localhost:8000")
 DEFAULT_GPU_TYPE = "NVIDIA RTX A5000"
 DEFAULT_CLOUD_TYPE = "COMMUNITY"
-DEFAULT_IMAGE = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
+DEFAULT_IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 DEFAULT_DISK_GB = 20
 DEFAULT_IDLE_TIMEOUT_MINUTES = 20
 DEFAULT_RECONCILE_SECONDS = 15

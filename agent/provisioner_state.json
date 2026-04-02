@@ -2,17 +2,17 @@
   "version": 1,
   "managed": [
     {
-      "pod_id": "bzaqqokry0kb38",
-      "label": "RunPod NVIDIA GeForce RTX 4090 #9286",
-      "host": "103.196.86.83",
-      "port": 12492,
+      "pod_id": "yds428fitzwytx",
+      "label": "RunPod NVIDIA GeForce RTX 4090 #a6e8",
+      "host": "103.196.86.97",
+      "port": 15190,
       "worker_state": "running",
-      "created_at": 1775119381.115676,
-      "last_seen_at": 1775120626.7225509,
-      "last_available_at": 1775120298.0559835,
-      "last_job_started_at": 1775120459.2255318,
-      "last_job_finished_at": 1775120296.7230442,
-      "machine_id": "0b88e46d-06d0-4ab3-9bc7-f1ff8e27a2a4"
+      "created_at": 1775145993.8089015,
+      "last_seen_at": 1775146168.642171,
+      "last_available_at": 1775146074.285015,
+      "last_job_started_at": 1775146122.1781642,
+      "last_job_finished_at": null,
+      "machine_id": "a6c72217-b1d0-4536-a3d5-c051756a7af4"
     }
   ]
 }

@@ -15,6 +15,9 @@ import storage
 from blend_parser import parse_upload, BlendParseError
 
 MACHINE_STALE_SECONDS = 15
+DEFAULT_DEVICE_POLICY = "AUTO"
+ALLOWED_DEVICE_POLICIES = {"AUTO", "OPTIX", "CUDA", "CPU"}
+ALLOWED_CAMERA_MODES = {"auto_markers", "force_camera", "camera_ranges"}
 
 app = FastAPI(title="PC Rent Server")
 
@@ -61,6 +64,174 @@ def parse_output_files(raw: str | None) -> list[str]:
         return parsed if isinstance(parsed, list) else []
     except json.JSONDecodeError:
         return []
+
+
+def parse_json_object(raw: str | None, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not raw:
+        return default.copy() if default else {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    return default.copy() if default else {}
+
+
+def parse_json_list(raw: str | None, default: list[Any] | None = None) -> list[Any]:
+    if not raw:
+        return list(default or [])
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    return list(default or [])
+
+
+def _coerce_int(value: Any, minimum: int | None = None, maximum: int | None = None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if minimum is not None and parsed < minimum:
+        parsed = minimum
+    if maximum is not None and parsed > maximum:
+        parsed = maximum
+    return parsed
+
+
+def _coerce_float(value: Any, minimum: float | None = None, maximum: float | None = None) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if minimum is not None and parsed < minimum:
+        parsed = minimum
+    if maximum is not None and parsed > maximum:
+        parsed = maximum
+    return parsed
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"1", "true", "yes", "on"}:
+            return True
+        if lower in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return None
+
+
+def normalize_render_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
+    src = raw if isinstance(raw, dict) else {}
+    timeline = src.get("timeline") if isinstance(src.get("timeline"), dict) else {}
+    output = src.get("output") if isinstance(src.get("output"), dict) else {}
+    render = src.get("render") if isinstance(src.get("render"), dict) else {}
+
+    camera_mode_raw = src.get("camera_mode")
+    camera_mode = camera_mode_raw if camera_mode_raw in ALLOWED_CAMERA_MODES else "auto_markers"
+
+    device_policy_raw = render.get("device_policy")
+    if isinstance(device_policy_raw, str):
+        device_policy = device_policy_raw.strip().upper()
+    else:
+        device_policy = DEFAULT_DEVICE_POLICY
+    if device_policy not in ALLOWED_DEVICE_POLICIES:
+        device_policy = DEFAULT_DEVICE_POLICY
+
+    camera_ranges_raw = src.get("camera_ranges")
+    camera_ranges: list[dict[str, Any]] = []
+    if isinstance(camera_ranges_raw, list):
+        for item in camera_ranges_raw:
+            if not isinstance(item, dict):
+                continue
+            camera_name = item.get("camera_name")
+            if not isinstance(camera_name, str) or not camera_name.strip():
+                continue
+            frame_start = _coerce_int(item.get("frame_start"), minimum=1)
+            frame_end = _coerce_int(item.get("frame_end"), minimum=1)
+            if frame_start is None or frame_end is None or frame_end < frame_start:
+                continue
+            frame_step = _coerce_int(item.get("frame_step"), minimum=1) or 1
+            camera_ranges.append(
+                {
+                    "camera_name": camera_name.strip(),
+                    "frame_start": frame_start,
+                    "frame_end": frame_end,
+                    "frame_step": frame_step,
+                    "enabled": _coerce_bool(item.get("enabled")) is not False,
+                }
+            )
+
+    normalized = {
+        "scene_name": src.get("scene_name") if isinstance(src.get("scene_name"), str) else None,
+        "camera_mode": camera_mode,
+        "camera_name": src.get("camera_name") if isinstance(src.get("camera_name"), str) else None,
+        "camera_ranges": camera_ranges,
+        "view_layer": src.get("view_layer") if isinstance(src.get("view_layer"), str) else None,
+        "timeline": {
+            "frame_start": _coerce_int(timeline.get("frame_start"), minimum=1),
+            "frame_end": _coerce_int(timeline.get("frame_end"), minimum=1),
+            "frame_step": _coerce_int(timeline.get("frame_step"), minimum=1),
+            "fps": _coerce_float(timeline.get("fps"), minimum=1.0),
+            "frame_map_old": _coerce_int(timeline.get("frame_map_old"), minimum=1),
+            "frame_map_new": _coerce_int(timeline.get("frame_map_new"), minimum=1),
+        },
+        "output": {
+            "path_pattern": output.get("path_pattern") if isinstance(output.get("path_pattern"), str) else None,
+            "file_format": output.get("file_format") if isinstance(output.get("file_format"), str) else None,
+            "color_mode": output.get("color_mode") if isinstance(output.get("color_mode"), str) else None,
+            "color_depth": output.get("color_depth") if isinstance(output.get("color_depth"), str) else None,
+            "compression": _coerce_int(output.get("compression"), minimum=0, maximum=100),
+            "quality": _coerce_int(output.get("quality"), minimum=0, maximum=100),
+            "exr_codec": output.get("exr_codec") if isinstance(output.get("exr_codec"), str) else None,
+        },
+        "render": {
+            "engine": render.get("engine") if isinstance(render.get("engine"), str) else None,
+            "resolution_x": _coerce_int(render.get("resolution_x"), minimum=1),
+            "resolution_y": _coerce_int(render.get("resolution_y"), minimum=1),
+            "resolution_percentage": _coerce_int(render.get("resolution_percentage"), minimum=1, maximum=1000),
+            "cycles_samples": _coerce_int(render.get("cycles_samples"), minimum=1),
+            "cycles_adaptive_sampling": _coerce_bool(render.get("cycles_adaptive_sampling")),
+            "cycles_denoise": _coerce_bool(render.get("cycles_denoise")),
+            "device_policy": device_policy,
+        },
+    }
+    return normalized
+
+
+def normalize_scheduling(raw: dict[str, Any] | None) -> dict[str, Any]:
+    src = raw if isinstance(raw, dict) else {}
+    return {
+        "chunk_size_frames": _coerce_int(src.get("chunk_size_frames"), minimum=1),
+        "max_retries_per_chunk": _coerce_int(src.get("max_retries_per_chunk"), minimum=0, maximum=10) or 0,
+        "priority": _coerce_int(src.get("priority"), minimum=-100, maximum=100) or 0,
+    }
+
+
+def extract_analysis_warnings(analysis_snapshot: dict[str, Any] | None) -> list[str]:
+    if not isinstance(analysis_snapshot, dict):
+        return []
+    unsupported = analysis_snapshot.get("unsupported_fields")
+    if not isinstance(unsupported, list):
+        return []
+    out = []
+    for item in unsupported:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+    return out
 
 
 def compute_progress_pct(
@@ -308,7 +479,7 @@ def get_next_job_for_machine(machine_id: str, request: Request) -> dict[str, Any
         """
         SELECT * FROM jobs
         WHERE machine_id = %s AND status = 'pending'
-        ORDER BY submitted_at ASC
+        ORDER BY priority DESC, submitted_at ASC
         LIMIT 1
         """,
         (machine_id,),
@@ -374,7 +545,7 @@ def update_job_progress(job_id: str, payload: UpdateJobProgressPayload) -> dict[
 
 
 @app.put("/jobs/{job_id}/status")
-def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str, bool]:
+def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str, Any]:
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -412,6 +583,46 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
             job_id,
         ),
     )
+
+    retry_job_id = None
+    if (
+        payload.status == "failed"
+        and job.get("group_id")
+        and (job.get("attempt") or 0) < (job.get("max_retries") or 0)
+    ):
+        next_attempt = (job.get("attempt") or 0) + 1
+        retry_machine_id = choose_retry_machine(job["group_id"], job["machine_id"]) or job["machine_id"]
+        retry_job_id = str(uuid4())
+        execute(
+            """
+            INSERT INTO jobs (id, machine_id, group_id, input_filename, status,
+                              total_frames, rendered_frames, output_files,
+                              frame_start, frame_end, frame_step,
+                              render_overrides_json, attempt, max_retries, priority,
+                              chunk_index, chunk_size_frames, submitted_at)
+            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                retry_job_id,
+                retry_machine_id,
+                job["group_id"],
+                job["input_filename"],
+                job.get("total_frames"),
+                job.get("frame_start"),
+                job.get("frame_end"),
+                job.get("frame_step") or 1,
+                job.get("render_overrides_json") or "{}",
+                next_attempt,
+                job.get("max_retries") or 0,
+                job.get("priority") or 0,
+                job.get("chunk_index"),
+                job.get("chunk_size_frames"),
+                now_iso(),
+            ),
+        )
+
+    if retry_job_id and payload.status == "failed":
+        return {"success": True, "retry_scheduled": True, "retry_job_id": retry_job_id}
 
     return {"success": True}
 
@@ -565,6 +776,55 @@ def distribute_frames(
     return assignments
 
 
+def distribute_frames_by_chunk_size(
+    frame_start: int,
+    frame_end: int,
+    frame_step: int,
+    machines: list[dict],
+    chunk_size_frames: int,
+) -> list[dict]:
+    """Split frame range into fixed-size chunks and assign in power-ranked round-robin."""
+    if chunk_size_frames < 1:
+        raise ValueError("chunk_size_frames must be >= 1")
+    if not machines:
+        return []
+
+    ranked = sorted(
+        [(m, compute_power_score(m)) for m in machines],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if not ranked:
+        return []
+
+    assignments = []
+    current_frame = frame_start
+    chunk_index = 0
+    while current_frame <= frame_end:
+        machine, score = ranked[chunk_index % len(ranked)]
+        chunk_end = current_frame + (chunk_size_frames - 1) * frame_step
+        chunk_end = min(chunk_end, frame_end)
+        chunk_total = ((chunk_end - current_frame) // frame_step) + 1 if chunk_end >= current_frame else 0
+        assignments.append({
+            "machine_id": machine["id"],
+            "gpu_model": machine.get("gpu_model", "Unknown"),
+            "gpu_vram_gb": machine.get("gpu_vram_gb", 0),
+            "cpu_cores": machine.get("cpu_cores", 0),
+            "ram_gb": machine.get("ram_gb", 0),
+            "frame_start": current_frame,
+            "frame_end": chunk_end,
+            "frame_step": frame_step,
+            "total_frames": chunk_total,
+            "power_score": round(score, 1),
+            "chunk_index": chunk_index,
+            "chunk_size_frames": chunk_size_frames,
+        })
+        current_frame = chunk_end + frame_step
+        chunk_index += 1
+
+    return assignments
+
+
 def serialize_render_group_task(job: dict, machine: dict | None = None) -> dict:
     """Serialize a job within a render group into a task dict for the API."""
     total_frames = job.get("total_frames")
@@ -579,6 +839,9 @@ def serialize_render_group_task(job: dict, machine: dict | None = None) -> dict:
         "machine_vram": machine.get("gpu_vram_gb", 0) if machine else 0,
         "frame_start": job.get("frame_start"),
         "frame_end": job.get("frame_end"),
+        "frame_step": job.get("frame_step") or 1,
+        "chunk_index": job.get("chunk_index"),
+        "chunk_size_frames": job.get("chunk_size_frames"),
         "total_frames": total_frames,
         "rendered_frames": rendered_frames,
         "progress_pct": compute_progress_pct(
@@ -586,6 +849,9 @@ def serialize_render_group_task(job: dict, machine: dict | None = None) -> dict:
         ),
         "status": job.get("status", "pending"),
         "error": job.get("error"),
+        "attempt": job.get("attempt") or 0,
+        "max_retries": job.get("max_retries") or 0,
+        "priority": job.get("priority") or 0,
     }
 
 
@@ -654,18 +920,52 @@ def _check_failover(group_id: str, tasks_raw: list[dict]):
             """
             INSERT INTO jobs (id, machine_id, group_id, input_filename, status,
                               total_frames, rendered_frames, output_files,
-                              frame_start, frame_end, frame_step, submitted_at)
-            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s)
+                              frame_start, frame_end, frame_step,
+                              render_overrides_json, attempt, max_retries, priority,
+                              chunk_index, chunk_size_frames, submitted_at)
+            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 new_job_id, best_machine["id"], group_id,
                 task["input_filename"], new_total,
-                new_start, new_end, step, now_iso(),
+                new_start, new_end, step,
+                task.get("render_overrides_json") or "{}",
+                task.get("attempt") or 0,
+                task.get("max_retries") or 0,
+                task.get("priority") or 0,
+                task.get("chunk_index"),
+                task.get("chunk_size_frames"),
+                now_iso(),
             ),
         )
         new_job_ids.append(new_job_id)
 
     return new_job_ids
+
+
+def choose_retry_machine(group_id: str, failed_machine_id: str) -> str | None:
+    """Pick a machine from the same group, preferring available and non-failed machine."""
+    rows = query_all(
+        """
+        SELECT DISTINCT m.*
+        FROM jobs j
+        JOIN machines m ON m.id = j.machine_id
+        WHERE j.group_id = %s
+        """,
+        (group_id,),
+    )
+    if not rows:
+        return failed_machine_id
+
+    def rank(machine: dict) -> tuple[int, int, float]:
+        available = 1 if machine.get("status") == "available" else 0
+        same = 1 if machine.get("id") == failed_machine_id else 0
+        score = compute_power_score(machine)
+        # available first, avoid same machine, higher power first
+        return (available, -same, score)
+
+    ranked = sorted(rows, key=rank, reverse=True)
+    return ranked[0].get("id") if ranked else failed_machine_id
 
 
 class CreateRenderGroupPayload(BaseModel):
@@ -720,6 +1020,9 @@ class ConfirmRenderGroupPayload(BaseModel):
     frame_start: int | None = None
     frame_end: int | None = None
     frame_step: int | None = None
+    render_overrides: dict[str, Any] | None = None
+    scheduling: dict[str, Any] | None = None
+    analysis_snapshot: dict[str, Any] | None = None
 
 
 @app.post("/render-groups/{group_id}/confirm-upload")
@@ -739,13 +1042,24 @@ def confirm_render_group_upload(
     if not storage.file_exists(r2_key):
         raise HTTPException(status_code=400, detail="File not found in storage")
 
-    # If manual frame range provided, use it directly
+    render_overrides = normalize_render_overrides(payload.render_overrides)
+    scheduling = normalize_scheduling(payload.scheduling)
+    analysis_snapshot = payload.analysis_snapshot if isinstance(payload.analysis_snapshot, dict) else {}
+    analysis_warnings = extract_analysis_warnings(analysis_snapshot)
+
+    timeline = render_overrides.get("timeline", {})
+
+    # Backward compatibility precedence:
+    # explicit payload frame range > render_overrides.timeline > parsed upload
     if payload.frame_start is not None and payload.frame_end is not None:
-        frame_start = payload.frame_start
-        frame_end = payload.frame_end
-        frame_step = payload.frame_step or 1
+        frame_start = int(payload.frame_start)
+        frame_end = int(payload.frame_end)
+        frame_step = int(payload.frame_step or 1)
+    elif timeline.get("frame_start") is not None and timeline.get("frame_end") is not None:
+        frame_start = int(timeline.get("frame_start"))
+        frame_end = int(timeline.get("frame_end"))
+        frame_step = int(timeline.get("frame_step") or 1)
     else:
-        # Try to auto-parse .blend
         try:
             file_data = storage.download_file(r2_key)
             frame_info = parse_upload(file_data, group["input_filename"])
@@ -753,15 +1067,31 @@ def confirm_render_group_upload(
             frame_end = frame_info["frame_end"]
             frame_step = frame_info["frame_step"]
         except BlendParseError as e:
-            # Can't parse — ask client for manual frame range
             execute(
-                "UPDATE render_groups SET status = 'pending' WHERE id = %s",
-                (group_id,),
+                """
+                UPDATE render_groups
+                SET status = 'pending',
+                    render_overrides_json = %s,
+                    scheduling_json = %s,
+                    analysis_snapshot_json = %s,
+                    analysis_warnings_json = %s
+                WHERE id = %s
+                """,
+                (
+                    json.dumps(render_overrides),
+                    json.dumps(scheduling),
+                    json.dumps(analysis_snapshot),
+                    json.dumps(analysis_warnings),
+                    group_id,
+                ),
             )
             return {
                 "group_id": group_id,
                 "needs_frame_input": True,
                 "parse_error": str(e),
+                "resolved_render_settings": render_overrides,
+                "scheduling": scheduling,
+                "analysis_warnings": analysis_warnings,
             }
         except Exception:
             raise HTTPException(status_code=500, detail="Failed to analyze uploaded file")
@@ -772,18 +1102,33 @@ def confirm_render_group_upload(
     if total_frames <= 0:
         raise HTTPException(status_code=400, detail="No renderable frames found in .blend file")
 
-    # Update group
     execute(
         """
         UPDATE render_groups
-        SET total_frames = %s, frame_start = %s, frame_end = %s, frame_step = %s,
+        SET total_frames = %s,
+            frame_start = %s,
+            frame_end = %s,
+            frame_step = %s,
+            render_overrides_json = %s,
+            scheduling_json = %s,
+            analysis_snapshot_json = %s,
+            analysis_warnings_json = %s,
             status = 'pending'
         WHERE id = %s
         """,
-        (total_frames, frame_start, frame_end, frame_step, group_id),
+        (
+            total_frames,
+            frame_start,
+            frame_end,
+            frame_step,
+            json.dumps(render_overrides),
+            json.dumps(scheduling),
+            json.dumps(analysis_snapshot),
+            json.dumps(analysis_warnings),
+            group_id,
+        ),
     )
 
-    # Fetch full machine data for power scoring
     machines = []
     for mid in payload.machine_ids:
         m = query_one("SELECT * FROM machines WHERE id = %s", (mid,))
@@ -791,27 +1136,54 @@ def confirm_render_group_upload(
             raise HTTPException(status_code=400, detail=f"Machine {mid[:8]}... not found")
         machines.append(m)
 
-    # Distribute frames
-    assignments = distribute_frames(total_frames, frame_start, frame_end, frame_step, machines)
+    chunk_size_frames = scheduling.get("chunk_size_frames")
+    if chunk_size_frames:
+        assignments = distribute_frames_by_chunk_size(
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            machines=machines,
+            chunk_size_frames=chunk_size_frames,
+        )
+    else:
+        assignments = distribute_frames(total_frames, frame_start, frame_end, frame_step, machines)
+        for i, assignment in enumerate(assignments):
+            assignment["chunk_index"] = i
+            assignment["chunk_size_frames"] = None
 
-    # Create individual jobs
     tasks = []
+    max_retries = scheduling.get("max_retries_per_chunk", 0)
+    priority = scheduling.get("priority", 0)
+    overrides_json = json.dumps(render_overrides)
     for a in assignments:
         job_id = str(uuid4())
         execute(
             """
             INSERT INTO jobs (id, machine_id, group_id, input_filename, status,
                               total_frames, rendered_frames, output_files,
-                              frame_start, frame_end, frame_step, submitted_at)
-            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s)
+                              frame_start, frame_end, frame_step,
+                              render_overrides_json, attempt, max_retries, priority,
+                              chunk_index, chunk_size_frames, submitted_at)
+            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                job_id, a["machine_id"], group_id, group["input_filename"],
-                a["total_frames"], a["frame_start"], a["frame_end"], a["frame_step"],
+                job_id,
+                a["machine_id"],
+                group_id,
+                group["input_filename"],
+                a["total_frames"],
+                a["frame_start"],
+                a["frame_end"],
+                a["frame_step"],
+                overrides_json,
+                0,
+                max_retries,
+                priority,
+                a.get("chunk_index"),
+                a.get("chunk_size_frames"),
                 now_iso(),
             ),
         )
-        # Mark machine as processing
         execute(
             "UPDATE machines SET status = 'processing' WHERE id = %s",
             (a["machine_id"],),
@@ -823,12 +1195,18 @@ def confirm_render_group_upload(
             "machine_vram": a["gpu_vram_gb"],
             "frame_start": a["frame_start"],
             "frame_end": a["frame_end"],
+            "frame_step": a["frame_step"],
+            "chunk_index": a.get("chunk_index"),
+            "chunk_size_frames": a.get("chunk_size_frames"),
             "total_frames": a["total_frames"],
             "rendered_frames": 0,
             "progress_pct": None,
             "status": "pending",
             "power_score": a["power_score"],
             "error": None,
+            "attempt": 0,
+            "max_retries": max_retries,
+            "priority": priority,
         })
 
     return {
@@ -839,6 +1217,9 @@ def confirm_render_group_upload(
         "frame_start": frame_start,
         "frame_end": frame_end,
         "frame_step": frame_step,
+        "resolved_render_settings": render_overrides,
+        "scheduling": scheduling,
+        "analysis_warnings": analysis_warnings,
         "tasks": tasks,
     }
 
@@ -849,6 +1230,11 @@ def get_render_group(group_id: str) -> dict[str, Any]:
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
+    resolved_render_settings = normalize_render_overrides(
+        parse_json_object(group.get("render_overrides_json"), {})
+    )
+    scheduling = normalize_scheduling(parse_json_object(group.get("scheduling_json"), {}))
+    analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
 
     jobs = query_all(
         "SELECT * FROM jobs WHERE group_id = %s ORDER BY frame_start ASC",
@@ -919,6 +1305,9 @@ def get_render_group(group_id: str) -> dict[str, Any]:
         "submitted_at": group["submitted_at"],
         "completed_at": group.get("completed_at"),
         "error": group.get("error"),
+        "resolved_render_settings": resolved_render_settings,
+        "scheduling": scheduling,
+        "analysis_warnings": analysis_warnings,
         "overall_rendered_frames": total_rendered,
         "overall_progress_pct": overall_pct,
         "tasks": tasks,
@@ -1007,3 +1396,4 @@ def download_latest_release():
         raise HTTPException(status_code=404, detail="No release available")
     url = storage.generate_presigned_url("releases/PCRentAgent-Setup.exe", expires_in=7200)
     return RedirectResponse(url=url)
+

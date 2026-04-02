@@ -114,6 +114,10 @@ def init_db():
                     frame_start INTEGER NOT NULL DEFAULT 1,
                     frame_end INTEGER NOT NULL DEFAULT 1,
                     frame_step INTEGER NOT NULL DEFAULT 1,
+                    render_overrides_json TEXT NOT NULL DEFAULT '{}',
+                    scheduling_json TEXT NOT NULL DEFAULT '{}',
+                    analysis_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    analysis_warnings_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL DEFAULT 'uploading',
                     submitted_at TEXT NOT NULL,
                     completed_at TEXT,
@@ -132,7 +136,40 @@ def init_db():
                 ALTER TABLE jobs
                 ADD COLUMN IF NOT EXISTS frame_step INTEGER DEFAULT 1;
 
+                ALTER TABLE render_groups
+                ADD COLUMN IF NOT EXISTS render_overrides_json TEXT NOT NULL DEFAULT '{}';
+
+                ALTER TABLE render_groups
+                ADD COLUMN IF NOT EXISTS scheduling_json TEXT NOT NULL DEFAULT '{}';
+
+                ALTER TABLE render_groups
+                ADD COLUMN IF NOT EXISTS analysis_snapshot_json TEXT NOT NULL DEFAULT '{}';
+
+                ALTER TABLE render_groups
+                ADD COLUMN IF NOT EXISTS analysis_warnings_json TEXT NOT NULL DEFAULT '[]';
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS render_overrides_json TEXT NOT NULL DEFAULT '{}';
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 0;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 0;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS chunk_index INTEGER;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS chunk_size_frames INTEGER;
+
                 ALTER TABLE machines
                 ADD COLUMN IF NOT EXISTS machine_type TEXT NOT NULL DEFAULT 'windows';
+
+                CREATE INDEX IF NOT EXISTS idx_jobs_machine_pending_priority
+                ON jobs(machine_id, status, priority DESC, submitted_at ASC);
                 """
             )

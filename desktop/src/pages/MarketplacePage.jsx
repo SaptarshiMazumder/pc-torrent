@@ -25,6 +25,12 @@ const FLOW_STAGE = {
   SUBMITTED: "submitted",
 };
 
+const CAMERA_MODE_OPTIONS = [
+  { value: "auto_markers", label: "Auto (Scene Camera + Marker Cuts)" },
+  { value: "force_camera", label: "Force Single Camera" },
+  { value: "camera_ranges", label: "Camera Ranges (Editable)" },
+];
+
 function powerScore(machine) {
   return (machine.gpu_vram_gb || 0) * 4 + (machine.cpu_cores || 0) + (machine.ram_gb || 0) * 0.3;
 }
@@ -40,6 +46,161 @@ function parseManualFrameRange(frameStart, frameEnd, frameStep) {
 
   const step = Number.isInteger(fst) && fst > 0 ? fst : 1;
   return { frame_start: fs, frame_end: fe, frame_step: step };
+}
+
+function countFramesInRange(start, end, step) {
+  if (!Number.isInteger(start) || !Number.isInteger(end) || !Number.isInteger(step) || step < 1 || end < start) {
+    return 0;
+  }
+  return Math.floor((end - start) / step) + 1;
+}
+
+function nextCameraRangeId() {
+  nextCameraRangeId.counter = (nextCameraRangeId.counter || 0) + 1;
+  return `camera-range-${nextCameraRangeId.counter}`;
+}
+
+function buildDefaultCameraRanges(scene) {
+  if (!scene || !Number.isInteger(scene.frame_start) || !Number.isInteger(scene.frame_end)) {
+    return [];
+  }
+  const sceneStep = Number.isInteger(scene.frame_step) && scene.frame_step > 0 ? scene.frame_step : 1;
+  const sceneStart = scene.frame_start;
+  const sceneEnd = scene.frame_end;
+  const knownCameras = Array.isArray(scene.cameras) ? scene.cameras.filter(Boolean) : [];
+  const defaultCamera = scene.active_camera || knownCameras[0] || "";
+
+  const cuts = (Array.isArray(scene.camera_cuts) ? scene.camera_cuts : [])
+    .filter((cut) => Number.isInteger(cut?.frame))
+    .sort((a, b) => a.frame - b.frame);
+
+  let currentCamera = defaultCamera;
+  for (const cut of cuts) {
+    if (cut.frame > sceneStart) break;
+    if (cut.camera_name) currentCamera = cut.camera_name;
+  }
+
+  const segments = [];
+  let segmentStart = sceneStart;
+  for (const cut of cuts) {
+    if (cut.frame <= sceneStart) continue;
+    if (cut.frame > sceneEnd) break;
+
+    const segmentEnd = Math.min(sceneEnd, cut.frame - 1);
+    if (segmentEnd >= segmentStart) {
+      segments.push({
+        id: nextCameraRangeId(),
+        enabled: true,
+        camera_name: currentCamera || defaultCamera,
+        frame_start: segmentStart,
+        frame_end: segmentEnd,
+        frame_step: sceneStep,
+      });
+    }
+    if (cut.camera_name) currentCamera = cut.camera_name;
+    segmentStart = Math.max(segmentStart, cut.frame);
+  }
+
+  if (segmentStart <= sceneEnd) {
+    segments.push({
+      id: nextCameraRangeId(),
+      enabled: true,
+      camera_name: currentCamera || defaultCamera,
+      frame_start: segmentStart,
+      frame_end: sceneEnd,
+      frame_step: sceneStep,
+    });
+  }
+
+  if (segments.length === 0) {
+    segments.push({
+      id: nextCameraRangeId(),
+      enabled: true,
+      camera_name: defaultCamera,
+      frame_start: sceneStart,
+      frame_end: sceneEnd,
+      frame_step: sceneStep,
+    });
+  }
+
+  const merged = [];
+  for (const segment of segments) {
+    const prev = merged[merged.length - 1];
+    if (
+      prev &&
+      prev.camera_name === segment.camera_name &&
+      prev.frame_step === segment.frame_step &&
+      prev.frame_end + 1 >= segment.frame_start
+    ) {
+      prev.frame_end = Math.max(prev.frame_end, segment.frame_end);
+      continue;
+    }
+    merged.push({ ...segment });
+  }
+  return merged;
+}
+
+function parseCameraRangeRows(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row) => {
+      const start = Number.parseInt(row?.frame_start, 10);
+      const end = Number.parseInt(row?.frame_end, 10);
+      const step = Number.parseInt(row?.frame_step, 10);
+      return {
+        id: row?.id || nextCameraRangeId(),
+        enabled: row?.enabled !== false,
+        camera_name: typeof row?.camera_name === "string" ? row.camera_name : "",
+        frame_start: start,
+        frame_end: end,
+        frame_step: Number.isInteger(step) && step > 0 ? step : 1,
+      };
+    })
+    .filter((row) => Number.isInteger(row.frame_start) && Number.isInteger(row.frame_end) && row.frame_end >= row.frame_start);
+}
+
+function rowMatchesFrame(row, frame) {
+  if (!row || row.enabled === false) return false;
+  if (frame < row.frame_start || frame > row.frame_end) return false;
+  const step = Number.isInteger(row.frame_step) && row.frame_step > 0 ? row.frame_step : 1;
+  return (frame - row.frame_start) % step === 0;
+}
+
+function countRowFramesWithinTimeline(row, frameRange) {
+  if (!frameRange) return 0;
+  let count = 0;
+  for (let frame = frameRange.frame_start; frame <= frameRange.frame_end; frame += frameRange.frame_step) {
+    if (rowMatchesFrame(row, frame)) count += 1;
+  }
+  return count;
+}
+
+function validateCameraRanges(rows, frameRange) {
+  const parsedRows = parseCameraRangeRows(rows).filter((row) => row.enabled);
+  if (parsedRows.length === 0) {
+    return { ok: false, error: "Add at least one enabled camera range.", rows: [] };
+  }
+  for (const row of parsedRows) {
+    if (!row.camera_name) {
+      return { ok: false, error: "Each enabled camera range needs a camera.", rows: [] };
+    }
+  }
+  if (!frameRange) {
+    return { ok: false, error: "Enter a valid frame range first.", rows: [] };
+  }
+
+  for (let frame = frameRange.frame_start; frame <= frameRange.frame_end; frame += frameRange.frame_step) {
+    const matched = parsedRows.find((row) => rowMatchesFrame(row, frame));
+    if (!matched) {
+      return {
+        ok: false,
+        error: `Camera ranges do not cover frame ${frame}. Adjust ranges or switch to Auto mode.`,
+        rows: [],
+      };
+    }
+  }
+
+  return { ok: true, error: "", rows: parsedRows };
 }
 
 function SelectedMachinesSummary({ machines }) {
@@ -108,12 +269,37 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const [frameStart, setFrameStart] = useState("");
   const [frameEnd, setFrameEnd] = useState("");
   const [frameStep, setFrameStep] = useState("1");
+  const [sceneName, setSceneName] = useState("");
+  const [cameraMode, setCameraMode] = useState("auto_markers");
+  const [forceCameraName, setForceCameraName] = useState("");
+  const [viewLayerName, setViewLayerName] = useState("");
+  const [cameraRanges, setCameraRanges] = useState([]);
 
   const selectedMachines = useMemo(
     () => machines.filter((machine) => selectedMachineIds.includes(machine.id)),
     [machines, selectedMachineIds]
   );
   const selectedMachineIdSet = useMemo(() => new Set(selectedMachineIds), [selectedMachineIds]);
+  const analyzedScenes = useMemo(
+    () => (Array.isArray(analysisResult?.scenes) ? analysisResult.scenes : []),
+    [analysisResult]
+  );
+  const selectedSceneInfo = useMemo(() => {
+    if (!analyzedScenes.length) return null;
+    return (
+      analyzedScenes.find((scene) => scene.name === sceneName) ||
+      analyzedScenes.find((scene) => scene.is_active) ||
+      analyzedScenes[0]
+    );
+  }, [analyzedScenes, sceneName]);
+  const availableCameras = useMemo(
+    () => (Array.isArray(selectedSceneInfo?.cameras) ? selectedSceneInfo.cameras : []),
+    [selectedSceneInfo]
+  );
+  const availableViewLayers = useMemo(
+    () => (Array.isArray(selectedSceneInfo?.view_layers) ? selectedSceneInfo.view_layers : []),
+    [selectedSceneInfo]
+  );
 
   const resetSubmissionFlow = ({ clearFile = false } = {}) => {
     setFlowStage(FLOW_STAGE.IDLE);
@@ -129,6 +315,11 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setFrameStart("");
     setFrameEnd("");
     setFrameStep("1");
+    setSceneName("");
+    setCameraMode("auto_markers");
+    setForceCameraName("");
+    setViewLayerName("");
+    setCameraRanges([]);
     if (clearFile) {
       setFile(null);
     }
@@ -190,12 +381,34 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       setFrameStart(String(parsed.frame_start));
       setFrameEnd(String(parsed.frame_end));
       setFrameStep(String(parsed.frame_step || 1));
+      const parsedScenes = Array.isArray(parsed?.scenes) ? parsed.scenes : [];
+      const activeScene =
+        parsedScenes.find((scene) => scene?.is_active) ||
+        parsedScenes.find(Boolean) ||
+        null;
+      if (activeScene) {
+        setSceneName(activeScene.name || "");
+        setForceCameraName(activeScene.active_camera || (activeScene.cameras?.[0] ?? ""));
+        setViewLayerName(activeScene.view_layers?.[0] ?? "");
+        setCameraRanges(buildDefaultCameraRanges(activeScene));
+      } else {
+        setSceneName("");
+        setForceCameraName("");
+        setViewLayerName("");
+        setCameraRanges([]);
+      }
+      setCameraMode("auto_markers");
     } catch (err) {
       setAnalysisResult(null);
       setClientParseError(`Client parse failed: ${err.message || "Unknown parsing error"}`);
       setFrameStart("");
       setFrameEnd("");
       setFrameStep("1");
+      setSceneName("");
+      setCameraMode("auto_markers");
+      setForceCameraName("");
+      setViewLayerName("");
+      setCameraRanges([]);
     } finally {
       setFlowStage(FLOW_STAGE.ANALYZED);
       setAnalyzing(false);
@@ -247,17 +460,14 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       return;
     }
 
-    const manualRange = parseManualFrameRange(frameStart, frameEnd, frameStep);
-    const frameRange = analysisResult
-      ? {
-          frame_start: analysisResult.frame_start,
-          frame_end: analysisResult.frame_end,
-          frame_step: analysisResult.frame_step || 1,
-        }
-      : manualRange;
+    const frameRange = manualFrameRange;
 
     if (!frameRange) {
       setError("Enter a valid manual frame range before starting render");
+      return;
+    }
+    if (cameraMode === "camera_ranges" && !cameraRangesValidation.ok) {
+      setError(cameraRangesValidation.error || "Camera ranges are invalid");
       return;
     }
 
@@ -267,11 +477,35 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setFlowStage(FLOW_STAGE.STARTING);
 
     try {
+      const renderOverrides = {
+        scene_name: sceneName || null,
+        camera_mode: cameraMode,
+        camera_name: forceCameraName || null,
+        view_layer: viewLayerName || null,
+        camera_ranges:
+          cameraMode === "camera_ranges"
+            ? cameraRangesValidation.rows.map((row) => ({
+                camera_name: row.camera_name,
+                frame_start: row.frame_start,
+                frame_end: row.frame_end,
+                frame_step: row.frame_step,
+                enabled: row.enabled !== false,
+              }))
+            : [],
+        timeline: {
+          frame_start: frameRange.frame_start,
+          frame_end: frameRange.frame_end,
+          frame_step: frameRange.frame_step || 1,
+        },
+      };
       const result = await confirmDistributedJob(
         backendUrl,
         pendingGroupId,
         selectedMachines.map((machine) => machine.id),
-        frameRange
+        frameRange,
+        renderOverrides,
+        null,
+        analysisResult
       );
 
       if (result.needs_frame_input) {
@@ -305,15 +539,71 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     resetSubmissionFlow();
   };
 
+  const handleCameraRangeUpdate = (rowId, patch) => {
+    setCameraRanges((prev) =>
+      prev.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
+    );
+  };
+
+  const handleCameraRangeRemove = (rowId) => {
+    setCameraRanges((prev) => prev.filter((row) => row.id !== rowId));
+  };
+
+  const handleCameraRangeAdd = () => {
+    const manualRange = parseManualFrameRange(frameStart, frameEnd, frameStep);
+    const defaultStart = manualRange?.frame_start ?? 1;
+    const defaultEnd = manualRange?.frame_end ?? defaultStart;
+    const defaultStep = manualRange?.frame_step ?? 1;
+    const fallbackCamera = forceCameraName || availableCameras[0] || selectedSceneInfo?.active_camera || "";
+    setCameraRanges((prev) => [
+      ...prev,
+      {
+        id: nextCameraRangeId(),
+        enabled: true,
+        camera_name: fallbackCamera,
+        frame_start: defaultStart,
+        frame_end: defaultEnd,
+        frame_step: defaultStep,
+      },
+    ]);
+  };
+
+  const handleCameraRangesAutoFill = () => {
+    if (!selectedSceneInfo) return;
+    setCameraRanges(buildDefaultCameraRanges(selectedSceneInfo));
+  };
+
+  const manualFrameRange = useMemo(
+    () => parseManualFrameRange(frameStart, frameEnd, frameStep),
+    [frameStart, frameEnd, frameStep]
+  );
+
+  const cameraRangesValidation = useMemo(() => {
+    if (cameraMode !== "camera_ranges") {
+      return { ok: true, error: "", rows: [] };
+    }
+    return validateCameraRanges(cameraRanges, manualFrameRange);
+  }, [cameraMode, cameraRanges, manualFrameRange]);
+
+  const cameraRangeFrameCounts = useMemo(() => {
+    const map = new Map();
+    if (!manualFrameRange) return map;
+    for (const row of cameraRanges) {
+      map.set(row.id, countRowFramesWithinTimeline(row, manualFrameRange));
+    }
+    return map;
+  }, [cameraRanges, manualFrameRange]);
+
   const canUpload = flowStage === FLOW_STAGE.ANALYZED && !analyzing && !uploading && !starting;
-  const manualRangeValid = parseManualFrameRange(frameStart, frameEnd, frameStep) !== null;
+  const manualRangeValid = manualFrameRange !== null;
   const canStart =
     flowStage === FLOW_STAGE.UPLOADED &&
     !analyzing &&
     !uploading &&
     !starting &&
     Boolean(pendingGroupId) &&
-    (analysisResult ? true : manualRangeValid);
+    manualRangeValid &&
+    (cameraMode !== "camera_ranges" || cameraRangesValidation.ok);
 
   const stepLabel = analyzing
     ? "Analyzing"
@@ -340,8 +630,23 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     flowStage === FLOW_STAGE.UPLOADED || flowStage === FLOW_STAGE.SUBMITTED
       ? "success"
       : flowStage === FLOW_STAGE.ANALYZED && !analysisResult
-      ? "warning"
-      : "neutral";
+    ? "warning"
+    : "neutral";
+  const hasCompletedAnalysis = flowStage !== FLOW_STAGE.IDLE && !analyzing;
+
+  const handleSceneSelectionChange = (nextSceneName) => {
+    setSceneName(nextSceneName);
+    const nextScene = analyzedScenes.find((scene) => scene.name === nextSceneName);
+    if (!nextScene) return;
+    setForceCameraName(nextScene.active_camera || (nextScene.cameras?.[0] ?? ""));
+    setViewLayerName(nextScene.view_layers?.[0] ?? "");
+    setCameraRanges(buildDefaultCameraRanges(nextScene));
+    if (Number.isInteger(nextScene.frame_start)) setFrameStart(String(nextScene.frame_start));
+    if (Number.isInteger(nextScene.frame_end)) setFrameEnd(String(nextScene.frame_end));
+    if (Number.isInteger(nextScene.frame_step) && nextScene.frame_step > 0) {
+      setFrameStep(String(nextScene.frame_step));
+    }
+  };
 
   if (view === "browse") {
     return (
@@ -456,7 +761,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
               className="btn btn-primary submit-primary-btn"
               type="button"
               onClick={handleAnalyze}
-              disabled={!file || analyzing || uploading || starting}
+              disabled={!file || selectedMachines.length === 0 || analyzing || uploading || starting}
             >
               {analyzing ? "Analyzing..." : "Analyze"}
             </button>
@@ -503,28 +808,216 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
           </div>
         )}
 
-        {flowStage !== FLOW_STAGE.IDLE && (
-          <div className="submit-result-box">
-            <p className="submit-result-text">
-              {analysisResult
-                ? `Frame range detected: ${analysisResult.frame_start}..${analysisResult.frame_end}${
-                    (analysisResult.frame_step || 1) > 1
-                      ? `, every ${analysisResult.frame_step} frames`
-                      : ""
-                  }`
-                : "Analyze could not detect frames. Upload can continue, but manual frame range is required before Start Rendering."}
-            </p>
-
-            {clientParseError && <p className="error-text">{clientParseError}</p>}
-            {serverParseError && <p className="error-text">{serverParseError}</p>}
+        {hasCompletedAnalysis && analysisResult && (
+          <div className="manual-range-panel">
+            <div className="manual-range-title">Scene & Camera</div>
+            <div className="manual-range-subtitle">
+              Choose how camera selection is applied across frames.
+            </div>
+            <div className="manual-range-grid">
+              <label className="manual-range-field">
+                <span className="manual-range-label">Scene</span>
+                <select
+                  value={sceneName}
+                  onChange={(event) => handleSceneSelectionChange(event.target.value)}
+                  className="manual-range-input"
+                >
+                  {(analyzedScenes.length ? analyzedScenes : [{ name: "", label: "Default Scene" }]).map((scene) => (
+                    <option key={scene.name || "default"} value={scene.name || ""}>
+                      {scene.name || "Default Scene"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="manual-range-field">
+                <span className="manual-range-label">Camera Mode</span>
+                <select
+                  value={cameraMode}
+                  onChange={(event) => setCameraMode(event.target.value)}
+                  className="manual-range-input"
+                >
+                  {CAMERA_MODE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="manual-range-field">
+                <span className="manual-range-label">Force Camera</span>
+                <select
+                  value={forceCameraName}
+                  onChange={(event) => setForceCameraName(event.target.value)}
+                  className="manual-range-input"
+                  disabled={cameraMode !== "force_camera" || availableCameras.length === 0}
+                >
+                  {availableCameras.length > 0 ? (
+                    availableCameras.map((cameraName) => (
+                      <option key={cameraName} value={cameraName}>
+                        {cameraName}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">No cameras found</option>
+                  )}
+                </select>
+              </label>
+              <label className="manual-range-field">
+                <span className="manual-range-label">View Layer</span>
+                <select
+                  value={viewLayerName}
+                  onChange={(event) => setViewLayerName(event.target.value)}
+                  className="manual-range-input"
+                >
+                  {availableViewLayers.length > 0 ? (
+                    availableViewLayers.map((layerName) => (
+                      <option key={layerName} value={layerName}>
+                        {layerName}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Default</option>
+                  )}
+                </select>
+              </label>
+            </div>
+            {cameraMode === "auto_markers" && (
+              <div className="manual-range-subtitle" style={{ marginTop: 8 }}>
+                Auto mode follows scene camera and timeline marker cuts for per-frame camera switching.
+              </div>
+            )}
+            {cameraMode === "camera_ranges" && (
+              <div className="camera-ranges-panel">
+                <div className="camera-ranges-head">
+                  <div className="manual-range-subtitle camera-ranges-subtitle">
+                    Edit exactly which camera is used for which frame ranges.
+                  </div>
+                  <div className="camera-ranges-actions">
+                    <button type="button" className="btn btn-secondary" onClick={handleCameraRangesAutoFill}>
+                      Use Marker Cuts
+                    </button>
+                    <button type="button" className="btn btn-secondary" onClick={handleCameraRangeAdd}>
+                      Add Range
+                    </button>
+                  </div>
+                </div>
+                <div className="camera-ranges-table-wrap">
+                  <table className="camera-ranges-table">
+                    <thead>
+                      <tr>
+                        <th>Use</th>
+                        <th>Camera</th>
+                        <th>Start</th>
+                        <th>End</th>
+                        <th>Step</th>
+                        <th>Frames</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cameraRanges.map((row) => (
+                        <tr key={row.id}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={row.enabled !== false}
+                              onChange={(event) => handleCameraRangeUpdate(row.id, { enabled: event.target.checked })}
+                            />
+                          </td>
+                          <td>
+                            <select
+                              value={row.camera_name || ""}
+                              onChange={(event) => handleCameraRangeUpdate(row.id, { camera_name: event.target.value })}
+                              className="manual-range-input camera-ranges-input"
+                            >
+                              {availableCameras.length > 0 ? (
+                                availableCameras.map((cameraName) => (
+                                  <option key={cameraName} value={cameraName}>
+                                    {cameraName}
+                                  </option>
+                                ))
+                              ) : (
+                                <option value="">No cameras</option>
+                              )}
+                            </select>
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              min="1"
+                              value={row.frame_start ?? ""}
+                              onChange={(event) => handleCameraRangeUpdate(row.id, { frame_start: event.target.value })}
+                              className="manual-range-input camera-ranges-input"
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              min="1"
+                              value={row.frame_end ?? ""}
+                              onChange={(event) => handleCameraRangeUpdate(row.id, { frame_end: event.target.value })}
+                              className="manual-range-input camera-ranges-input"
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              min="1"
+                              value={row.frame_step ?? 1}
+                              onChange={(event) => handleCameraRangeUpdate(row.id, { frame_step: event.target.value })}
+                              className="manual-range-input camera-ranges-input"
+                            />
+                          </td>
+                          <td>
+                            <span className="camera-ranges-count">
+                              {cameraRangeFrameCounts.get(row.id) || 0}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="btn btn-secondary camera-ranges-remove"
+                              onClick={() => handleCameraRangeRemove(row.id)}
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {cameraRanges.length === 0 && (
+                        <tr>
+                          <td colSpan={7} className="camera-ranges-empty">
+                            No camera ranges configured. Add one to continue.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                {manualFrameRange && (
+                  <div className="manual-range-subtitle camera-ranges-subtitle">
+                    Timeline has {countFramesInRange(
+                      manualFrameRange.frame_start,
+                      manualFrameRange.frame_end,
+                      manualFrameRange.frame_step
+                    )} frames after step filtering.
+                  </div>
+                )}
+                {!cameraRangesValidation.ok && (
+                  <p className="error-text camera-ranges-error">{cameraRangesValidation.error}</p>
+                )}
+              </div>
+            )}
           </div>
         )}
 
-        {flowStage !== FLOW_STAGE.IDLE && !analysisResult && (
+        {hasCompletedAnalysis && (
           <div className="manual-range-panel">
-            <div className="manual-range-title">Manual Frame Range</div>
+            <div className="manual-range-title">Frame Range</div>
             <div className="manual-range-subtitle">
-              Required because this file could not be parsed locally.
+              {analysisResult
+                ? "Auto-filled from analysis. You can edit before upload/start."
+                : "Required because this file could not be parsed locally."}
             </div>
             <div className="manual-range-grid">
               <label className="manual-range-field">
@@ -561,6 +1054,8 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
           </div>
         )}
 
+        {hasCompletedAnalysis && clientParseError && <p className="error-text">{clientParseError}</p>}
+        {hasCompletedAnalysis && serverParseError && <p className="error-text">{serverParseError}</p>}
         {error && <p className="error-text">{error}</p>}
       </div>
     </div>

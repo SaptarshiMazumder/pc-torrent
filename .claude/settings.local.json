@@ -66,7 +66,14 @@
       "Bash(find /c/Users/googler/OneDrive/Desktop/Projects/pc-rent -type f \\\\\\(-name *preflight* -o -name DashboardPage* -o -name SettingsPage* -o -name commands.rs -o -name runtime_info* \\\\\\))",
       "Bash(grep -r \"preflight\\\\|run_preflight\\\\|RuntimeInfo\\\\|runtime_info\\\\|runtime_status\" /c/Users/googler/OneDrive/Desktop/Projects/pc-rent --include=*.py --include=*.rs --include=*.jsx --include=*.ts --include=*.tsx)",
       "Bash(xargs cat:*)",
-      "Bash(grep -r \"blend\\\\|frame_start\\\\|frame_end\\\\|parse\" /c/Users/googler/OneDrive/Desktop/Projects/pc-rent/agent --include=*.py)"
+      "Bash(grep -r \"blend\\\\|frame_start\\\\|frame_end\\\\|parse\" /c/Users/googler/OneDrive/Desktop/Projects/pc-rent/agent --include=*.py)",
+      "Bash(pip show:*)",
+      "WebFetch(domain:docs.vast.ai)",
+      "WebFetch(domain:docs.runpod.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:vast.ai)",
+      "WebFetch(domain:www.runpod.io)",
+      "WebFetch(domain:graphql-spec.runpod.io)"
     ]
   }
 }

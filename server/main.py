@@ -1400,6 +1400,25 @@ def download_docker_image():
     return RedirectResponse(url=url)
 
 
+@app.get("/docker/linux-image/version")
+def get_linux_docker_image_version() -> dict[str, str]:
+    try:
+        sha_data = storage.download_file("docker/linux/pcrent-render-linux.sha256")
+        sha = sha_data.decode().strip().split()[0]
+        return {"version": "v1.0.0", "sha256": sha}
+    except Exception:
+        raise HTTPException(status_code=404, detail="No Linux image available")
+
+
+@app.get("/docker/linux-image")
+def download_linux_docker_image():
+    key = "docker/linux/pcrent-render-linux.tar.gz"
+    if not storage.file_exists(key):
+        raise HTTPException(status_code=404, detail="Linux image not found")
+    url = storage.generate_presigned_url(key, expires_in=7200)
+    return RedirectResponse(url=url)
+
+
 # -----------------------------------------------
 # Desktop installer distribution
 # -----------------------------------------------

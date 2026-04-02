@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Upload Docker render image to R2."""
+"""Upload Windows Docker render image to R2."""
 import hashlib
 import os
 import sys

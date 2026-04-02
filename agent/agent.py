@@ -206,26 +206,46 @@ def detect_specs():
 # -----------------------------------------------
 # BACKEND COMMUNICATION
 # -----------------------------------------------
+def _ensure_http_success(resp, action):
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        body = (resp.text or "").strip()
+        if len(body) > 500:
+            body = body[:500] + "..."
+        detail = f"{action} failed with {resp.status_code}"
+        if body:
+            detail = f"{detail}: {body}"
+        raise RuntimeError(detail) from exc
+
+
 def register_machine(specs):
-    resp = requests.post(f"{BACKEND_URL}/machines/register", json=specs)
-    resp.raise_for_status()
-    return resp.json()["machine_id"]
+    resp = requests.post(f"{BACKEND_URL}/machines/register", json=specs, timeout=20)
+    _ensure_http_success(resp, "Machine registration")
+    payload = resp.json()
+    machine = payload.get("machine_id")
+    if not machine:
+        raise RuntimeError("Machine registration returned no machine_id")
+    return machine
 
 
 def set_available(mid):
-    requests.put(f"{BACKEND_URL}/machines/{mid}/available").raise_for_status()
+    resp = requests.put(f"{BACKEND_URL}/machines/{mid}/available", timeout=20)
+    _ensure_http_success(resp, f"Mark machine {mid} available")
 
 
 def set_idle(mid):
     try:
-        requests.put(f"{BACKEND_URL}/machines/{mid}/idle")
+        requests.put(f"{BACKEND_URL}/machines/{mid}/idle", timeout=15)
     except Exception:
         pass
 
 
 def poll_for_job(mid):
-    resp = requests.get(f"{BACKEND_URL}/jobs/next-for-machine/{mid}", timeout=10)
-    resp.raise_for_status()
+    resp = requests.get(f"{BACKEND_URL}/jobs/next-for-machine/{mid}", timeout=15)
+    _ensure_http_success(resp, f"Poll next job for machine {mid}")
+    if not resp.content:
+        return None
     return resp.json()
 
 
@@ -235,7 +255,12 @@ def update_job_status(job_id, status, error=None, output_files=None):
         payload["error"] = error
     if output_files is not None:
         payload["output_files"] = output_files
-    requests.put(f"{BACKEND_URL}/jobs/{job_id}/status", json=payload).raise_for_status()
+    resp = requests.put(
+        f"{BACKEND_URL}/jobs/{job_id}/status",
+        json=payload,
+        timeout=20,
+    )
+    _ensure_http_success(resp, f"Update job {job_id} status to {status}")
 
 
 def update_job_progress(job_id, rendered_frames, total_frames=None):
@@ -243,18 +268,20 @@ def update_job_progress(job_id, rendered_frames, total_frames=None):
         "rendered_frames": rendered_frames,
         "total_frames": total_frames,
     }
-    requests.put(
+    resp = requests.put(
         f"{BACKEND_URL}/jobs/{job_id}/progress",
         json=payload,
         timeout=10,
-    ).raise_for_status()
+    )
+    _ensure_http_success(resp, f"Update job {job_id} progress")
 
 
 def send_machine_heartbeat(mid):
-    requests.put(
+    resp = requests.put(
         f"{BACKEND_URL}/machines/{mid}/heartbeat",
         timeout=10,
-    ).raise_for_status()
+    )
+    _ensure_http_success(resp, f"Heartbeat machine {mid}")
 
 
 def upload_output_files(job_id, output_dir):
@@ -1313,6 +1340,7 @@ def main():
 
     # Step 5: Register with backend (or reconnect with saved ID)
     saved_id = load_machine_id()
+    restored_with_saved_id = False
 
     _log("[AGENT] Registering with backend...")
     try:
@@ -1323,15 +1351,27 @@ def main():
         else:
             _log(f"[AGENT] Registered. Machine ID: {machine_id}")
     except Exception as e:
-        _log(f"[AGENT] Failed to register: {e}")
+        _log(f"[AGENT] Failed to register: {e}", level="error")
         if saved_id:
-            _log(f"[AGENT] Using saved machine ID: {saved_id}")
+            _log(f"[AGENT] Trying saved machine ID: {saved_id}")
             machine_id = saved_id
+            try:
+                set_available(machine_id)
+                restored_with_saved_id = True
+                _log(f"[AGENT] Recovered using saved machine ID: {machine_id}")
+            except Exception as saved_err:
+                _log(f"[AGENT] Saved machine ID is not usable: {saved_err}", level="error")
+                sys.exit(1)
         else:
             sys.exit(1)
 
     # Step 6: Mark available and start polling
-    set_available(machine_id)
+    if not restored_with_saved_id:
+        try:
+            set_available(machine_id)
+        except Exception as e:
+            _log(f"[AGENT] Failed to mark machine available: {e}", level="error")
+            sys.exit(1)
     _log("[AGENT] Marked as available. Polling for jobs...")
 
     if sys.stdin and sys.stdin.isatty():

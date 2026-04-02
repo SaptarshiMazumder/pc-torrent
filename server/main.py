@@ -475,15 +475,28 @@ def get_next_job_for_machine(machine_id: str, request: Request) -> dict[str, Any
         "UPDATE machines SET last_seen_at = %s WHERE id = %s",
         (now_iso(), machine_id),
     )
-    job = query_one(
-        """
-        SELECT * FROM jobs
-        WHERE machine_id = %s AND status = 'pending'
-        ORDER BY priority DESC, submitted_at ASC
-        LIMIT 1
-        """,
-        (machine_id,),
-    )
+    try:
+        job = query_one(
+            """
+            SELECT * FROM jobs
+            WHERE machine_id = %s AND status = 'pending'
+            ORDER BY priority DESC, submitted_at ASC
+            LIMIT 1
+            """,
+            (machine_id,),
+        )
+    except Exception:
+        # Backward-compatibility fallback for older DB schemas that don't
+        # yet have priority/chunking columns.
+        job = query_one(
+            """
+            SELECT * FROM jobs
+            WHERE machine_id = %s AND status = 'pending'
+            ORDER BY submitted_at ASC
+            LIMIT 1
+            """,
+            (machine_id,),
+        )
     if not job:
         return None
 

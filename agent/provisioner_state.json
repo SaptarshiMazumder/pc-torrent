@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "managed": [
+    {
+      "pod_id": "bzaqqokry0kb38",
+      "label": "RunPod NVIDIA GeForce RTX 4090 #9286",
+      "host": "103.196.86.83",
+      "port": 12492,
+      "worker_state": "running",
+      "created_at": 1775119381.115676,
+      "last_seen_at": 1775120626.7225509,
+      "last_available_at": 1775120298.0559835,
+      "last_job_started_at": 1775120459.2255318,
+      "last_job_finished_at": 1775120296.7230442,
+      "machine_id": "0b88e46d-06d0-4ab3-9bc7-f1ff8e27a2a4"
+    }
+  ]
+}

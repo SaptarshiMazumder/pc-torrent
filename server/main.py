@@ -37,7 +37,7 @@ app = FastAPI(title="PC Rent Server")
 @app.on_event("startup")
 def _startup():
     init_db()
-    runpod_dispatch.register_virtual_machine(execute, query_one, now_iso)
+    runpod_dispatch.register_virtual_machines(execute, query_one, now_iso)
     runpod_dispatch.start_heartbeat_thread(execute, now_iso)
 
 app.add_middleware(
@@ -1267,6 +1267,7 @@ def confirm_render_group_upload(
                         frame_end=task["frame_end"],
                         frame_step=task["frame_step"],
                         render_overrides_b64=overrides_b64,
+                        machine_id=task["machine_id"],
                     )
                     runpod_dispatch.start_polling_thread(
                         job_id=task["job_id"],
@@ -1274,6 +1275,7 @@ def confirm_render_group_upload(
                         db_execute=execute,
                         db_query_one=query_one,
                         now_iso=now_iso,
+                        machine_id=task["machine_id"],
                     )
                 except Exception as exc:
                     log.error(f"Failed to dispatch job {task['job_id']} to RunPod: {exc}")

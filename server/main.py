@@ -1,6 +1,15 @@
+import base64
 import io
 import json
+import logging
 import zipfile
+
+# Load .env before anything else reads os.environ
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -12,7 +21,10 @@ from pydantic import BaseModel
 
 from db import execute, init_db, query_all, query_one
 import storage
+import runpod_dispatch
 from blend_parser import parse_upload, BlendParseError
+
+log = logging.getLogger(__name__)
 
 MACHINE_STALE_SECONDS = 15
 DEFAULT_DEVICE_POLICY = "AUTO"
@@ -20,6 +32,13 @@ ALLOWED_DEVICE_POLICIES = {"AUTO", "OPTIX", "CUDA", "CPU"}
 ALLOWED_CAMERA_MODES = {"auto_markers", "force_camera", "camera_ranges"}
 
 app = FastAPI(title="PC Rent Server")
+
+
+@app.on_event("startup")
+def _startup():
+    init_db()
+    runpod_dispatch.register_virtual_machine(execute, query_one, now_iso)
+    runpod_dispatch.start_heartbeat_thread(execute, now_iso)
 
 app.add_middleware(
     CORSMiddleware,
@@ -288,10 +307,6 @@ def validate_job_input_filename(name: str) -> None:
         )
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
-
 
 # -----------------------------------------------
 # Health
@@ -396,7 +411,9 @@ def list_available_machines() -> list[dict[str, Any]]:
         """
         UPDATE machines
         SET status = 'idle'
-        WHERE status = 'available' AND (last_seen_at IS NULL OR last_seen_at < %s)
+        WHERE status = 'available'
+          AND machine_type != 'runpod_serverless'
+          AND (last_seen_at IS NULL OR last_seen_at < %s)
         """,
         (cutoff,),
     )
@@ -568,10 +585,12 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
     rendered_frames = max(0, job.get("rendered_frames") or 0)
     if payload.status in ("done", "failed"):
         completed_at = now_iso()
-        execute(
-            "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
-            (completed_at, job["machine_id"]),
-        )
+        # Serverless machines are always-available; heartbeat manages their last_seen_at
+        if _machine_type_of(job["machine_id"]) != "runpod_serverless":
+            execute(
+                "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
+                (completed_at, job["machine_id"]),
+            )
     if payload.status == "done":
         if total_frames and total_frames > 0:
             rendered_frames = total_frames
@@ -774,6 +793,7 @@ def distribute_frames(
         chunk_total = ((chunk_end - current_frame) // frame_step) + 1 if chunk_end >= current_frame else 0
         assignments.append({
             "machine_id": machine["id"],
+            "machine_type": machine.get("machine_type", "windows"),
             "gpu_model": machine.get("gpu_model", "Unknown"),
             "gpu_vram_gb": machine.get("gpu_vram_gb", 0),
             "cpu_cores": machine.get("cpu_cores", 0),
@@ -820,6 +840,7 @@ def distribute_frames_by_chunk_size(
         chunk_total = ((chunk_end - current_frame) // frame_step) + 1 if chunk_end >= current_frame else 0
         assignments.append({
             "machine_id": machine["id"],
+            "machine_type": machine.get("machine_type", "windows"),
             "gpu_model": machine.get("gpu_model", "Unknown"),
             "gpu_vram_gb": machine.get("gpu_vram_gb", 0),
             "cpu_cores": machine.get("cpu_cores", 0),
@@ -979,6 +1000,11 @@ def choose_retry_machine(group_id: str, failed_machine_id: str) -> str | None:
 
     ranked = sorted(rows, key=rank, reverse=True)
     return ranked[0].get("id") if ranked else failed_machine_id
+
+
+def _machine_type_of(machine_id: str) -> str:
+    row = query_one("SELECT machine_type FROM machines WHERE id = %s", (machine_id,))
+    return row["machine_type"] if row else "windows"
 
 
 class CreateRenderGroupPayload(BaseModel):
@@ -1197,10 +1223,12 @@ def confirm_render_group_upload(
                 now_iso(),
             ),
         )
-        execute(
-            "UPDATE machines SET status = 'processing' WHERE id = %s",
-            (a["machine_id"],),
-        )
+        # Serverless machines are always-available; don't flip them to 'processing'
+        if a.get("machine_type") != "runpod_serverless":
+            execute(
+                "UPDATE machines SET status = 'processing' WHERE id = %s",
+                (a["machine_id"],),
+            )
         tasks.append({
             "job_id": job_id,
             "machine_id": a["machine_id"],
@@ -1221,6 +1249,34 @@ def confirm_render_group_upload(
             "max_retries": max_retries,
             "priority": priority,
         })
+
+    # Dispatch runpod_serverless tasks immediately
+    if runpod_dispatch.is_enabled():
+        blend_url = (
+            f"{runpod_dispatch.PUBLIC_BACKEND_URL}"
+            f"/render-groups/{group_id}/input/{group['input_filename']}"
+        )
+        overrides_b64 = base64.b64encode(overrides_json.encode()).decode()
+        for task in tasks:
+            if task.get("machine_id") and _machine_type_of(task["machine_id"]) == "runpod_serverless":
+                try:
+                    rp_job_id = runpod_dispatch.dispatch_job(
+                        job_id=task["job_id"],
+                        blend_url=blend_url,
+                        frame_start=task["frame_start"],
+                        frame_end=task["frame_end"],
+                        frame_step=task["frame_step"],
+                        render_overrides_b64=overrides_b64,
+                    )
+                    runpod_dispatch.start_polling_thread(
+                        job_id=task["job_id"],
+                        runpod_job_id=rp_job_id,
+                        db_execute=execute,
+                        db_query_one=query_one,
+                        now_iso=now_iso,
+                    )
+                except Exception as exc:
+                    log.error(f"Failed to dispatch job {task['job_id']} to RunPod: {exc}")
 
     return {
         "group_id": group_id,

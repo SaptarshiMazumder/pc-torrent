@@ -39,7 +39,14 @@ if [ ! -f "$PROJECT_ROOT/server/.env" ]; then
     exit 1
 fi
 
-export $(grep -v '^#' "$PROJECT_ROOT/server/.env" | grep -v '^$' | xargs)
+while IFS='=' read -r key value; do
+    key="${key%$'\r'}"
+    value="${value%$'\r'}"
+    if [[ -z "$key" || "$key" =~ ^# ]]; then
+        continue
+    fi
+    export "$key=$value"
+done < "$PROJECT_ROOT/server/.env"
 
 log_ok "DATABASE_URL loaded (Neon PostgreSQL)"
 log_ok "R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:0:10}..."
@@ -57,6 +64,7 @@ cp "$PROJECT_ROOT/server/requirements.txt" "$BUILD_DIR/"
 cp "$PROJECT_ROOT/server/db.py" "$BUILD_DIR/"
 cp "$PROJECT_ROOT/server/storage.py" "$BUILD_DIR/"
 cp "$PROJECT_ROOT/server/main.py" "$BUILD_DIR/"
+cp "$PROJECT_ROOT/server/runpod_dispatch.py" "$BUILD_DIR/"
 cp "$PROJECT_ROOT/server/blend_parser.py" "$BUILD_DIR/"
 log_ok "Copied source files to build context"
 
@@ -84,6 +92,14 @@ gcloud run deploy "$SERVICE_NAME" \
     --set-env-vars "R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID" \
     --set-env-vars "R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY" \
     --set-env-vars "R2_BUCKET_NAME=$R2_BUCKET_NAME" \
+    --set-env-vars "RUNPOD_API_KEY=$RUNPOD_API_KEY" \
+    --set-env-vars "RUNPOD_ENDPOINT_ID=${RUNPOD_ENDPOINT_ID:-}" \
+    --set-env-vars "^@^RUNPOD_ENDPOINTS=${RUNPOD_ENDPOINTS:-}" \
+    --set-env-vars "PUBLIC_BACKEND_URL=$PUBLIC_BACKEND_URL" \
+    --set-env-vars "RUNPOD_GPU_MODEL=${RUNPOD_GPU_MODEL:-RunPod Serverless}" \
+    --set-env-vars "RUNPOD_GPU_VRAM_GB=${RUNPOD_GPU_VRAM_GB:-24}" \
+    --set-env-vars "RUNPOD_CPU_CORES=${RUNPOD_CPU_CORES:-16}" \
+    --set-env-vars "RUNPOD_RAM_GB=${RUNPOD_RAM_GB:-64}" \
     --quiet
 
 BACKEND_URL=$(gcloud run services describe "$SERVICE_NAME" \

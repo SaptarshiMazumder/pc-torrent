@@ -1679,7 +1679,7 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
 
 @app.get("/render-groups/{group_id}/download")
 def download_render_group_output(group_id: str):
-    """Download all output files from a completed render group as a zip."""
+    """Return presigned R2 URLs for all output files — client downloads directly from R2."""
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
@@ -1689,7 +1689,6 @@ def download_render_group_output(group_id: str):
         (group_id,),
     )
 
-    # Check if all non-failed tasks are done
     all_jobs = query_all("SELECT status FROM jobs WHERE group_id = %s", (group_id,))
     pending_or_running = [j for j in all_jobs if j["status"] in ("pending", "running")]
     if pending_or_running:
@@ -1706,27 +1705,16 @@ def download_render_group_output(group_id: str):
     if not all_files:
         raise HTTPException(status_code=404, detail="No output files found")
 
-    # Single file → redirect
-    if len(all_files) == 1:
-        r2_key, fname = all_files[0]
-        url = storage.generate_presigned_url(r2_key, download_name=fname)
-        return RedirectResponse(url=url)
+    # Return presigned URLs — no data passes through the server
+    urls = []
+    for r2_key, fname in all_files:
+        try:
+            url = storage.generate_presigned_url(r2_key, download_name=fname)
+            urls.append({"filename": fname, "url": url})
+        except Exception:
+            continue
 
-    # Multiple files → zip
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for r2_key, fname in all_files:
-            try:
-                data = storage.download_file(r2_key)
-                zf.writestr(fname, data)
-            except Exception:
-                continue
-    zip_buffer.seek(0)
-
-    headers = {
-        "Content-Disposition": f"attachment; filename=render_{group_id[:8]}_output.zip"
-    }
-    return StreamingResponse(zip_buffer, media_type="application/zip", headers=headers)
+    return {"files": urls, "group_id": group_id}
 
 
 # -----------------------------------------------

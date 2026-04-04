@@ -161,6 +161,9 @@ def _apply_output(scene, overrides: dict):
     file_format = output.get("file_format")
     if isinstance(file_format, str) and file_format:
         _set_attr_safe(image_settings, "file_format", file_format)
+    else:
+        # Default to PNG for distributed rendering — video formats cannot be split across workers
+        _set_attr_safe(image_settings, "file_format", "PNG")
 
     color_mode = output.get("color_mode")
     if isinstance(color_mode, str) and color_mode:
@@ -469,6 +472,66 @@ def _filepath_for_frame(base_path: str, frame: int):
     return f"{base_path}{frame:04d}"
 
 
+def _save_render_result_as_png(path: str) -> bool:
+    """
+    Save the current Render Result as PNG by copying its pixels into a fresh
+    image data-block.  This bypasses scene.render.image_settings entirely, so
+    it works even when the scene output format is locked to FFMPEG.
+    """
+    src = bpy.data.images.get("Render Result")
+    if not src or src.size[0] == 0 or src.size[1] == 0:
+        log("[RENDER_DRIVER] PNG fallback: Render Result not available")
+        return False
+    w, h = src.size[0], src.size[1]
+    tmp = None
+    try:
+        tmp = bpy.data.images.new("_pcr_png_tmp", w, h, float_buffer=True, alpha=True)
+        tmp.pixels[:] = src.pixels[:]
+        tmp.file_format = "PNG"
+        tmp.filepath_raw = path
+        tmp.save()
+        return True
+    except Exception as exc:
+        log(f"[RENDER_DRIVER] PNG fallback save failed: {exc}")
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                bpy.data.images.remove(tmp)
+            except Exception:
+                pass
+
+
+def _render_frames_with_png_fallback(scene, selected_layer, base_path):
+    """
+    Frame-by-frame animation render that saves every frame as PNG regardless
+    of the scene output format.  Used when the scene is locked to FFMPEG output.
+    """
+    frames = list(range(int(scene.frame_start), int(scene.frame_end) + 1, max(1, int(scene.frame_step))))
+    if not frames:
+        raise RuntimeError("No renderable frames in timeline")
+
+    _disable_default_progress_handlers()
+    _emit_progress("meta", frames[0], 0, len(frames))
+
+    kwargs = {
+        "animation": False,
+        "write_still": False,
+        "use_viewport": False,
+        "scene": scene.name,
+    }
+    if selected_layer:
+        kwargs["layer"] = selected_layer
+
+    for index, frame in enumerate(frames, start=1):
+        scene.frame_set(frame)
+        bpy.ops.render.render(**kwargs)
+        frame_path = _filepath_for_frame(base_path, frame) + ".png"
+        if not _save_render_result_as_png(frame_path):
+            raise RuntimeError(f"Failed to save frame {frame} as PNG")
+        _emit_progress("frame", frame, index, len(frames))
+
+
 def _render_animation(scene, selected_layer):
     kwargs = {
         "animation": True,
@@ -546,10 +609,21 @@ def main():
     log(f"[RENDER_DRIVER] Output: {scene.render.filepath}")
     log(f"[RENDER_DRIVER] Engine: {scene.render.engine}")
 
+    ffmpeg_locked = scene.render.image_settings.file_format == "FFMPEG"
+    if ffmpeg_locked:
+        log("[RENDER_DRIVER] Output format locked to FFMPEG — switching to frame-by-frame PNG rendering")
+
     if camera_mode == "camera_ranges":
         camera_ranges = _normalize_camera_ranges(overrides)
         log(f"[RENDER_DRIVER] Camera ranges: {len(camera_ranges)}")
         _render_with_camera_ranges(scene, selected_layer, camera_ranges)
+    elif ffmpeg_locked:
+        if not _ensure_scene_camera(scene):
+            raise RuntimeError(
+                "No camera found in the scene. Add a camera, set one as active, "
+                "or use camera_ranges with valid camera names."
+            )
+        _render_frames_with_png_fallback(scene, selected_layer, scene.render.filepath)
     else:
         if not _ensure_scene_camera(scene):
             raise RuntimeError(

@@ -39,14 +39,10 @@ RENDER_DRIVER_SCRIPT = os.getenv("RENDER_DRIVER_SCRIPT", "/scripts/render_driver
 
 # Push a progress update to backend at most every N seconds
 PROGRESS_PUSH_INTERVAL = float(os.getenv("PROGRESS_PUSH_INTERVAL", "2"))
-# Max bytes per output upload request (~24 MB)
-UPLOAD_BATCH_BYTES = int(os.getenv("UPLOAD_BATCH_BYTES", str(24 * 1024 * 1024)))
-UPLOAD_BATCH_FILES = int(os.getenv("UPLOAD_BATCH_FILES", "50"))
 RENDER_FATAL_PATTERNS = (
     "[RENDER_DRIVER] ERROR:",
     "RuntimeError: Error: Cannot render, no camera",
     "Error: Cannot render, no camera",
-    "Traceback (most recent call last):",
 )
 
 
@@ -144,7 +140,7 @@ def _push_progress(backend_url: str, job_id: str, rendered_frames: int, total_fr
 
 
 def _upload_outputs(backend_url: str, job_id: str, output_dir: str) -> list[str]:
-    """Upload rendered output files to the backend in batches. Returns list of uploaded filenames."""
+    """Upload rendered output files directly to R2 via presigned URLs (bypasses Cloud Run size limits)."""
     files = sorted(
         f for f in os.listdir(output_dir)
         if os.path.isfile(os.path.join(output_dir, f))
@@ -153,46 +149,37 @@ def _upload_outputs(backend_url: str, job_id: str, output_dir: str) -> list[str]
         log.warning("No output files found after render")
         return []
 
-    # Split into batches by size and count
-    batches: list[list[str]] = []
-    current_batch: list[str] = []
-    current_size = 0
-    for fname in files:
-        fsize = os.path.getsize(os.path.join(output_dir, fname))
-        if current_batch and (
-            current_size + fsize > UPLOAD_BATCH_BYTES
-            or len(current_batch) >= UPLOAD_BATCH_FILES
-        ):
-            batches.append(current_batch)
-            current_batch = []
-            current_size = 0
-        current_batch.append(fname)
-        current_size += fsize
-    if current_batch:
-        batches.append(current_batch)
+    # Request presigned PUT URLs from server
+    log.info(f"Requesting presigned upload URLs for {len(files)} file(s)")
+    resp = requests.post(
+        f"{backend_url}/jobs/{job_id}/request-upload-urls",
+        json={"filenames": files},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    urls: dict = resp.json()["urls"]
 
+    # Upload each file directly to R2
     uploaded: list[str] = []
-    for i, batch in enumerate(batches):
-        log.info(f"Uploading batch {i + 1}/{len(batches)} ({len(batch)} files)")
-        file_handles = []
-        try:
-            file_handles = [
-                (fname, open(os.path.join(output_dir, fname), "rb"))
-                for fname in batch
-            ]
-            resp = requests.post(
-                f"{backend_url}/jobs/{job_id}/output",
-                files=[("files", (fname, fh, "application/octet-stream")) for fname, fh in file_handles],
-                timeout=600,
-            )
-            resp.raise_for_status()
-            uploaded.extend(batch)
-        except Exception as e:
-            log.error(f"Batch {i + 1} upload failed: {e}")
-            raise
-        finally:
-            for _, fh in file_handles:
-                fh.close()
+    for i, fname in enumerate(files):
+        url = urls.get(fname)
+        if not url:
+            raise RuntimeError(f"No presigned URL returned for {fname}")
+        fpath = os.path.join(output_dir, fname)
+        fsize = os.path.getsize(fpath)
+        log.info(f"Uploading {i + 1}/{len(files)}: {fname} ({fsize / 1024 / 1024:.1f} MB)")
+        with open(fpath, "rb") as fh:
+            put_resp = requests.put(url, data=fh, headers={"Content-Type": "application/octet-stream"}, timeout=600)
+            put_resp.raise_for_status()
+        uploaded.append(fname)
+
+    # Register uploaded filenames with the server (updates DB output_files list)
+    log.info(f"Registering {len(uploaded)} output file(s) with server")
+    requests.post(
+        f"{backend_url}/jobs/{job_id}/register-outputs",
+        json={"filenames": uploaded},
+        timeout=30,
+    ).raise_for_status()
 
     return uploaded
 

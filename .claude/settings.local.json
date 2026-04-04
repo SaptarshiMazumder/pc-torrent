@@ -73,7 +73,9 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:vast.ai)",
       "WebFetch(domain:www.runpod.io)",
-      "WebFetch(domain:graphql-spec.runpod.io)"
+      "WebFetch(domain:graphql-spec.runpod.io)",
+      "Bash(docker push:*)",
+      "Bash(docker manifest:*)"
     ]
   }
 }

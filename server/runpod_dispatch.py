@@ -294,6 +294,56 @@ def dispatch_job(
     return runpod_job_id
 
 
+def dispatch_and_save(
+    job_id: str,
+    blend_url: str,
+    frame_start: int,
+    frame_end: int,
+    frame_step: int,
+    render_overrides_b64: str,
+    machine_id: str,
+    db_execute,
+) -> str:
+    """Dispatch to RunPod and immediately persist the RunPod job ID on the job row."""
+    rp_job_id = dispatch_job(
+        job_id=job_id,
+        blend_url=blend_url,
+        frame_start=frame_start,
+        frame_end=frame_end,
+        frame_step=frame_step,
+        render_overrides_b64=render_overrides_b64,
+        machine_id=machine_id,
+    )
+    db_execute(
+        "UPDATE jobs SET runpod_job_id = %s WHERE id = %s",
+        (rp_job_id, job_id),
+    )
+    return rp_job_id
+
+
+def _find_failover_machine(db_query_one, db_query_all, failed_machine_id: str):
+    """
+    Find the best available machine to take over a failed job.
+    Prefers: other serverless endpoints > available linux/windows PCs.
+    Returns (machine_row, machine_type) or (None, None).
+    """
+    rows = db_query_all(
+        """
+        SELECT * FROM machines
+        WHERE status = 'available' AND id != %s
+        ORDER BY gpu_vram_gb DESC
+        """,
+        (failed_machine_id,),
+    )
+    if not rows:
+        return None, None
+    # Prefer serverless (always available, instant spin-up), then others
+    serverless = [r for r in rows if r.get("machine_type") == "runpod_serverless"]
+    if serverless:
+        return serverless[0], "runpod_serverless"
+    return rows[0], rows[0].get("machine_type", "windows")
+
+
 def start_polling_thread(
     job_id: str,
     runpod_job_id: str,
@@ -301,10 +351,16 @@ def start_polling_thread(
     db_query_one,
     now_iso,
     machine_id: str = "",
+    blend_url: str = "",
+    render_overrides_b64: str = "",
+    db_query_all=None,
+    group_id: str = "",
 ):
     """
     Background thread: polls RunPod /status/{runpod_job_id} every
     JOB_STATUS_POLL_INTERVAL_SEC seconds.
+    On failure: retries on same endpoint first, then fails over to any
+    available machine in the marketplace.
     """
     endpoint_id = (
         _endpoint_id_for_machine(machine_id)
@@ -326,7 +382,8 @@ def start_polling_thread(
                 rp_status: str = data.get("status", "")
 
                 job = db_query_one(
-                    "SELECT status FROM jobs WHERE id = %s", (job_id,)
+                    "SELECT status, attempt, max_retries, frame_start, frame_end, frame_step, rendered_frames, input_filename, render_overrides_json, chunk_index, chunk_size_frames, priority FROM jobs WHERE id = %s",
+                    (job_id,),
                 )
                 if not job:
                     log.warning(f"Poll: job {job_id} not found in DB, stopping")
@@ -352,8 +409,84 @@ def start_polling_thread(
                     break
 
                 elif rp_status in ("FAILED", "CANCELLED"):
-                    if local_status not in ("done", "failed"):
-                        error = str(data.get("error") or f"RunPod status: {rp_status}")
+                    if local_status in ("done", "failed"):
+                        break
+                    error = str(data.get("error") or f"RunPod status: {rp_status}")
+
+                    # Calculate remaining frames (skip already rendered ones)
+                    rendered = max(0, job.get("rendered_frames") or 0)
+                    step = job.get("frame_step") or 1
+                    remaining_start = job["frame_start"] + rendered * step
+                    remaining_end = job["frame_end"]
+
+                    # --- Attempt 1: retry on same endpoint ---
+                    attempt = job.get("attempt") or 0
+                    max_retries = job.get("max_retries") or 0
+                    if attempt < max_retries and blend_url and remaining_start <= remaining_end:
+                        next_attempt = attempt + 1
+                        db_execute(
+                            """
+                            UPDATE jobs
+                            SET status = 'pending', attempt = %s,
+                                rendered_frames = 0, error = %s,
+                                frame_start = %s
+                            WHERE id = %s
+                            """,
+                            (next_attempt, f"Retry {next_attempt}/{max_retries} (was: {error})", remaining_start, job_id),
+                        )
+                        log.warning(
+                            f"Job {job_id} failed, retrying on same endpoint "
+                            f"({next_attempt}/{max_retries}): {error}"
+                        )
+                        try:
+                            new_rp_job_id = dispatch_and_save(
+                                job_id=job_id,
+                                blend_url=blend_url,
+                                frame_start=remaining_start,
+                                frame_end=remaining_end,
+                                frame_step=step,
+                                render_overrides_b64=render_overrides_b64,
+                                machine_id=machine_id,
+                                db_execute=db_execute,
+                            )
+                            start_polling_thread(
+                                job_id=job_id,
+                                runpod_job_id=new_rp_job_id,
+                                db_execute=db_execute,
+                                db_query_one=db_query_one,
+                                now_iso=now_iso,
+                                machine_id=machine_id,
+                                blend_url=blend_url,
+                                render_overrides_b64=render_overrides_b64,
+                                db_query_all=db_query_all,
+                                group_id=group_id,
+                            )
+                        except Exception as dispatch_err:
+                            log.error(f"Same-endpoint retry failed for {job_id}: {dispatch_err}")
+                            # Fall through to failover below
+                            _handle_failover(
+                                job_id=job_id, job=job, error=str(dispatch_err),
+                                remaining_start=remaining_start, remaining_end=remaining_end,
+                                step=step, blend_url=blend_url,
+                                render_overrides_b64=render_overrides_b64,
+                                failed_machine_id=machine_id, group_id=group_id,
+                                db_execute=db_execute, db_query_one=db_query_one,
+                                db_query_all=db_query_all, now_iso=now_iso,
+                            )
+                        break
+
+                    # --- Attempt 2: failover to any available machine ---
+                    if blend_url and remaining_start <= remaining_end and db_query_all:
+                        _handle_failover(
+                            job_id=job_id, job=job, error=error,
+                            remaining_start=remaining_start, remaining_end=remaining_end,
+                            step=step, blend_url=blend_url,
+                            render_overrides_b64=render_overrides_b64,
+                            failed_machine_id=machine_id, group_id=group_id,
+                            db_execute=db_execute, db_query_one=db_query_one,
+                            db_query_all=db_query_all, now_iso=now_iso,
+                        )
+                    else:
                         db_execute(
                             """
                             UPDATE jobs
@@ -362,7 +495,7 @@ def start_polling_thread(
                             """,
                             (now_iso(), error, job_id),
                         )
-                        log.error(f"Job {job_id} failed on RunPod: {error}")
+                        log.error(f"Job {job_id} failed, no failover possible: {error}")
                     break
 
                 # IN_QUEUE or unknown -> keep polling
@@ -373,3 +506,88 @@ def start_polling_thread(
 
     t = threading.Thread(target=_poll, daemon=True, name=f"runpod-poll-{job_id[:8]}")
     t.start()
+
+
+def _handle_failover(
+    job_id, job, error, remaining_start, remaining_end, step,
+    blend_url, render_overrides_b64, failed_machine_id, group_id,
+    db_execute, db_query_one, db_query_all, now_iso,
+):
+    """Mark original job failed, create a new job on the best available machine."""
+    import uuid
+
+    db_execute(
+        """
+        UPDATE jobs
+        SET status = 'failed', completed_at = %s, error = %s
+        WHERE id = %s
+        """,
+        (now_iso(), f"Failed, migrating remaining frames ({error})", job_id),
+    )
+
+    failover_machine, failover_type = _find_failover_machine(
+        db_query_one, db_query_all, failed_machine_id,
+    )
+    if not failover_machine:
+        log.error(f"Job {job_id}: no available machines for failover")
+        return
+
+    new_total = ((remaining_end - remaining_start) // step) + 1
+    new_job_id = str(uuid.uuid4())
+    db_execute(
+        """
+        INSERT INTO jobs (id, machine_id, group_id, input_filename, status,
+                          total_frames, rendered_frames, output_files,
+                          frame_start, frame_end, frame_step,
+                          render_overrides_json, attempt, max_retries, priority,
+                          chunk_index, chunk_size_frames, submitted_at)
+        VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, 0, %s, %s, %s, %s, %s)
+        """,
+        (
+            new_job_id, failover_machine["id"], group_id,
+            job.get("input_filename"), new_total,
+            remaining_start, remaining_end, step,
+            job.get("render_overrides_json") or "{}",
+            job.get("max_retries") or 0,
+            job.get("priority") or 0,
+            job.get("chunk_index"),
+            job.get("chunk_size_frames"),
+            now_iso(),
+        ),
+    )
+    log.info(
+        f"Job {job_id} failed over -> new job {new_job_id} on "
+        f"{failover_machine.get('gpu_model', '?')} ({failover_type})"
+    )
+
+    # Dispatch the new job if it's serverless
+    if failover_type == "runpod_serverless":
+        try:
+            rp_job_id = dispatch_and_save(
+                job_id=new_job_id,
+                blend_url=blend_url,
+                frame_start=remaining_start,
+                frame_end=remaining_end,
+                frame_step=step,
+                render_overrides_b64=render_overrides_b64,
+                machine_id=failover_machine["id"],
+                db_execute=db_execute,
+            )
+            start_polling_thread(
+                job_id=new_job_id,
+                runpod_job_id=rp_job_id,
+                db_execute=db_execute,
+                db_query_one=db_query_one,
+                now_iso=now_iso,
+                machine_id=failover_machine["id"],
+                blend_url=blend_url,
+                render_overrides_b64=render_overrides_b64,
+                db_query_all=db_query_all,
+                group_id=group_id,
+            )
+        except Exception as exc:
+            log.error(f"Failover dispatch failed for new job {new_job_id}: {exc}")
+            db_execute(
+                "UPDATE jobs SET status = 'failed', completed_at = %s, error = %s WHERE id = %s",
+                (now_iso(), f"Failover dispatch failed: {exc}", new_job_id),
+            )

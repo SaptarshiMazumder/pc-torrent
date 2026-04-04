@@ -235,7 +235,7 @@ def normalize_scheduling(raw: dict[str, Any] | None) -> dict[str, Any]:
     src = raw if isinstance(raw, dict) else {}
     return {
         "chunk_size_frames": _coerce_int(src.get("chunk_size_frames"), minimum=1),
-        "max_retries_per_chunk": _coerce_int(src.get("max_retries_per_chunk"), minimum=0, maximum=10) or 0,
+        "max_retries_per_chunk": _coerce_int(src.get("max_retries_per_chunk"), minimum=0, maximum=10) if src.get("max_retries_per_chunk") is not None else 2,
         "priority": _coerce_int(src.get("priority"), minimum=-100, maximum=100) or 0,
     }
 
@@ -617,41 +617,82 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
     )
 
     retry_job_id = None
-    if (
-        payload.status == "failed"
-        and job.get("group_id")
-        and (job.get("attempt") or 0) < (job.get("max_retries") or 0)
-    ):
-        next_attempt = (job.get("attempt") or 0) + 1
-        retry_machine_id = choose_retry_machine(job["group_id"], job["machine_id"]) or job["machine_id"]
-        retry_job_id = str(uuid4())
-        execute(
-            """
-            INSERT INTO jobs (id, machine_id, group_id, input_filename, status,
-                              total_frames, rendered_frames, output_files,
-                              frame_start, frame_end, frame_step,
-                              render_overrides_json, attempt, max_retries, priority,
-                              chunk_index, chunk_size_frames, submitted_at)
-            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                retry_job_id,
-                retry_machine_id,
-                job["group_id"],
-                job["input_filename"],
-                job.get("total_frames"),
-                job.get("frame_start"),
-                job.get("frame_end"),
-                job.get("frame_step") or 1,
-                job.get("render_overrides_json") or "{}",
-                next_attempt,
-                job.get("max_retries") or 0,
-                job.get("priority") or 0,
-                job.get("chunk_index"),
-                job.get("chunk_size_frames"),
-                now_iso(),
-            ),
-        )
+    if payload.status == "failed" and job.get("group_id"):
+        # Calculate remaining frames (don't re-render what's already done)
+        already_rendered = max(0, rendered_frames)
+        step = job.get("frame_step") or 1
+        remaining_start = job["frame_start"] + already_rendered * step
+        remaining_end = job["frame_end"]
+
+        if remaining_start <= remaining_end:
+            retry_machine_id = choose_retry_machine(job["group_id"], job["machine_id"]) or job["machine_id"]
+            retry_job_id = str(uuid4())
+            remaining_total = ((remaining_end - remaining_start) // step) + 1
+            next_attempt = (job.get("attempt") or 0) + 1
+            execute(
+                """
+                INSERT INTO jobs (id, machine_id, group_id, input_filename, status,
+                                  total_frames, rendered_frames, output_files,
+                                  frame_start, frame_end, frame_step,
+                                  render_overrides_json, attempt, max_retries, priority,
+                                  chunk_index, chunk_size_frames, submitted_at)
+                VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    retry_job_id,
+                    retry_machine_id,
+                    job["group_id"],
+                    job["input_filename"],
+                    remaining_total,
+                    remaining_start,
+                    remaining_end,
+                    step,
+                    job.get("render_overrides_json") or "{}",
+                    next_attempt,
+                    job.get("max_retries") or 0,
+                    job.get("priority") or 0,
+                    job.get("chunk_index"),
+                    job.get("chunk_size_frames"),
+                    now_iso(),
+                ),
+            )
+            # If retry target is serverless, dispatch immediately
+            retry_machine_type = _machine_type_of(retry_machine_id)
+            if retry_machine_type == "runpod_serverless" and runpod_dispatch.is_enabled():
+                group = query_one("SELECT * FROM render_groups WHERE id = %s", (job["group_id"],))
+                if group:
+                    blend_url = (
+                        f"{runpod_dispatch.PUBLIC_BACKEND_URL}"
+                        f"/render-groups/{job['group_id']}/input/{group['input_filename']}"
+                    )
+                    overrides_b64 = base64.b64encode(
+                        (job.get("render_overrides_json") or "{}").encode()
+                    ).decode()
+                    try:
+                        rp_job_id = runpod_dispatch.dispatch_and_save(
+                            job_id=retry_job_id,
+                            blend_url=blend_url,
+                            frame_start=remaining_start,
+                            frame_end=remaining_end,
+                            frame_step=step,
+                            render_overrides_b64=overrides_b64,
+                            machine_id=retry_machine_id,
+                            db_execute=execute,
+                        )
+                        runpod_dispatch.start_polling_thread(
+                            job_id=retry_job_id,
+                            runpod_job_id=rp_job_id,
+                            db_execute=execute,
+                            db_query_one=query_one,
+                            now_iso=now_iso,
+                            machine_id=retry_machine_id,
+                            blend_url=blend_url,
+                            render_overrides_b64=overrides_b64,
+                            db_query_all=query_all,
+                            group_id=job["group_id"],
+                        )
+                    except Exception as exc:
+                        log.error(f"Retry dispatch to RunPod failed for {retry_job_id}: {exc}")
 
     if retry_job_id and payload.status == "failed":
         return {"success": True, "retry_scheduled": True, "retry_job_id": retry_job_id}
@@ -809,6 +850,55 @@ def distribute_frames(
     return assignments
 
 
+WORKERS_PER_SERVERLESS = 3
+
+
+def expand_serverless_assignments(
+    assignments: list[dict],
+    workers_per_endpoint: int = WORKERS_PER_SERVERLESS,
+) -> list[dict]:
+    """Split each serverless assignment into multiple sub-assignments for parallel workers."""
+    expanded: list[dict] = []
+    for a in assignments:
+        if a.get("machine_type") != "runpod_serverless" or workers_per_endpoint <= 1:
+            expanded.append(a)
+            continue
+
+        frame_start = a["frame_start"]
+        frame_end = a["frame_end"]
+        frame_step = a["frame_step"]
+        total_frames = a["total_frames"]
+
+        if total_frames <= 1:
+            expanded.append(a)
+            continue
+
+        frames_per_worker = max(1, total_frames // workers_per_endpoint)
+        current = frame_start
+        for w in range(workers_per_endpoint):
+            if current > frame_end:
+                break
+            if w == workers_per_endpoint - 1:
+                sub_end = frame_end
+            else:
+                sub_end = current + (frames_per_worker - 1) * frame_step
+                sub_end = min(sub_end, frame_end)
+
+            sub_total = ((sub_end - current) // frame_step) + 1 if sub_end >= current else 0
+            if sub_total <= 0:
+                break
+
+            sub = dict(a)
+            sub["frame_start"] = current
+            sub["frame_end"] = sub_end
+            sub["total_frames"] = sub_total
+            expanded.append(sub)
+
+            current = sub_end + frame_step
+
+    return expanded
+
+
 def distribute_frames_by_chunk_size(
     frame_start: int,
     frame_end: int,
@@ -868,6 +958,7 @@ def serialize_render_group_task(job: dict, machine: dict | None = None) -> dict:
 
     return {
         "job_id": job["id"],
+        "runpod_job_id": job.get("runpod_job_id"),
         "machine_id": job["machine_id"],
         "machine_gpu": machine["gpu_model"] if machine else "Unknown",
         "machine_vram": machine.get("gpu_vram_gb", 0) if machine else 0,
@@ -933,17 +1024,11 @@ def _check_failover(group_id: str, tasks_raw: list[dict]):
         if new_start > new_end:
             continue  # all frames were already rendered
 
-        # Find the most powerful non-failed machine in the group
-        best_machine = None
-        best_score = -1
-        for mid, m in machines_map.items():
-            if mid == task["machine_id"]:
-                continue
-            score = compute_power_score(m)
-            if score > best_score:
-                best_score = score
-                best_machine = m
-
+        # Find the best available machine from the entire marketplace
+        best_machine_id = choose_retry_machine(group_id, task["machine_id"])
+        if not best_machine_id or best_machine_id == task["machine_id"]:
+            continue
+        best_machine = query_one("SELECT * FROM machines WHERE id = %s", (best_machine_id,))
         if not best_machine:
             continue
 
@@ -974,32 +1059,69 @@ def _check_failover(group_id: str, tasks_raw: list[dict]):
         )
         new_job_ids.append(new_job_id)
 
+        # If reassigned to serverless, dispatch immediately
+        if best_machine.get("machine_type") == "runpod_serverless" and runpod_dispatch.is_enabled():
+            group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
+            if group:
+                blend_url = (
+                    f"{runpod_dispatch.PUBLIC_BACKEND_URL}"
+                    f"/render-groups/{group_id}/input/{group['input_filename']}"
+                )
+                overrides_b64 = base64.b64encode(
+                    (task.get("render_overrides_json") or "{}").encode()
+                ).decode()
+                try:
+                    rp_job_id = runpod_dispatch.dispatch_and_save(
+                        job_id=new_job_id,
+                        blend_url=blend_url,
+                        frame_start=new_start,
+                        frame_end=new_end,
+                        frame_step=step,
+                        render_overrides_b64=overrides_b64,
+                        machine_id=best_machine["id"],
+                        db_execute=execute,
+                    )
+                    runpod_dispatch.start_polling_thread(
+                        job_id=new_job_id,
+                        runpod_job_id=rp_job_id,
+                        db_execute=execute,
+                        db_query_one=query_one,
+                        now_iso=now_iso,
+                        machine_id=best_machine["id"],
+                        blend_url=blend_url,
+                        render_overrides_b64=overrides_b64,
+                        db_query_all=query_all,
+                        group_id=group_id,
+                    )
+                except Exception as exc:
+                    log.error(f"Failover dispatch to RunPod failed for {new_job_id}: {exc}")
+
     return new_job_ids
 
 
 def choose_retry_machine(group_id: str, failed_machine_id: str) -> str | None:
-    """Pick a machine from the same group, preferring available and non-failed machine."""
+    """Pick the best available machine from the entire marketplace.
+
+    Prefers: serverless (instant) > other available machines.
+    Avoids the machine that just failed.
+    """
     rows = query_all(
         """
-        SELECT DISTINCT m.*
-        FROM jobs j
-        JOIN machines m ON m.id = j.machine_id
-        WHERE j.group_id = %s
+        SELECT * FROM machines
+        WHERE status = 'available' AND id != %s
+        ORDER BY gpu_vram_gb DESC
         """,
-        (group_id,),
+        (failed_machine_id,),
     )
     if not rows:
+        # No other machines available — fall back to the same machine
         return failed_machine_id
 
-    def rank(machine: dict) -> tuple[int, int, float]:
-        available = 1 if machine.get("status") == "available" else 0
-        same = 1 if machine.get("id") == failed_machine_id else 0
-        score = compute_power_score(machine)
-        # available first, avoid same machine, higher power first
-        return (available, -same, score)
-
-    ranked = sorted(rows, key=rank, reverse=True)
-    return ranked[0].get("id") if ranked else failed_machine_id
+    # Prefer serverless endpoints (always available, instant spin-up)
+    serverless = [r for r in rows if r.get("machine_type") == "runpod_serverless"]
+    if serverless:
+        return serverless[0]["id"]
+    return rows[0]["id"]
 
 
 def _machine_type_of(machine_id: str) -> str:
@@ -1190,6 +1312,11 @@ def confirm_render_group_upload(
             assignment["chunk_index"] = i
             assignment["chunk_size_frames"] = None
 
+    # Expand serverless farms into multiple parallel workers
+    assignments = expand_serverless_assignments(assignments)
+    for i, a in enumerate(assignments):
+        a["chunk_index"] = i
+
     tasks = []
     max_retries = scheduling.get("max_retries_per_chunk", 0)
     priority = scheduling.get("priority", 0)
@@ -1260,7 +1387,7 @@ def confirm_render_group_upload(
         for task in tasks:
             if task.get("machine_id") and _machine_type_of(task["machine_id"]) == "runpod_serverless":
                 try:
-                    rp_job_id = runpod_dispatch.dispatch_job(
+                    rp_job_id = runpod_dispatch.dispatch_and_save(
                         job_id=task["job_id"],
                         blend_url=blend_url,
                         frame_start=task["frame_start"],
@@ -1268,6 +1395,7 @@ def confirm_render_group_upload(
                         frame_step=task["frame_step"],
                         render_overrides_b64=overrides_b64,
                         machine_id=task["machine_id"],
+                        db_execute=execute,
                     )
                     runpod_dispatch.start_polling_thread(
                         job_id=task["job_id"],
@@ -1276,6 +1404,10 @@ def confirm_render_group_upload(
                         db_query_one=query_one,
                         now_iso=now_iso,
                         machine_id=task["machine_id"],
+                        blend_url=blend_url,
+                        render_overrides_b64=overrides_b64,
+                        db_query_all=query_all,
+                        group_id=group_id,
                     )
                 except Exception as exc:
                     log.error(f"Failed to dispatch job {task['job_id']} to RunPod: {exc}")

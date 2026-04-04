@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget xz-utils libxi6 libxxf86vm1 libxfixes3 \
     libxrender1 libgl1-mesa-glx libxkbcommon0 \
     libsm6 libice6 libxrandr2 libxinerama1 libxcursor1 \
+    libegl1-mesa libgles2-mesa \
     python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 

@@ -98,6 +98,11 @@ MISSING_ASSETS_WARNING = (
 PROGRESS_EVENT_PREFIX = "PCR_PROGRESS "
 BACKEND_PROGRESS_MIN_INTERVAL = 1.0
 HEARTBEAT_INTERVAL = 5.0
+HTTP_CONNECT_TIMEOUT = 10
+HTTP_READ_TIMEOUT = 30
+HTTP_STATUS_READ_TIMEOUT = 120
+HTTP_RETRIES = 3
+HTTP_RETRY_BACKOFF_SEC = 1.5
 
 
 def _read_positive_int_env(name, default):
@@ -219,8 +224,31 @@ def _ensure_http_success(resp, action):
         raise RuntimeError(detail) from exc
 
 
+def _request_with_retries(method, url, *, timeout, retries=HTTP_RETRIES, **kwargs):
+    last_exc = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            return requests.request(method, url, timeout=timeout, **kwargs)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt >= retries:
+                break
+            sleep_s = min(10.0, HTTP_RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+            _log(
+                f"[AGENT] Request retry {attempt}/{retries - 1} after error: {exc}",
+                level="warn",
+            )
+            time.sleep(sleep_s)
+    raise last_exc
+
+
 def register_machine(specs):
-    resp = requests.post(f"{BACKEND_URL}/machines/register", json=specs, timeout=20)
+    resp = _request_with_retries(
+        "POST",
+        f"{BACKEND_URL}/machines/register",
+        json=specs,
+        timeout=(HTTP_CONNECT_TIMEOUT, HTTP_STATUS_READ_TIMEOUT),
+    )
     _ensure_http_success(resp, "Machine registration")
     payload = resp.json()
     machine = payload.get("machine_id")
@@ -230,7 +258,11 @@ def register_machine(specs):
 
 
 def set_available(mid):
-    resp = requests.put(f"{BACKEND_URL}/machines/{mid}/available", timeout=20)
+    resp = _request_with_retries(
+        "PUT",
+        f"{BACKEND_URL}/machines/{mid}/available",
+        timeout=(HTTP_CONNECT_TIMEOUT, HTTP_STATUS_READ_TIMEOUT),
+    )
     _ensure_http_success(resp, f"Mark machine {mid} available")
 
 
@@ -242,7 +274,11 @@ def set_idle(mid):
 
 
 def poll_for_job(mid):
-    resp = requests.get(f"{BACKEND_URL}/jobs/next-for-machine/{mid}", timeout=15)
+    resp = _request_with_retries(
+        "GET",
+        f"{BACKEND_URL}/jobs/next-for-machine/{mid}",
+        timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT),
+    )
     _ensure_http_success(resp, f"Poll next job for machine {mid}")
     if not resp.content:
         return None
@@ -255,10 +291,12 @@ def update_job_status(job_id, status, error=None, output_files=None):
         payload["error"] = error
     if output_files is not None:
         payload["output_files"] = output_files
-    resp = requests.put(
+    resp = _request_with_retries(
+        "PUT",
         f"{BACKEND_URL}/jobs/{job_id}/status",
         json=payload,
-        timeout=20,
+        timeout=(HTTP_CONNECT_TIMEOUT, HTTP_STATUS_READ_TIMEOUT),
+        retries=5,
     )
     _ensure_http_success(resp, f"Update job {job_id} status to {status}")
 
@@ -268,18 +306,22 @@ def update_job_progress(job_id, rendered_frames, total_frames=None):
         "rendered_frames": rendered_frames,
         "total_frames": total_frames,
     }
-    resp = requests.put(
+    resp = _request_with_retries(
+        "PUT",
         f"{BACKEND_URL}/jobs/{job_id}/progress",
         json=payload,
-        timeout=10,
+        timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT),
+        retries=2,
     )
     _ensure_http_success(resp, f"Update job {job_id} progress")
 
 
 def send_machine_heartbeat(mid):
-    resp = requests.put(
+    resp = _request_with_retries(
+        "PUT",
         f"{BACKEND_URL}/machines/{mid}/heartbeat",
-        timeout=10,
+        timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT),
+        retries=2,
     )
     _ensure_http_success(resp, f"Heartbeat machine {mid}")
 

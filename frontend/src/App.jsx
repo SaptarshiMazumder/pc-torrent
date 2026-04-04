@@ -71,6 +71,7 @@ function SegmentedProgressBar({ tasks, totalFrames }) {
             <div key={task.job_id} className="seg-label">
               <span className="seg-dot" style={{ background: task.status === "failed" ? "#ef4444" : color }} />
               <span className="seg-gpu">{gpuShortName(task.machine_gpu)}</span>
+              <span className="seg-workerid" style={{ fontFamily: "monospace", fontSize: 10, color: "#666", marginLeft: 2 }}>[{task.runpod_job_id || task.job_id.slice(0, 8)}]</span>
               <span className="seg-range">{task.frame_start}&ndash;{task.frame_end}</span>
               <span className={`seg-pct ${task.status === "done" ? "pct-done" : task.status === "failed" ? "pct-failed" : ""}`}>
                 {task.status === "failed" ? "Failed" : task.status === "pending" ? "Waiting" : `${pct}%`}

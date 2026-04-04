@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { getJob, getRenderGroup } from "../lib/api";
 
 const STORAGE_KEY = "pcrent_jobs";
-const POLL_INTERVAL = 3000;
+const POLL_INTERVAL = 5000;
 
 function loadJobs() {
   try {
@@ -79,7 +79,7 @@ export function useJobs(backendUrl) {
       if (!url) return;
 
       setJobs((prev) => {
-        const activeJobs = prev.filter((j) => j.status !== "done");
+        const activeJobs = prev.filter((j) => !["done", "failed", "cancelled"].includes(j.status));
         if (activeJobs.length === 0) return prev;
 
         activeJobs.forEach(async (job) => {
@@ -107,7 +107,7 @@ export function useJobs(backendUrl) {
                           typeof updated.overall_progress_pct === "number"
                             ? updated.overall_progress_pct
                             : null,
-                        tasks: updated.tasks || [],
+                        tasks: updated.tasks?.length > 0 ? updated.tasks : j.tasks,
                       }
                     : j
                 )

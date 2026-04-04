@@ -33,7 +33,7 @@ const INITIAL_STATE = {
   logs: [],
 };
 
-export function useAgent() {
+export function useAgent(backendUrl) {
   const [state, setState] = useState(INITIAL_STATE);
   const logsRef = useRef([]);
 
@@ -43,6 +43,9 @@ export function useAgent() {
   }, []);
 
   useEffect(() => {
+    // Skip sidecar entirely when in rentee mode (no backendUrl)
+    if (!backendUrl) return;
+
     let unlistenFn = null;
 
     // Listen for sidecar events
@@ -251,7 +254,7 @@ export function useAgent() {
         unlisten.then((fn) => fn());
       }
     };
-  }, [addLog]);
+  }, [addLog, backendUrl]);
 
   const clearLogs = useCallback(async () => {
     await clearLogsCommand();

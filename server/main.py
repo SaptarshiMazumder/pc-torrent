@@ -17,13 +17,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from db import execute, init_db, query_all, query_one
+from db import execute, init_db, query_all, query_one, request_conn
 import storage
 import runpod_dispatch
 from blend_parser import parse_upload, BlendParseError
@@ -767,6 +767,37 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
         return {"success": True, "retry_scheduled": True, "retry_job_id": retry_job_id}
 
     return {"success": True}
+
+
+@app.post("/jobs/{job_id}/request-upload-urls")
+async def request_upload_urls(job_id: str, body: dict = Body(...)) -> dict[str, Any]:
+    """Return presigned R2 PUT URLs so RunPod workers can upload frames directly (bypasses Cloud Run size limit)."""
+    job = query_one("SELECT id FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    filenames: list[str] = body.get("filenames", [])
+    if not filenames:
+        raise HTTPException(status_code=400, detail="No filenames provided")
+    urls = {}
+    for filename in filenames:
+        safe_name = sanitize_filename(filename)
+        r2_key = f"jobs/{job_id}/output/{safe_name}"
+        urls[filename] = storage.generate_presigned_upload_url(r2_key, expires_in=3600)
+    return {"urls": urls}
+
+
+@app.post("/jobs/{job_id}/register-outputs")
+async def register_outputs(job_id: str, body: dict = Body(...)) -> dict[str, Any]:
+    """Register filenames already uploaded directly to R2 (updates DB output_files list)."""
+    job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    filenames: list[str] = body.get("filenames", [])
+    safe_names = [sanitize_filename(f) for f in filenames]
+    existing = parse_output_files(job["output_files"])
+    merged = list(dict.fromkeys(existing + safe_names))
+    execute("UPDATE jobs SET output_files = %s WHERE id = %s", (json.dumps(merged), job_id))
+    return {"success": True, "registered": len(safe_names)}
 
 
 @app.post("/jobs/{job_id}/output")
@@ -1554,6 +1585,11 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
 @app.get("/render-groups/{group_id}")
 def get_render_group(group_id: str) -> dict[str, Any]:
     """Get render group status with per-task progress."""
+    with request_conn():
+        return _get_render_group_inner(group_id)
+
+
+def _get_render_group_inner(group_id: str) -> dict[str, Any]:
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")

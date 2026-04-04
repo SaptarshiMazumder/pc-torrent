@@ -1,4 +1,5 @@
 import os
+import threading
 from contextlib import contextmanager
 
 import psycopg2
@@ -18,7 +19,7 @@ def _get_pool():
     global _pool
     if _pool is None:
         _pool = psycopg2.pool.ThreadedConnectionPool(
-            1, 10, DATABASE_URL
+            1, 30, DATABASE_URL
         )
     return _pool
 
@@ -39,8 +40,6 @@ def get_conn():
             if not conn.closed:
                 conn.rollback()
         finally:
-            # Drop broken connections from the pool so we don't keep reusing
-            # dead sockets and returning repeated 500s on polling endpoints.
             pool.putconn(conn, close=True)
             conn = None
         raise
@@ -49,8 +48,42 @@ def get_conn():
             pool.putconn(conn)
 
 
+# Thread-local storage so all DB calls within one request share one connection
+_local = threading.local()
+
+
+@contextmanager
+def request_conn():
+    """
+    Context manager that pins ONE connection for the duration of a request.
+    All query_one / query_all / execute calls inside will reuse it.
+    """
+    if getattr(_local, "conn", None) is not None:
+        # Already inside a request_conn block — reuse it
+        yield _local.conn
+        return
+
+    with get_conn() as conn:
+        _local.conn = conn
+        try:
+            yield conn
+        finally:
+            _local.conn = None
+
+
+def _get_request_conn():
+    """Return the pinned connection if inside request_conn(), else get a fresh one."""
+    return _local.conn if getattr(_local, "conn", None) is not None else None
+
+
 def query_one(sql, params=None):
     """Execute a query and return one row as a dict, or None."""
+    pinned = _get_request_conn()
+    if pinned:
+        with pinned.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            return dict(row) if row else None
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
@@ -60,6 +93,11 @@ def query_one(sql, params=None):
 
 def query_all(sql, params=None):
     """Execute a query and return all rows as list of dicts."""
+    pinned = _get_request_conn()
+    if pinned:
+        with pinned.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            return [dict(row) for row in cur.fetchall()]
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
@@ -68,6 +106,11 @@ def query_all(sql, params=None):
 
 def execute(sql, params=None):
     """Execute a statement (INSERT, UPDATE, DELETE)."""
+    pinned = _get_request_conn()
+    if pinned:
+        with pinned.cursor() as cur:
+            cur.execute(sql, params)
+        return
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)

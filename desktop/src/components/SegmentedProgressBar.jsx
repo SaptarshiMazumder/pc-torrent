@@ -84,6 +84,7 @@ export default function SegmentedProgressBar({ tasks, totalFrames }) {
                 style={{ background: task.status === "failed" ? "#ef4444" : color }}
               />
               <span className="segmented-label-gpu">{gpuShortName(task.machine_gpu)}</span>
+              <span style={{ fontFamily: "monospace", fontSize: 10, color: "#666", marginLeft: 2 }}>[{task.runpod_job_id || task.job_id.slice(0, 8)}]</span>
               <span className="segmented-label-frames">
                 {task.frame_start}&ndash;{task.frame_end}
               </span>

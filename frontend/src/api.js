@@ -110,3 +110,7 @@ export async function getRenderGroup(groupId) {
 export function renderGroupDownloadUrl(groupId) {
   return `${BASE}/render-groups/${groupId}/download`;
 }
+
+export function logsStreamUrl() {
+  return `${BASE}/logs/stream`;
+}

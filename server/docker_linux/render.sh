@@ -51,6 +51,7 @@ run_render() {
     local log_file="$3"
     local -a cmd=(
         "$BLENDER_BIN"
+        --enable-autoexec
         -b "$BLEND_FILE"
         -P "$PROGRESS_SCRIPT"
         -P "$RENDER_DRIVER_SCRIPT"
@@ -74,6 +75,13 @@ log_contains_device_unavailable() {
     grep -q "Requested Cycles device not available" "$log_file"
 }
 
+log_contains_fatal_render_error() {
+    local log_file="$1"
+    grep -q "\\[RENDER_DRIVER\\] ERROR:" "$log_file" || \
+    grep -q "Error: Cannot render, no camera" "$log_file" || \
+    grep -q "Traceback (most recent call last):" "$log_file"
+}
+
 attempt_render() {
     local log_file
     log_file=$(mktemp)
@@ -87,6 +95,11 @@ attempt_render() {
 
                 for device in OPTIX CUDA; do
                     if run_render "$device" "$device (GPU)" "$log_file"; then
+                        if log_contains_fatal_render_error "$log_file"; then
+                            echo "ERROR: Fatal render error detected in Blender output."
+                            rm -f "$log_file"
+                            return 4
+                        fi
                         rm -f "$log_file"
                         return 0
                     fi
@@ -111,6 +124,11 @@ attempt_render() {
             ;;
         CPU)
             if run_render "" "CPU (strict)" "$log_file"; then
+                if log_contains_fatal_render_error "$log_file"; then
+                    echo "ERROR: Fatal render error detected in Blender output."
+                    rm -f "$log_file"
+                    return 4
+                fi
                 rm -f "$log_file"
                 return 0
             fi
@@ -125,6 +143,11 @@ attempt_render() {
                 return 2
             fi
             if run_render "$DEVICE_POLICY" "$DEVICE_POLICY (GPU, strict)" "$log_file"; then
+                if log_contains_fatal_render_error "$log_file"; then
+                    echo "ERROR: Fatal render error detected in Blender output."
+                    rm -f "$log_file"
+                    return 4
+                fi
                 rm -f "$log_file"
                 return 0
             fi

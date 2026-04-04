@@ -86,7 +86,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --region "$GCP_REGION" \
     --project "$GCP_PROJECT" \
     --allow-unauthenticated \
-    --memory 512Mi \
+    --memory 2Gi \
     --set-env-vars "DATABASE_URL=$DATABASE_URL" \
     --set-env-vars "R2_ACCOUNT_ID=$R2_ACCOUNT_ID" \
     --set-env-vars "R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID" \

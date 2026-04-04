@@ -17,19 +17,37 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
   const handleDownload = async (id, url) => {
     setDownloadResults((prev) => ({
       ...prev,
-      [id]: { status: "loading", path: "", error: "" },
+      [id]: { status: "loading", path: "", error: "", progress: "" },
     }));
     setDownloadingId(id);
     try {
-      const result = await downloadJobOutputToDownloads(url);
+      // Fetch the list of presigned R2 URLs — no file data passes through the server
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+      const data = await resp.json();
+
+      const files = data.files || [];
+      if (files.length === 0) throw new Error("No output files found");
+
+      let lastPath = "";
+      for (let i = 0; i < files.length; i++) {
+        const { filename, url: fileUrl } = files[i];
+        setDownloadResults((prev) => ({
+          ...prev,
+          [id]: { status: "loading", path: "", error: "", progress: `${i + 1} / ${files.length}` },
+        }));
+        const result = await downloadJobOutputToDownloads(fileUrl);
+        lastPath = result.path.replace(/[^\\/]+$/, ""); // folder path
+      }
+
       setDownloadResults((prev) => ({
         ...prev,
-        [id]: { status: "done", path: result.path, error: "" },
+        [id]: { status: "done", path: lastPath || "Downloads", error: "", progress: "" },
       }));
     } catch (error) {
       setDownloadResults((prev) => ({
         ...prev,
-        [id]: { status: "error", path: "", error: error.message || "Download failed." },
+        [id]: { status: "error", path: "", error: error.message || "Download failed.", progress: "" },
       }));
     } finally {
       setDownloadingId(null);
@@ -173,7 +191,11 @@ function RenderGroupCard({ job, downloadState, downloadingId, onDownload, onRemo
               onClick={onDownload}
               disabled={downloadingId === id}
             >
-              {downloadingId === id ? "Downloading..." : "Download All"}
+              {downloadingId === id
+                ? downloadResults[id]?.progress
+                  ? `Downloading... ${downloadResults[id].progress}`
+                  : "Downloading..."
+                : "Download All"}
             </button>
           )}
           <button className="btn btn-secondary" onClick={onRemove}>

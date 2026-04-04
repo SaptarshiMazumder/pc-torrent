@@ -24,6 +24,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(agent_state.clone())
         .manage(sidecar_handle.clone())
         .invoke_handler(tauri::generate_handler![
@@ -39,6 +40,8 @@ fn main() {
             commands::run_preflight,
             commands::remove_image,
             commands::download_job_output_to_downloads,
+            commands::find_blender,
+            commands::prepare_blend_for_upload,
         ])
         .setup(move |app| {
             match persistence::load_agent_state(&app.handle()) {

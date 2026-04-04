@@ -2,11 +2,14 @@ use serde_json::json;
 use serde::Serialize;
 use reqwest::header::CONTENT_DISPOSITION;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
+
+// Embed the prepare script at compile time so it ships inside the binary
+const PREPARE_BLEND_PY: &str = include_str!("../../../runpod_worker/prepare_blend.py");
 
 use crate::persistence::save_agent_state;
 use crate::sidecar::{SidecarHandle, spawn_sidecar};
@@ -300,5 +303,283 @@ pub async fn download_job_output_to_downloads(
     Ok(DownloadResult {
         path: file_path.to_string_lossy().to_string(),
         filename,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Blend file preparation
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct PrepareResult {
+    pub prepared_path: String,
+    pub filename: String,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+    pub prep_done: bool,
+}
+
+/// Search common install locations for the Blender binary.
+#[tauri::command]
+pub fn find_blender() -> Option<String> {
+    // 1. Explicit env override
+    if let Ok(bin) = std::env::var("BLENDER_BIN") {
+        if Path::new(&bin).is_file() {
+            return Some(bin);
+        }
+    }
+
+    // 2. Common Windows install paths (newest first)
+    #[cfg(target_os = "windows")]
+    {
+        let versions = ["5.1", "5.0", "4.4", "4.3", "4.2", "4.1", "4.0", "3.6", "3.5", "3.4", "3.3"];
+        for ver in &versions {
+            let p = format!(r"C:\Program Files\Blender Foundation\Blender {ver}\blender.exe");
+            if Path::new(&p).is_file() {
+                return Some(p);
+            }
+        }
+        // Generic (some installers don't include version in folder name)
+        let generic = r"C:\Program Files\Blender Foundation\blender.exe";
+        if Path::new(generic).is_file() {
+            return Some(generic.to_string());
+        }
+        // `where blender` via shell
+        if let Ok(out) = std::process::Command::new("where").arg("blender").output() {
+            if out.status.success() {
+                if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                    for line in s.lines() {
+                        let p = line.trim();
+                        if !p.is_empty() && Path::new(p).is_file() {
+                            return Some(p.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. macOS / Linux fallbacks
+    #[cfg(not(target_os = "windows"))]
+    {
+        let candidates = [
+            "/Applications/Blender.app/Contents/MacOS/Blender",
+            "/usr/bin/blender",
+            "/usr/local/bin/blender",
+        ];
+        for p in &candidates {
+            if Path::new(p).is_file() {
+                return Some(p.to_string());
+            }
+        }
+        if let Ok(out) = std::process::Command::new("which").arg("blender").output() {
+            if out.status.success() {
+                if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                    let p = s.trim();
+                    if !p.is_empty() {
+                        return Some(p.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn _find_blend_files(dir: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                results.extend(_find_blend_files(&path));
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let lower = name.to_lowercase();
+                if lower.ends_with(".blend") && !lower.starts_with("._") {
+                    results.push(path);
+                }
+            }
+        }
+    }
+    results.sort();
+    results
+}
+
+fn _choose_target_blend(source_stem: &str, root: &Path, blends: &[PathBuf]) -> PathBuf {
+    // Prefer root-level files; within that, prefer stem match, then largest file
+    let mut best: Option<(&PathBuf, usize, bool, u64)> = None; // (path, depth, stem_match, size)
+    for p in blends {
+        let rel = p.strip_prefix(root).unwrap_or(p);
+        let depth = rel.components().count().saturating_sub(1);
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        let stem_match = stem == source_stem.to_lowercase();
+        let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let better = match &best {
+            None => true,
+            Some((_, bd, bm, bs)) => {
+                let b_is_root = *bd == 0;
+                let c_is_root = depth == 0;
+                if b_is_root != c_is_root {
+                    c_is_root
+                } else if *bm != stem_match {
+                    stem_match
+                } else {
+                    size > *bs
+                }
+            }
+        };
+        if better {
+            best = Some((p, depth, stem_match, size));
+        }
+    }
+    best.map(|(p, ..)| p.clone()).unwrap_or_else(|| blends[0].clone())
+}
+
+fn _zip_dir(src: &Path, dest: &Path) -> Result<(), String> {
+    let file = File::create(dest).map_err(|e| format!("Cannot create zip: {e}"))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    _zip_dir_recursive(&mut zip, src, src, opts)?;
+    zip.finish().map_err(|e| format!("Zip finish failed: {e}"))?;
+    Ok(())
+}
+
+fn _zip_dir_recursive(
+    zip: &mut zip::ZipWriter<File>,
+    dir: &Path,
+    base: &Path,
+    opts: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(base)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if path.is_dir() {
+            zip.add_directory(&rel, opts).map_err(|e| e.to_string())?;
+            _zip_dir_recursive(zip, &path, base, opts)?;
+        } else {
+            zip.start_file(&rel, opts).map_err(|e| e.to_string())?;
+            let mut f = File::open(&path).map_err(|e| e.to_string())?;
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            Write::write_all(zip, &buf).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Run prepare_blend.py inside Blender on the selected file, pack all assets,
+/// and return the path to the prepared file (ready for upload).
+#[tauri::command]
+pub async fn prepare_blend_for_upload(
+    file_path: String,
+    blender_bin: String,
+) -> Result<PrepareResult, String> {
+    let source = Path::new(&file_path);
+    let filename = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Invalid file path")?
+        .to_string();
+
+    // Unique work directory inside %TEMP%/pcrent_prep/
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let work_dir = std::env::temp_dir()
+        .join("pcrent_prep")
+        .join(format!("job_{ts}"));
+    fs::create_dir_all(&work_dir).map_err(|e| format!("Cannot create work dir: {e}"))?;
+
+    // Write prepare script
+    let prep_script = work_dir.join("prepare_blend.py");
+    fs::write(&prep_script, PREPARE_BLEND_PY)
+        .map_err(|e| format!("Cannot write prepare script: {e}"))?;
+
+    let is_zip = filename.to_lowercase().ends_with(".zip");
+
+    let blend_path: PathBuf;
+    let extract_dir: Option<PathBuf>;
+
+    if is_zip {
+        let zip_bytes = fs::read(source).map_err(|e| format!("Cannot read zip: {e}"))?;
+        let cursor = std::io::Cursor::new(zip_bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| format!("Invalid zip archive: {e}"))?;
+        let ex = work_dir.join("extracted");
+        fs::create_dir_all(&ex).map_err(|e| e.to_string())?;
+        archive
+            .extract(&ex)
+            .map_err(|e| format!("Zip extract failed: {e}"))?;
+        let blends = _find_blend_files(&ex);
+        if blends.is_empty() {
+            return Err("No .blend file found inside zip".to_string());
+        }
+        let source_stem = Path::new(&filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        blend_path = _choose_target_blend(source_stem, &ex, &blends);
+        extract_dir = Some(ex);
+    } else {
+        // Copy blend to work dir so Blender writes the prepared file there
+        let dest = work_dir.join(&filename);
+        fs::copy(source, &dest).map_err(|e| format!("Cannot copy blend: {e}"))?;
+        blend_path = dest;
+        extract_dir = None;
+    }
+
+    // Run Blender headless with prepare script
+    let output = std::process::Command::new(&blender_bin)
+        .arg("-b")
+        .arg(&blend_path)
+        .arg("--python")
+        .arg(&prep_script)
+        .output()
+        .map_err(|e| format!("Failed to launch Blender: {e}"))?;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    let mut prep_done = false;
+
+    for line in combined.lines() {
+        if let Some(msg) = line.strip_prefix("PREP_WARN:") {
+            warnings.push(msg.trim().to_string());
+        } else if let Some(msg) = line.strip_prefix("PREP_ERROR:") {
+            errors.push(msg.trim().to_string());
+        } else if line.trim() == "PREP_DONE" {
+            prep_done = true;
+        }
+    }
+
+    // Package the result
+    let (prepared_path, prepared_filename) = if is_zip {
+        // Re-zip the extracted (now prepared) directory
+        let new_zip = work_dir.join(&filename);
+        let ex = extract_dir.unwrap();
+        _zip_dir(&ex, &new_zip)?;
+        (new_zip.to_string_lossy().to_string(), filename)
+    } else {
+        (blend_path.to_string_lossy().to_string(), filename)
+    };
+
+    Ok(PrepareResult {
+        prepared_path,
+        filename: prepared_filename,
+        warnings,
+        errors,
+        prep_done,
     })
 }

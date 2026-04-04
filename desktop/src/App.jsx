@@ -19,7 +19,7 @@ export default function App() {
     "https://pcrent-server-wbifmyiivq-an.a.run.app"
   );
 
-  const agent = useAgent();
+  const agent = useAgent(mode === "renter" ? backendUrl : null);
   const jobsHook = useJobs(backendUrl);
 
   const handleModeChange = useCallback(

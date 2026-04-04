@@ -78,8 +78,7 @@ log_contains_device_unavailable() {
 log_contains_fatal_render_error() {
     local log_file="$1"
     grep -q "\\[RENDER_DRIVER\\] ERROR:" "$log_file" || \
-    grep -q "Error: Cannot render, no camera" "$log_file" || \
-    grep -q "Traceback (most recent call last):" "$log_file"
+    grep -q "Error: Cannot render, no camera" "$log_file"
 }
 
 attempt_render() {

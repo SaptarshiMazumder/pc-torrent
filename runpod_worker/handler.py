@@ -42,11 +42,84 @@ PROGRESS_PUSH_INTERVAL = float(os.getenv("PROGRESS_PUSH_INTERVAL", "2"))
 # Max bytes per output upload request (~24 MB)
 UPLOAD_BATCH_BYTES = int(os.getenv("UPLOAD_BATCH_BYTES", str(24 * 1024 * 1024)))
 UPLOAD_BATCH_FILES = int(os.getenv("UPLOAD_BATCH_FILES", "50"))
+RENDER_FATAL_PATTERNS = (
+    "[RENDER_DRIVER] ERROR:",
+    "RuntimeError: Error: Cannot render, no camera",
+    "Error: Cannot render, no camera",
+    "Traceback (most recent call last):",
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _find_blend_files(root_dir: str) -> list[str]:
+    blend_files: list[str] = []
+    for current_root, _, files in os.walk(root_dir):
+        for name in files:
+            lower_name = name.lower()
+            if not lower_name.endswith(".blend"):
+                continue
+            if lower_name.startswith("._"):
+                continue
+            full_path = os.path.join(current_root, name)
+            rel = os.path.relpath(full_path, root_dir).replace("\\", "/")
+            if rel.startswith("__MACOSX/") or "/._" in rel:
+                continue
+            blend_files.append(full_path)
+    blend_files.sort()
+    return blend_files
+
+
+def _choose_render_target_blend(
+    source_filename: str,
+    input_dir: str,
+    blend_files: list[str],
+) -> tuple[str, bool]:
+    """
+    Choose a deterministic render target when archive contains multiple .blend files.
+    Preference:
+    1) root-level .blend files only (if any exist)
+    2) file stem matches uploaded filename stem
+    3) larger file size
+    4) shorter/lexical relative path
+    5) (fallback) shallower path for non-root-only bundles
+    """
+    source_stem = os.path.splitext(os.path.basename(source_filename))[0].lower()
+
+    entries = []
+    for path in blend_files:
+        rel = os.path.relpath(path, input_dir).replace("\\", "/")
+        stem = os.path.splitext(os.path.basename(path))[0].lower()
+        depth = rel.count("/")
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        entries.append(
+            {
+                "path": path,
+                "rel": rel,
+                "stem_rank": 0 if stem == source_stem else 1,
+                "depth": depth,
+                "size": size,
+            }
+        )
+
+    root_entries = [entry for entry in entries if entry["depth"] == 0]
+    pool = root_entries if root_entries else entries
+    ranked = sorted(
+        pool,
+        key=lambda entry: (
+            entry["stem_rank"],
+            -entry["size"],
+            entry["depth"],
+            len(entry["rel"]),
+            entry["rel"].lower(),
+        ),
+    )
+    return ranked[0]["path"], bool(root_entries)
 
 def _mark_running(backend_url: str, job_id: str):
     try:
@@ -195,8 +268,29 @@ def handler(job: dict) -> dict:
             os.remove(raw_path)
             log.info(f"Extracted contents: {os.listdir(input_dir)}")
 
-        # render.sh finds the .blend automatically via find $INPUT_DIR -name "*.blend"
-        blend_path = ""  # let render.sh discover it
+        blend_files = _find_blend_files(input_dir)
+        if not blend_files:
+            err = "No .blend file found in uploaded input bundle"
+            log.error(err)
+            _mark_failed(backend_url, job_id, err)
+            return {"status": "failed", "error": err}
+
+        blend_path, selected_from_root = _choose_render_target_blend(filename, input_dir, blend_files)
+        chosen_rel = os.path.relpath(blend_path, input_dir).replace("\\", "/")
+        if len(blend_files) > 1:
+            candidates = sorted(
+                (os.path.relpath(p, input_dir).replace("\\", "/") for p in blend_files),
+                key=lambda rel: (rel.count("/"), len(rel), rel.lower()),
+            )
+            preview = ", ".join(candidates[:4])
+            extra = "" if len(candidates) <= 4 else ", ..."
+            selection_mode = "root-level priority" if selected_from_root else "fallback (no root-level .blend found)"
+            log.warning(
+                f"Found {len(blend_files)} .blend files in bundle. "
+                f"Selected '{chosen_rel}' ({selection_mode}). Candidates: {preview}{extra}"
+            )
+        else:
+            log.info(f"Selected render target: {chosen_rel}")
 
         # 3. Decode render overrides
         render_overrides: dict = {}
@@ -239,11 +333,17 @@ def handler(job: dict) -> dict:
         total_frames = (frame_end - frame_start) // frame_step + 1
         rendered_frames = 0
         last_push = 0.0
+        fatal_render_error = ""
 
         for line in proc.stdout:
             line = line.rstrip()
             if line:
                 log.info(line)
+                if not fatal_render_error:
+                    for pattern in RENDER_FATAL_PATTERNS:
+                        if pattern in line:
+                            fatal_render_error = line
+                            break
 
             if "PCR_PROGRESS" in line:
                 try:
@@ -263,8 +363,11 @@ def handler(job: dict) -> dict:
 
         proc.wait()
 
-        if proc.returncode != 0:
-            err = f"render.sh exited with code {proc.returncode}"
+        if proc.returncode != 0 or fatal_render_error:
+            if fatal_render_error:
+                err = f"Render runtime error detected: {fatal_render_error}"
+            else:
+                err = f"render.sh exited with code {proc.returncode}"
             log.error(err)
             _mark_failed(backend_url, job_id, err)
             return {"status": "failed", "error": err}
@@ -275,6 +378,11 @@ def handler(job: dict) -> dict:
             uploaded = _upload_outputs(backend_url, job_id, output_dir)
         except Exception as e:
             err = f"Output upload failed: {e}"
+            log.error(err)
+            _mark_failed(backend_url, job_id, err)
+            return {"status": "failed", "error": err}
+        if not uploaded:
+            err = "Render produced no output files"
             log.error(err)
             _mark_failed(backend_url, job_id, err)
             return {"status": "failed", "error": err}

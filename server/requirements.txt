@@ -6,3 +6,4 @@ boto3==1.38.0
 zstandard==0.23.0
 httpx==0.28.1
 python-dotenv==1.0.1
+sse-starlette==2.1.0

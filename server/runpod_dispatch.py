@@ -294,6 +294,22 @@ def dispatch_job(
     return runpod_job_id
 
 
+def cancel_job(runpod_job_id: str, machine_id: str = ""):
+    """Cancel a running job on RunPod."""
+    endpoint_id = (
+        _endpoint_id_for_machine(machine_id)
+        if machine_id
+        else ENDPOINTS[0]["id"]
+    )
+    resp = httpx.post(
+        f"https://api.runpod.ai/v2/{endpoint_id}/cancel/{runpod_job_id}",
+        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    log.info(f"Cancelled RunPod job {runpod_job_id} on endpoint {endpoint_id}")
+
+
 def dispatch_and_save(
     job_id: str,
     blend_url: str,
@@ -409,7 +425,7 @@ def start_polling_thread(
                     break
 
                 elif rp_status in ("FAILED", "CANCELLED"):
-                    if local_status in ("done", "failed"):
+                    if local_status in ("done", "failed", "cancelled"):
                         break
                     error = str(data.get("error") or f"RunPod status: {rp_status}")
 

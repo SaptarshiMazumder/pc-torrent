@@ -6,6 +6,7 @@ import {
   confirmDistributedJob,
   getRenderGroup,
   renderGroupDownloadUrl,
+  logsStreamUrl,
 } from "./api";
 import { parseBlendFile } from "./lib/blend-parser";
 import "./App.css";
@@ -618,6 +619,81 @@ function RenderGroupStatusPage({ groupId, initialGroup, onBack }) {
 }
 
 // -----------------------------------------------
+// Page: Server Logs (SSE stream)
+// -----------------------------------------------
+function ServerLogsPage({ onBack }) {
+  const [lines, setLines] = useState([]);
+  const [connected, setConnected] = useState(false);
+  const bottomRef = useRef(null);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const es = new EventSource(logsStreamUrl());
+    es.onopen = () => setConnected(true);
+    es.onmessage = (e) => {
+      setLines((prev) => {
+        const next = [...prev, e.data];
+        return next.length > 1000 ? next.slice(-1000) : next;
+      });
+    };
+    es.onerror = () => setConnected(false);
+    return () => es.close();
+  }, []);
+
+  useEffect(() => {
+    if (bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [lines]);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button className="btn-back" onClick={onBack}>{"<- Back"}</button>
+          <h2>Server Logs</h2>
+        </div>
+        <span style={{ fontSize: 12, color: connected ? "#10b981" : "#ef4444" }}>
+          {connected ? "Live" : "Disconnected"}
+        </span>
+      </div>
+      <div
+        ref={containerRef}
+        style={{
+          background: "#0a0a0a",
+          border: "1px solid #222",
+          borderRadius: 8,
+          padding: "12px 16px",
+          fontFamily: "monospace",
+          fontSize: 11,
+          lineHeight: 1.6,
+          maxHeight: "75vh",
+          overflowY: "auto",
+          color: "#ccc",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-all",
+        }}
+      >
+        {lines.length === 0 && <span style={{ color: "#666" }}>Waiting for logs...</span>}
+        {lines.map((line, i) => (
+          <div
+            key={i}
+            style={{
+              color: line.includes("ERROR") ? "#ef4444"
+                : line.includes("WARNING") ? "#f59e0b"
+                : "#ccc",
+            }}
+          >
+            {line}
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------------------------
 // App Shell
 // -----------------------------------------------
 export default function App() {
@@ -644,6 +720,13 @@ export default function App() {
           PC Rent
         </h1>
         <span className="tagline">Distributed rendering marketplace</span>
+        <button
+          className="btn-secondary"
+          style={{ marginLeft: "auto", fontSize: 12 }}
+          onClick={() => setPage("logs")}
+        >
+          Server Logs
+        </button>
       </header>
       <main>
         {page === "machines" && <MachinesPage onContinue={handleContinue} />}
@@ -660,6 +743,9 @@ export default function App() {
             initialGroup={initialGroup}
             onBack={() => setPage("machines")}
           />
+        )}
+        {page === "logs" && (
+          <ServerLogsPage onBack={() => setPage("machines")} />
         )}
       </main>
     </div>

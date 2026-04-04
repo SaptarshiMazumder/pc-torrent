@@ -235,6 +235,42 @@ def _find_camera_object(camera_name: str):
     return camera
 
 
+def _iter_scene_cameras(scene):
+    for obj in getattr(scene, "objects", []):
+        if getattr(obj, "type", None) == "CAMERA":
+            yield obj
+
+
+def _ensure_scene_camera(scene) -> bool:
+    """
+    Ensure scene.camera is set so Blender animation render cannot fail with
+    "Cannot render, no camera" on scenes that forgot to assign an active camera.
+    Returns True when a camera is available after fallback.
+    """
+    if scene.camera and getattr(scene.camera, "type", None) == "CAMERA":
+        return True
+
+    for marker in sorted(scene.timeline_markers, key=lambda m: int(getattr(m, "frame", 0))):
+        marker_cam = getattr(marker, "camera", None)
+        if marker_cam and getattr(marker_cam, "type", None) == "CAMERA":
+            scene.camera = marker_cam
+            log(f"[RENDER_DRIVER] Fallback scene camera from marker: {marker_cam.name}")
+            return True
+
+    for cam in _iter_scene_cameras(scene):
+        scene.camera = cam
+        log(f"[RENDER_DRIVER] Fallback scene camera from scene objects: {cam.name}")
+        return True
+
+    for obj in bpy.data.objects:
+        if getattr(obj, "type", None) == "CAMERA":
+            scene.camera = obj
+            log(f"[RENDER_DRIVER] Fallback scene camera from global objects: {obj.name}")
+            return True
+
+    return False
+
+
 def _apply_scene_camera(scene, overrides: dict) -> str:
     camera_mode = overrides.get("camera_mode")
     if not isinstance(camera_mode, str) or not camera_mode:
@@ -458,6 +494,11 @@ def main():
         log(f"[RENDER_DRIVER] Camera ranges: {len(camera_ranges)}")
         _render_with_camera_ranges(scene, selected_layer, camera_ranges)
     else:
+        if not _ensure_scene_camera(scene):
+            raise RuntimeError(
+                "No camera found in the scene. Add a camera, set one as active, "
+                "or use camera_ranges with valid camera names."
+            )
         _render_animation(scene, selected_layer)
 
 

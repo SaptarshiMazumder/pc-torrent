@@ -1,7 +1,10 @@
+import asyncio
 import base64
+import collections
 import io
 import json
 import logging
+import threading
 import zipfile
 
 # Load .env before anything else reads os.environ
@@ -18,11 +21,42 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 
 from db import execute, init_db, query_all, query_one
 import storage
 import runpod_dispatch
 from blend_parser import parse_upload, BlendParseError
+
+# ---------------------------------------------------------------------------
+# In-memory log ring buffer + SSE broadcast
+# ---------------------------------------------------------------------------
+LOG_BUFFER_SIZE = 500
+_log_buffer: collections.deque[str] = collections.deque(maxlen=LOG_BUFFER_SIZE)
+_log_subscribers: list[asyncio.Queue] = []
+_log_subscribers_lock = threading.Lock()
+
+
+class _BroadcastHandler(logging.Handler):
+    """Captures log records into a ring buffer and pushes to SSE subscribers."""
+
+    def emit(self, record: logging.LogRecord):
+        line = self.format(record)
+        _log_buffer.append(line)
+        with _log_subscribers_lock:
+            for q in _log_subscribers:
+                try:
+                    q.put_nowait(line)
+                except asyncio.QueueFull:
+                    pass  # slow consumer, drop line
+
+
+_broadcast_handler = _BroadcastHandler()
+_broadcast_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s", datefmt="%H:%M:%S")
+)
+logging.root.addHandler(_broadcast_handler)
+logging.root.setLevel(logging.INFO)
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +81,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/logs/stream")
+async def stream_logs():
+    """SSE endpoint: streams application logs in real time."""
+    q: asyncio.Queue[str] = asyncio.Queue(maxsize=200)
+
+    async def event_generator():
+        # Send buffered history first
+        for line in list(_log_buffer):
+            yield {"data": line}
+        # Then stream live
+        with _log_subscribers_lock:
+            _log_subscribers.append(q)
+        try:
+            while True:
+                line = await q.get()
+                yield {"data": line}
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with _log_subscribers_lock:
+                _log_subscribers.remove(q)
+
+    return EventSourceResponse(event_generator())
+
+
+@app.get("/logs/recent")
+def recent_logs() -> list[str]:
+    """Return the last N log lines as JSON array."""
+    return list(_log_buffer)
 
 
 class RegisterMachinePayload(BaseModel):
@@ -617,7 +682,11 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
     )
 
     retry_job_id = None
-    if payload.status == "failed" and job.get("group_id"):
+    group_status = None
+    if job.get("group_id"):
+        g = query_one("SELECT status FROM render_groups WHERE id = %s", (job["group_id"],))
+        group_status = g["status"] if g else None
+    if payload.status == "failed" and job.get("group_id") and group_status not in ("cancelled", "failed", "done"):
         # Calculate remaining frames (don't re-render what's already done)
         already_rendered = max(0, rendered_frames)
         step = job.get("frame_step") or 1
@@ -1425,6 +1494,61 @@ def confirm_render_group_upload(
         "analysis_warnings": analysis_warnings,
         "tasks": tasks,
     }
+
+
+@app.post("/render-groups/cancel-all")
+def cancel_all_render_groups() -> dict[str, Any]:
+    """Cancel ALL active render groups and their jobs."""
+    groups = query_all(
+        "SELECT id FROM render_groups WHERE status IN ('pending', 'running', 'uploading')"
+    )
+    total_cancelled = 0
+    for g in groups:
+        result = cancel_render_group(g["id"])
+        total_cancelled += result.get("cancelled_jobs", 0)
+    return {"success": True, "cancelled_groups": len(groups), "cancelled_jobs": total_cancelled}
+
+
+@app.post("/render-groups/{group_id}/cancel")
+def cancel_render_group(group_id: str) -> dict[str, Any]:
+    """Cancel all pending/running jobs in a render group and stop RunPod workers."""
+    group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+
+    jobs = query_all(
+        "SELECT * FROM jobs WHERE group_id = %s AND status IN ('pending', 'running')",
+        (group_id,),
+    )
+
+    cancelled_count = 0
+    for job in jobs:
+        # Cancel RunPod job if it has one
+        rp_job_id = job.get("runpod_job_id")
+        if rp_job_id and runpod_dispatch.is_enabled():
+            try:
+                runpod_dispatch.cancel_job(rp_job_id, job["machine_id"])
+            except Exception as exc:
+                log.warning(f"Failed to cancel RunPod job {rp_job_id}: {exc}")
+
+        execute(
+            "UPDATE jobs SET status = 'cancelled', completed_at = %s, error = 'Cancelled by user' WHERE id = %s",
+            (now_iso(), job["id"]),
+        )
+        # Release non-serverless machines
+        if _machine_type_of(job["machine_id"]) != "runpod_serverless":
+            execute(
+                "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
+                (now_iso(), job["machine_id"]),
+            )
+        cancelled_count += 1
+
+    execute(
+        "UPDATE render_groups SET status = 'cancelled', completed_at = %s WHERE id = %s",
+        (now_iso(), group_id),
+    )
+
+    return {"success": True, "cancelled_jobs": cancelled_count}
 
 
 @app.get("/render-groups/{group_id}")

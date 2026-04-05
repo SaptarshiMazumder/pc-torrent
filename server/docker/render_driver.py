@@ -186,6 +186,47 @@ def _apply_output(scene, overrides: dict):
         _set_attr_safe(image_settings, "exr_codec", exr_codec)
 
 
+def _activate_gpu_devices(compute_type: str) -> bool:
+    """Activate GPU compute devices in Cycles preferences."""
+    try:
+        cycles_prefs = bpy.context.preferences.addons["cycles"].preferences
+    except (KeyError, AttributeError):
+        log("[RENDER_DRIVER] Cycles addon not available, cannot activate GPU.")
+        return False
+
+    try:
+        cycles_prefs.compute_device_type = compute_type
+    except Exception as exc:
+        log(f"[RENDER_DRIVER] Failed to set compute_device_type={compute_type}: {exc}")
+        return False
+
+    try:
+        cycles_prefs.get_devices()
+    except Exception:
+        try:
+            cycles_prefs.refresh_devices()
+        except Exception:
+            pass
+
+    gpu_devices = []
+    for device in getattr(cycles_prefs, "devices", []):
+        try:
+            if device.type != "CPU":
+                device.use = True
+                gpu_devices.append(device.name)
+            else:
+                device.use = False
+        except Exception:
+            continue
+
+    if gpu_devices:
+        log(f"[RENDER_DRIVER] Activated {compute_type} GPU devices: {gpu_devices}")
+        return True
+
+    log(f"[RENDER_DRIVER] No {compute_type} GPU devices found (only CPU).")
+    return False
+
+
 def _apply_render(scene, overrides: dict):
     render = overrides.get("render") if isinstance(overrides.get("render"), dict) else {}
     render_settings = scene.render
@@ -218,13 +259,27 @@ def _apply_render(scene, overrides: dict):
     _set_attr_safe(cycles, "use_adaptive_sampling", _coerce_bool(render.get("cycles_adaptive_sampling")))
     _set_attr_safe(cycles, "use_denoising", _coerce_bool(render.get("cycles_denoise")))
 
-    device_policy = render.get("device_policy")
-    if isinstance(device_policy, str):
-        policy = device_policy.strip().upper()
-        if policy == "CPU":
-            _set_attr_safe(cycles, "device", "CPU")
-        elif policy in {"AUTO", "CUDA", "OPTIX"}:
+    device_policy = os.environ.get("DEVICE_POLICY", "").strip().upper()
+    override_policy = render.get("device_policy")
+    if isinstance(override_policy, str) and override_policy.strip():
+        device_policy = override_policy.strip().upper()
+
+    if device_policy == "CPU":
+        _set_attr_safe(cycles, "device", "CPU")
+        return
+
+    if device_policy in {"OPTIX", "CUDA"}:
+        if _activate_gpu_devices(device_policy):
             _set_attr_safe(cycles, "device", "GPU")
+        return
+
+    # AUTO: try CUDA then OPTIX, fall back to CPU silently (Windows workers may not have GPU)
+    if device_policy in {"", "AUTO"}:
+        for compute_type in ("CUDA", "OPTIX"):
+            if _activate_gpu_devices(compute_type):
+                _set_attr_safe(cycles, "device", "GPU")
+                return
+        log("[RENDER_DRIVER] No GPU found, using CPU")
 
 
 def _find_camera_object(camera_name: str):

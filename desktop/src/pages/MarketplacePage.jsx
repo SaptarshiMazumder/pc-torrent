@@ -488,41 +488,36 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       setError("Select at least one machine before uploading");
       return;
     }
+    const fallbackStage = flowStage === FLOW_STAGE.PREPARED ? FLOW_STAGE.PREPARED : FLOW_STAGE.ANALYZED;
     setError("");
     setServerParseError("");
     setUploadProgress(0);
+    setUploading(true);
+
     let uploadFilename = file.name;
     let uploadBlob = null; // will be set below
-    // Use prepared artifact when available.
+    let uploadPath = null;
+
+    // Use prepared artifact path when available.
     if (flowStage === FLOW_STAGE.PREPARED && prepResult?.prepared_path) {
       uploadFilename = prepResult.filename || file.name;
-      try {
-        const prepUrl = convertFileSrc(prepResult.prepared_path);
-        const resp = await fetch(prepUrl);
-        uploadBlob = await resp.blob();
-      } catch (err) {
-        setPrepResult((prev) => ({
-          warnings: prev?.warnings || [],
-          errors: [...(prev?.errors || []), `Could not read prepared file, using original input: ${err}`],
-          prep_done: false,
-        }));
-      }
+      uploadPath = prepResult.prepared_path;
     }
-    // If no prepared blob, upload the original file
-    if (!uploadBlob) {
+
+    // If no prepared path, use original file.
+    if (!uploadPath) {
       if (file._fileObj) {
         uploadBlob = file._fileObj;
       } else if (file.path) {
-        const url = convertFileSrc(file.path);
-        const resp = await fetch(url);
-        uploadBlob = await resp.blob();
+        uploadPath = file.path;
       } else {
         setError("Cannot read file for upload");
-        setFlowStage(flowStage === FLOW_STAGE.PREPARED ? FLOW_STAGE.PREPARED : FLOW_STAGE.ANALYZED);
+        setFlowStage(fallbackStage);
+        setUploading(false);
         return;
       }
     }
-    setUploading(true);
+
     try {
       const created = await createDistributedRenderGroup(
         backendUrl,
@@ -530,13 +525,22 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         uploadFilename
       );
       setPendingGroupId(created.group_id || "");
-      await uploadDistributedRenderInput(created.upload_url, uploadBlob, (pct) => {
-        setUploadProgress(pct);
-      });
+
+      if (uploadPath) {
+        await invoke("upload_file_to_presigned_url", {
+          filePath: uploadPath,
+          uploadUrl: created.upload_url,
+        });
+        setUploadProgress(100);
+      } else {
+        await uploadDistributedRenderInput(created.upload_url, uploadBlob, (pct) => {
+          setUploadProgress((prev) => Math.max(prev, pct));
+        });
+      }
       setFlowStage(FLOW_STAGE.UPLOADED);
     } catch (err) {
       setError(err.message || "Upload failed");
-      setFlowStage(flowStage === FLOW_STAGE.PREPARED ? FLOW_STAGE.PREPARED : FLOW_STAGE.ANALYZED);
+      setFlowStage(fallbackStage);
     } finally {
       setUploading(false);
     }
@@ -939,7 +943,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         {(analyzing || preparing || uploading || starting) && (
           <div className="runtime-progress-wrap">
             <div className={`runtime-progress-track ${uploading ? "" : "indeterminate"}`}>
-              <div className="runtime-progress-fill" style={{ width: uploading ? `${uploadProgress}%` : "40%" }} />
+              <div
+                className="runtime-progress-fill"
+                style={{
+                  width: uploading ? `${uploadProgress}%` : "40%",
+                  transition: uploading ? "none" : undefined,
+                }}
+              />
             </div>
             <div className="runtime-progress-meta">
               <span>{stepLabel}</span>

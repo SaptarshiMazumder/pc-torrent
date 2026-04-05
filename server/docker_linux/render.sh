@@ -4,8 +4,9 @@ set -euo pipefail
 BLENDER_BIN="${BLENDER_BIN:-/opt/blender/blender}"
 INPUT_DIR="${INPUT_DIR:-/input}"
 OUTPUT_DIR="${OUTPUT_DIR:-/output}"
-PROGRESS_SCRIPT="${PROGRESS_SCRIPT:-/progress_handler.py}"
-RENDER_DRIVER_SCRIPT="${RENDER_DRIVER_SCRIPT:-/render_driver.py}"
+PROGRESS_SCRIPT="${PROGRESS_SCRIPT:-/scripts/progress_handler.py}"
+RENDER_DRIVER_SCRIPT="${RENDER_DRIVER_SCRIPT:-/scripts/render_driver.py}"
+PRE_LOAD_SCRIPT="${PRE_LOAD_SCRIPT:-/scripts/pre_load.py}"
 DEVICE_POLICY="${DEVICE_POLICY:-AUTO}"
 FRAME_STEP="${FRAME_STEP:-1}"
 BLEND_FILE="${BLEND_FILE:-}"
@@ -52,6 +53,7 @@ run_render() {
     local -a cmd=(
         "$BLENDER_BIN"
         --enable-autoexec
+        --python "$PRE_LOAD_SCRIPT"
         -b "$BLEND_FILE"
         -P "$PROGRESS_SCRIPT"
         -P "$RENDER_DRIVER_SCRIPT"

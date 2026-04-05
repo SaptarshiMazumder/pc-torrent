@@ -5,6 +5,7 @@ export async function getMachines(baseUrl) {
 }
 
 async function uploadFileToPresignedUrl(uploadUrl, file, onProgress) {
+  let lastProgress = 0;
   await new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", uploadUrl);
@@ -12,7 +13,9 @@ async function uploadFileToPresignedUrl(uploadUrl, file, onProgress) {
     if (onProgress) {
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
-          onProgress(Math.round((e.loaded / e.total) * 100));
+          const nextProgress = Math.round((e.loaded / e.total) * 100);
+          lastProgress = Math.max(lastProgress, nextProgress);
+          onProgress(lastProgress);
         }
       };
     }

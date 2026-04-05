@@ -1,12 +1,17 @@
 use serde_json::json;
 use serde::Serialize;
-use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
+use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use futures_util::TryStreamExt;
+use std::collections::HashMap;
+use std::error::Error;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
+use tokio_util::io::ReaderStream;
 
 // Embed the prepare script at compile time so it ships inside the binary
 const PREPARE_BLEND_PY: &str = include_str!("../../../runpod_worker/prepare_blend.py");
@@ -19,6 +24,47 @@ use crate::state::{AgentState, LogEntry};
 pub struct DownloadResult {
     pub path: String,
     pub filename: String,
+}
+
+#[derive(Clone, Copy)]
+enum UploadTaskStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl UploadTaskStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            UploadTaskStatus::Running => "running",
+            UploadTaskStatus::Completed => "completed",
+            UploadTaskStatus::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct UploadTaskEntry {
+    uploaded_bytes: u64,
+    total_bytes: u64,
+    status: UploadTaskStatus,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct UploadProgressSnapshot {
+    pub status: String,
+    pub progress_pct: u8,
+    pub uploaded_bytes: u64,
+    pub total_bytes: u64,
+    pub error: Option<String>,
+}
+
+static UPLOAD_TASKS: OnceLock<StdMutex<HashMap<String, UploadTaskEntry>>> = OnceLock::new();
+static NEXT_UPLOAD_ID: AtomicU64 = AtomicU64::new(1);
+
+fn upload_tasks() -> &'static StdMutex<HashMap<String, UploadTaskEntry>> {
+    UPLOAD_TASKS.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
 fn downloads_dir() -> Result<PathBuf, String> {
@@ -45,30 +91,102 @@ pub fn get_file_size(file_path: String) -> Result<u64, String> {
 }
 
 #[tauri::command]
-pub async fn upload_file_to_presigned_url(
+pub async fn start_upload_file_to_presigned_url(
     file_path: String,
     upload_url: String,
-) -> Result<(), String> {
-    let path = Path::new(&file_path);
-    let metadata = tokio::fs::metadata(path)
+) -> Result<String, String> {
+    let path = PathBuf::from(&file_path);
+    let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|err| format!("Failed to read file metadata: {err}"))?;
     if !metadata.is_file() {
         return Err("Selected path is not a file.".to_string());
     }
 
-    let bytes = tokio::fs::read(path)
+    let total_bytes = metadata.len();
+    let upload_id = format!(
+        "upload-{}",
+        NEXT_UPLOAD_ID.fetch_add(1, Ordering::Relaxed)
+    );
+
+    {
+        let mut tasks = upload_tasks()
+            .lock()
+            .map_err(|_| "Failed to acquire upload task lock".to_string())?;
+        tasks.insert(
+            upload_id.clone(),
+            UploadTaskEntry {
+                uploaded_bytes: 0,
+                total_bytes,
+                status: UploadTaskStatus::Running,
+                error: None,
+            },
+        );
+    }
+
+    let upload_id_for_task = upload_id.clone();
+    tokio::spawn(async move {
+        let outcome = upload_file_streaming(path, upload_url, upload_id_for_task.clone(), total_bytes).await;
+        if let Ok(mut tasks) = upload_tasks().lock() {
+            if let Some(task) = tasks.get_mut(&upload_id_for_task) {
+                match outcome {
+                    Ok(()) => {
+                        task.uploaded_bytes = task.total_bytes;
+                        task.status = UploadTaskStatus::Completed;
+                        task.error = None;
+                    }
+                    Err(err) => {
+                        task.status = UploadTaskStatus::Failed;
+                        task.error = Some(err);
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(upload_id)
+}
+
+async fn upload_file_streaming(
+    file_path: PathBuf,
+    upload_url: String,
+    upload_id: String,
+    total_bytes: u64,
+) -> Result<(), String> {
+    let file = tokio::fs::File::open(&file_path)
         .await
-        .map_err(|err| format!("Failed to read file for upload: {err}"))?;
+        .map_err(|err| format!("Failed to open file for upload: {err}"))?;
+
+    let upload_id_for_stream = upload_id.clone();
+    let stream = ReaderStream::with_capacity(file, 256 * 1024).map_ok(move |chunk| {
+        if let Ok(mut tasks) = upload_tasks().lock() {
+            if let Some(task) = tasks.get_mut(&upload_id_for_stream) {
+                task.uploaded_bytes = task
+                    .uploaded_bytes
+                    .saturating_add(chunk.len() as u64)
+                    .min(task.total_bytes);
+            }
+        }
+        chunk
+    });
 
     let response = reqwest::Client::new()
         .put(&upload_url)
         .header(CONTENT_TYPE, "application/octet-stream")
-        .header(CONTENT_LENGTH, metadata.len().to_string())
-        .body(bytes)
+        .header(reqwest::header::CONTENT_LENGTH, total_bytes.to_string())
+        .body(reqwest::Body::wrap_stream(stream))
         .send()
         .await
-        .map_err(|err| format!("Upload request failed: {err}"))?;
+        .map_err(|err| {
+            let mut msg = err.to_string();
+            let mut source = err.source();
+            while let Some(src) = source {
+                msg.push_str(": ");
+                msg.push_str(&src.to_string());
+                source = src.source();
+            }
+            format!("Upload request failed: {msg}")
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -81,6 +199,68 @@ pub async fn upload_file_to_presigned_url(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_upload_progress(upload_id: String) -> Result<UploadProgressSnapshot, String> {
+    let tasks = upload_tasks()
+        .lock()
+        .map_err(|_| "Failed to acquire upload task lock".to_string())?;
+    let task = tasks
+        .get(&upload_id)
+        .ok_or_else(|| "Upload not found".to_string())?;
+
+    let raw_progress = if task.total_bytes == 0 {
+        0
+    } else {
+        ((task.uploaded_bytes.saturating_mul(100)) / task.total_bytes)
+            .min(100) as u8
+    };
+    let progress_pct = match task.status {
+        UploadTaskStatus::Completed => 100,
+        UploadTaskStatus::Running => raw_progress.min(99),
+        UploadTaskStatus::Failed => raw_progress.min(99),
+    };
+
+    Ok(UploadProgressSnapshot {
+        status: task.status.as_str().to_string(),
+        progress_pct,
+        uploaded_bytes: task.uploaded_bytes,
+        total_bytes: task.total_bytes,
+        error: task.error.clone(),
+    })
+}
+
+#[tauri::command]
+pub fn clear_upload_progress(upload_id: String) -> Result<(), String> {
+    let mut tasks = upload_tasks()
+        .lock()
+        .map_err(|_| "Failed to acquire upload task lock".to_string())?;
+    tasks.remove(&upload_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn upload_file_to_presigned_url(
+    file_path: String,
+    upload_url: String,
+) -> Result<(), String> {
+    let upload_id = start_upload_file_to_presigned_url(file_path, upload_url).await?;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let snapshot = get_upload_progress(upload_id.clone())?;
+        match snapshot.status.as_str() {
+            "completed" => {
+                let _ = clear_upload_progress(upload_id);
+                return Ok(());
+            }
+            "failed" => {
+                let _ = clear_upload_progress(upload_id);
+                return Err(snapshot.error.unwrap_or_else(|| "Upload failed".to_string()));
+            }
+            _ => {}
+        }
+    }
 }
 
 fn sanitize_filename(name: &str) -> String {

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { cancelRenderGroup, jobOutputsUrl, renderGroupOutputsUrl } from "../lib/api";
+import { cancelRenderGroup, getRenderGroupOutputs, getJobOutputs, jobOutputsUrl, renderGroupOutputsUrl } from "../lib/api";
 import { downloadJobOutputToDownloads } from "../lib/sidecar";
 import SegmentedProgressBar from "../components/SegmentedProgressBar";
 
@@ -34,7 +34,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
   const [downloadResults, setDownloadResults] = useState({});
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
 
-  const handleDownload = async (id, url, jobFilename) => {
+  const handleDownload = async (id, fetchOutputs, jobFilename) => {
     setDownloadResults((prev) => ({
       ...prev,
       [id]: { status: "loading", path: "", error: "", progress: "" },
@@ -43,9 +43,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
     try {
       const jobFolder = buildDownloadFolderName(jobFilename, id);
       // Fetch the list of presigned R2 URLs — no file data passes through the server
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-      const data = await resp.json();
+      const data = await fetchOutputs();
 
       const files = data.files || [];
       if (files.length === 0) throw new Error("No output files found");
@@ -130,7 +128,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
                   downloadingId={downloadingId}
                   canceling={!!cancelingGroupIds[id]}
                   onDownload={() =>
-                    handleDownload(id, renderGroupOutputsUrl(backendUrl, id), job.filename)
+                    handleDownload(id, () => getRenderGroupOutputs(backendUrl, id), job.filename)
                   }
                   onCancel={() => {
                     void handleCancelRenderGroup(id);
@@ -149,7 +147,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
                 downloadState={downloadState}
                 downloadingId={downloadingId}
                 onDownload={() =>
-                  handleDownload(id, jobOutputsUrl(backendUrl, id), job.filename)
+                  handleDownload(id, () => getJobOutputs(backendUrl, id), job.filename)
                 }
                 onRemove={() => removeJob(id)}
               />
@@ -358,7 +356,7 @@ function SingleJobCard({ job, backendUrl, downloadState, downloadingId, onDownlo
         <div className="rentee-job-info">
           <div className="job-filename">{job.filename}</div>
           <div className="job-id">
-            {job.machine_gpu} &middot; {id.slice(0, 8)}...
+            {job.machine_gpu} &middot; {id?.slice(0, 8)}...
           </div>
         </div>
         <span className={`status-badge status-${job.status}`}>

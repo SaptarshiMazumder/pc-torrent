@@ -1,35 +1,62 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getJob, getRenderGroup } from "../lib/api";
+import { listJobs, listRenderGroups, getJob, getRenderGroup } from "../lib/api";
 
-const STORAGE_KEY = "pcrent_jobs";
-const POLL_INTERVAL = 2000;
-
-function loadJobs() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveJobs(jobs) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(jobs));
-}
+const POLL_INTERVAL = 3000;
 
 export function useJobs(backendUrl) {
-  const [jobs, setJobs] = useState(loadJobs);
+  const [jobs, setJobs] = useState([]);
+  const [loading, setLoading] = useState(false);
   const backendUrlRef = useRef(backendUrl);
 
   useEffect(() => {
     backendUrlRef.current = backendUrl;
   }, [backendUrl]);
 
-  useEffect(() => {
-    saveJobs(jobs);
-  }, [jobs]);
+  // Fetch all jobs from server
+  const fetchAll = useCallback(async (url) => {
+    if (!url) return;
+    setLoading(true);
+    try {
+      const [groups, singleJobs] = await Promise.all([
+        listRenderGroups(url).catch(() => []),
+        listJobs(url).catch(() => []),
+      ]);
+      const allJobs = [
+        ...groups.map((g) => ({ ...g, group_id: g.id })),
+        ...singleJobs.map((j) => ({ ...j, job_id: j.job_id || j.id })),
+      ].sort((a, b) => new Date(b.submitted_at) - new Date(a.submitted_at));
+      setJobs(allJobs);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  // Add a single-machine job (legacy)
+  // Load on mount and when backendUrl changes
+  useEffect(() => {
+    if (backendUrl) fetchAll(backendUrl);
+  }, [backendUrl, fetchAll]);
+
+  // Optimistically add a render group after submit (server fetch will reconcile)
+  const addRenderGroup = useCallback((groupId, filename, tasks, totalFrames) => {
+    setJobs((prev) => [
+      {
+        group_id: groupId,
+        id: groupId,
+        filename,
+        status: "pending",
+        submitted_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        total_frames: totalFrames,
+        overall_rendered_frames: 0,
+        overall_progress_pct: null,
+        tasks: tasks || [],
+      },
+      ...prev,
+    ]);
+  }, []);
+
+  // Optimistically add a single job
   const addJob = useCallback((jobId, machineGpu, filename) => {
     setJobs((prev) => [
       {
@@ -49,25 +76,6 @@ export function useJobs(backendUrl) {
     ]);
   }, []);
 
-  // Add a distributed render group
-  const addRenderGroup = useCallback((groupId, filename, tasks, totalFrames) => {
-    setJobs((prev) => [
-      {
-        group_id: groupId,
-        filename,
-        status: "pending",
-        submitted_at: new Date().toISOString(),
-        completed_at: null,
-        error: null,
-        total_frames: totalFrames,
-        overall_rendered_frames: 0,
-        overall_progress_pct: null,
-        tasks: tasks || [],
-      },
-      ...prev,
-    ]);
-  }, []);
-
   const removeJob = useCallback((id) => {
     setJobs((prev) => prev.filter((j) => (j.group_id || j.job_id) !== id));
   }, []);
@@ -76,62 +84,46 @@ export function useJobs(backendUrl) {
     setJobs((prev) =>
       prev.map((job) =>
         job.group_id === groupId
-          ? {
-              ...job,
-              status: "cancelled",
-              completed_at: new Date().toISOString(),
-              error: "Cancelled by user",
-            }
+          ? { ...job, status: "cancelled", completed_at: new Date().toISOString(), error: "Cancelled by user" }
           : job
       )
     );
   }, []);
 
-  // Poll active jobs and render groups
+  // Poll active jobs
   useEffect(() => {
     const poll = async () => {
       const url = backendUrlRef.current;
       if (!url) return;
 
       setJobs((prev) => {
-        const activeJobs = prev.filter((j) => !["done", "failed", "cancelled"].includes(j.status));
-        if (activeJobs.length === 0) return prev;
+        const active = prev.filter((j) => !["done", "failed", "cancelled"].includes(j.status));
+        if (active.length === 0) return prev;
 
-        activeJobs.forEach(async (job) => {
+        active.forEach(async (job) => {
           try {
             if (job.group_id) {
-              // Poll render group
               const updated = await getRenderGroup(url, job.group_id);
-              setJobs((current) =>
-                current.map((j) =>
+              setJobs((cur) =>
+                cur.map((j) =>
                   j.group_id === job.group_id
                     ? {
                         ...j,
                         status: updated.status,
                         completed_at: updated.completed_at,
                         error: updated.error,
-                        total_frames:
-                          typeof updated.total_frames === "number"
-                            ? updated.total_frames
-                            : null,
-                        overall_rendered_frames:
-                          typeof updated.overall_rendered_frames === "number"
-                            ? updated.overall_rendered_frames
-                            : 0,
-                        overall_progress_pct:
-                          typeof updated.overall_progress_pct === "number"
-                            ? updated.overall_progress_pct
-                            : null,
+                        total_frames: typeof updated.total_frames === "number" ? updated.total_frames : null,
+                        overall_rendered_frames: typeof updated.overall_rendered_frames === "number" ? updated.overall_rendered_frames : 0,
+                        overall_progress_pct: typeof updated.overall_progress_pct === "number" ? updated.overall_progress_pct : null,
                         tasks: updated.tasks?.length > 0 ? updated.tasks : j.tasks,
                       }
                     : j
                 )
               );
             } else {
-              // Poll single job (legacy)
               const updated = await getJob(url, job.job_id);
-              setJobs((current) =>
-                current.map((j) =>
+              setJobs((cur) =>
+                cur.map((j) =>
                   j.job_id === job.job_id
                     ? {
                         ...j,
@@ -139,26 +131,15 @@ export function useJobs(backendUrl) {
                         completed_at: updated.completed_at,
                         output_files: updated.output_files || [],
                         error: updated.error,
-                        total_frames:
-                          typeof updated.total_frames === "number"
-                            ? updated.total_frames
-                            : null,
-                        rendered_frames:
-                          typeof updated.rendered_frames === "number"
-                            ? updated.rendered_frames
-                            : 0,
-                        progress_pct:
-                          typeof updated.progress_pct === "number"
-                            ? updated.progress_pct
-                            : null,
+                        total_frames: typeof updated.total_frames === "number" ? updated.total_frames : null,
+                        rendered_frames: typeof updated.rendered_frames === "number" ? updated.rendered_frames : 0,
+                        progress_pct: typeof updated.progress_pct === "number" ? updated.progress_pct : null,
                       }
                     : j
                 )
               );
             }
-          } catch {
-            // Silently skip failed polls
-          }
+          } catch {}
         });
 
         return prev;
@@ -169,5 +150,5 @@ export function useJobs(backendUrl) {
     return () => clearInterval(id);
   }, []);
 
-  return { jobs, addJob, addRenderGroup, removeJob, markRenderGroupCancelled };
+  return { jobs, loading, addJob, addRenderGroup, removeJob, markRenderGroupCancelled };
 }

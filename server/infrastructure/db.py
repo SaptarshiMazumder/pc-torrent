@@ -228,5 +228,17 @@ def init_db():
 
                 CREATE INDEX IF NOT EXISTS idx_jobs_machine_pending_priority
                 ON jobs(machine_id, status, priority DESC, submitted_at ASC);
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+                ALTER TABLE render_groups
+                ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+                CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id);
+                CREATE INDEX IF NOT EXISTS idx_render_groups_user_id ON render_groups(user_id);
+
+                ALTER TABLE machines ADD COLUMN IF NOT EXISTS user_id TEXT;
+                CREATE INDEX IF NOT EXISTS idx_machines_user_id ON machines(user_id);
                 """
             )

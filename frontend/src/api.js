@@ -1,7 +1,22 @@
+import { auth } from "./firebase/config";
+
 const BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
-export async function getMachines() {
-  const r = await fetch(`${BASE}/machines`);
+async function authHeaders() {
+  const token = await auth.currentUser?.getIdToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function apiFetch(path, options = {}) {
+  const headers = {
+    ...(options.headers || {}),
+    ...(await authHeaders()),
+  };
+  const r = await fetch(`${BASE}${path}`, { ...options, headers });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `Request failed: ${r.status}`);
+  }
   return r.json();
 }
 
@@ -12,51 +27,55 @@ async function uploadFileToPresignedUrl(uploadUrl, file, onProgress) {
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     if (onProgress) {
       xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          onProgress(Math.round((e.loaded / e.total) * 100));
-        }
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
       };
     }
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed with status ${xhr.status}`));
-    };
+    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Upload failed: ${xhr.status}`)));
     xhr.onerror = () => reject(new Error("Upload failed"));
     xhr.send(file);
   });
 }
 
+export async function getMe() {
+  return apiFetch("/me");
+}
+
+export async function updateMe(fields) {
+  return apiFetch("/me", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+}
+
+export async function getMachines() {
+  return apiFetch("/machines");
+}
+
 export async function submitJob(machineId, file, onProgress) {
-  // Step 1: Get presigned upload URL from backend
-  const reqRes = await fetch(`${BASE}/jobs/request-upload`, {
+  const { job_id, upload_url } = await apiFetch("/jobs/request-upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ machine_id: machineId, filename: file.name }),
   });
-  if (!reqRes.ok) {
-    const err = await reqRes.json();
-    throw new Error(err.detail || "Failed to request upload URL");
-  }
-  const { job_id, upload_url } = await reqRes.json();
 
-  // Step 2: Upload file directly to R2 using presigned URL
   await uploadFileToPresignedUrl(upload_url, file, onProgress);
 
-  // Step 3: Confirm upload with backend
-  const confirmRes = await fetch(`${BASE}/jobs/${job_id}/confirm-upload`, {
-    method: "POST",
-  });
-  if (!confirmRes.ok) {
-    const err = await confirmRes.json();
-    throw new Error(err.detail || "Failed to confirm upload");
-  }
+  await apiFetch(`/jobs/${job_id}/confirm-upload`, { method: "POST" });
 
   return { job_id, status: "pending" };
 }
 
+export async function listJobs() {
+  return apiFetch("/jobs");
+}
+
 export async function getJob(jobId) {
-  const r = await fetch(`${BASE}/jobs/${jobId}`);
-  return r.json();
+  return apiFetch(`/jobs/${jobId}`);
+}
+
+export async function listRenderGroups() {
+  return apiFetch("/render-groups");
 }
 
 export function downloadUrl(jobId) {
@@ -66,16 +85,11 @@ export function downloadUrl(jobId) {
 // ---- Distributed Rendering (Render Groups) ----
 
 export async function createDistributedRenderGroup(machineIds, filename) {
-  const createRes = await fetch(`${BASE}/render-groups/create`, {
+  return apiFetch("/render-groups/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ machine_ids: machineIds, filename }),
   });
-  if (!createRes.ok) {
-    const err = await createRes.json();
-    throw new Error(err.detail || "Failed to create render group");
-  }
-  return createRes.json();
 }
 
 export async function uploadDistributedRenderInput(uploadUrl, file, onProgress) {
@@ -90,27 +104,24 @@ export async function confirmDistributedJob(groupId, machineIds, frameRange = nu
     body.frame_end = frameRange.frame_end;
     body.frame_step = frameRange.frame_step || 1;
   }
-  const confirmRes = await fetch(`${BASE}/render-groups/${groupId}/confirm-upload`, {
+  return apiFetch(`/render-groups/${groupId}/confirm-upload`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!confirmRes.ok) {
-    const err = await confirmRes.json();
-    throw new Error(err.detail || "Failed to confirm upload");
-  }
-  return confirmRes.json();
 }
 
 export async function getRenderGroup(groupId) {
-  const r = await fetch(`${BASE}/render-groups/${groupId}`);
-  return r.json();
+  return apiFetch(`/render-groups/${groupId}`);
 }
 
 export function renderGroupDownloadUrl(groupId) {
   return `${BASE}/render-groups/${groupId}/download`;
 }
 
-export function logsStreamUrl() {
-  return `${BASE}/logs/stream`;
+export async function logsStreamUrl() {
+  const token = await auth.currentUser?.getIdToken();
+  const url = new URL(`${BASE}/logs/stream`);
+  if (token) url.searchParams.set("token", token);
+  return url.toString();
 }

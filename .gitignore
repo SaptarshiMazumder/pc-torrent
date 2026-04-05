@@ -34,3 +34,7 @@ server/docker/pcrent-render.sha256
 Thumbs.db
 .vscode/
 .idea/
+
+# Service account credentials — never commit these
+server/*-adminsdk-*.json
+server/gen-lang-client-*.json

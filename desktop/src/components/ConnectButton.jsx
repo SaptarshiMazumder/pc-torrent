@@ -1,4 +1,5 @@
 import { connectAgent, disconnectAgent } from "../lib/sidecar";
+import { getFirebaseToken } from "../lib/api";
 
 export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
   const isConnected = ["connected", "rendering", "paused"].includes(status);
@@ -22,7 +23,8 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
       if (isConnected) {
         await disconnectAgent();
       } else {
-        await connectAgent(backendUrl);
+        const token = await getFirebaseToken();
+        await connectAgent(backendUrl, token || "");
       }
     } catch (err) {
       console.error("Agent command failed:", err);

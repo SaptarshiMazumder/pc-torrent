@@ -80,6 +80,7 @@ def _emit_job_progress(**payload):
 # CONFIG
 # -----------------------------------------------
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
+FIREBASE_TOKEN = ""  # set by sidecar on connect
 POLL_INTERVAL = 5  # seconds between job polls
 RENDER_TIMEOUT = 4 * 3600  # 4 hours max per render
 DOCKER_IMAGE = "pcrent-render:latest"
@@ -244,10 +245,14 @@ def _request_with_retries(method, url, *, timeout, retries=HTTP_RETRIES, **kwarg
 
 
 def register_machine(specs):
+    headers = {}
+    if FIREBASE_TOKEN:
+        headers["Authorization"] = f"Bearer {FIREBASE_TOKEN}"
     resp = _request_with_retries(
         "POST",
         f"{BACKEND_URL}/machines/register",
         json=specs,
+        headers=headers,
         timeout=(HTTP_CONNECT_TIMEOUT, HTTP_STATUS_READ_TIMEOUT),
     )
     _ensure_http_success(resp, "Machine registration")

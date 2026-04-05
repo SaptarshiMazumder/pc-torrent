@@ -89,6 +89,8 @@ gcloud run deploy "$SERVICE_NAME" \
     --set-env-vars "RUNPOD_GPU_VRAM_GB=${RUNPOD_GPU_VRAM_GB:-24}" \
     --set-env-vars "RUNPOD_CPU_CORES=${RUNPOD_CPU_CORES:-16}" \
     --set-env-vars "RUNPOD_RAM_GB=${RUNPOD_RAM_GB:-64}" \
+    --set-env-vars "AGENT_API_KEY=$AGENT_API_KEY" \
+    --set-env-vars "^|^FIREBASE_SERVICE_ACCOUNT_JSON=$FIREBASE_SERVICE_ACCOUNT_JSON" \
     --quiet
 
 BACKEND_URL=$(gcloud run services describe "$SERVICE_NAME" \

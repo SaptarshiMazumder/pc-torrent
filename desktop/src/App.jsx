@@ -5,22 +5,25 @@ import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 import MarketplacePage from "./pages/MarketplacePage";
 import MyJobsPage from "./pages/MyJobsPage";
+import LoginPage from "./components/LoginPage";
 import { useAgent } from "./hooks/useAgent";
 import { useJobs } from "./hooks/useJobs";
+import { useAuth } from "./contexts/AuthContext";
 
 const DEFAULT_PAGES = { renter: "dashboard", rentee: "marketplace" };
 
 export default function App() {
+  const { user, loading: authLoading } = useAuth();
   const [mode, setMode] = useState(
     () => localStorage.getItem("pcrent_mode") || "rentee"
   );
-  const [page, setPage] = useState(DEFAULT_PAGES[mode] || "marketplace");
+  const [page, setPage] = useState(() => DEFAULT_PAGES[localStorage.getItem("pcrent_mode") || "rentee"] || "marketplace");
   const [backendUrl, setBackendUrl] = useState(
-    "https://pcrent-server-wbifmyiivq-an.a.run.app"
+    "https://pcrent-server-930713698987.asia-northeast1.run.app"
   );
 
-  const agent = useAgent(mode === "renter" ? backendUrl : null);
-  const jobsHook = useJobs(backendUrl);
+  const agent = useAgent(user && mode === "renter" ? backendUrl : null);
+  const jobsHook = useJobs(user ? backendUrl : null);
 
   const handleModeChange = useCallback(
     (newMode) => {
@@ -38,6 +41,9 @@ export default function App() {
     },
     [jobsHook.addRenderGroup]
   );
+
+  if (authLoading) return <div className="auth-loading">Loading...</div>;
+  if (!user) return <LoginPage />;
 
   return (
     <div className="app">

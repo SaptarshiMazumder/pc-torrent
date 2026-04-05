@@ -119,6 +119,7 @@ def _read_positive_int_env(name, default):
 # Keep each multipart upload below typical platform request limits (e.g. Cloud Run).
 OUTPUT_UPLOAD_MAX_REQUEST_MB = _read_positive_int_env("OUTPUT_UPLOAD_MAX_REQUEST_MB", 24)
 OUTPUT_UPLOAD_MAX_FILES_PER_REQUEST = _read_positive_int_env("OUTPUT_UPLOAD_MAX_FILES_PER_REQUEST", 50)
+OUTPUT_INCREMENTAL_SCAN_INTERVAL = float(os.environ.get("OUTPUT_INCREMENTAL_SCAN_INTERVAL", "1.0"))
 
 machine_id = None
 running = True
@@ -326,11 +327,18 @@ def send_machine_heartbeat(mid):
     _ensure_http_success(resp, f"Heartbeat machine {mid}")
 
 
-def upload_output_files(job_id, output_dir):
-    files_found = [
-        f for f in os.listdir(output_dir)
-        if not f.startswith(".") and os.path.isfile(os.path.join(output_dir, f))
-    ]
+def upload_output_files(job_id, output_dir, filenames=None):
+    if filenames is None:
+        files_found = [
+            f for f in os.listdir(output_dir)
+            if not f.startswith(".") and os.path.isfile(os.path.join(output_dir, f))
+        ]
+    else:
+        files_found = [
+            f for f in filenames
+            if not f.startswith(".") and os.path.isfile(os.path.join(output_dir, f))
+        ]
+    files_found = sorted(dict.fromkeys(files_found))
     if not files_found:
         return []
 
@@ -407,6 +415,100 @@ def upload_output_files(job_id, output_dir):
                 fobj.close()
 
     return files_found
+
+
+class IncrementalOutputUploader:
+    """
+    Upload frames as they appear in output_dir so partial results survive failures.
+    """
+
+    def __init__(self, job_id, output_dir):
+        self.job_id = job_id
+        self.output_dir = output_dir
+        self._uploaded = set()
+        self._lock = threading.Lock()
+        self._last_sizes = {}
+        self._stable_counts = {}
+        self._stop = threading.Event()
+        self._thread = None
+
+    @property
+    def uploaded_files(self):
+        with self._lock:
+            return sorted(self._uploaded)
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"agent-uploader-{self.job_id[:8]}",
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3)
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                self._scan_once(require_stable=True)
+            except Exception as exc:
+                _log(f"[JOB] Incremental upload scan failed: {exc}", level="warn")
+            self._stop.wait(max(0.2, OUTPUT_INCREMENTAL_SCAN_INTERVAL))
+
+    def _scan_once(self, require_stable):
+        files = sorted(
+            f for f in os.listdir(self.output_dir)
+            if not f.startswith(".") and os.path.isfile(os.path.join(self.output_dir, f))
+        )
+        ready = []
+        for fname in files:
+            with self._lock:
+                already_uploaded = fname in self._uploaded
+            if already_uploaded:
+                continue
+            fpath = os.path.join(self.output_dir, fname)
+            try:
+                size = os.path.getsize(fpath)
+            except OSError:
+                continue
+            if size <= 0:
+                continue
+
+            prev = self._last_sizes.get(fname)
+            if prev == size:
+                self._stable_counts[fname] = self._stable_counts.get(fname, 0) + 1
+            else:
+                self._stable_counts[fname] = 0
+            self._last_sizes[fname] = size
+
+            if not require_stable or self._stable_counts.get(fname, 0) >= 1:
+                ready.append(fname)
+
+        if not ready:
+            return
+
+        uploaded_now = upload_output_files(self.job_id, self.output_dir, filenames=ready)
+        with self._lock:
+            for fname in uploaded_now:
+                self._uploaded.add(fname)
+                self._last_sizes.pop(fname, None)
+                self._stable_counts.pop(fname, None)
+            total_uploaded = len(self._uploaded)
+        if uploaded_now:
+            _log(
+                f"[JOB] Incremental upload: {len(uploaded_now)} new file(s), "
+                f"{total_uploaded} total uploaded"
+            )
+
+    def flush_final(self):
+        # Rendering has stopped, upload everything still present.
+        self._scan_once(require_stable=False)
+        self._scan_once(require_stable=False)
 
 
 def download_input_file(input_url, dest_path):
@@ -1082,6 +1184,7 @@ def execute_job(job):
     begin_active_job(job_id, work_dir)
     heartbeat_stop = threading.Event()
     heartbeat_thread = None
+    output_uploader = IncrementalOutputUploader(job_id, output_dir)
     progress_state = {
         "current_frame": None,
         "rendered_frames": 0,
@@ -1195,6 +1298,12 @@ def execute_job(job):
         emit_progress_update()
         push_progress_to_backend(force=True)
 
+    def with_partial_recovery_hint(message):
+        uploaded_count = len(output_uploader.uploaded_files)
+        if uploaded_count <= 0:
+            return message
+        return f"{message}. {uploaded_count} frame(s) already uploaded and recoverable."
+
     try:
         heartbeat_thread = start_heartbeat_loop()
 
@@ -1270,6 +1379,7 @@ def execute_job(job):
             text=True,
         )
         update_active_job(job_id=job_id, process=process)
+        output_uploader.start()
 
         # Stream container output
         container_log = []
@@ -1294,6 +1404,12 @@ def execute_job(job):
                 process.stdout.close()
 
         process.wait(timeout=RENDER_TIMEOUT)
+        output_uploader.stop()
+        try:
+            output_uploader.flush_final()
+        except Exception as exc:
+            _log(f"[JOB] Final incremental output flush failed: {exc}", level="warn")
+
         missing_assets = detect_missing_project_assets(container_log)
         stop_reason = get_active_job_stop_reason(job_id)
 
@@ -1314,9 +1430,19 @@ def execute_job(job):
         else:
             _log("[JOB] Render device used: unknown (no device marker in container logs).", level="warn")
 
-        # 4. Upload output files
-        _log(f"[JOB] Uploading output files...")
-        output_files = upload_output_files(job_id, output_dir)
+        # 4. Catch up any files that were not incrementally uploaded
+        output_files = output_uploader.uploaded_files
+        local_output_files = sorted(
+            f for f in os.listdir(output_dir)
+            if not f.startswith(".") and os.path.isfile(os.path.join(output_dir, f))
+        )
+        missing_output_files = [f for f in local_output_files if f not in output_files]
+        if missing_output_files:
+            _log(f"[JOB] Uploading remaining {len(missing_output_files)} output file(s)...")
+            output_files += [
+                f for f in upload_output_files(job_id, output_dir, filenames=missing_output_files)
+                if f not in output_files
+            ]
 
         if not output_files:
             if missing_assets:
@@ -1339,7 +1465,7 @@ def execute_job(job):
 
     except JobStopped as e:
         _log(f"[JOB] {e}")
-        final_error = str(e)
+        final_error = with_partial_recovery_hint(str(e))
         finalize_progress()
         update_job_status(job_id, "failed", error=final_error)
 
@@ -1349,13 +1475,13 @@ def execute_job(job):
             subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=10)
         except Exception:
             pass
-        final_error = "Render timed out"
+        final_error = with_partial_recovery_hint("Render timed out")
         finalize_progress()
         update_job_status(job_id, "failed", error=final_error)
 
     except Exception as e:
         _log(f"[JOB] Error: {e}")
-        final_error = str(e)
+        final_error = with_partial_recovery_hint(str(e))
         finalize_progress()
         update_job_status(job_id, "failed", error=final_error)
 
@@ -1363,6 +1489,11 @@ def execute_job(job):
         heartbeat_stop.set()
         if heartbeat_thread and heartbeat_thread.is_alive():
             heartbeat_thread.join(timeout=1)
+        try:
+            output_uploader.stop()
+            output_uploader.flush_final()
+        except Exception as exc:
+            _log(f"[JOB] Failed to finalize incremental output uploader: {exc}", level="warn")
 
         persist_job_outputs(job_id, output_dir, final_status, final_error)
         clear_active_job(job_id)

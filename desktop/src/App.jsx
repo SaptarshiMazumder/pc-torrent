@@ -81,6 +81,7 @@ export default function App() {
             jobs={jobsHook.jobs}
             removeJob={jobsHook.removeJob}
             backendUrl={backendUrl}
+            markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
           />
         )}
 

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { getJob, getRenderGroup } from "../lib/api";
 
 const STORAGE_KEY = "pcrent_jobs";
-const POLL_INTERVAL = 5000;
+const POLL_INTERVAL = 2000;
 
 function loadJobs() {
   try {
@@ -70,6 +70,21 @@ export function useJobs(backendUrl) {
 
   const removeJob = useCallback((id) => {
     setJobs((prev) => prev.filter((j) => (j.group_id || j.job_id) !== id));
+  }, []);
+
+  const markRenderGroupCancelled = useCallback((groupId) => {
+    setJobs((prev) =>
+      prev.map((job) =>
+        job.group_id === groupId
+          ? {
+              ...job,
+              status: "cancelled",
+              completed_at: new Date().toISOString(),
+              error: "Cancelled by user",
+            }
+          : job
+      )
+    );
   }, []);
 
   // Poll active jobs and render groups
@@ -154,5 +169,5 @@ export function useJobs(backendUrl) {
     return () => clearInterval(id);
   }, []);
 
-  return { jobs, addJob, addRenderGroup, removeJob };
+  return { jobs, addJob, addRenderGroup, removeJob, markRenderGroupCancelled };
 }

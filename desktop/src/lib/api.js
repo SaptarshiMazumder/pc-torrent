@@ -4,12 +4,35 @@ export async function getMachines(baseUrl) {
   return r.json();
 }
 
-async function uploadFileToPresignedUrl(uploadUrl, file, onProgress) {
+async function uploadFileToPresignedUrl(uploadUrl, file, onProgress, signal = null) {
   let lastProgress = 0;
   await new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let aborted = false;
+    let abortListener = null;
+
     xhr.open("PUT", uploadUrl);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+    if (signal?.aborted) {
+      reject(new DOMException("Upload aborted", "AbortError"));
+      return;
+    }
+
+    if (signal) {
+      abortListener = () => {
+        aborted = true;
+        xhr.abort();
+      };
+      signal.addEventListener("abort", abortListener, { once: true });
+    }
+
+    const cleanupAbortListener = () => {
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
+      }
+    };
+
     if (onProgress) {
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
@@ -20,10 +43,18 @@ async function uploadFileToPresignedUrl(uploadUrl, file, onProgress) {
       };
     }
     xhr.onload = () => {
+      cleanupAbortListener();
       if (xhr.status >= 200 && xhr.status < 300) resolve();
       else reject(new Error(`Upload failed with status ${xhr.status}`));
     };
-    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.onabort = () => {
+      cleanupAbortListener();
+      reject(new DOMException("Upload aborted", "AbortError"));
+    };
+    xhr.onerror = () => {
+      cleanupAbortListener();
+      reject(new Error(aborted ? "Upload aborted" : "Upload failed"));
+    };
     xhr.send(file);
   });
 }
@@ -66,6 +97,10 @@ export function downloadUrl(baseUrl, jobId) {
   return `${baseUrl}/jobs/${jobId}/download`;
 }
 
+export function jobOutputsUrl(baseUrl, jobId) {
+  return `${baseUrl}/jobs/${jobId}/outputs`;
+}
+
 // ---- Distributed Rendering (Render Groups) ----
 
 export async function createDistributedRenderGroup(baseUrl, machineIds, filename) {
@@ -81,8 +116,8 @@ export async function createDistributedRenderGroup(baseUrl, machineIds, filename
   return createRes.json();
 }
 
-export async function uploadDistributedRenderInput(uploadUrl, file, onProgress) {
-  await uploadFileToPresignedUrl(uploadUrl, file, onProgress);
+export async function uploadDistributedRenderInput(uploadUrl, file, onProgress, signal = null) {
+  await uploadFileToPresignedUrl(uploadUrl, file, onProgress, signal);
   if (onProgress) onProgress(100);
 }
 
@@ -93,7 +128,8 @@ export async function confirmDistributedJob(
   frameRange = null,
   renderOverrides = null,
   scheduling = null,
-  analysisSnapshot = null
+  analysisSnapshot = null,
+  signal = null
 ) {
   const body = { machine_ids: machineIds };
   if (frameRange) {
@@ -114,6 +150,7 @@ export async function confirmDistributedJob(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!confirmRes.ok) {
     const err = await confirmRes.json();
@@ -130,4 +167,19 @@ export async function getRenderGroup(baseUrl, groupId) {
 
 export function renderGroupDownloadUrl(baseUrl, groupId) {
   return `${baseUrl}/render-groups/${groupId}/download`;
+}
+
+export function renderGroupOutputsUrl(baseUrl, groupId) {
+  return `${baseUrl}/render-groups/${groupId}/outputs`;
+}
+
+export async function cancelRenderGroup(baseUrl, groupId) {
+  const response = await fetch(`${baseUrl}/render-groups/${groupId}/cancel`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to cancel render group");
+  }
+  return response.json();
 }

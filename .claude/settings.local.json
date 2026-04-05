@@ -77,7 +77,8 @@
       "Bash(docker push:*)",
       "Bash(docker manifest:*)",
       "WebFetch(domain:garagefarm.net)",
-      "WebFetch(domain:forum.garagefarm.net)"
+      "WebFetch(domain:forum.garagefarm.net)",
+      "Bash(find /c/Users/googler/OneDrive/Desktop/Projects/pc-rent -name \"*.md\" ! -path \"*/venv/*\" -exec grep -l \"blend\\\\|render\\\\|farm\" {} \\\\;)"
     ]
   }
 }

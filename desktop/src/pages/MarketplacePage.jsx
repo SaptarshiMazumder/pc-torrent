@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import MachineCard from "../components/MachineCard";
@@ -7,6 +7,7 @@ import {
   createDistributedRenderGroup,
   uploadDistributedRenderInput,
   confirmDistributedJob,
+  cancelRenderGroup,
 } from "../lib/api";
 import { parseBlendFile } from "../lib/blend-parser";
 
@@ -276,6 +277,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const [error, setError] = useState("");
 
   const [pendingGroupId, setPendingGroupId] = useState("");
+  const [cancelingRender, setCancelingRender] = useState(false);
+
+  const analyzeRunRef = useRef(0);
+  const prepareRunRef = useRef(0);
+  const activeUploadIdRef = useRef("");
+  const uploadAbortRef = useRef(null);
+  const startAbortRef = useRef(null);
 
   const [frameStart, setFrameStart] = useState("");
   const [frameEnd, setFrameEnd] = useState("");
@@ -313,6 +321,22 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   );
 
   const resetSubmissionFlow = ({ clearFile = false } = {}) => {
+    analyzeRunRef.current += 1;
+    prepareRunRef.current += 1;
+    if (uploadAbortRef.current) {
+      uploadAbortRef.current.abort();
+      uploadAbortRef.current = null;
+    }
+    if (startAbortRef.current) {
+      startAbortRef.current.abort();
+      startAbortRef.current = null;
+    }
+    if (activeUploadIdRef.current) {
+      invoke("cancel_upload_progress", { uploadId: activeUploadIdRef.current }).catch(() => {});
+      invoke("clear_upload_progress", { uploadId: activeUploadIdRef.current }).catch(() => {});
+      activeUploadIdRef.current = "";
+    }
+
     setFlowStage(FLOW_STAGE.IDLE);
     setAnalyzing(false);
     setPreparing(false);
@@ -325,6 +349,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setServerParseError("");
     setError("");
     setPendingGroupId("");
+    setCancelingRender(false);
     setFrameStart("");
     setFrameEnd("");
     setFrameStep("1");
@@ -393,6 +418,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setPendingGroupId("");
     setUploadProgress(0);
     setAnalyzing(true);
+    const runId = ++analyzeRunRef.current;
 
     try {
       // Resolve a File/Blob for client-side parsing
@@ -403,10 +429,12 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         const blob = await resp.blob();
         fileForParsing = new File([blob], file.name, { type: "application/octet-stream" });
       }
+      if (runId !== analyzeRunRef.current) return;
       if (!fileForParsing) {
         throw new Error("No file data available for analysis");
       }
       const parsed = await parseBlendFile(fileForParsing);
+      if (runId !== analyzeRunRef.current) return;
       setAnalysisResult(parsed);
       setClientParseError("");
       setFrameStart(String(parsed.frame_start));
@@ -430,6 +458,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       }
       setCameraMode("auto_markers");
     } catch (err) {
+      if (runId !== analyzeRunRef.current) return;
       setAnalysisResult(null);
       setClientParseError(`Client parse failed: ${err.message || "Unknown parsing error"}`);
       setFrameStart("");
@@ -441,8 +470,10 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       setViewLayerName("");
       setCameraRanges([]);
     } finally {
-      setFlowStage(FLOW_STAGE.ANALYZED);
-      setAnalyzing(false);
+      if (runId === analyzeRunRef.current) {
+        setFlowStage(FLOW_STAGE.ANALYZED);
+        setAnalyzing(false);
+      }
     }
   };
 
@@ -465,17 +496,22 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setPrepResult(null);
     setPreparing(true);
     setFlowStage(FLOW_STAGE.PREPARING);
+    const runId = ++prepareRunRef.current;
     try {
       const result = await invoke("prepare_blend_for_upload", {
         filePath: file.path,
         blenderBin,
       });
+      if (runId !== prepareRunRef.current) return;
       setPrepResult(result);
     } catch (prepErr) {
+      if (runId !== prepareRunRef.current) return;
       setPrepResult({ warnings: [], errors: [`Prepare step failed: ${prepErr}`], prep_done: false });
     } finally {
-      setPreparing(false);
-      setFlowStage(FLOW_STAGE.PREPARED);
+      if (runId === prepareRunRef.current) {
+        setPreparing(false);
+        setFlowStage(FLOW_STAGE.PREPARED);
+      }
     }
   };
   const handleUpload = async () => {
@@ -497,11 +533,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setServerParseError("");
     setUploadProgress(0);
     setUploading(true);
+    activeUploadIdRef.current = "";
 
     let uploadFilename = file.name;
     let uploadPath = file.path || null;
     let uploadBlob = null;
     let uploadTaskId = "";
+    let createdGroupId = "";
 
     // Use prepared artifact when available.
     if (flowStage === FLOW_STAGE.PREPARED && prepResult?.prepared_path) {
@@ -527,13 +565,15 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         selectedMachines.map((machine) => machine.id),
         uploadFilename
       );
-      setPendingGroupId(created.group_id || "");
+      createdGroupId = created.group_id || "";
+      setPendingGroupId(createdGroupId);
 
       if (uploadPath) {
         uploadTaskId = await invoke("start_upload_file_to_presigned_url", {
           filePath: uploadPath,
           uploadUrl: created.upload_url,
         });
+        activeUploadIdRef.current = uploadTaskId;
 
         while (true) {
           await wait(250);
@@ -548,17 +588,25 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
             setUploadProgress(100);
             break;
           }
+          if (snapshot?.status === "cancelled") {
+            const reason = snapshot?.error || "Upload cancelled by user";
+            throw new DOMException(reason, "AbortError");
+          }
           if (snapshot?.status === "failed") {
             throw new Error(snapshot?.error || "Upload failed");
           }
         }
       } else {
+        const controller = new AbortController();
+        uploadAbortRef.current = controller;
         await uploadDistributedRenderInput(created.upload_url, uploadBlob, (pct) => {
           setUploadProgress((prev) => Math.max(prev, pct));
-        });
+        }, controller.signal);
+        uploadAbortRef.current = null;
       }
       setFlowStage(FLOW_STAGE.UPLOADED);
     } catch (err) {
+      const cancelled = err?.name === "AbortError";
       const detail =
         (typeof err === "string" && err) ||
         err?.message ||
@@ -569,12 +617,23 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
             return "";
           }
         })();
-      setError(detail ? `Upload failed: ${detail}` : "Upload failed");
+      if (cancelled) {
+        setError("Upload cancelled");
+        if (createdGroupId) {
+          cancelRenderGroup(backendUrl, createdGroupId).catch(() => {});
+        }
+        setPendingGroupId("");
+      } else {
+        setError(detail ? `Upload failed: ${detail}` : "Upload failed");
+      }
       setFlowStage(fallbackStage);
     } finally {
+      uploadAbortRef.current = null;
       if (uploadTaskId) {
+        invoke("cancel_upload_progress", { uploadId: uploadTaskId }).catch(() => {});
         invoke("clear_upload_progress", { uploadId: uploadTaskId }).catch(() => {});
       }
+      activeUploadIdRef.current = "";
       setUploading(false);
     }
   };
@@ -602,6 +661,8 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setServerParseError("");
     setStarting(true);
     setFlowStage(FLOW_STAGE.STARTING);
+    const controller = new AbortController();
+    startAbortRef.current = controller;
 
     try {
       const renderOverrides = {
@@ -632,7 +693,8 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         frameRange,
         renderOverrides,
         null,
-        analysisResult
+        analysisResult,
+        controller.signal
       );
 
       if (result.needs_frame_input) {
@@ -653,10 +715,88 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         result.total_frames
       );
     } catch (err) {
-      setError(err.message || "Failed to start render");
-      setFlowStage(FLOW_STAGE.UPLOADED);
+      if (err?.name === "AbortError") {
+        setError("Render start cancelled");
+        setFlowStage(FLOW_STAGE.UPLOADED);
+      } else {
+        setError(err.message || "Failed to start render");
+        setFlowStage(FLOW_STAGE.UPLOADED);
+      }
     } finally {
+      startAbortRef.current = null;
       setStarting(false);
+    }
+  };
+
+  const handleCancelSubmittedRender = async () => {
+    if (!pendingGroupId || cancelingRender) return;
+    setCancelingRender(true);
+    setError("");
+    try {
+      await cancelRenderGroup(backendUrl, pendingGroupId);
+      setError("Render cancelled");
+      setFlowStage(FLOW_STAGE.UPLOADED);
+      setPendingGroupId("");
+    } catch (err) {
+      setError(err?.message || "Failed to cancel render");
+    } finally {
+      setCancelingRender(false);
+    }
+  };
+
+  const handleStopCurrentTask = async () => {
+    if (analyzing) {
+      analyzeRunRef.current += 1;
+      setAnalyzing(false);
+      setAnalysisResult(null);
+      setClientParseError("");
+      setServerParseError("");
+      setFlowStage(FLOW_STAGE.IDLE);
+      setError("Analysis cancelled");
+      return;
+    }
+
+    if (preparing) {
+      prepareRunRef.current += 1;
+      setPreparing(false);
+      setFlowStage(FLOW_STAGE.ANALYZED);
+      setError("Preparation cancelled");
+      return;
+    }
+
+    if (uploading) {
+      const uploadId = activeUploadIdRef.current;
+      if (uploadId) {
+        await invoke("cancel_upload_progress", { uploadId }).catch(() => {});
+      }
+      if (uploadAbortRef.current) {
+        uploadAbortRef.current.abort();
+        uploadAbortRef.current = null;
+      }
+
+      if (pendingGroupId) {
+        await cancelRenderGroup(backendUrl, pendingGroupId).catch(() => {});
+      }
+      setPendingGroupId("");
+      activeUploadIdRef.current = "";
+      setUploading(false);
+      setUploadProgress(0);
+      setFlowStage(prepResult?.prepared_path ? FLOW_STAGE.PREPARED : FLOW_STAGE.ANALYZED);
+      setError("Upload cancelled");
+      return;
+    }
+
+    if (starting) {
+      if (startAbortRef.current) {
+        startAbortRef.current.abort();
+        startAbortRef.current = null;
+      }
+      if (pendingGroupId) {
+        await cancelRenderGroup(backendUrl, pendingGroupId).catch(() => {});
+      }
+      setStarting(false);
+      setFlowStage(FLOW_STAGE.UPLOADED);
+      setError("Render start cancelled");
     }
   };
 
@@ -748,7 +888,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   }, [cameraRanges, manualFrameRange]);
 
   const needsPrepareStep = Boolean(blenderBin && file?.path);
-  const isBusy = analyzing || preparing || uploading || starting;
+  const isBusy = analyzing || preparing || uploading || starting || cancelingRender;
   const canPrepare = needsPrepareStep && flowStage === FLOW_STAGE.ANALYZED && !isBusy;
   const canUpload =
     (flowStage === FLOW_STAGE.PREPARED || (!needsPrepareStep && flowStage === FLOW_STAGE.ANALYZED)) &&
@@ -971,6 +1111,37 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
           {flowStage === FLOW_STAGE.STARTING && (
             <button className="btn btn-primary submit-primary-btn" type="button" disabled>
               Starting...
+            </button>
+          )}
+
+          {(analyzing || preparing || uploading || starting) && (
+            <button
+              className="btn btn-danger submit-primary-btn"
+              type="button"
+              onClick={() => {
+                void handleStopCurrentTask();
+              }}
+            >
+              {analyzing
+                ? "Stop Analyze"
+                : preparing
+                ? "Stop Prepare"
+                : uploading
+                ? "Stop Upload"
+                : "Stop Starting"}
+            </button>
+          )}
+
+          {flowStage === FLOW_STAGE.SUBMITTED && pendingGroupId && (
+            <button
+              className="btn btn-danger submit-primary-btn"
+              type="button"
+              onClick={() => {
+                void handleCancelSubmittedRender();
+              }}
+              disabled={cancelingRender}
+            >
+              {cancelingRender ? "Stopping Render..." : "Stop Render"}
             </button>
           )}
         </div>

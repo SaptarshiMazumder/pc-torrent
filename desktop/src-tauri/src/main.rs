@@ -43,6 +43,7 @@ fn main() {
             commands::get_file_size,
             commands::start_upload_file_to_presigned_url,
             commands::get_upload_progress,
+            commands::cancel_upload_progress,
             commands::clear_upload_progress,
             commands::upload_file_to_presigned_url,
             commands::find_blender,

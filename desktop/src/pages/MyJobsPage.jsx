@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { downloadUrl, renderGroupDownloadUrl } from "../lib/api";
+import { cancelRenderGroup, jobOutputsUrl, renderGroupOutputsUrl } from "../lib/api";
 import { downloadJobOutputToDownloads } from "../lib/sidecar";
 import SegmentedProgressBar from "../components/SegmentedProgressBar";
 
 const STATUS_LABELS = {
   pending: "Pending",
+  uploading: "Uploading",
   running: "Rendering",
   done: "Done",
+  cancelled: "Cancelled",
   failed: "Failed",
 };
 
@@ -19,9 +21,18 @@ function buildDownloadFolderName(jobFilename, id) {
   return `render__${baseName}__${suffix}`;
 }
 
-export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
+function frameIndexFromFilename(filename) {
+  if (typeof filename !== "string") return -1;
+  const match = filename.match(/(\d+)(?=\.[^.]+$)/);
+  if (!match) return -1;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : -1;
+}
+
+export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGroupCancelled }) {
   const [downloadingId, setDownloadingId] = useState(null);
   const [downloadResults, setDownloadResults] = useState({});
+  const [cancelingGroupIds, setCancelingGroupIds] = useState({});
 
   const handleDownload = async (id, url, jobFilename) => {
     setDownloadResults((prev) => ({
@@ -67,6 +78,27 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
     }
   };
 
+  const handleCancelRenderGroup = async (groupId) => {
+    if (!groupId || cancelingGroupIds[groupId]) return;
+    setCancelingGroupIds((prev) => ({ ...prev, [groupId]: true }));
+    try {
+      await cancelRenderGroup(backendUrl, groupId);
+      markRenderGroupCancelled?.(groupId);
+    } catch (error) {
+      const message = error?.message || "Failed to cancel render group";
+      setDownloadResults((prev) => ({
+        ...prev,
+        [groupId]: { status: "error", path: "", error: message, progress: "" },
+      }));
+    } finally {
+      setCancelingGroupIds((prev) => {
+        const next = { ...prev };
+        delete next[groupId];
+        return next;
+      });
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-header">
@@ -93,11 +125,16 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
                 <RenderGroupCard
                   key={id}
                   job={job}
+                  backendUrl={backendUrl}
                   downloadState={downloadState}
                   downloadingId={downloadingId}
+                  canceling={!!cancelingGroupIds[id]}
                   onDownload={() =>
-                    handleDownload(id, renderGroupDownloadUrl(backendUrl, id), job.filename)
+                    handleDownload(id, renderGroupOutputsUrl(backendUrl, id), job.filename)
                   }
+                  onCancel={() => {
+                    void handleCancelRenderGroup(id);
+                  }}
                   onRemove={() => removeJob(id)}
                 />
               );
@@ -108,10 +145,11 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
               <SingleJobCard
                 key={id}
                 job={job}
+                backendUrl={backendUrl}
                 downloadState={downloadState}
                 downloadingId={downloadingId}
                 onDownload={() =>
-                  handleDownload(id, downloadUrl(backendUrl, id), job.filename)
+                  handleDownload(id, jobOutputsUrl(backendUrl, id), job.filename)
                 }
                 onRemove={() => removeJob(id)}
               />
@@ -123,7 +161,16 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
   );
 }
 
-function RenderGroupCard({ job, downloadState, downloadingId, onDownload, onRemove }) {
+function RenderGroupCard({
+  job,
+  backendUrl,
+  downloadState,
+  downloadingId,
+  canceling,
+  onDownload,
+  onCancel,
+  onRemove,
+}) {
   const id = job.group_id;
   const overallPct =
     job.status === "done"
@@ -134,6 +181,28 @@ function RenderGroupCard({ job, downloadState, downloadingId, onDownload, onRemo
 
   const tasksDone = (job.tasks || []).filter((t) => t.status === "done").length;
   const taskCount = (job.tasks || []).length;
+  const availableOutputCount =
+    typeof job.available_output_files_count === "number"
+      ? job.available_output_files_count
+      : (job.tasks || []).reduce((sum, task) => sum + (task.output_files_count || 0), 0);
+  const latestTaskWithOutput = (job.tasks || []).reduce((best, task) => {
+    if (!task?.latest_output_file) return best;
+    if (!best?.latest_output_file) return task;
+    const bestFrame = frameIndexFromFilename(best.latest_output_file);
+    const taskFrame = frameIndexFromFilename(task.latest_output_file);
+    if (taskFrame > bestFrame) return task;
+    if (taskFrame === bestFrame && task.latest_output_file > best.latest_output_file) return task;
+    return best;
+  }, null);
+  const latestPreviewUrl =
+    latestTaskWithOutput && latestTaskWithOutput.latest_output_file
+      ? `${backendUrl}/jobs/${latestTaskWithOutput.job_id}/output/${encodeURIComponent(
+          latestTaskWithOutput.latest_output_file
+        )}?v=${availableOutputCount}`
+      : "";
+  const canDownloadAvailable = availableOutputCount > 0;
+  const isDownloading = downloadingId === id;
+  const canCancel = ["pending", "running", "uploading"].includes(job.status);
 
   return (
     <div className="card rentee-job-card">
@@ -170,6 +239,20 @@ function RenderGroupCard({ job, downloadState, downloadingId, onDownload, onRemo
         </div>
       )}
 
+      {latestPreviewUrl && (
+        <div className="job-latest-frame-wrap">
+          <div className="job-latest-frame-meta">
+            Latest frame: <code>{latestTaskWithOutput.latest_output_file}</code>
+          </div>
+          <img
+            className="job-latest-frame-preview"
+            src={latestPreviewUrl}
+            alt="Latest rendered frame preview"
+            loading="lazy"
+          />
+        </div>
+      )}
+
       {job.status === "failed" && job.error && (
         <div className="rentee-job-error">
           <strong>Error:</strong> {job.error}
@@ -178,16 +261,28 @@ function RenderGroupCard({ job, downloadState, downloadingId, onDownload, onRemo
 
       {job.status === "done" && (
         <div className="rentee-job-done">
-          <p className="muted">All {taskCount} chunks complete</p>
-          {downloadState?.status === "done" && (
-            <div className="rentee-job-success">
-              Downloaded to <code>{downloadState.path}</code>
-            </div>
-          )}
-          {downloadState?.status === "error" && (
-            <div className="rentee-job-error">{downloadState.error}</div>
-          )}
+          <p className="muted">
+            All {taskCount} chunks complete &middot; {availableOutputCount} frame file
+            {availableOutputCount !== 1 ? "s" : ""} available
+          </p>
         </div>
+      )}
+
+      {job.status !== "done" && canDownloadAvailable && (
+        <div className="rentee-job-done">
+          <p className="muted">
+            {availableOutputCount} frame file{availableOutputCount !== 1 ? "s" : ""} already available now
+          </p>
+        </div>
+      )}
+
+      {downloadState?.status === "done" && (
+        <div className="rentee-job-success">
+          Downloaded to <code>{downloadState.path}</code>
+        </div>
+      )}
+      {downloadState?.status === "error" && (
+        <div className="rentee-job-error">{downloadState.error}</div>
       )}
 
       <div className="rentee-job-footer">
@@ -198,17 +293,28 @@ function RenderGroupCard({ job, downloadState, downloadingId, onDownload, onRemo
           )}
         </div>
         <div className="rentee-job-actions">
-          {job.status === "done" && (
+          {canCancel && (
+            <button
+              className="btn btn-danger"
+              onClick={onCancel}
+              disabled={canceling}
+            >
+              {canceling ? "Stopping..." : "Stop Render"}
+            </button>
+          )}
+          {canDownloadAvailable && (
             <button
               className="btn btn-primary"
               onClick={onDownload}
-              disabled={downloadingId === id}
+              disabled={isDownloading}
             >
-              {downloadingId === id
+              {isDownloading
                 ? downloadState?.progress
                   ? `Downloading... ${downloadState.progress}`
                   : "Downloading..."
-                : "Download All"}
+                : job.status === "done"
+                ? "Download All"
+                : "Download Available"}
             </button>
           )}
           <button className="btn btn-secondary" onClick={onRemove}>
@@ -220,7 +326,7 @@ function RenderGroupCard({ job, downloadState, downloadingId, onDownload, onRemo
   );
 }
 
-function SingleJobCard({ job, downloadState, downloadingId, onDownload, onRemove }) {
+function SingleJobCard({ job, backendUrl, downloadState, downloadingId, onDownload, onRemove }) {
   const id = job.job_id;
   const totalFrames =
     typeof job.total_frames === "number" ? job.total_frames : null;
@@ -233,6 +339,18 @@ function SingleJobCard({ job, downloadState, downloadingId, onDownload, onRemove
   const hasTotalFrames = typeof totalFrames === "number" && totalFrames > 0;
   const showRenderProgress =
     job.status === "running" || hasTotalFrames || renderedFrames > 0;
+  const outputFiles = Array.isArray(job.output_files) ? job.output_files : [];
+  const availableOutputCount =
+    typeof job.output_files_count === "number" ? job.output_files_count : outputFiles.length;
+  const latestOutputFile =
+    job.latest_output_file || outputFiles.slice().sort((a, b) => frameIndexFromFilename(a) - frameIndexFromFilename(b)).pop() || "";
+  const latestPreviewUrl =
+    latestOutputFile && backendUrl
+      ? `${backendUrl}/jobs/${id}/output/${encodeURIComponent(latestOutputFile)}?v=${availableOutputCount}`
+      : "";
+  const visibleOutputFiles = outputFiles.slice(0, 12);
+  const hiddenOutputCount = Math.max(0, outputFiles.length - visibleOutputFiles.length);
+  const canDownloadAvailable = availableOutputCount > 0;
 
   return (
     <div className="card rentee-job-card">
@@ -270,6 +388,20 @@ function SingleJobCard({ job, downloadState, downloadingId, onDownload, onRemove
         </div>
       )}
 
+      {latestPreviewUrl && (
+        <div className="job-latest-frame-wrap">
+          <div className="job-latest-frame-meta">
+            Latest frame: <code>{latestOutputFile}</code>
+          </div>
+          <img
+            className="job-latest-frame-preview"
+            src={latestPreviewUrl}
+            alt="Latest rendered frame preview"
+            loading="lazy"
+          />
+        </div>
+      )}
+
       {job.status === "failed" && job.error && (
         <div className="rentee-job-error">
           <strong>Error:</strong> {job.error}
@@ -279,26 +411,38 @@ function SingleJobCard({ job, downloadState, downloadingId, onDownload, onRemove
       {job.status === "done" && (
         <div className="rentee-job-done">
           <p className="muted">
-            {job.output_files.length} output file
-            {job.output_files.length !== 1 ? "s" : ""}
+            {availableOutputCount} output file
+            {availableOutputCount !== 1 ? "s" : ""}
           </p>
-          {job.output_files.length > 0 && (
+          {visibleOutputFiles.length > 0 && (
             <ul className="output-file-list">
-              {job.output_files.map((f) => (
+              {visibleOutputFiles.map((f) => (
                 <li key={f}>{f}</li>
               ))}
             </ul>
           )}
+          {hiddenOutputCount > 0 && (
+            <p className="muted">+{hiddenOutputCount} more files</p>
+          )}
           {job.error && <p className="rentee-job-warning">Warning: {job.error}</p>}
-          {downloadState?.status === "done" && (
-            <div className="rentee-job-success">
-              Downloaded to <code>{downloadState.path}</code>
-            </div>
-          )}
-          {downloadState?.status === "error" && (
-            <div className="rentee-job-error">{downloadState.error}</div>
-          )}
         </div>
+      )}
+
+      {job.status !== "done" && canDownloadAvailable && (
+        <div className="rentee-job-done">
+          <p className="muted">
+            {availableOutputCount} output file{availableOutputCount !== 1 ? "s" : ""} available now
+          </p>
+        </div>
+      )}
+
+      {downloadState?.status === "done" && (
+        <div className="rentee-job-success">
+          Downloaded to <code>{downloadState.path}</code>
+        </div>
+      )}
+      {downloadState?.status === "error" && (
+        <div className="rentee-job-error">{downloadState.error}</div>
       )}
 
       <div className="rentee-job-footer">
@@ -309,13 +453,17 @@ function SingleJobCard({ job, downloadState, downloadingId, onDownload, onRemove
           )}
         </div>
         <div className="rentee-job-actions">
-          {job.status === "done" && (
+          {canDownloadAvailable && (
             <button
               className="btn btn-primary"
               onClick={onDownload}
               disabled={downloadingId === id}
             >
-              {downloadingId === id ? "Downloading..." : "Download"}
+              {downloadingId === id
+                ? "Downloading..."
+                : job.status === "done"
+                ? "Download"
+                : "Download Available"}
             </button>
           )}
           <button className="btn btn-secondary" onClick={onRemove}>

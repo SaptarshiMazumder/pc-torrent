@@ -89,6 +89,58 @@ def generate_presigned_upload_url(key: str, content_type: str = "application/oct
     )
 
 
+def create_multipart_upload(key: str, content_type: str = "application/octet-stream") -> str:
+    """Create a multipart upload session and return UploadId."""
+    resp = _get_client().create_multipart_upload(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        ContentType=content_type,
+    )
+    upload_id = resp.get("UploadId")
+    if not upload_id:
+        raise RuntimeError("R2 did not return UploadId for multipart upload")
+    return upload_id
+
+
+def generate_presigned_upload_part_url(
+    key: str,
+    upload_id: str,
+    part_number: int,
+    expires_in: int = 3600,
+) -> str:
+    """Generate a presigned URL for uploading one multipart part."""
+    return _get_client().generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": R2_BUCKET_NAME,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": int(part_number),
+        },
+        ExpiresIn=expires_in,
+    )
+
+
+def complete_multipart_upload(key: str, upload_id: str, parts: list[dict]) -> dict:
+    """Complete multipart upload with sorted Parts payload."""
+    sorted_parts = sorted(parts, key=lambda p: int(p["PartNumber"]))
+    return _get_client().complete_multipart_upload(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": sorted_parts},
+    )
+
+
+def abort_multipart_upload(key: str, upload_id: str):
+    """Abort a multipart upload session."""
+    _get_client().abort_multipart_upload(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        UploadId=upload_id,
+    )
+
+
 def delete_file(key: str):
     """Delete a file from R2."""
     _get_client().delete_object(Bucket=R2_BUCKET_NAME, Key=key)

@@ -30,6 +30,7 @@ Output prefixes (parsed by the desktop app):
 """
 
 import bpy
+import json
 import os
 import re
 import sys
@@ -586,6 +587,136 @@ def _validate_scenes() -> list[str]:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _minimal_scene_payload(scene, active_name: str) -> dict:
+    frame_start = _safe_int(getattr(scene, "frame_start", 1), 1)
+    frame_end = _safe_int(getattr(scene, "frame_end", frame_start), frame_start)
+    frame_step = max(1, _safe_int(getattr(scene, "frame_step", 1), 1))
+    total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
+    scene_name = getattr(scene, "name", "Scene")
+    camera = getattr(scene, "camera", None)
+    active_camera = getattr(camera, "name", None) if camera else None
+    return {
+        "name": scene_name,
+        "is_active": scene_name == active_name,
+        "frame_start": frame_start,
+        "frame_end": frame_end,
+        "frame_step": frame_step,
+        "total_frames": total_frames,
+        "active_camera": active_camera,
+        "cameras": [active_camera] if active_camera else [],
+        "view_layers": [],
+        "camera_cuts": [],
+    }
+
+
+def _scene_payload(scene, active_name: str) -> dict:
+    payload = _minimal_scene_payload(scene, active_name)
+
+    cameras = list(payload["cameras"])
+    camera_cuts = []
+
+    try:
+        markers = sorted(getattr(scene, "timeline_markers", []), key=lambda marker: _safe_int(getattr(marker, "frame", 0), 0))
+        for marker in markers:
+            marker_camera = None
+            try:
+                marker_camera = marker.camera.name if getattr(marker, "camera", None) else None
+            except Exception:
+                marker_camera = None
+            if marker_camera:
+                cameras.append(marker_camera)
+            camera_cuts.append(
+                {
+                    "frame": _safe_int(getattr(marker, "frame", 0), 0),
+                    "camera_name": marker_camera,
+                }
+            )
+    except Exception:
+        pass
+
+    try:
+        for obj in bpy.data.objects:
+            if getattr(obj, "type", "") == "CAMERA":
+                cameras.append(getattr(obj, "name", "Camera"))
+    except Exception:
+        pass
+
+    deduped_cameras = []
+    for camera_name in cameras:
+        if camera_name and camera_name not in deduped_cameras:
+            deduped_cameras.append(camera_name)
+
+    view_layers = []
+    try:
+        view_layers = [getattr(layer, "name", "") for layer in getattr(scene, "view_layers", []) if getattr(layer, "name", "")]
+    except Exception:
+        view_layers = []
+
+    payload["cameras"] = deduped_cameras
+    payload["view_layers"] = view_layers
+    payload["camera_cuts"] = camera_cuts
+    return payload
+
+
+def _emit_analysis_json():
+    active_scene = bpy.context.scene if bpy.context and bpy.context.scene else None
+    if active_scene:
+        active_name = active_scene.name
+    elif bpy.data.scenes:
+        active_name = bpy.data.scenes[0].name
+    else:
+        raise RuntimeError("No scenes found for analysis")
+
+    scenes = []
+    for scene in bpy.data.scenes:
+        try:
+            scenes.append(_scene_payload(scene, active_name))
+        except Exception:
+            scenes.append(_minimal_scene_payload(scene, active_name))
+    if not scenes:
+        raise RuntimeError("No scenes found for analysis")
+
+    active = None
+    for scene in scenes:
+        if scene.get("is_active"):
+            active = scene
+            break
+    if active is None:
+        active = scenes[0]
+
+    version = bpy.app.version
+    blender_version = int(version[0]) * 100 + int(version[1])
+    payload = {
+        "frame_start": active["frame_start"],
+        "frame_end": active["frame_end"],
+        "frame_step": active["frame_step"],
+        "total_frames": active["total_frames"],
+        "blender_version": blender_version,
+        "active_scene": active["name"],
+        "cameras": active.get("cameras", []),
+        "camera_cuts": active.get("camera_cuts", []),
+        "view_layers": active.get("view_layers", []),
+        "timeline_defaults": {
+            "frame_start": active["frame_start"],
+            "frame_end": active["frame_end"],
+            "frame_step": active["frame_step"],
+        },
+        "output_defaults": None,
+        "render_defaults": {},
+        "scenes": scenes,
+        "unsupported_fields": [],
+    }
+
+    print("PCR_ANALYSIS_JSON:" + json.dumps(payload, separators=(",", ":")), flush=True)
+
+
 def prepare():
     filepath = bpy.data.filepath
     if not filepath:
@@ -669,6 +800,10 @@ def prepare():
     # ── 13. Save ─────────────────────────────────────────────────────────
     bpy.ops.wm.save_as_mainfile(filepath=filepath)
     _log("Saved prepared blend file")
+    try:
+        _emit_analysis_json()
+    except Exception as e:
+        _warn(f"Could not emit analysis metadata: {e}")
 
     print("PREP_DONE", flush=True)
 

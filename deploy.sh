@@ -58,17 +58,7 @@ log_ok "CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:0:8}..."
 # -----------------------------------------------
 log_step "[2/5] Deploying backend -> Google Cloud Run"
 
-BUILD_DIR=$(mktemp -d)
-cp "$PROJECT_ROOT/server/Dockerfile" "$BUILD_DIR/"
-cp "$PROJECT_ROOT/server/requirements.txt" "$BUILD_DIR/"
-cp "$PROJECT_ROOT/server/db.py" "$BUILD_DIR/"
-cp "$PROJECT_ROOT/server/storage.py" "$BUILD_DIR/"
-cp "$PROJECT_ROOT/server/main.py" "$BUILD_DIR/"
-cp "$PROJECT_ROOT/server/runpod_dispatch.py" "$BUILD_DIR/"
-cp "$PROJECT_ROOT/server/blend_parser.py" "$BUILD_DIR/"
-log_ok "Copied source files to build context"
-
-cd "$BUILD_DIR"
+cd "$PROJECT_ROOT/server"
 log_info "Building Docker image via Cloud Build..."
 gcloud builds submit \
     --tag "gcr.io/$GCP_PROJECT/$SERVICE_NAME" \
@@ -77,7 +67,6 @@ gcloud builds submit \
 log_ok "Docker image built and pushed"
 
 cd "$PROJECT_ROOT"
-rm -rf "$BUILD_DIR" || true
 
 log_info "Deploying container to Cloud Run (region: $GCP_REGION)..."
 gcloud run deploy "$SERVICE_NAME" \

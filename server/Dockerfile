@@ -5,7 +5,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY db.py storage.py main.py blend_parser.py runpod_dispatch.py ./
+COPY main.py ./
+COPY infrastructure/db.py ./db.py
+COPY infrastructure/storage.py ./storage.py
+COPY services/blend_parser.py ./blend_parser.py
+COPY services/runpod_dispatch.py ./runpod_dispatch.py
 
 EXPOSE 8080
 

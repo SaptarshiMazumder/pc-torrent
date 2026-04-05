@@ -63,6 +63,15 @@ PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000")
 # How often to poll RunPod /status (seconds)
 JOB_STATUS_POLL_INTERVAL_SEC = float(os.getenv("JOB_STATUS_POLL_INTERVAL_SEC", "5"))
 
+# Timeout: job stuck IN_QUEUE (image pull / cold start). Healthy workers
+# start in seconds — anything beyond 60s means the worker node is bad.
+# We cancel and immediately respawn on the same endpoint (different node).
+IN_QUEUE_TIMEOUT_SEC = _env_float("IN_QUEUE_TIMEOUT_SEC", 60)
+
+# Timeout: job IN_PROGRESS but rendered_frames hasn't changed. Allows for
+# very long single frames (complex CYCLES scenes).
+IN_PROGRESS_STALE_SEC = _env_float("IN_PROGRESS_STALE_SEC", 90 * 60)
+
 # Heartbeat cadence for virtual machine rows (seconds)
 _HEARTBEAT_INTERVAL = 10
 
@@ -385,6 +394,10 @@ def start_polling_thread(
     )
 
     def _poll():
+        started_at = time.monotonic()
+        last_rendered_frames = None
+        last_frame_change_at = time.monotonic()
+
         while True:
             time.sleep(JOB_STATUS_POLL_INTERVAL_SEC)
             try:
@@ -407,6 +420,77 @@ def start_polling_thread(
 
                 local_status: str = job["status"]
 
+                # ── Timeout checks ────────────────────────────────────────────
+                elapsed = time.monotonic() - started_at
+
+                if rp_status == "IN_QUEUE" and elapsed > IN_QUEUE_TIMEOUT_SEC:
+                    log.warning(
+                        f"Job {job_id}: RunPod worker stuck initializing for "
+                        f"{elapsed:.0f}s — cancelling and respawning on same endpoint"
+                    )
+                    try:
+                        cancel_job(runpod_job_id, machine_id)
+                    except Exception as ce:
+                        log.warning(f"Cancel failed during IN_QUEUE timeout: {ce}")
+
+                    if blend_url:
+                        try:
+                            job_row = db_query_one(
+                                "SELECT frame_start, frame_end, frame_step FROM jobs WHERE id = %s",
+                                (job_id,),
+                            )
+                            new_rp_job_id = dispatch_and_save(
+                                job_id=job_id,
+                                blend_url=blend_url,
+                                frame_start=job_row["frame_start"],
+                                frame_end=job_row["frame_end"],
+                                frame_step=job_row["frame_step"],
+                                render_overrides_b64=render_overrides_b64,
+                                machine_id=machine_id,
+                                db_execute=db_execute,
+                            )
+                            log.info(f"Job {job_id}: respawned as RunPod job {new_rp_job_id}")
+                            # Start a fresh polling thread for the new RunPod job
+                            start_polling_thread(
+                                job_id=job_id,
+                                runpod_job_id=new_rp_job_id,
+                                db_execute=db_execute,
+                                db_query_one=db_query_one,
+                                now_iso=now_iso,
+                                machine_id=machine_id,
+                                blend_url=blend_url,
+                                render_overrides_b64=render_overrides_b64,
+                                db_query_all=db_query_all,
+                                group_id=group_id,
+                            )
+                            break  # this polling thread's job is done
+                        except Exception as respawn_err:
+                            log.error(f"Job {job_id}: respawn failed: {respawn_err} — falling through to failover")
+                            rp_status = "FAILED"
+                            data["error"] = f"Worker stuck initializing, respawn failed: {respawn_err}"
+                    else:
+                        rp_status = "FAILED"
+                        data["error"] = "Worker stuck initializing, no blend_url to respawn"
+
+                elif rp_status == "IN_PROGRESS":
+                    cur_frames = job.get("rendered_frames") or 0
+                    if cur_frames != last_rendered_frames:
+                        last_rendered_frames = cur_frames
+                        last_frame_change_at = time.monotonic()
+                    elif time.monotonic() - last_frame_change_at > IN_PROGRESS_STALE_SEC:
+                        timeout_err = (
+                            f"RunPod job IN_PROGRESS but no new frames for "
+                            f"{IN_PROGRESS_STALE_SEC/60:.0f} min — cancelling"
+                        )
+                        log.warning(f"Job {job_id}: {timeout_err}")
+                        try:
+                            cancel_job(runpod_job_id, machine_id)
+                        except Exception as ce:
+                            log.warning(f"Cancel failed during IN_PROGRESS timeout: {ce}")
+                        rp_status = "FAILED"
+                        data["error"] = timeout_err
+
+                # ── Normal status handling ────────────────────────────────────
                 if rp_status == "IN_PROGRESS" and local_status == "pending":
                     db_execute(
                         "UPDATE jobs SET status = 'running' WHERE id = %s", (job_id,)

@@ -35,6 +35,10 @@ const CAMERA_MODE_OPTIONS = [
   { value: "camera_ranges", label: "Camera Ranges (Editable)" },
 ];
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function powerScore(machine) {
   return (machine.gpu_vram_gb || 0) * 4 + (machine.cpu_cores || 0) + (machine.ram_gb || 0) * 0.3;
 }
@@ -495,21 +499,20 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setUploading(true);
 
     let uploadFilename = file.name;
-    let uploadBlob = null; // will be set below
-    let uploadPath = null;
+    let uploadPath = file.path || null;
+    let uploadBlob = null;
+    let uploadTaskId = "";
 
-    // Use prepared artifact path when available.
+    // Use prepared artifact when available.
     if (flowStage === FLOW_STAGE.PREPARED && prepResult?.prepared_path) {
       uploadFilename = prepResult.filename || file.name;
       uploadPath = prepResult.prepared_path;
     }
 
-    // If no prepared path, use original file.
+    // Fallback to browser blob upload only when no local file path is available.
     if (!uploadPath) {
       if (file._fileObj) {
         uploadBlob = file._fileObj;
-      } else if (file.path) {
-        uploadPath = file.path;
       } else {
         setError("Cannot read file for upload");
         setFlowStage(fallbackStage);
@@ -527,11 +530,28 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       setPendingGroupId(created.group_id || "");
 
       if (uploadPath) {
-        await invoke("upload_file_to_presigned_url", {
+        uploadTaskId = await invoke("start_upload_file_to_presigned_url", {
           filePath: uploadPath,
           uploadUrl: created.upload_url,
         });
-        setUploadProgress(100);
+
+        while (true) {
+          await wait(250);
+          const snapshot = await invoke("get_upload_progress", { uploadId: uploadTaskId });
+          const pct =
+            typeof snapshot?.progress_pct === "number"
+              ? Math.max(0, Math.min(100, Math.round(snapshot.progress_pct)))
+              : 0;
+          setUploadProgress((prev) => Math.max(prev, pct));
+
+          if (snapshot?.status === "completed") {
+            setUploadProgress(100);
+            break;
+          }
+          if (snapshot?.status === "failed") {
+            throw new Error(snapshot?.error || "Upload failed");
+          }
+        }
       } else {
         await uploadDistributedRenderInput(created.upload_url, uploadBlob, (pct) => {
           setUploadProgress((prev) => Math.max(prev, pct));
@@ -539,9 +559,22 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       }
       setFlowStage(FLOW_STAGE.UPLOADED);
     } catch (err) {
-      setError(err.message || "Upload failed");
+      const detail =
+        (typeof err === "string" && err) ||
+        err?.message ||
+        (() => {
+          try {
+            return JSON.stringify(err);
+          } catch {
+            return "";
+          }
+        })();
+      setError(detail ? `Upload failed: ${detail}` : "Upload failed");
       setFlowStage(fallbackStage);
     } finally {
+      if (uploadTaskId) {
+        invoke("clear_upload_progress", { uploadId: uploadTaskId }).catch(() => {});
+      }
       setUploading(false);
     }
   };
@@ -739,6 +772,8 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     : starting
     ? "Starting"
     : "";
+  const hasDeterminateUploadProgress = uploading && uploadProgress > 0;
+  const showIndeterminateProgress = !uploading || !hasDeterminateUploadProgress;
 
   const currentStageLabel =
     flowStage === FLOW_STAGE.IDLE
@@ -942,18 +977,24 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
 
         {(analyzing || preparing || uploading || starting) && (
           <div className="runtime-progress-wrap">
-            <div className={`runtime-progress-track ${uploading ? "" : "indeterminate"}`}>
+            <div className={`runtime-progress-track ${showIndeterminateProgress ? "indeterminate" : ""}`}>
               <div
                 className="runtime-progress-fill"
                 style={{
-                  width: uploading ? `${uploadProgress}%` : "40%",
+                  width: showIndeterminateProgress ? "40%" : `${uploadProgress}%`,
                   transition: uploading ? "none" : undefined,
                 }}
               />
             </div>
             <div className="runtime-progress-meta">
               <span>{stepLabel}</span>
-              <span>{uploading ? `${uploadProgress}%` : "Working..."}</span>
+              <span>
+                {uploading
+                  ? hasDeterminateUploadProgress
+                    ? `${uploadProgress}%`
+                    : "Uploading..."
+                  : "Working..."}
+              </span>
             </div>
           </div>
         )}

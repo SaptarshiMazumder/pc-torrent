@@ -23,6 +23,7 @@ const FLOW_STAGE = {
   IDLE: "idle",
   ANALYZED: "analyzed",
   PREPARING: "preparing",
+  PREPARED: "prepared",
   UPLOADED: "uploaded",
   STARTING: "starting",
   SUBMITTED: "submitted",
@@ -441,8 +442,44 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     }
   };
 
-  const handleUpload = async () => {
+  const handlePrepare = async () => {
     if (flowStage !== FLOW_STAGE.ANALYZED) return;
+    if (!file) {
+      setError("Select a .blend file or .zip project bundle first");
+      return;
+    }
+    if (selectedMachines.length === 0) {
+      setError("Select at least one machine before preparing");
+      return;
+    }
+    if (!blenderBin || !file.path) {
+      setFlowStage(FLOW_STAGE.PREPARED);
+      return;
+    }
+    setError("");
+    setServerParseError("");
+    setPrepResult(null);
+    setPreparing(true);
+    setFlowStage(FLOW_STAGE.PREPARING);
+    try {
+      const result = await invoke("prepare_blend_for_upload", {
+        filePath: file.path,
+        blenderBin,
+      });
+      setPrepResult(result);
+    } catch (prepErr) {
+      setPrepResult({ warnings: [], errors: [`Prepare step failed: ${prepErr}`], prep_done: false });
+    } finally {
+      setPreparing(false);
+      setFlowStage(FLOW_STAGE.PREPARED);
+    }
+  };
+  const handleUpload = async () => {
+    const shouldPrepareBeforeUpload = Boolean(blenderBin && file?.path);
+    const canUploadFromCurrentStage =
+      flowStage === FLOW_STAGE.PREPARED ||
+      (flowStage === FLOW_STAGE.ANALYZED && !shouldPrepareBeforeUpload);
+    if (!canUploadFromCurrentStage) return;
     if (!file) {
       setError("Select a .blend file or .zip project bundle first");
       return;
@@ -451,38 +488,26 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       setError("Select at least one machine before uploading");
       return;
     }
-
     setError("");
     setServerParseError("");
     setUploadProgress(0);
-    setPrepResult(null);
-
     let uploadFilename = file.name;
     let uploadBlob = null; // will be set below
-
-    // ── Prepare step (only if Blender found and we have a path) ────────────
-    if (blenderBin && file.path) {
-      setPreparing(true);
-      setFlowStage(FLOW_STAGE.PREPARING);
+    // Use prepared artifact when available.
+    if (flowStage === FLOW_STAGE.PREPARED && prepResult?.prepared_path) {
+      uploadFilename = prepResult.filename || file.name;
       try {
-        const result = await invoke("prepare_blend_for_upload", {
-          filePath: file.path,
-          blenderBin,
-        });
-        setPrepResult(result);
-        uploadFilename = result.filename;
-        // Read prepared file via asset protocol (no IPC byte transfer)
-        const prepUrl = convertFileSrc(result.prepared_path);
+        const prepUrl = convertFileSrc(prepResult.prepared_path);
         const resp = await fetch(prepUrl);
         uploadBlob = await resp.blob();
-      } catch (prepErr) {
-        // Prepare failed — warn and fall through to upload original
-        setPrepResult({ warnings: [], errors: [`Prepare step failed: ${prepErr}`], prep_done: false });
-      } finally {
-        setPreparing(false);
+      } catch (err) {
+        setPrepResult((prev) => ({
+          warnings: prev?.warnings || [],
+          errors: [...(prev?.errors || []), `Could not read prepared file, using original input: ${err}`],
+          prep_done: false,
+        }));
       }
     }
-
     // If no prepared blob, upload the original file
     if (!uploadBlob) {
       if (file._fileObj) {
@@ -493,12 +518,10 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         uploadBlob = await resp.blob();
       } else {
         setError("Cannot read file for upload");
-        setFlowStage(FLOW_STAGE.ANALYZED);
+        setFlowStage(flowStage === FLOW_STAGE.PREPARED ? FLOW_STAGE.PREPARED : FLOW_STAGE.ANALYZED);
         return;
       }
     }
-
-    // ── Upload ───────────────────────────────────────────────────────────────
     setUploading(true);
     try {
       const created = await createDistributedRenderGroup(
@@ -507,19 +530,17 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         uploadFilename
       );
       setPendingGroupId(created.group_id || "");
-
       await uploadDistributedRenderInput(created.upload_url, uploadBlob, (pct) => {
         setUploadProgress(pct);
       });
       setFlowStage(FLOW_STAGE.UPLOADED);
     } catch (err) {
       setError(err.message || "Upload failed");
-      setFlowStage(FLOW_STAGE.ANALYZED);
+      setFlowStage(flowStage === FLOW_STAGE.PREPARED ? FLOW_STAGE.PREPARED : FLOW_STAGE.ANALYZED);
     } finally {
       setUploading(false);
     }
   };
-
   const handleStartRendering = async () => {
     if (flowStage !== FLOW_STAGE.UPLOADED) {
       return;
@@ -611,7 +632,14 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       if (!selected) return; // user cancelled
       const filePath = typeof selected === "string" ? selected : selected.path;
       const name = filePath.replace(/\\/g, "/").split("/").pop();
-      setFile({ name, path: filePath, size: 0 });
+      let size = 0;
+      try {
+        const resolvedSize = await invoke("get_file_size", { filePath });
+        size = Number.isFinite(resolvedSize) && resolvedSize >= 0 ? resolvedSize : 0;
+      } catch {
+        size = 0;
+      }
+      setFile({ name, path: filePath, size });
       resetSubmissionFlow();
     } catch (err) {
       setError(`Could not open file picker: ${err}`);
@@ -682,7 +710,12 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     return map;
   }, [cameraRanges, manualFrameRange]);
 
-  const canUpload = flowStage === FLOW_STAGE.ANALYZED && !analyzing && !preparing && !uploading && !starting;
+  const needsPrepareStep = Boolean(blenderBin && file?.path);
+  const isBusy = analyzing || preparing || uploading || starting;
+  const canPrepare = needsPrepareStep && flowStage === FLOW_STAGE.ANALYZED && !isBusy;
+  const canUpload =
+    (flowStage === FLOW_STAGE.PREPARED || (!needsPrepareStep && flowStage === FLOW_STAGE.ANALYZED)) &&
+    !isBusy;
   const manualRangeValid = manualFrameRange !== null;
   const canStart =
     flowStage === FLOW_STAGE.UPLOADED &&
@@ -712,6 +745,8 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         : "Manual frame range required"
       : flowStage === FLOW_STAGE.PREPARING
       ? "Preparing blend file"
+      : flowStage === FLOW_STAGE.PREPARED
+      ? "Preparation complete"
       : flowStage === FLOW_STAGE.UPLOADED
       ? "Upload complete"
       : flowStage === FLOW_STAGE.STARTING
@@ -719,7 +754,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       : "Submitted";
 
   const currentStageTone =
-    flowStage === FLOW_STAGE.UPLOADED || flowStage === FLOW_STAGE.SUBMITTED
+    flowStage === FLOW_STAGE.PREPARED || flowStage === FLOW_STAGE.UPLOADED || flowStage === FLOW_STAGE.SUBMITTED
       ? "success"
       : flowStage === FLOW_STAGE.ANALYZED && !analysisResult
     ? "warning"
@@ -857,19 +892,28 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
             </button>
           )}
 
-          {(flowStage === FLOW_STAGE.ANALYZED || flowStage === FLOW_STAGE.PREPARING) && (
+          {needsPrepareStep && (flowStage === FLOW_STAGE.ANALYZED || flowStage === FLOW_STAGE.PREPARING) && (
+            <button
+              className="btn btn-primary submit-primary-btn"
+              type="button"
+              onClick={handlePrepare}
+              disabled={!canPrepare}
+            >
+              {preparing ? "Preparing..." : "Prepare File"}
+            </button>
+          )}
+
+          {((!needsPrepareStep && flowStage === FLOW_STAGE.ANALYZED) || flowStage === FLOW_STAGE.PREPARED) && (
             <button
               className="btn btn-primary submit-primary-btn"
               type="button"
               onClick={handleUpload}
               disabled={!canUpload}
             >
-              {preparing
-                ? "Preparing..."
-                : uploading
+              {uploading
                 ? `Uploading... ${uploadProgress}%`
-                : blenderBin
-                ? "Prepare & Upload"
+                : flowStage === FLOW_STAGE.PREPARED
+                ? "Start Uploading"
                 : "Upload"}
             </button>
           )}
@@ -1178,3 +1222,4 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     </div>
   );
 }
+

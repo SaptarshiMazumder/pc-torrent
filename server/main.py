@@ -4,6 +4,7 @@ import collections
 import io
 import json
 import logging
+import math
 import re
 import threading
 import zipfile
@@ -65,6 +66,11 @@ MACHINE_STALE_SECONDS = 15
 DEFAULT_DEVICE_POLICY = "AUTO"
 ALLOWED_DEVICE_POLICIES = {"AUTO", "OPTIX", "CUDA", "CPU"}
 ALLOWED_CAMERA_MODES = {"auto_markers", "force_camera", "camera_ranges"}
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024 * 1024  # 100 GB
+SINGLE_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024  # S3 PutObject hard limit
+MULTIPART_MIN_PART_SIZE_BYTES = 5 * 1024 * 1024  # S3 minimum except last part
+MULTIPART_DEFAULT_PART_SIZE_BYTES = 64 * 1024 * 1024
+MULTIPART_MAX_PARTS = 10_000
 
 app = FastAPI(title="PC Rent Server")
 
@@ -402,6 +408,81 @@ def validate_job_input_filename(name: str) -> None:
         )
 
 
+def validate_upload_size(file_size_bytes: int) -> int:
+    size = int(file_size_bytes or 0)
+    if size <= 0:
+        raise HTTPException(status_code=400, detail="file_size_bytes must be greater than zero")
+    if size > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds max upload size of {MAX_UPLOAD_BYTES} bytes (100 GB)",
+        )
+    return size
+
+
+def choose_multipart_part_size(file_size_bytes: int, requested_part_size_bytes: int | None = None) -> int:
+    size = validate_upload_size(file_size_bytes)
+
+    part_size = requested_part_size_bytes or MULTIPART_DEFAULT_PART_SIZE_BYTES
+    part_size = max(int(part_size), MULTIPART_MIN_PART_SIZE_BYTES)
+
+    required_min = math.ceil(size / MULTIPART_MAX_PARTS)
+    part_size = max(part_size, required_min)
+
+    # Keep part boundaries aligned to 1 MiB for predictable client chunking.
+    mib = 1024 * 1024
+    if part_size % mib != 0:
+        part_size = ((part_size + mib - 1) // mib) * mib
+
+    total_parts = math.ceil(size / part_size)
+    if total_parts > MULTIPART_MAX_PARTS:
+        raise HTTPException(status_code=400, detail="Too many multipart chunks for this file size")
+
+    return part_size
+
+
+def compute_total_parts(file_size_bytes: int, part_size_bytes: int) -> int:
+    if part_size_bytes <= 0:
+        raise HTTPException(status_code=400, detail="part_size_bytes must be greater than zero")
+    return max(1, math.ceil(file_size_bytes / part_size_bytes))
+
+
+def normalize_part_numbers(part_numbers: list[int]) -> list[int]:
+    if not part_numbers:
+        raise HTTPException(status_code=400, detail="part_numbers cannot be empty")
+    deduped = sorted({int(n) for n in part_numbers})
+    if len(deduped) > 200:
+        raise HTTPException(status_code=400, detail="Too many part numbers requested at once")
+    for n in deduped:
+        if n < 1 or n > MULTIPART_MAX_PARTS:
+            raise HTTPException(status_code=400, detail=f"Invalid part number: {n}")
+    return deduped
+
+
+def normalize_completed_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not parts:
+        raise HTTPException(status_code=400, detail="parts cannot be empty")
+
+    cleaned: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for part in parts:
+        part_number = int(part.get("part_number", 0))
+        etag = str(part.get("etag", "")).strip()
+        if part_number < 1 or part_number > MULTIPART_MAX_PARTS:
+            raise HTTPException(status_code=400, detail=f"Invalid part_number: {part_number}")
+        if not etag:
+            raise HTTPException(status_code=400, detail=f"Missing etag for part {part_number}")
+        if part_number in seen:
+            raise HTTPException(status_code=400, detail=f"Duplicate part_number: {part_number}")
+        seen.add(part_number)
+        cleaned.append({"PartNumber": part_number, "ETag": etag})
+
+    return cleaned
+
+
+def job_input_r2_key(job: dict[str, Any]) -> str:
+    return f"jobs/{job['id']}/input/{job['input_filename']}"
+
 
 # -----------------------------------------------
 # Health
@@ -530,10 +611,31 @@ def list_available_machines() -> list[dict[str, Any]]:
 class RequestUploadPayload(BaseModel):
     machine_id: str
     filename: str
+    file_size_bytes: int | None = None
+
+
+class MultipartInitPayload(BaseModel):
+    file_size_bytes: int
+    content_type: str | None = "application/octet-stream"
+    part_size_bytes: int | None = None
+
+
+class MultipartPartUrlsPayload(BaseModel):
+    upload_id: str
+    part_numbers: list[int]
+
+
+class MultipartCompletePayload(BaseModel):
+    upload_id: str
+    parts: list[dict[str, Any]]
+
+
+class MultipartAbortPayload(BaseModel):
+    upload_id: str
 
 
 @app.post("/jobs/request-upload")
-def request_upload(payload: RequestUploadPayload) -> dict[str, str]:
+def request_upload(payload: RequestUploadPayload) -> dict[str, Any]:
     """Get a presigned URL to upload directly to R2."""
     machine = query_one(
         "SELECT id FROM machines WHERE id = %s AND status = 'available'",
@@ -544,6 +646,11 @@ def request_upload(payload: RequestUploadPayload) -> dict[str, str]:
 
     input_filename = sanitize_filename(payload.filename)
     validate_job_input_filename(input_filename)
+    file_size_bytes = None
+    multipart_required = False
+    if payload.file_size_bytes is not None:
+        file_size_bytes = validate_upload_size(payload.file_size_bytes)
+        multipart_required = file_size_bytes > SINGLE_PUT_MAX_BYTES
 
     job_id = str(uuid4())
     r2_key = f"jobs/{job_id}/input/{input_filename}"
@@ -558,7 +665,123 @@ def request_upload(payload: RequestUploadPayload) -> dict[str, str]:
         (job_id, payload.machine_id, input_filename, now_iso()),
     )
 
-    return {"job_id": job_id, "upload_url": upload_url, "r2_key": r2_key}
+    return {
+        "job_id": job_id,
+        "upload_url": upload_url,
+        "r2_key": r2_key,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "single_put_max_bytes": SINGLE_PUT_MAX_BYTES,
+        "multipart_required": multipart_required,
+        "suggested_upload_mode": "multipart" if multipart_required else "single_put",
+        "file_size_bytes": file_size_bytes,
+    }
+
+
+@app.post("/jobs/{job_id}/multipart-upload/init")
+def init_job_multipart_upload(job_id: str, payload: MultipartInitPayload) -> dict[str, Any]:
+    job = query_one(
+        "SELECT id, input_filename, status FROM jobs WHERE id = %s",
+        (job_id,),
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "uploading":
+        raise HTTPException(status_code=409, detail="Job is not in uploading state")
+
+    file_size_bytes = validate_upload_size(payload.file_size_bytes)
+    part_size_bytes = choose_multipart_part_size(file_size_bytes, payload.part_size_bytes)
+    total_parts = compute_total_parts(file_size_bytes, part_size_bytes)
+    r2_key = job_input_r2_key(job)
+
+    try:
+        upload_id = storage.create_multipart_upload(
+            r2_key,
+            content_type=(payload.content_type or "application/octet-stream"),
+        )
+    except Exception as exc:
+        log.error("Failed to create multipart upload for job %s: %s", job_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to initialize multipart upload")
+
+    return {
+        "upload_id": upload_id,
+        "part_size_bytes": part_size_bytes,
+        "total_parts": total_parts,
+        "file_size_bytes": file_size_bytes,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "single_put_max_bytes": SINGLE_PUT_MAX_BYTES,
+        "r2_key": r2_key,
+    }
+
+
+@app.post("/jobs/{job_id}/multipart-upload/part-urls")
+def job_multipart_part_urls(job_id: str, payload: MultipartPartUrlsPayload) -> dict[str, Any]:
+    job = query_one(
+        "SELECT id, input_filename, status FROM jobs WHERE id = %s",
+        (job_id,),
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "uploading":
+        raise HTTPException(status_code=409, detail="Job is not in uploading state")
+
+    r2_key = job_input_r2_key(job)
+    numbers = normalize_part_numbers(payload.part_numbers)
+    urls: dict[str, str] = {}
+    for n in numbers:
+        urls[str(n)] = storage.generate_presigned_upload_part_url(
+            r2_key,
+            payload.upload_id,
+            n,
+            expires_in=3600,
+        )
+    return {"upload_id": payload.upload_id, "urls": urls}
+
+
+@app.post("/jobs/{job_id}/multipart-upload/complete")
+def complete_job_multipart_upload(job_id: str, payload: MultipartCompletePayload) -> dict[str, Any]:
+    job = query_one(
+        "SELECT id, input_filename, status FROM jobs WHERE id = %s",
+        (job_id,),
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "uploading":
+        raise HTTPException(status_code=409, detail="Job is not in uploading state")
+
+    r2_key = job_input_r2_key(job)
+    parts = normalize_completed_parts(payload.parts)
+    try:
+        result = storage.complete_multipart_upload(r2_key, payload.upload_id, parts)
+    except Exception as exc:
+        log.error("Failed to complete multipart upload for job %s: %s", job_id, exc)
+        raise HTTPException(status_code=400, detail=f"Failed to complete multipart upload: {exc}")
+
+    return {
+        "success": True,
+        "upload_id": payload.upload_id,
+        "etag": result.get("ETag"),
+        "location": result.get("Location"),
+        "key": result.get("Key"),
+    }
+
+
+@app.post("/jobs/{job_id}/multipart-upload/abort")
+def abort_job_multipart_upload(job_id: str, payload: MultipartAbortPayload) -> dict[str, Any]:
+    job = query_one(
+        "SELECT id, input_filename, status FROM jobs WHERE id = %s",
+        (job_id,),
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    r2_key = job_input_r2_key(job)
+    try:
+        storage.abort_multipart_upload(r2_key, payload.upload_id)
+    except Exception as exc:
+        log.warning("Failed to abort multipart upload for job %s: %s", job_id, exc)
+        raise HTTPException(status_code=400, detail=f"Failed to abort multipart upload: {exc}")
+
+    return {"success": True, "upload_id": payload.upload_id}
 
 
 @app.post("/jobs/{job_id}/confirm-upload")
@@ -571,7 +794,7 @@ def confirm_upload(job_id: str) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Job not in uploading state")
 
     # Verify the file exists in R2
-    r2_key = f"jobs/{job_id}/input/{job['input_filename']}"
+    r2_key = job_input_r2_key(job)
     if not storage.file_exists(r2_key):
         raise HTTPException(status_code=400, detail="File not found in storage. Upload may have failed.")
 
@@ -1356,6 +1579,7 @@ def _machine_type_of(machine_id: str) -> str:
 class CreateRenderGroupPayload(BaseModel):
     machine_ids: list[str]
     filename: str
+    file_size_bytes: int | None = None
 
 
 @app.post("/render-groups/create")
@@ -1366,6 +1590,11 @@ def create_render_group(payload: CreateRenderGroupPayload) -> dict[str, Any]:
 
     input_filename = sanitize_filename(payload.filename)
     validate_job_input_filename(input_filename)
+    file_size_bytes = None
+    multipart_required = False
+    if payload.file_size_bytes is not None:
+        file_size_bytes = validate_upload_size(payload.file_size_bytes)
+        multipart_required = file_size_bytes > SINGLE_PUT_MAX_BYTES
 
     # Validate all machines exist and are available
     for mid in payload.machine_ids:
@@ -1397,7 +1626,119 @@ def create_render_group(payload: CreateRenderGroupPayload) -> dict[str, Any]:
         "upload_url": upload_url,
         "r2_key": r2_key,
         "machine_ids": payload.machine_ids,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "single_put_max_bytes": SINGLE_PUT_MAX_BYTES,
+        "multipart_required": multipart_required,
+        "suggested_upload_mode": "multipart" if multipart_required else "single_put",
+        "file_size_bytes": file_size_bytes,
     }
+
+
+@app.post("/render-groups/{group_id}/multipart-upload/init")
+def init_render_group_multipart_upload(group_id: str, payload: MultipartInitPayload) -> dict[str, Any]:
+    group = query_one(
+        "SELECT id, r2_input_key, status FROM render_groups WHERE id = %s",
+        (group_id,),
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+    if group["status"] != "uploading":
+        raise HTTPException(status_code=409, detail="Render group is not in uploading state")
+
+    file_size_bytes = validate_upload_size(payload.file_size_bytes)
+    part_size_bytes = choose_multipart_part_size(file_size_bytes, payload.part_size_bytes)
+    total_parts = compute_total_parts(file_size_bytes, part_size_bytes)
+    r2_key = group["r2_input_key"]
+
+    try:
+        upload_id = storage.create_multipart_upload(
+            r2_key,
+            content_type=(payload.content_type or "application/octet-stream"),
+        )
+    except Exception as exc:
+        log.error("Failed to create multipart upload for render group %s: %s", group_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to initialize multipart upload")
+
+    return {
+        "upload_id": upload_id,
+        "part_size_bytes": part_size_bytes,
+        "total_parts": total_parts,
+        "file_size_bytes": file_size_bytes,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "single_put_max_bytes": SINGLE_PUT_MAX_BYTES,
+        "r2_key": r2_key,
+    }
+
+
+@app.post("/render-groups/{group_id}/multipart-upload/part-urls")
+def render_group_multipart_part_urls(group_id: str, payload: MultipartPartUrlsPayload) -> dict[str, Any]:
+    group = query_one(
+        "SELECT id, r2_input_key, status FROM render_groups WHERE id = %s",
+        (group_id,),
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+    if group["status"] != "uploading":
+        raise HTTPException(status_code=409, detail="Render group is not in uploading state")
+
+    r2_key = group["r2_input_key"]
+    numbers = normalize_part_numbers(payload.part_numbers)
+    urls: dict[str, str] = {}
+    for n in numbers:
+        urls[str(n)] = storage.generate_presigned_upload_part_url(
+            r2_key,
+            payload.upload_id,
+            n,
+            expires_in=3600,
+        )
+    return {"upload_id": payload.upload_id, "urls": urls}
+
+
+@app.post("/render-groups/{group_id}/multipart-upload/complete")
+def complete_render_group_multipart_upload(group_id: str, payload: MultipartCompletePayload) -> dict[str, Any]:
+    group = query_one(
+        "SELECT id, r2_input_key, status FROM render_groups WHERE id = %s",
+        (group_id,),
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+    if group["status"] != "uploading":
+        raise HTTPException(status_code=409, detail="Render group is not in uploading state")
+
+    r2_key = group["r2_input_key"]
+    parts = normalize_completed_parts(payload.parts)
+    try:
+        result = storage.complete_multipart_upload(r2_key, payload.upload_id, parts)
+    except Exception as exc:
+        log.error("Failed to complete multipart upload for render group %s: %s", group_id, exc)
+        raise HTTPException(status_code=400, detail=f"Failed to complete multipart upload: {exc}")
+
+    return {
+        "success": True,
+        "upload_id": payload.upload_id,
+        "etag": result.get("ETag"),
+        "location": result.get("Location"),
+        "key": result.get("Key"),
+    }
+
+
+@app.post("/render-groups/{group_id}/multipart-upload/abort")
+def abort_render_group_multipart_upload(group_id: str, payload: MultipartAbortPayload) -> dict[str, Any]:
+    group = query_one(
+        "SELECT id, r2_input_key FROM render_groups WHERE id = %s",
+        (group_id,),
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+
+    r2_key = group["r2_input_key"]
+    try:
+        storage.abort_multipart_upload(r2_key, payload.upload_id)
+    except Exception as exc:
+        log.warning("Failed to abort multipart upload for render group %s: %s", group_id, exc)
+        raise HTTPException(status_code=400, detail=f"Failed to abort multipart upload: {exc}")
+
+    return {"success": True, "upload_id": payload.upload_id}
 
 
 class ConfirmRenderGroupPayload(BaseModel):

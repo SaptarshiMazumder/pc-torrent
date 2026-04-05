@@ -1,15 +1,50 @@
 const BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
-export async function getMachines() {
-  const r = await fetch(`${BASE}/machines`);
-  return r.json();
+function isMultipartEndpointMissing(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("404") &&
+    message.includes("multipart-upload")
+  );
 }
 
-async function uploadFileToPresignedUrl(uploadUrl, file, onProgress) {
+async function parseJsonError(response, fallbackMessage) {
+  try {
+    const payload = await response.json();
+    if (payload?.detail) return payload.detail;
+  } catch {
+    // ignore parse errors
+  }
+  return fallbackMessage;
+}
+
+async function uploadFileToPresignedUrl(uploadUrl, file, onProgress, signal = null) {
   await new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let aborted = false;
+    let abortListener = null;
     xhr.open("PUT", uploadUrl);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+    if (signal?.aborted) {
+      reject(new DOMException("Upload aborted", "AbortError"));
+      return;
+    }
+
+    if (signal) {
+      abortListener = () => {
+        aborted = true;
+        xhr.abort();
+      };
+      signal.addEventListener("abort", abortListener, { once: true });
+    }
+
+    const cleanup = () => {
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
+      }
+    };
+
     if (onProgress) {
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
@@ -18,40 +53,239 @@ async function uploadFileToPresignedUrl(uploadUrl, file, onProgress) {
       };
     }
     xhr.onload = () => {
+      cleanup();
       if (xhr.status >= 200 && xhr.status < 300) resolve();
       else reject(new Error(`Upload failed with status ${xhr.status}`));
     };
-    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException("Upload aborted", "AbortError"));
+    };
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error(aborted ? "Upload aborted" : "Upload failed"));
+    };
     xhr.send(file);
   });
 }
 
-export async function submitJob(machineId, file, onProgress) {
-  // Step 1: Get presigned upload URL from backend
+async function uploadBlobPart(partUrl, blob, signal = null, onBytes = null) {
+  await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let aborted = false;
+    let abortListener = null;
+    let uploaded = 0;
+
+    xhr.open("PUT", partUrl);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+    if (signal?.aborted) {
+      reject(new DOMException("Upload aborted", "AbortError"));
+      return;
+    }
+
+    if (signal) {
+      abortListener = () => {
+        aborted = true;
+        xhr.abort();
+      };
+      signal.addEventListener("abort", abortListener, { once: true });
+    }
+
+    const cleanup = () => {
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
+      }
+    };
+
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const delta = Math.max(0, e.loaded - uploaded);
+      uploaded = e.loaded;
+      if (delta > 0 && onBytes) onBytes(delta);
+    };
+
+    xhr.onload = () => {
+      cleanup();
+      if (uploaded < blob.size && onBytes) {
+        onBytes(blob.size - uploaded);
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const etag = xhr.getResponseHeader("etag") || xhr.getResponseHeader("ETag");
+        if (!etag) {
+          reject(new Error("Missing ETag in multipart part response"));
+          return;
+        }
+        resolve(etag);
+        return;
+      }
+      reject(new Error(`Part upload failed with status ${xhr.status}`));
+    };
+
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException("Upload aborted", "AbortError"));
+    };
+
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error(aborted ? "Upload aborted" : "Part upload failed"));
+    };
+
+    xhr.send(blob);
+  });
+}
+
+async function postJson(url, body, signal = null) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) {
+    const detail = await parseJsonError(response, `Request failed (${response.status})`);
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+async function uploadMultipartInput(kind, id, file, onProgress, signal = null) {
+  const init = await postJson(
+    `${BASE}/${kind}/${id}/multipart-upload/init`,
+    {
+      file_size_bytes: file.size,
+      content_type: "application/octet-stream",
+    },
+    signal
+  );
+
+  const partSize = Math.max(5 * 1024 * 1024, Number(init.part_size_bytes || 0));
+  const totalParts = Math.max(1, Number(init.total_parts || 0));
+
+  let uploadedBytes = 0;
+  const reportProgress = () => {
+    if (!onProgress) return;
+    const pct = Math.min(100, Math.max(0, Math.round((uploadedBytes / file.size) * 100)));
+    onProgress(pct);
+  };
+  reportProgress();
+
+  const completedParts = [];
+  const partUrlCache = new Map();
+  const partUrlBatchSize = 16;
+
+  try {
+    for (let partNumber = 1; partNumber <= totalParts; partNumber += 1) {
+      if (!partUrlCache.has(partNumber)) {
+        const batch = [];
+        for (
+          let n = partNumber;
+          n <= totalParts && n < partNumber + partUrlBatchSize;
+          n += 1
+        ) {
+          batch.push(n);
+        }
+        const partUrlResp = await postJson(
+          `${BASE}/${kind}/${id}/multipart-upload/part-urls`,
+          {
+            upload_id: init.upload_id,
+            part_numbers: batch,
+          },
+          signal
+        );
+        const entries = Object.entries(partUrlResp.urls || {});
+        for (const [k, v] of entries) {
+          const numeric = Number.parseInt(k, 10);
+          if (Number.isInteger(numeric) && typeof v === "string") {
+            partUrlCache.set(numeric, v);
+          }
+        }
+      }
+
+      const partUrl = partUrlCache.get(partNumber);
+      if (!partUrl) {
+        throw new Error(`Missing upload URL for part ${partNumber}`);
+      }
+      partUrlCache.delete(partNumber);
+
+      const start = (partNumber - 1) * partSize;
+      const end = Math.min(file.size, start + partSize);
+      const blob = file.slice(start, end);
+      const etag = await uploadBlobPart(partUrl, blob, signal, (delta) => {
+        uploadedBytes += delta;
+        reportProgress();
+      });
+      completedParts.push({
+        part_number: partNumber,
+        etag,
+      });
+    }
+
+    await postJson(
+      `${BASE}/${kind}/${id}/multipart-upload/complete`,
+      {
+        upload_id: init.upload_id,
+        parts: completedParts,
+      },
+      signal
+    );
+    if (onProgress) onProgress(100);
+  } catch (error) {
+    await postJson(
+      `${BASE}/${kind}/${id}/multipart-upload/abort`,
+      { upload_id: init.upload_id },
+      null
+    ).catch(() => {});
+    throw error;
+  }
+}
+
+export async function getMachines() {
+  const r = await fetch(`${BASE}/machines`);
+  return r.json();
+}
+
+export async function submitJob(machineId, file, onProgress, signal = null) {
   const reqRes = await fetch(`${BASE}/jobs/request-upload`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ machine_id: machineId, filename: file.name }),
+    body: JSON.stringify({
+      machine_id: machineId,
+      filename: file.name,
+      file_size_bytes: file.size,
+    }),
+    signal,
   });
   if (!reqRes.ok) {
-    const err = await reqRes.json();
-    throw new Error(err.detail || "Failed to request upload URL");
+    const detail = await parseJsonError(reqRes, "Failed to request upload URL");
+    throw new Error(detail);
   }
-  const { job_id, upload_url } = await reqRes.json();
+  const requestInfo = await reqRes.json();
+  const jobId = requestInfo.job_id;
 
-  // Step 2: Upload file directly to R2 using presigned URL
-  await uploadFileToPresignedUrl(upload_url, file, onProgress);
+  try {
+    await uploadMultipartInput("jobs", jobId, file, onProgress, signal);
+  } catch (error) {
+    const canFallback =
+      typeof requestInfo.upload_url === "string" &&
+      file.size <= Number(requestInfo.single_put_max_bytes || 5 * 1024 * 1024 * 1024) &&
+      isMultipartEndpointMissing(error);
+    if (!canFallback) throw error;
+    await uploadFileToPresignedUrl(requestInfo.upload_url, file, onProgress, signal);
+    if (onProgress) onProgress(100);
+  }
 
-  // Step 3: Confirm upload with backend
-  const confirmRes = await fetch(`${BASE}/jobs/${job_id}/confirm-upload`, {
+  const confirmRes = await fetch(`${BASE}/jobs/${jobId}/confirm-upload`, {
     method: "POST",
+    signal,
   });
   if (!confirmRes.ok) {
-    const err = await confirmRes.json();
-    throw new Error(err.detail || "Failed to confirm upload");
+    const detail = await parseJsonError(confirmRes, "Failed to confirm upload");
+    throw new Error(detail);
   }
 
-  return { job_id, status: "pending" };
+  return { job_id: jobId, status: "pending" };
 }
 
 export async function getJob(jobId) {
@@ -63,24 +297,25 @@ export function downloadUrl(jobId) {
   return `${BASE}/jobs/${jobId}/download`;
 }
 
-// ---- Distributed Rendering (Render Groups) ----
-
-export async function createDistributedRenderGroup(machineIds, filename) {
+export async function createDistributedRenderGroup(machineIds, filename, fileSizeBytes = null) {
   const createRes = await fetch(`${BASE}/render-groups/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ machine_ids: machineIds, filename }),
+    body: JSON.stringify({
+      machine_ids: machineIds,
+      filename,
+      file_size_bytes: fileSizeBytes,
+    }),
   });
   if (!createRes.ok) {
-    const err = await createRes.json();
-    throw new Error(err.detail || "Failed to create render group");
+    const detail = await parseJsonError(createRes, "Failed to create render group");
+    throw new Error(detail);
   }
   return createRes.json();
 }
 
-export async function uploadDistributedRenderInput(uploadUrl, file, onProgress) {
-  await uploadFileToPresignedUrl(uploadUrl, file, onProgress);
-  if (onProgress) onProgress(100);
+export async function uploadDistributedRenderInput(groupId, file, onProgress, signal = null) {
+  await uploadMultipartInput("render-groups", groupId, file, onProgress, signal);
 }
 
 export async function confirmDistributedJob(groupId, machineIds, frameRange = null) {
@@ -96,8 +331,8 @@ export async function confirmDistributedJob(groupId, machineIds, frameRange = nu
     body: JSON.stringify(body),
   });
   if (!confirmRes.ok) {
-    const err = await confirmRes.json();
-    throw new Error(err.detail || "Failed to confirm upload");
+    const detail = await parseJsonError(confirmRes, "Failed to confirm upload");
+    throw new Error(detail);
   }
   return confirmRes.json();
 }

@@ -17,6 +17,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+base64 = "0.22"
 
 [profile.release]
 strip = true

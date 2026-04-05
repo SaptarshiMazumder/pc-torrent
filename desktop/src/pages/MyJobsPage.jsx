@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cancelRenderGroup, jobOutputsUrl, renderGroupOutputsUrl } from "../lib/api";
 import { downloadJobOutputToDownloads } from "../lib/sidecar";
 import SegmentedProgressBar from "../components/SegmentedProgressBar";
@@ -29,10 +29,28 @@ function frameIndexFromFilename(filename) {
   return Number.isFinite(parsed) ? parsed : -1;
 }
 
+function outputSort(a, b) {
+  const frameA = frameIndexFromFilename(a?.filename || "");
+  const frameB = frameIndexFromFilename(b?.filename || "");
+  if (frameA !== frameB) return frameA - frameB;
+  return String(a?.filename || "").localeCompare(String(b?.filename || ""));
+}
+
+function jobKey(job) {
+  return job?.group_id || job?.job_id || "";
+}
+
 export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGroupCancelled }) {
   const [downloadingId, setDownloadingId] = useState(null);
   const [downloadResults, setDownloadResults] = useState({});
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
+  const [openFrameGalleries, setOpenFrameGalleries] = useState({});
+  const [frameGalleries, setFrameGalleries] = useState({});
+  const jobsRef = useRef(jobs);
+
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
 
   const handleDownload = async (id, url, jobFilename) => {
     setDownloadResults((prev) => ({
@@ -99,6 +117,96 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
     }
   };
 
+  const fetchFrameGallery = useCallback(
+    async (job, { silent = false } = {}) => {
+      const id = jobKey(job);
+      if (!id) return;
+
+      const endpoint = job.group_id
+        ? renderGroupOutputsUrl(backendUrl, id)
+        : jobOutputsUrl(backendUrl, id);
+
+      if (!silent) {
+        setFrameGalleries((prev) => ({
+          ...prev,
+          [id]: {
+            ...prev[id],
+            loading: true,
+            error: "",
+            files: prev[id]?.files || [],
+          },
+        }));
+      }
+
+      try {
+        const resp = await fetch(endpoint);
+        if (!resp.ok) {
+          throw new Error(`Could not load frames (${resp.status})`);
+        }
+        const payload = await resp.json();
+        const files = Array.isArray(payload?.files) ? payload.files.slice().sort(outputSort) : [];
+        setFrameGalleries((prev) => ({
+          ...prev,
+          [id]: {
+            loading: false,
+            error: "",
+            files,
+            updatedAt: Date.now(),
+          },
+        }));
+      } catch (err) {
+        setFrameGalleries((prev) => ({
+          ...prev,
+          [id]: {
+            loading: false,
+            error: err?.message || "Failed to load frames",
+            files: prev[id]?.files || [],
+            updatedAt: Date.now(),
+          },
+        }));
+      }
+    },
+    [backendUrl]
+  );
+
+  const handleToggleFrameGallery = useCallback(
+    (job) => {
+      const id = jobKey(job);
+      if (!id) return;
+      setOpenFrameGalleries((prev) => {
+        const isOpen = !!prev[id];
+        const next = { ...prev, [id]: !isOpen };
+        if (isOpen) {
+          delete next[id];
+        }
+        return next;
+      });
+      if (!openFrameGalleries[id]) {
+        void fetchFrameGallery(job, { silent: false });
+      }
+    },
+    [fetchFrameGallery, openFrameGalleries]
+  );
+
+  useEffect(() => {
+    const openIds = Object.keys(openFrameGalleries).filter((id) => openFrameGalleries[id]);
+    if (openIds.length === 0) return;
+
+    const tick = () => {
+      const currentJobs = jobsRef.current || [];
+      for (const id of openIds) {
+        const job = currentJobs.find((candidate) => jobKey(candidate) === id);
+        if (job) {
+          void fetchFrameGallery(job, { silent: true });
+        }
+      }
+    };
+
+    tick();
+    const timer = setInterval(tick, 2500);
+    return () => clearInterval(timer);
+  }, [openFrameGalleries, fetchFrameGallery]);
+
   return (
     <div className="page">
       <div className="page-header">
@@ -129,11 +237,16 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
                   downloadState={downloadState}
                   downloadingId={downloadingId}
                   canceling={!!cancelingGroupIds[id]}
+                  galleryOpen={!!openFrameGalleries[id]}
+                  galleryState={frameGalleries[id]}
                   onDownload={() =>
                     handleDownload(id, renderGroupOutputsUrl(backendUrl, id), job.filename)
                   }
                   onCancel={() => {
                     void handleCancelRenderGroup(id);
+                  }}
+                  onToggleGallery={() => {
+                    handleToggleFrameGallery(job);
                   }}
                   onRemove={() => removeJob(id)}
                 />
@@ -148,9 +261,14 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
                 backendUrl={backendUrl}
                 downloadState={downloadState}
                 downloadingId={downloadingId}
+                galleryOpen={!!openFrameGalleries[id]}
+                galleryState={frameGalleries[id]}
                 onDownload={() =>
                   handleDownload(id, jobOutputsUrl(backendUrl, id), job.filename)
                 }
+                onToggleGallery={() => {
+                  handleToggleFrameGallery(job);
+                }}
                 onRemove={() => removeJob(id)}
               />
             );
@@ -167,8 +285,11 @@ function RenderGroupCard({
   downloadState,
   downloadingId,
   canceling,
+  galleryOpen,
+  galleryState,
   onDownload,
   onCancel,
+  onToggleGallery,
   onRemove,
 }) {
   const id = job.group_id;
@@ -203,6 +324,7 @@ function RenderGroupCard({
   const canDownloadAvailable = availableOutputCount > 0;
   const isDownloading = downloadingId === id;
   const canCancel = ["pending", "running", "uploading"].includes(job.status);
+  const canViewFrames = canDownloadAvailable || canCancel || job.status === "done";
 
   return (
     <div className="card rentee-job-card">
@@ -302,6 +424,11 @@ function RenderGroupCard({
               {canceling ? "Stopping..." : "Stop Render"}
             </button>
           )}
+          {canViewFrames && (
+            <button className="btn btn-secondary" onClick={onToggleGallery}>
+              {galleryOpen ? "Hide Frames" : "View Frames"}
+            </button>
+          )}
           {canDownloadAvailable && (
             <button
               className="btn btn-primary"
@@ -322,11 +449,30 @@ function RenderGroupCard({
           </button>
         </div>
       </div>
+
+      {galleryOpen && (
+        <FrameGalleryPanel
+          id={id}
+          files={galleryState?.files || []}
+          loading={!!galleryState?.loading}
+          error={galleryState?.error || ""}
+        />
+      )}
     </div>
   );
 }
 
-function SingleJobCard({ job, backendUrl, downloadState, downloadingId, onDownload, onRemove }) {
+function SingleJobCard({
+  job,
+  backendUrl,
+  downloadState,
+  downloadingId,
+  galleryOpen,
+  galleryState,
+  onDownload,
+  onToggleGallery,
+  onRemove,
+}) {
   const id = job.job_id;
   const totalFrames =
     typeof job.total_frames === "number" ? job.total_frames : null;
@@ -351,6 +497,7 @@ function SingleJobCard({ job, backendUrl, downloadState, downloadingId, onDownlo
   const visibleOutputFiles = outputFiles.slice(0, 12);
   const hiddenOutputCount = Math.max(0, outputFiles.length - visibleOutputFiles.length);
   const canDownloadAvailable = availableOutputCount > 0;
+  const canViewFrames = canDownloadAvailable || job.status === "running" || job.status === "pending";
 
   return (
     <div className="card rentee-job-card">
@@ -453,6 +600,11 @@ function SingleJobCard({ job, backendUrl, downloadState, downloadingId, onDownlo
           )}
         </div>
         <div className="rentee-job-actions">
+          {canViewFrames && (
+            <button className="btn btn-secondary" onClick={onToggleGallery}>
+              {galleryOpen ? "Hide Frames" : "View Frames"}
+            </button>
+          )}
           {canDownloadAvailable && (
             <button
               className="btn btn-primary"
@@ -471,6 +623,64 @@ function SingleJobCard({ job, backendUrl, downloadState, downloadingId, onDownlo
           </button>
         </div>
       </div>
+
+      {galleryOpen && (
+        <FrameGalleryPanel
+          id={id}
+          files={galleryState?.files || []}
+          loading={!!galleryState?.loading}
+          error={galleryState?.error || ""}
+        />
+      )}
+    </div>
+  );
+}
+
+function FrameGalleryPanel({ id, files, loading, error }) {
+  return (
+    <div className="job-frame-gallery">
+      <div className="job-frame-gallery-head">
+        <span>Live Frames</span>
+        <span className="muted">{files.length} available</span>
+      </div>
+
+      {loading && files.length === 0 && (
+        <div className="job-frame-gallery-empty">Loading frames...</div>
+      )}
+
+      {!loading && !error && files.length === 0 && (
+        <div className="job-frame-gallery-empty">No frames available yet.</div>
+      )}
+
+      {error && (
+        <div className="rentee-job-error job-frame-gallery-error">{error}</div>
+      )}
+
+      {files.length > 0 && (
+        <div className="job-frame-grid">
+          {files.map((file) => {
+            const fileKey = `${id}:${file.job_id || ""}:${file.filename}`;
+            return (
+              <a
+                key={fileKey}
+                className="job-frame-tile"
+                href={file.url}
+                target="_blank"
+                rel="noreferrer"
+                title={file.filename}
+              >
+                <img
+                  className="job-frame-thumb"
+                  src={file.url}
+                  alt={file.filename}
+                  loading="lazy"
+                />
+                <span className="job-frame-name">{file.filename}</span>
+              </a>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

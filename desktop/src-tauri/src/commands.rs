@@ -1,7 +1,8 @@
 use serde_json::json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use futures_util::StreamExt;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, File};
@@ -10,11 +11,105 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tauri::{AppHandle, State};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 
 // Embed the prepare script at compile time so it ships inside the binary
 const PREPARE_BLEND_PY: &str = include_str!("../../../runpod_worker/prepare_blend.py");
+const ANALYZE_BLEND_PY: &str = r#"
+import json
+import bpy
+
+def scene_payload(scene, active_name):
+    frame_start = int(scene.frame_start)
+    frame_end = int(scene.frame_end)
+    frame_step = max(1, int(scene.frame_step))
+    total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
+
+    cameras = []
+    active_camera = scene.camera.name if scene.camera else None
+    if active_camera:
+        cameras.append(active_camera)
+
+    camera_cuts = []
+    try:
+        markers = sorted(scene.timeline_markers, key=lambda m: int(m.frame))
+    except Exception:
+        markers = []
+    for marker in markers:
+        camera_name = marker.camera.name if getattr(marker, "camera", None) else None
+        if camera_name:
+            cameras.append(camera_name)
+        camera_cuts.append({
+            "frame": int(marker.frame),
+            "camera_name": camera_name,
+        })
+
+    for obj in bpy.data.objects:
+        if getattr(obj, "type", "") == "CAMERA":
+            cameras.append(obj.name)
+
+    unique_cameras = []
+    for name in cameras:
+        if name and name not in unique_cameras:
+            unique_cameras.append(name)
+
+    view_layers = [vl.name for vl in scene.view_layers]
+
+    return {
+        "name": scene.name,
+        "is_active": scene.name == active_name,
+        "frame_start": frame_start,
+        "frame_end": frame_end,
+        "frame_step": frame_step,
+        "total_frames": total_frames,
+        "active_camera": active_camera,
+        "cameras": unique_cameras,
+        "view_layers": view_layers,
+        "camera_cuts": camera_cuts,
+    }
+
+active_scene = bpy.context.scene
+active_name = active_scene.name if active_scene else (bpy.data.scenes[0].name if bpy.data.scenes else "")
+scenes = [scene_payload(scene, active_name) for scene in bpy.data.scenes]
+if not scenes:
+    raise RuntimeError("No scenes found in file")
+
+active = None
+for scene in scenes:
+    if scene.get("is_active"):
+        active = scene
+        break
+if active is None:
+    active = scenes[0]
+
+v = bpy.app.version
+blender_version = int(v[0]) * 100 + int(v[1])
+
+payload = {
+    "frame_start": active["frame_start"],
+    "frame_end": active["frame_end"],
+    "frame_step": active["frame_step"],
+    "total_frames": active["total_frames"],
+    "blender_version": blender_version,
+    "active_scene": active["name"],
+    "cameras": active.get("cameras", []),
+    "camera_cuts": active.get("camera_cuts", []),
+    "view_layers": active.get("view_layers", []),
+    "timeline_defaults": {
+        "frame_start": active["frame_start"],
+        "frame_end": active["frame_end"],
+        "frame_step": active["frame_step"],
+    },
+    "output_defaults": None,
+    "render_defaults": {},
+    "scenes": scenes,
+    "unsupported_fields": [],
+}
+
+print("PCR_ANALYSIS_JSON:" + json.dumps(payload, separators=(",", ":")))
+"#;
 
 use crate::persistence::save_agent_state;
 use crate::sidecar::{SidecarHandle, spawn_sidecar};
@@ -63,8 +158,23 @@ pub struct UploadProgressSnapshot {
     pub error: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct MultipartInitResponse {
+    upload_id: String,
+    part_size_bytes: u64,
+    total_parts: u32,
+}
+
+#[derive(Deserialize)]
+struct MultipartPartUrlsResponse {
+    urls: HashMap<String, String>,
+}
+
 static UPLOAD_TASKS: OnceLock<StdMutex<HashMap<String, UploadTaskEntry>>> = OnceLock::new();
 static NEXT_UPLOAD_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024 * 1024; // 100 GB
+const MULTIPART_MIN_PART_SIZE_BYTES: u64 = 5 * 1024 * 1024;
+const PART_URL_BATCH_SIZE: u32 = 16;
 
 fn upload_tasks() -> &'static StdMutex<HashMap<String, UploadTaskEntry>> {
     UPLOAD_TASKS.get_or_init(|| StdMutex::new(HashMap::new()))
@@ -94,6 +204,44 @@ pub fn get_file_size(file_path: String) -> Result<u64, String> {
 }
 
 #[tauri::command]
+pub fn read_file_head_base64(file_path: String, max_bytes: u64) -> Result<String, String> {
+    let path = Path::new(&file_path);
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("Failed to read file metadata: {err}"))?;
+    if !metadata.is_file() {
+        return Err("Selected path is not a file.".to_string());
+    }
+
+    let file_size = metadata.len();
+    if file_size == 0 {
+        return Ok(String::new());
+    }
+
+    let requested = if max_bytes == 0 { 1 } else { max_bytes };
+    let to_read_u64 = file_size.min(requested);
+    let to_read: usize = to_read_u64
+        .try_into()
+        .map_err(|_| "Requested read size is too large for this platform".to_string())?;
+
+    let mut file = File::open(path)
+        .map_err(|err| format!("Failed to open file: {err}"))?;
+    let mut buffer = vec![0_u8; to_read];
+    let mut offset = 0_usize;
+    while offset < buffer.len() {
+        let n = file
+            .read(&mut buffer[offset..])
+            .map_err(|err| format!("Failed to read file: {err}"))?;
+        if n == 0 {
+            break;
+        }
+        offset += n;
+    }
+    buffer.truncate(offset);
+
+    Ok(BASE64.encode(&buffer))
+}
+
+#[tauri::command]
 pub async fn start_upload_file_to_presigned_url(
     file_path: String,
     upload_url: String,
@@ -107,6 +255,12 @@ pub async fn start_upload_file_to_presigned_url(
     }
 
     let total_bytes = metadata.len();
+    if total_bytes > MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "File exceeds max upload size (100 GB). Size: {:.2} GB",
+            (total_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+        ));
+    }
     let upload_id = format!(
         "upload-{}",
         NEXT_UPLOAD_ID.fetch_add(1, Ordering::Relaxed)
@@ -164,21 +318,383 @@ pub async fn start_upload_file_to_presigned_url(
     Ok(upload_id)
 }
 
+fn normalize_backend_base_url(raw: &str) -> String {
+    raw.trim().trim_end_matches('/').to_string()
+}
+
+fn upload_cancelled(upload_id: &str) -> bool {
+    if let Ok(tasks) = upload_tasks().lock() {
+        if let Some(task) = tasks.get(upload_id) {
+            return task.cancel_requested || matches!(task.status, UploadTaskStatus::Cancelled);
+        }
+    }
+    false
+}
+
+fn set_uploaded_bytes(upload_id: &str, uploaded_bytes: u64) {
+    if let Ok(mut tasks) = upload_tasks().lock() {
+        if let Some(task) = tasks.get_mut(upload_id) {
+            task.uploaded_bytes = uploaded_bytes.min(task.total_bytes);
+        }
+    }
+}
+
+fn current_uploaded_bytes(upload_id: &str) -> u64 {
+    if let Ok(tasks) = upload_tasks().lock() {
+        if let Some(task) = tasks.get(upload_id) {
+            return task.uploaded_bytes;
+        }
+    }
+    0
+}
+
+async fn response_error_detail(response: reqwest::Response) -> String {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if body.trim().is_empty() {
+        format!("HTTP {status}")
+    } else {
+        format!("HTTP {status}: {body}")
+    }
+}
+
+async fn post_json(
+    client: &reqwest::Client,
+    url: &str,
+    body: serde_json::Value,
+) -> Result<reqwest::Response, String> {
+    client
+        .post(url)
+        .header(CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|err| format!("Request failed ({url}): {err}"))
+}
+
+async fn abort_render_group_multipart_best_effort(
+    client: &reqwest::Client,
+    base_url: &str,
+    group_id: &str,
+    remote_upload_id: &str,
+) {
+    let abort_url = format!("{base_url}/render-groups/{group_id}/multipart-upload/abort");
+    let _ = post_json(
+        client,
+        &abort_url,
+        json!({
+            "upload_id": remote_upload_id
+        }),
+    )
+    .await;
+}
+
+#[tauri::command]
+pub async fn start_upload_file_to_render_group_multipart(
+    file_path: String,
+    backend_url: String,
+    group_id: String,
+) -> Result<String, String> {
+    let path = PathBuf::from(&file_path);
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|err| format!("Failed to read file metadata: {err}"))?;
+    if !metadata.is_file() {
+        return Err("Selected path is not a file.".to_string());
+    }
+
+    let total_bytes = metadata.len();
+    if total_bytes > MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "File exceeds max upload size (100 GB). Size: {:.2} GB",
+            (total_bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+        ));
+    }
+
+    let upload_id = format!(
+        "upload-{}",
+        NEXT_UPLOAD_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    {
+        let mut tasks = upload_tasks()
+            .lock()
+            .map_err(|_| "Failed to acquire upload task lock".to_string())?;
+        tasks.insert(
+            upload_id.clone(),
+            UploadTaskEntry {
+                uploaded_bytes: 0,
+                total_bytes,
+                status: UploadTaskStatus::Running,
+                error: None,
+                cancel_requested: false,
+            },
+        );
+    }
+
+    let upload_id_for_task = upload_id.clone();
+    let backend_url_for_task = normalize_backend_base_url(&backend_url);
+    let group_id_for_task = group_id.clone();
+
+    tokio::spawn(async move {
+        let outcome = upload_file_to_render_group_multipart(
+            path,
+            backend_url_for_task,
+            group_id_for_task,
+            upload_id_for_task.clone(),
+            total_bytes,
+        )
+        .await;
+
+        if let Ok(mut tasks) = upload_tasks().lock() {
+            if let Some(task) = tasks.get_mut(&upload_id_for_task) {
+                let cancelled = task.cancel_requested || matches!(task.status, UploadTaskStatus::Cancelled);
+                match outcome {
+                    Ok(()) => {
+                        if cancelled {
+                            task.status = UploadTaskStatus::Cancelled;
+                            if task.error.is_none() {
+                                task.error = Some("Cancelled by user".to_string());
+                            }
+                        } else {
+                            task.uploaded_bytes = task.total_bytes;
+                            task.status = UploadTaskStatus::Completed;
+                            task.error = None;
+                        }
+                    }
+                    Err(err) => {
+                        if cancelled || err.to_lowercase().contains("cancelled") {
+                            task.status = UploadTaskStatus::Cancelled;
+                            task.error = Some("Cancelled by user".to_string());
+                        } else {
+                            task.status = UploadTaskStatus::Failed;
+                            task.error = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(upload_id)
+}
+
+async fn upload_file_to_render_group_multipart(
+    file_path: PathBuf,
+    backend_url: String,
+    group_id: String,
+    upload_id: String,
+    total_bytes: u64,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let init_url = format!("{backend_url}/render-groups/{group_id}/multipart-upload/init");
+    let init_response = post_json(
+        &client,
+        &init_url,
+        json!({
+            "file_size_bytes": total_bytes,
+            "content_type": "application/octet-stream",
+        }),
+    )
+    .await?;
+    if !init_response.status().is_success() {
+        return Err(format!(
+            "Failed to init multipart upload: {}",
+            response_error_detail(init_response).await
+        ));
+    }
+
+    let init_text = init_response
+        .text()
+        .await
+        .map_err(|err| format!("Failed reading multipart init response: {err}"))?;
+    let init: MultipartInitResponse = serde_json::from_str(&init_text)
+        .map_err(|err| format!("Invalid multipart init response: {err}"))?;
+
+    let part_size_bytes = init
+        .part_size_bytes
+        .max(MULTIPART_MIN_PART_SIZE_BYTES);
+    let total_parts = init.total_parts.max(1);
+    let remote_upload_id = init.upload_id;
+    let part_urls_endpoint = format!("{backend_url}/render-groups/{group_id}/multipart-upload/part-urls");
+    let complete_endpoint = format!("{backend_url}/render-groups/{group_id}/multipart-upload/complete");
+
+    let mut completed_parts: Vec<serde_json::Value> = Vec::with_capacity(total_parts as usize);
+    let mut url_cache: HashMap<u32, String> = HashMap::new();
+
+    for part_number in 1..=total_parts {
+        if upload_cancelled(&upload_id) {
+            abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+            return Err("Upload cancelled by user".to_string());
+        }
+
+        if !url_cache.contains_key(&part_number) {
+            let mut batch: Vec<u32> = Vec::new();
+            let batch_end = (part_number + PART_URL_BATCH_SIZE - 1).min(total_parts);
+            for n in part_number..=batch_end {
+                batch.push(n);
+            }
+
+            let urls_response = post_json(
+                &client,
+                &part_urls_endpoint,
+                json!({
+                    "upload_id": remote_upload_id,
+                    "part_numbers": batch,
+                }),
+            )
+            .await?;
+            if !urls_response.status().is_success() {
+                abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+                return Err(format!(
+                    "Failed to fetch multipart part URLs: {}",
+                    response_error_detail(urls_response).await
+                ));
+            }
+            let urls_text = urls_response
+                .text()
+                .await
+                .map_err(|err| format!("Failed reading multipart part-url response: {err}"))?;
+            let parsed: MultipartPartUrlsResponse = serde_json::from_str(&urls_text)
+                .map_err(|err| format!("Invalid multipart part-url response: {err}"))?;
+            for (k, v) in parsed.urls {
+                if let Ok(n) = k.parse::<u32>() {
+                    url_cache.insert(n, v);
+                }
+            }
+        }
+
+        let part_url = url_cache
+            .remove(&part_number)
+            .ok_or_else(|| format!("Missing upload URL for part {part_number}"))?;
+
+        let offset = ((part_number as u64) - 1) * part_size_bytes;
+        let remaining = total_bytes.saturating_sub(offset);
+        let this_part_size = remaining.min(part_size_bytes);
+        if this_part_size == 0 {
+            break;
+        }
+
+        let mut part_uploaded = false;
+        let mut last_err: Option<String> = None;
+        let committed_before_part = current_uploaded_bytes(&upload_id);
+        for attempt in 1..=3 {
+            if upload_cancelled(&upload_id) {
+                abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+                return Err("Upload cancelled by user".to_string());
+            }
+
+            let mut stream_file = tokio::fs::File::open(&file_path)
+                .await
+                .map_err(|err| format!("Failed to open file for part {part_number}: {err}"))?;
+            stream_file
+                .seek(SeekFrom::Start(offset))
+                .await
+                .map_err(|err| format!("Failed to seek file for part {part_number}: {err}"))?;
+            let limited_reader = stream_file.take(this_part_size);
+            let upload_id_for_stream = upload_id.clone();
+            let mut sent_in_attempt: u64 = 0;
+            let stream = ReaderStream::with_capacity(limited_reader, 256 * 1024).map(move |item| {
+                if upload_cancelled(&upload_id_for_stream) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "Upload cancelled by user",
+                    ));
+                }
+                item.map(|chunk| {
+                    sent_in_attempt = sent_in_attempt.saturating_add(chunk.len() as u64);
+                    set_uploaded_bytes(
+                        &upload_id_for_stream,
+                        committed_before_part.saturating_add(sent_in_attempt),
+                    );
+                    chunk
+                })
+            });
+
+            let part_response = client
+                .put(&part_url)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(reqwest::header::CONTENT_LENGTH, this_part_size.to_string())
+                .body(reqwest::Body::wrap_stream(stream))
+                .send()
+                .await;
+
+            match part_response {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let etag = response
+                            .headers()
+                            .get("etag")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string())
+                            .or_else(|| {
+                                response
+                                    .headers()
+                                    .get("ETag")
+                                    .and_then(|v| v.to_str().ok())
+                                    .map(|s| s.to_string())
+                            })
+                            .ok_or_else(|| format!("Missing ETag for part {part_number}"))?;
+
+                        completed_parts.push(json!({
+                            "part_number": part_number,
+                            "etag": etag,
+                        }));
+                        set_uploaded_bytes(
+                            &upload_id,
+                            committed_before_part.saturating_add(this_part_size),
+                        );
+                        part_uploaded = true;
+                        break;
+                    }
+                    set_uploaded_bytes(&upload_id, committed_before_part);
+                    last_err = Some(format!(
+                        "Part {part_number} upload failed (attempt {attempt}/3): {}",
+                        response_error_detail(response).await
+                    ));
+                }
+                Err(err) => {
+                    set_uploaded_bytes(&upload_id, committed_before_part);
+                    last_err = Some(format!(
+                        "Part {part_number} request failed (attempt {attempt}/3): {err}"
+                    ));
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(350 * attempt as u64)).await;
+        }
+
+        if !part_uploaded {
+            abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+            return Err(last_err.unwrap_or_else(|| format!("Failed uploading part {part_number}")));
+        }
+    }
+
+    let complete_response = post_json(
+        &client,
+        &complete_endpoint,
+        json!({
+            "upload_id": remote_upload_id,
+            "parts": completed_parts,
+        }),
+    )
+    .await?;
+    if !complete_response.status().is_success() {
+        abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+        return Err(format!(
+            "Failed to complete multipart upload: {}",
+            response_error_detail(complete_response).await
+        ));
+    }
+
+    Ok(())
+}
+
 async fn upload_file_streaming(
     file_path: PathBuf,
     upload_url: String,
     upload_id: String,
     total_bytes: u64,
 ) -> Result<(), String> {
-    fn upload_cancelled(upload_id: &str) -> bool {
-        if let Ok(tasks) = upload_tasks().lock() {
-            if let Some(task) = tasks.get(upload_id) {
-                return task.cancel_requested || matches!(task.status, UploadTaskStatus::Cancelled);
-            }
-        }
-        false
-    }
-
     let file = tokio::fs::File::open(&file_path)
         .await
         .map_err(|err| format!("Failed to open file for upload: {err}"))?;
@@ -629,6 +1145,20 @@ pub struct PrepareResult {
     pub prep_done: bool,
 }
 
+#[derive(Serialize)]
+pub struct AnalyzeAndPrepareResult {
+    pub analysis: Option<serde_json::Value>,
+    pub prepared_path: Option<String>,
+    pub filename: String,
+    pub analysis_warnings: Vec<String>,
+    pub analysis_errors: Vec<String>,
+    pub prepare_warnings: Vec<String>,
+    pub prepare_errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+    pub prep_done: bool,
+}
+
 /// Search common install locations for the Blender binary.
 #[tauri::command]
 pub fn find_blender() -> Option<String> {
@@ -783,6 +1313,65 @@ fn _zip_dir_recursive(
     Ok(())
 }
 
+fn _extract_zip_to_dir(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = File::open(zip_path).map_err(|e| format!("Cannot open zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid zip archive: {e}"))?;
+    archive
+        .extract(dest)
+        .map_err(|e| format!("Zip extract failed: {e}"))
+}
+
+fn _tail_lines(text: &str, count: usize) -> String {
+    text.lines()
+        .rev()
+        .take(count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn _parse_prepare_output(
+    combined: &str,
+) -> (
+    Vec<String>,
+    Vec<String>,
+    bool,
+    Option<serde_json::Value>,
+    Vec<String>,
+) {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    let mut prep_done = false;
+    let mut analysis = None;
+    let mut analysis_errors = Vec::new();
+
+    for line in combined.lines() {
+        if let Some(msg) = line.strip_prefix("PREP_WARN:") {
+            warnings.push(msg.trim().to_string());
+            continue;
+        }
+        if let Some(msg) = line.strip_prefix("PREP_ERROR:") {
+            errors.push(msg.trim().to_string());
+            continue;
+        }
+        if line.trim() == "PREP_DONE" {
+            prep_done = true;
+            continue;
+        }
+        if let Some(idx) = line.find("PCR_ANALYSIS_JSON:") {
+            let payload = &line[idx + "PCR_ANALYSIS_JSON:".len()..];
+            match serde_json::from_str::<serde_json::Value>(payload.trim()) {
+                Ok(parsed) => analysis = Some(parsed),
+                Err(err) => analysis_errors.push(format!("Invalid analysis JSON returned by Blender: {err}")),
+            }
+        }
+    }
+
+    (warnings, errors, prep_done, analysis, analysis_errors)
+}
+
 /// Run prepare_blend.py inside Blender on the selected file, pack all assets,
 /// and return the path to the prepared file (ready for upload).
 #[tauri::command]
@@ -818,15 +1407,9 @@ pub async fn prepare_blend_for_upload(
     let extract_dir: Option<PathBuf>;
 
     if is_zip {
-        let zip_bytes = fs::read(source).map_err(|e| format!("Cannot read zip: {e}"))?;
-        let cursor = std::io::Cursor::new(zip_bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| format!("Invalid zip archive: {e}"))?;
         let ex = work_dir.join("extracted");
         fs::create_dir_all(&ex).map_err(|e| e.to_string())?;
-        archive
-            .extract(&ex)
-            .map_err(|e| format!("Zip extract failed: {e}"))?;
+        _extract_zip_to_dir(source, &ex)?;
         let blends = _find_blend_files(&ex);
         if blends.is_empty() {
             return Err("No .blend file found inside zip".to_string());
@@ -860,18 +1443,16 @@ pub async fn prepare_blend_for_upload(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let mut warnings = Vec::new();
-    let mut errors = Vec::new();
-    let mut prep_done = false;
-
-    for line in combined.lines() {
-        if let Some(msg) = line.strip_prefix("PREP_WARN:") {
-            warnings.push(msg.trim().to_string());
-        } else if let Some(msg) = line.strip_prefix("PREP_ERROR:") {
-            errors.push(msg.trim().to_string());
-        } else if line.trim() == "PREP_DONE" {
-            prep_done = true;
-        }
+    let (mut warnings, mut errors, prep_done, _, analysis_parse_errors) = _parse_prepare_output(&combined);
+    for err in analysis_parse_errors {
+        warnings.push(format!("Analysis metadata warning: {err}"));
+    }
+    if !output.status.success() {
+        errors.push(format!(
+            "Blender prepare failed (exit code: {}). Last logs:\n{}",
+            output.status.code().unwrap_or(-1),
+            _tail_lines(&combined, 20)
+        ));
     }
 
     // Package the result
@@ -892,4 +1473,250 @@ pub async fn prepare_blend_for_upload(
         errors,
         prep_done,
     })
+}
+
+#[tauri::command]
+pub async fn analyze_and_prepare_blend(
+    file_path: String,
+    blender_bin: String,
+) -> Result<AnalyzeAndPrepareResult, String> {
+    let source = Path::new(&file_path);
+    if !source.is_file() {
+        return Err("Selected path is not a file.".to_string());
+    }
+    if blender_bin.trim().is_empty() {
+        return Err("Blender binary path is empty".to_string());
+    }
+
+    let filename = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Invalid file path")?
+        .to_string();
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let work_dir = std::env::temp_dir()
+        .join("pcrent_analyze")
+        .join(format!("job_{ts}"));
+    fs::create_dir_all(&work_dir).map_err(|e| format!("Cannot create analyze work dir: {e}"))?;
+
+    let prep_script = work_dir.join("prepare_blend.py");
+    fs::write(&prep_script, PREPARE_BLEND_PY)
+        .map_err(|e| format!("Cannot write analyze/prepare script: {e}"))?;
+
+    let is_zip = filename.to_lowercase().ends_with(".zip");
+    let blend_path: PathBuf;
+    let extract_dir: Option<PathBuf>;
+
+    if is_zip {
+        let ex = work_dir.join("extracted");
+        fs::create_dir_all(&ex).map_err(|e| e.to_string())?;
+        _extract_zip_to_dir(source, &ex)?;
+
+        let blends = _find_blend_files(&ex);
+        if blends.is_empty() {
+            let analysis_errors = vec!["No .blend file found inside zip".to_string()];
+            let prepare_warnings = Vec::new();
+            let prepare_errors = Vec::new();
+            let warnings = prepare_warnings.clone();
+            let mut errors = analysis_errors.clone();
+            errors.extend(prepare_errors.clone());
+            return Ok(AnalyzeAndPrepareResult {
+                analysis: None,
+                prepared_path: None,
+                filename,
+                analysis_warnings: Vec::new(),
+                analysis_errors,
+                prepare_warnings,
+                prepare_errors,
+                warnings,
+                errors,
+                prep_done: false,
+            });
+        }
+        let source_stem = Path::new(&filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        blend_path = _choose_target_blend(source_stem, &ex, &blends);
+        extract_dir = Some(ex);
+    } else {
+        let dest = work_dir.join(&filename);
+        fs::copy(source, &dest).map_err(|e| format!("Cannot copy blend: {e}"))?;
+        blend_path = dest;
+        extract_dir = None;
+    }
+
+    let output = std::process::Command::new(&blender_bin)
+        .arg("-b")
+        .arg(&blend_path)
+        .arg("--python")
+        .arg(&prep_script)
+        .output()
+        .map_err(|e| format!("Failed to launch Blender: {e}"))?;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (
+        prepare_warnings,
+        mut prepare_errors,
+        prep_done_from_logs,
+        mut analysis,
+        mut analysis_errors,
+    ) = _parse_prepare_output(&combined);
+    let mut analysis_warnings: Vec<String> = Vec::new();
+
+    if !output.status.success() {
+        prepare_errors.push(format!(
+            "Blender analyze/prepare failed (exit code: {}). Last logs:\n{}",
+            output.status.code().unwrap_or(-1),
+            _tail_lines(&combined, 20)
+        ));
+    }
+    if analysis.is_none() {
+        let fallback_blend_path = blend_path.to_string_lossy().to_string();
+        match analyze_blend_with_blender(fallback_blend_path, blender_bin.clone()).await {
+            Ok(parsed) => {
+                analysis = Some(parsed);
+                if !analysis_errors.is_empty() {
+                    analysis_warnings.extend(
+                        analysis_errors
+                            .drain(..)
+                            .map(|msg| format!("Primary analysis payload issue (recovered by fallback): {msg}")),
+                    );
+                }
+                analysis_warnings.push(
+                    "Primary analysis metadata missing in combined run; fallback analysis succeeded.".to_string(),
+                );
+            }
+            Err(err) => {
+                analysis_errors.push(format!(
+                    "Analysis metadata not returned by Blender. Fallback analysis failed: {err}"
+                ));
+            }
+        }
+    }
+
+    let mut prep_done = prep_done_from_logs && output.status.success();
+    let prepared_path = if prep_done {
+        if is_zip {
+            let new_zip = work_dir.join(&filename);
+            if let Some(ex) = extract_dir.as_ref() {
+                match _zip_dir(ex, &new_zip) {
+                    Ok(()) => Some(new_zip.to_string_lossy().to_string()),
+                    Err(err) => {
+                        prepare_errors.push(format!("Prepared zip packaging failed: {err}"));
+                        prep_done = false;
+                        None
+                    }
+                }
+            } else {
+                prep_done = false;
+                prepare_errors.push("Prepared zip packaging failed: extracted bundle missing".to_string());
+                None
+            }
+        } else {
+            Some(blend_path.to_string_lossy().to_string())
+        }
+    } else {
+        None
+    };
+
+    let mut warnings = prepare_warnings.clone();
+    warnings.extend(analysis_warnings.clone());
+    let mut errors = prepare_errors.clone();
+    errors.extend(analysis_errors.clone());
+
+    Ok(AnalyzeAndPrepareResult {
+        analysis,
+        prepared_path,
+        filename,
+        analysis_warnings,
+        analysis_errors,
+        prepare_warnings,
+        prepare_errors,
+        warnings,
+        errors,
+        prep_done,
+    })
+}
+
+#[tauri::command]
+pub async fn analyze_blend_with_blender(
+    file_path: String,
+    blender_bin: String,
+) -> Result<serde_json::Value, String> {
+    let source = Path::new(&file_path);
+    if !source.is_file() {
+        return Err("Selected path is not a file.".to_string());
+    }
+    if blender_bin.trim().is_empty() {
+        return Err("Blender binary path is empty".to_string());
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let work_dir = std::env::temp_dir()
+        .join("pcrent_probe")
+        .join(format!("job_{ts}"));
+    fs::create_dir_all(&work_dir).map_err(|e| format!("Cannot create analyze work dir: {e}"))?;
+
+    let script_path = work_dir.join("analyze_blend.py");
+    fs::write(&script_path, ANALYZE_BLEND_PY)
+        .map_err(|e| format!("Cannot write analyze script: {e}"))?;
+
+    let output = std::process::Command::new(&blender_bin)
+        .arg("-b")
+        .arg(source)
+        .arg("--python")
+        .arg(&script_path)
+        .output()
+        .map_err(|e| format!("Failed to launch Blender for analysis: {e}"))?;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let prefix = "PCR_ANALYSIS_JSON:";
+    let maybe_line = combined.lines().find_map(|line| {
+        line.find(prefix)
+            .map(|idx| line[idx + prefix.len()..].trim().to_string())
+    });
+
+    let json_line = if let Some(line) = maybe_line {
+        line
+    } else {
+        let tail = combined
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        if output.status.success() {
+            return Err(format!(
+                "Blender analysis did not return metadata. Last logs:\n{tail}"
+            ));
+        }
+        return Err(format!(
+            "Blender analysis failed (exit code: {}). Last logs:\n{}",
+            output.status.code().unwrap_or(-1),
+            tail
+        ));
+    };
+
+    serde_json::from_str::<serde_json::Value>(&json_line)
+        .map_err(|e| format!("Invalid Blender analysis JSON: {e}"))
 }

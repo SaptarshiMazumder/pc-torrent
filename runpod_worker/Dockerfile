@@ -21,6 +21,7 @@ RUN mkdir -p /input /output /scripts
 COPY server/docker_linux/render.sh /scripts/render.sh
 COPY server/docker_linux/progress_handler.py /scripts/progress_handler.py
 COPY server/docker_linux/render_driver.py /scripts/render_driver.py
+COPY server/docker_linux/pre_load.py /scripts/pre_load.py
 RUN sed -i 's/\r$//' /scripts/render.sh && chmod +x /scripts/render.sh
 
 # Handler deps

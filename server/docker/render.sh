@@ -6,6 +6,7 @@ INPUT_DIR="${INPUT_DIR:-/input}"
 OUTPUT_DIR="${OUTPUT_DIR:-/output}"
 PROGRESS_SCRIPT="${PROGRESS_SCRIPT:-/progress_handler.py}"
 RENDER_DRIVER_SCRIPT="${RENDER_DRIVER_SCRIPT:-/render_driver.py}"
+PRE_LOAD_SCRIPT="${PRE_LOAD_SCRIPT:-/pre_load.py}"
 DEVICE_POLICY="${DEVICE_POLICY:-AUTO}"
 FRAME_STEP="${FRAME_STEP:-1}"
 BLEND_FILE="${BLEND_FILE:-}"
@@ -52,6 +53,7 @@ run_render() {
     local -a cmd=(
         "$BLENDER_BIN"
         --enable-autoexec
+        --python "$PRE_LOAD_SCRIPT"
         -b "$BLEND_FILE"
         -P "$PROGRESS_SCRIPT"
         -P "$RENDER_DRIVER_SCRIPT"
@@ -78,8 +80,7 @@ log_contains_device_unavailable() {
 log_contains_fatal_render_error() {
     local log_file="$1"
     grep -q "\\[RENDER_DRIVER\\] ERROR:" "$log_file" || \
-    grep -q "Error: Cannot render, no camera" "$log_file" || \
-    grep -q "Traceback (most recent call last):" "$log_file"
+    grep -q "Error: Cannot render, no camera" "$log_file"
 }
 
 attempt_render() {

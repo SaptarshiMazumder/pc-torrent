@@ -41,6 +41,7 @@ fn main() {
             commands::remove_image,
             commands::download_job_output_to_downloads,
             commands::get_file_size,
+            commands::upload_file_to_presigned_url,
             commands::find_blender,
             commands::prepare_blend_for_upload,
         ])

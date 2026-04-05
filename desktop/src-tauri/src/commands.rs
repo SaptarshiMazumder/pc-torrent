@@ -1,6 +1,6 @@
 use serde_json::json;
 use serde::Serialize;
-use reqwest::header::CONTENT_DISPOSITION;
+use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -42,6 +42,45 @@ pub fn get_file_size(file_path: String) -> Result<u64, String> {
         return Err("Selected path is not a file.".to_string());
     }
     Ok(metadata.len())
+}
+
+#[tauri::command]
+pub async fn upload_file_to_presigned_url(
+    file_path: String,
+    upload_url: String,
+) -> Result<(), String> {
+    let path = Path::new(&file_path);
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|err| format!("Failed to read file metadata: {err}"))?;
+    if !metadata.is_file() {
+        return Err("Selected path is not a file.".to_string());
+    }
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|err| format!("Failed to read file for upload: {err}"))?;
+
+    let response = reqwest::Client::new()
+        .put(&upload_url)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(CONTENT_LENGTH, metadata.len().to_string())
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|err| format!("Upload request failed: {err}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await.unwrap_or_default();
+        return Err(if detail.trim().is_empty() {
+            format!("Upload failed with status {status}")
+        } else {
+            format!("Upload failed with status {status}: {detail}")
+        });
+    }
+
+    Ok(())
 }
 
 fn sanitize_filename(name: &str) -> String {

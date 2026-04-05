@@ -75,7 +75,9 @@
       "WebFetch(domain:www.runpod.io)",
       "WebFetch(domain:graphql-spec.runpod.io)",
       "Bash(docker push:*)",
-      "Bash(docker manifest:*)"
+      "Bash(docker manifest:*)",
+      "WebFetch(domain:garagefarm.net)",
+      "WebFetch(domain:forum.garagefarm.net)"
     ]
   }
 }

@@ -9,6 +9,8 @@ import {
   logsStreamUrl,
 } from "./api";
 import { parseBlendFile } from "./lib/blend-parser";
+import { useAuth } from "./contexts/AuthContext";
+import LoginPage from "./components/LoginPage";
 import "./App.css";
 
 const SEGMENT_COLORS = [
@@ -628,16 +630,19 @@ function ServerLogsPage({ onBack }) {
   const containerRef = useRef(null);
 
   useEffect(() => {
-    const es = new EventSource(logsStreamUrl());
-    es.onopen = () => setConnected(true);
-    es.onmessage = (e) => {
-      setLines((prev) => {
-        const next = [...prev, e.data];
-        return next.length > 1000 ? next.slice(-1000) : next;
-      });
-    };
-    es.onerror = () => setConnected(false);
-    return () => es.close();
+    let es;
+    logsStreamUrl().then((url) => {
+      es = new EventSource(url);
+      es.onopen = () => setConnected(true);
+      es.onmessage = (e) => {
+        setLines((prev) => {
+          const next = [...prev, e.data];
+          return next.length > 1000 ? next.slice(-1000) : next;
+        });
+      };
+      es.onerror = () => setConnected(false);
+    });
+    return () => es?.close();
   }, []);
 
   useEffect(() => {
@@ -697,10 +702,19 @@ function ServerLogsPage({ onBack }) {
 // App Shell
 // -----------------------------------------------
 export default function App() {
+  const { user, loading, signOut } = useAuth();
   const [page, setPage] = useState("machines");
   const [selectedMachines, setSelectedMachines] = useState([]);
   const [groupId, setGroupId] = useState(null);
   const [initialGroup, setInitialGroup] = useState(null);
+
+  if (loading) {
+    return <div className="auth-loading">Loading...</div>;
+  }
+
+  if (!user) {
+    return <LoginPage />;
+  }
 
   const handleContinue = (machines) => {
     setSelectedMachines(machines);
@@ -726,6 +740,13 @@ export default function App() {
           onClick={() => setPage("logs")}
         >
           Server Logs
+        </button>
+        <button
+          className="btn-secondary"
+          style={{ fontSize: 12 }}
+          onClick={signOut}
+        >
+          Sign out
         </button>
       </header>
       <main>

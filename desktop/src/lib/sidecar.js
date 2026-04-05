@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export async function connectAgent(backendUrl) {
-  return invoke("connect_agent", { backendUrl });
+export async function connectAgent(backendUrl, firebaseToken = "") {
+  return invoke("connect_agent", { backendUrl, firebaseToken });
 }
 
 export async function disconnectAgent() {

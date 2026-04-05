@@ -1,7 +1,37 @@
-export async function getMachines(baseUrl) {
-  const r = await fetch(`${baseUrl}/machines`);
-  if (!r.ok) throw new Error("Failed to fetch machines");
+import { auth } from "../firebase/config";
+
+async function authHeaders() {
+  const token = await auth.currentUser?.getIdToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function apiFetch(baseUrl, path, options = {}) {
+  const headers = {
+    ...(options.headers || {}),
+    ...(await authHeaders()),
+  };
+  const r = await fetch(`${baseUrl}${path}`, { ...options, headers });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `Request failed: ${r.status}`);
+  }
   return r.json();
+}
+
+export async function getFirebaseToken() {
+  return auth.currentUser?.getIdToken() ?? null;
+}
+
+export async function getMachines(baseUrl) {
+  return apiFetch(baseUrl, "/machines");
+}
+
+export async function listJobs(baseUrl) {
+  return apiFetch(baseUrl, "/jobs");
+}
+
+export async function listRenderGroups(baseUrl) {
+  return apiFetch(baseUrl, "/render-groups");
 }
 
 async function uploadFileToPresignedUrl(uploadUrl, file, onProgress, signal = null) {
@@ -60,37 +90,21 @@ async function uploadFileToPresignedUrl(uploadUrl, file, onProgress, signal = nu
 }
 
 export async function submitJob(baseUrl, machineId, file, onProgress) {
-  // Step 1: Get presigned upload URL
-  const reqRes = await fetch(`${baseUrl}/jobs/request-upload`, {
+  const { job_id, upload_url } = await apiFetch(baseUrl, "/jobs/request-upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ machine_id: machineId, filename: file.name }),
   });
-  if (!reqRes.ok) {
-    const err = await reqRes.json();
-    throw new Error(err.detail || "Failed to request upload URL");
-  }
-  const { job_id, upload_url } = await reqRes.json();
 
-  // Step 2: Upload file directly to R2 via presigned URL
   await uploadFileToPresignedUrl(upload_url, file, onProgress);
 
-  // Step 3: Confirm upload
-  const confirmRes = await fetch(`${baseUrl}/jobs/${job_id}/confirm-upload`, {
-    method: "POST",
-  });
-  if (!confirmRes.ok) {
-    const err = await confirmRes.json();
-    throw new Error(err.detail || "Failed to confirm upload");
-  }
+  await apiFetch(baseUrl, `/jobs/${job_id}/confirm-upload`, { method: "POST" });
 
   return { job_id, status: "pending" };
 }
 
 export async function getJob(baseUrl, jobId) {
-  const r = await fetch(`${baseUrl}/jobs/${jobId}`);
-  if (!r.ok) throw new Error("Failed to fetch job");
-  return r.json();
+  return apiFetch(baseUrl, `/jobs/${jobId}`);
 }
 
 export function downloadUrl(baseUrl, jobId) {
@@ -104,16 +118,11 @@ export function jobOutputsUrl(baseUrl, jobId) {
 // ---- Distributed Rendering (Render Groups) ----
 
 export async function createDistributedRenderGroup(baseUrl, machineIds, filename) {
-  const createRes = await fetch(`${baseUrl}/render-groups/create`, {
+  return apiFetch(baseUrl, "/render-groups/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ machine_ids: machineIds, filename }),
   });
-  if (!createRes.ok) {
-    const err = await createRes.json();
-    throw new Error(err.detail || "Failed to create render group");
-  }
-  return createRes.json();
 }
 
 export async function uploadDistributedRenderInput(uploadUrl, file, onProgress, signal = null) {
@@ -146,23 +155,16 @@ export async function confirmDistributedJob(
   if (analysisSnapshot) {
     body.analysis_snapshot = analysisSnapshot;
   }
-  const confirmRes = await fetch(`${baseUrl}/render-groups/${groupId}/confirm-upload`, {
+  return apiFetch(baseUrl, `/render-groups/${groupId}/confirm-upload`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal,
   });
-  if (!confirmRes.ok) {
-    const err = await confirmRes.json();
-    throw new Error(err.detail || "Failed to confirm upload");
-  }
-  return confirmRes.json();
 }
 
 export async function getRenderGroup(baseUrl, groupId) {
-  const r = await fetch(`${baseUrl}/render-groups/${groupId}`);
-  if (!r.ok) throw new Error("Failed to fetch render group");
-  return r.json();
+  return apiFetch(baseUrl, `/render-groups/${groupId}`);
 }
 
 export function renderGroupDownloadUrl(baseUrl, groupId) {
@@ -173,13 +175,14 @@ export function renderGroupOutputsUrl(baseUrl, groupId) {
   return `${baseUrl}/render-groups/${groupId}/outputs`;
 }
 
+export async function getRenderGroupOutputs(baseUrl, groupId) {
+  return apiFetch(baseUrl, `/render-groups/${groupId}/outputs`);
+}
+
+export async function getJobOutputs(baseUrl, jobId) {
+  return apiFetch(baseUrl, `/jobs/${jobId}/outputs`);
+}
+
 export async function cancelRenderGroup(baseUrl, groupId) {
-  const response = await fetch(`${baseUrl}/render-groups/${groupId}/cancel`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail || "Failed to cancel render group");
-  }
-  return response.json();
+  return apiFetch(baseUrl, `/render-groups/${groupId}/cancel`, { method: "POST" });
 }

@@ -419,6 +419,7 @@ async fn ensure_sidecar_running(
 pub async fn connect_agent(
     app: tauri::AppHandle,
     backend_url: String,
+    firebase_token: Option<String>,
     state: State<'_, Arc<Mutex<AgentState>>>,
     sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
 ) -> Result<(), String> {
@@ -427,7 +428,8 @@ pub async fn connect_agent(
     let mut handle = sidecar.lock().await;
     handle.send_command(&json!({
         "cmd": "connect",
-        "backend_url": backend_url
+        "backend_url": backend_url,
+        "firebase_token": firebase_token.unwrap_or_default()
     }))?;
 
     let mut s = state.lock().await;

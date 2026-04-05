@@ -1,15 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import MachineCard from "../components/MachineCard";
 import {
   getMachines,
   createDistributedRenderGroup,
-  uploadDistributedRenderInput,
   confirmDistributedJob,
   cancelRenderGroup,
 } from "../lib/api";
-import { parseBlendFile } from "../lib/blend-parser";
 
 const SEGMENT_COLORS = [
   "#6c63ff",
@@ -23,7 +21,6 @@ const SEGMENT_COLORS = [
 const FLOW_STAGE = {
   IDLE: "idle",
   ANALYZED: "analyzed",
-  PREPARING: "preparing",
   PREPARED: "prepared",
   UPLOADED: "uploaded",
   STARTING: "starting",
@@ -264,7 +261,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const [file, setFile] = useState(null);           // { name, size, path } — path set after native picker
   const [flowStage, setFlowStage] = useState(FLOW_STAGE.IDLE);
   const [analyzing, setAnalyzing] = useState(false);
-  const [preparing, setPreparing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [starting, setStarting] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -280,7 +276,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const [cancelingRender, setCancelingRender] = useState(false);
 
   const analyzeRunRef = useRef(0);
-  const prepareRunRef = useRef(0);
   const activeUploadIdRef = useRef("");
   const uploadAbortRef = useRef(null);
   const startAbortRef = useRef(null);
@@ -322,7 +317,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
 
   const resetSubmissionFlow = ({ clearFile = false } = {}) => {
     analyzeRunRef.current += 1;
-    prepareRunRef.current += 1;
     if (uploadAbortRef.current) {
       uploadAbortRef.current.abort();
       uploadAbortRef.current = null;
@@ -339,7 +333,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
 
     setFlowStage(FLOW_STAGE.IDLE);
     setAnalyzing(false);
-    setPreparing(false);
     setUploading(false);
     setStarting(false);
     setUploadProgress(0);
@@ -403,6 +396,43 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     });
   };
 
+  const applyParsedAnalysis = (parsed) => {
+    setAnalysisResult(parsed);
+    setClientParseError("");
+    setFrameStart(String(parsed.frame_start));
+    setFrameEnd(String(parsed.frame_end));
+    setFrameStep(String(parsed.frame_step || 1));
+    const parsedScenes = Array.isArray(parsed?.scenes) ? parsed.scenes : [];
+    const activeScene =
+      parsedScenes.find((scene) => scene?.is_active) ||
+      parsedScenes.find(Boolean) ||
+      null;
+    if (activeScene) {
+      setSceneName(activeScene.name || "");
+      setForceCameraName(activeScene.active_camera || (activeScene.cameras?.[0] ?? ""));
+      setViewLayerName(activeScene.view_layers?.[0] ?? "");
+      setCameraRanges(buildDefaultCameraRanges(activeScene));
+    } else {
+      setSceneName("");
+      setForceCameraName("");
+      setViewLayerName("");
+      setCameraRanges([]);
+    }
+    setCameraMode("auto_markers");
+  };
+
+  const clearAnalysisFields = () => {
+    setAnalysisResult(null);
+    setFrameStart("");
+    setFrameEnd("");
+    setFrameStep("1");
+    setSceneName("");
+    setCameraMode("auto_markers");
+    setForceCameraName("");
+    setViewLayerName("");
+    setCameraRanges([]);
+  };
+
   const handleAnalyze = async () => {
     if (!file) {
       setError("Select a .blend file or .zip project bundle first");
@@ -417,108 +447,103 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setServerParseError("");
     setPendingGroupId("");
     setUploadProgress(0);
+    setPrepResult(null);
     setAnalyzing(true);
     const runId = ++analyzeRunRef.current;
 
     try {
-      // Resolve a File/Blob for client-side parsing
-      let fileForParsing = file._fileObj || null;
-      if (!fileForParsing && file.path) {
-        const url = convertFileSrc(file.path);
-        const resp = await fetch(url);
-        const blob = await resp.blob();
-        fileForParsing = new File([blob], file.name, { type: "application/octet-stream" });
+      if (!blenderBin) {
+        clearAnalysisFields();
+        setClientParseError(
+          "Blender not found. Analyze/prepare skipped; upload can continue without preparation."
+        );
+        setFlowStage(FLOW_STAGE.ANALYZED);
+        return;
       }
-      if (runId !== analyzeRunRef.current) return;
-      if (!fileForParsing) {
-        throw new Error("No file data available for analysis");
+      if (!file.path) {
+        clearAnalysisFields();
+        setClientParseError(
+          "This file is not from the desktop picker. Analyze/prepare skipped; reselect file with 'Choose File' to enable headless analysis."
+        );
+        setFlowStage(FLOW_STAGE.ANALYZED);
+        return;
       }
-      const parsed = await parseBlendFile(fileForParsing);
+
+      const result = await invoke("analyze_and_prepare_blend", {
+        filePath: file.path,
+        blenderBin,
+      });
       if (runId !== analyzeRunRef.current) return;
-      setAnalysisResult(parsed);
-      setClientParseError("");
-      setFrameStart(String(parsed.frame_start));
-      setFrameEnd(String(parsed.frame_end));
-      setFrameStep(String(parsed.frame_step || 1));
-      const parsedScenes = Array.isArray(parsed?.scenes) ? parsed.scenes : [];
-      const activeScene =
-        parsedScenes.find((scene) => scene?.is_active) ||
-        parsedScenes.find(Boolean) ||
-        null;
-      if (activeScene) {
-        setSceneName(activeScene.name || "");
-        setForceCameraName(activeScene.active_camera || (activeScene.cameras?.[0] ?? ""));
-        setViewLayerName(activeScene.view_layers?.[0] ?? "");
-        setCameraRanges(buildDefaultCameraRanges(activeScene));
+
+      const analysisWarnings = Array.isArray(result?.analysis_warnings) ? result.analysis_warnings : [];
+      const analysisErrors = Array.isArray(result?.analysis_errors) ? result.analysis_errors : [];
+      const prepareWarnings = Array.isArray(result?.prepare_warnings)
+        ? result.prepare_warnings
+        : Array.isArray(result?.warnings)
+        ? result.warnings
+        : [];
+      const prepareErrors = Array.isArray(result?.prepare_errors)
+        ? result.prepare_errors
+        : Array.isArray(result?.errors)
+        ? result.errors
+        : [];
+      const prepDone = Boolean(result?.prep_done);
+      const preparedPath =
+        typeof result?.prepared_path === "string" && result.prepared_path.trim()
+          ? result.prepared_path
+          : null;
+      const analysisPayload =
+        result?.analysis && typeof result.analysis === "object" ? result.analysis : null;
+
+      setPrepResult({
+        prepared_path: preparedPath,
+        filename: result?.filename || file.name,
+        warnings: prepareWarnings,
+        errors: prepareErrors,
+        analysis_warnings: analysisWarnings,
+        analysis_errors: analysisErrors,
+        prepare_warnings: prepareWarnings,
+        prepare_errors: prepareErrors,
+        prep_done: prepDone,
+      });
+
+      if (analysisPayload) {
+        applyParsedAnalysis(analysisPayload);
       } else {
-        setSceneName("");
-        setForceCameraName("");
-        setViewLayerName("");
-        setCameraRanges([]);
+        clearAnalysisFields();
       }
-      setCameraMode("auto_markers");
+
+      if (prepDone && preparedPath && analysisPayload) {
+        setClientParseError("");
+        setFlowStage(FLOW_STAGE.PREPARED);
+      } else if (analysisPayload) {
+        const prepDetail = prepareErrors.length
+          ? prepareErrors.join(" | ")
+          : "Preparation did not complete; upload will use original file.";
+        setClientParseError(`Prepare incomplete: ${prepDetail}`);
+        setFlowStage(FLOW_STAGE.ANALYZED);
+      } else {
+        const detail = analysisErrors.length
+          ? analysisErrors.join(" | ")
+          : "Analysis metadata not returned by Blender";
+        setClientParseError(`Analysis skipped: ${detail}. Upload can continue.`);
+        setFlowStage(FLOW_STAGE.ANALYZED);
+      }
     } catch (err) {
       if (runId !== analyzeRunRef.current) return;
-      setAnalysisResult(null);
-      setClientParseError(`Client parse failed: ${err.message || "Unknown parsing error"}`);
-      setFrameStart("");
-      setFrameEnd("");
-      setFrameStep("1");
-      setSceneName("");
-      setCameraMode("auto_markers");
-      setForceCameraName("");
-      setViewLayerName("");
-      setCameraRanges([]);
+      clearAnalysisFields();
+      setClientParseError(`Analysis skipped: ${err?.message || "Headless analyze failed"}. Upload can continue.`);
+      setFlowStage(FLOW_STAGE.ANALYZED);
     } finally {
       if (runId === analyzeRunRef.current) {
-        setFlowStage(FLOW_STAGE.ANALYZED);
         setAnalyzing(false);
       }
     }
   };
-
-  const handlePrepare = async () => {
-    if (flowStage !== FLOW_STAGE.ANALYZED) return;
-    if (!file) {
-      setError("Select a .blend file or .zip project bundle first");
-      return;
-    }
-    if (selectedMachines.length === 0) {
-      setError("Select at least one machine before preparing");
-      return;
-    }
-    if (!blenderBin || !file.path) {
-      setFlowStage(FLOW_STAGE.PREPARED);
-      return;
-    }
-    setError("");
-    setServerParseError("");
-    setPrepResult(null);
-    setPreparing(true);
-    setFlowStage(FLOW_STAGE.PREPARING);
-    const runId = ++prepareRunRef.current;
-    try {
-      const result = await invoke("prepare_blend_for_upload", {
-        filePath: file.path,
-        blenderBin,
-      });
-      if (runId !== prepareRunRef.current) return;
-      setPrepResult(result);
-    } catch (prepErr) {
-      if (runId !== prepareRunRef.current) return;
-      setPrepResult({ warnings: [], errors: [`Prepare step failed: ${prepErr}`], prep_done: false });
-    } finally {
-      if (runId === prepareRunRef.current) {
-        setPreparing(false);
-        setFlowStage(FLOW_STAGE.PREPARED);
-      }
-    }
-  };
   const handleUpload = async () => {
-    const shouldPrepareBeforeUpload = Boolean(blenderBin && file?.path);
     const canUploadFromCurrentStage =
       flowStage === FLOW_STAGE.PREPARED ||
-      (flowStage === FLOW_STAGE.ANALYZED && !shouldPrepareBeforeUpload);
+      flowStage === FLOW_STAGE.ANALYZED;
     if (!canUploadFromCurrentStage) return;
     if (!file) {
       setError("Select a .blend file or .zip project bundle first");
@@ -537,7 +562,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
 
     let uploadFilename = file.name;
     let uploadPath = file.path || null;
-    let uploadBlob = null;
     let uploadTaskId = "";
     let createdGroupId = "";
 
@@ -547,62 +571,61 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       uploadPath = prepResult.prepared_path;
     }
 
-    // Fallback to browser blob upload only when no local file path is available.
     if (!uploadPath) {
-      if (file._fileObj) {
-        uploadBlob = file._fileObj;
-      } else {
-        setError("Cannot read file for upload");
-        setFlowStage(fallbackStage);
-        setUploading(false);
-        return;
-      }
+      setError("Cannot stream this file safely. Re-select the file using the desktop 'Choose File' button.");
+      setFlowStage(fallbackStage);
+      setUploading(false);
+      return;
     }
 
     try {
       const created = await createDistributedRenderGroup(
         backendUrl,
         selectedMachines.map((machine) => machine.id),
-        uploadFilename
+        uploadFilename,
+        Number.isFinite(file?.size) ? file.size : null
       );
       createdGroupId = created.group_id || "";
       setPendingGroupId(createdGroupId);
 
-      if (uploadPath) {
-        uploadTaskId = await invoke("start_upload_file_to_presigned_url", {
-          filePath: uploadPath,
-          uploadUrl: created.upload_url,
-        });
-        activeUploadIdRef.current = uploadTaskId;
+      uploadTaskId = await invoke("start_upload_file_to_render_group_multipart", {
+        filePath: uploadPath,
+        backendUrl,
+        groupId: createdGroupId,
+      });
+      activeUploadIdRef.current = uploadTaskId;
 
-        while (true) {
-          await wait(250);
-          const snapshot = await invoke("get_upload_progress", { uploadId: uploadTaskId });
-          const pct =
-            typeof snapshot?.progress_pct === "number"
-              ? Math.max(0, Math.min(100, Math.round(snapshot.progress_pct)))
-              : 0;
-          setUploadProgress((prev) => Math.max(prev, pct));
+      while (true) {
+        await wait(250);
+        const snapshot = await invoke("get_upload_progress", { uploadId: uploadTaskId });
+        const uploadedBytes = Number(snapshot?.uploaded_bytes);
+        const totalBytes = Number(snapshot?.total_bytes);
+        const pctFromBytes =
+          Number.isFinite(uploadedBytes) &&
+          Number.isFinite(totalBytes) &&
+          totalBytes > 0
+            ? (uploadedBytes / totalBytes) * 100
+            : NaN;
+        const pctFromSnapshot =
+          typeof snapshot?.progress_pct === "number" ? Number(snapshot.progress_pct) : NaN;
+        const pct = Number.isFinite(pctFromBytes)
+          ? Math.max(0, Math.min(100, pctFromBytes))
+          : Number.isFinite(pctFromSnapshot)
+          ? Math.max(0, Math.min(100, pctFromSnapshot))
+          : 0;
+        setUploadProgress((prev) => Math.max(prev, pct));
 
-          if (snapshot?.status === "completed") {
-            setUploadProgress(100);
-            break;
-          }
-          if (snapshot?.status === "cancelled") {
-            const reason = snapshot?.error || "Upload cancelled by user";
-            throw new DOMException(reason, "AbortError");
-          }
-          if (snapshot?.status === "failed") {
-            throw new Error(snapshot?.error || "Upload failed");
-          }
+        if (snapshot?.status === "completed") {
+          setUploadProgress(100);
+          break;
         }
-      } else {
-        const controller = new AbortController();
-        uploadAbortRef.current = controller;
-        await uploadDistributedRenderInput(created.upload_url, uploadBlob, (pct) => {
-          setUploadProgress((prev) => Math.max(prev, pct));
-        }, controller.signal);
-        uploadAbortRef.current = null;
+        if (snapshot?.status === "cancelled") {
+          const reason = snapshot?.error || "Upload cancelled by user";
+          throw new DOMException(reason, "AbortError");
+        }
+        if (snapshot?.status === "failed") {
+          throw new Error(snapshot?.error || "Upload failed");
+        }
       }
       setFlowStage(FLOW_STAGE.UPLOADED);
     } catch (err) {
@@ -648,11 +671,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
 
     const frameRange = manualFrameRange;
 
-    if (!frameRange) {
-      setError("Enter a valid manual frame range before starting render");
-      return;
-    }
-    if (cameraMode === "camera_ranges" && !cameraRangesValidation.ok) {
+    if (cameraMode === "camera_ranges" && (!frameRange || !cameraRangesValidation.ok)) {
       setError(cameraRangesValidation.error || "Camera ranges are invalid");
       return;
     }
@@ -680,11 +699,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
                 enabled: row.enabled !== false,
               }))
             : [],
-        timeline: {
-          frame_start: frameRange.frame_start,
-          frame_end: frameRange.frame_end,
-          frame_step: frameRange.frame_step || 1,
-        },
+        timeline: frameRange
+          ? {
+              frame_start: frameRange.frame_start,
+              frame_end: frameRange.frame_end,
+              frame_step: frameRange.frame_step || 1,
+            }
+          : {},
       };
       const result = await confirmDistributedJob(
         backendUrl,
@@ -748,19 +769,12 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     if (analyzing) {
       analyzeRunRef.current += 1;
       setAnalyzing(false);
-      setAnalysisResult(null);
+      clearAnalysisFields();
+      setPrepResult(null);
       setClientParseError("");
       setServerParseError("");
       setFlowStage(FLOW_STAGE.IDLE);
       setError("Analysis cancelled");
-      return;
-    }
-
-    if (preparing) {
-      prepareRunRef.current += 1;
-      setPreparing(false);
-      setFlowStage(FLOW_STAGE.ANALYZED);
-      setError("Preparation cancelled");
       return;
     }
 
@@ -887,11 +901,9 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     return map;
   }, [cameraRanges, manualFrameRange]);
 
-  const needsPrepareStep = Boolean(blenderBin && file?.path);
-  const isBusy = analyzing || preparing || uploading || starting || cancelingRender;
-  const canPrepare = needsPrepareStep && flowStage === FLOW_STAGE.ANALYZED && !isBusy;
+  const isBusy = analyzing || uploading || starting || cancelingRender;
   const canUpload =
-    (flowStage === FLOW_STAGE.PREPARED || (!needsPrepareStep && flowStage === FLOW_STAGE.ANALYZED)) &&
+    (flowStage === FLOW_STAGE.PREPARED || flowStage === FLOW_STAGE.ANALYZED) &&
     !isBusy;
   const manualRangeValid = manualFrameRange !== null;
   const canStart =
@@ -900,20 +912,22 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     !uploading &&
     !starting &&
     Boolean(pendingGroupId) &&
-    manualRangeValid &&
-    (cameraMode !== "camera_ranges" || cameraRangesValidation.ok);
+    (cameraMode !== "camera_ranges" || (manualRangeValid && cameraRangesValidation.ok));
 
   const stepLabel = analyzing
     ? "Analyzing"
-    : preparing
-    ? "Preparing"
     : uploading
     ? "Uploading"
     : starting
     ? "Starting"
     : "";
-  const hasDeterminateUploadProgress = uploading && uploadProgress > 0;
-  const showIndeterminateProgress = !uploading || !hasDeterminateUploadProgress;
+  const showIndeterminateProgress = !uploading;
+  const uploadProgressLabel = (() => {
+    if (!uploading) return "Working...";
+    const clamped = Math.max(0, Math.min(100, Number(uploadProgress) || 0));
+    if (clamped >= 100) return "100%";
+    return `${clamped.toFixed(1)}%`;
+  })();
 
   const currentStageLabel =
     flowStage === FLOW_STAGE.IDLE
@@ -921,11 +935,9 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       : flowStage === FLOW_STAGE.ANALYZED
       ? analysisResult
         ? "Analysis complete"
-        : "Manual frame range required"
-      : flowStage === FLOW_STAGE.PREPARING
-      ? "Preparing blend file"
+        : "Analysis skipped"
       : flowStage === FLOW_STAGE.PREPARED
-      ? "Preparation complete"
+      ? "Analyze complete"
       : flowStage === FLOW_STAGE.UPLOADED
       ? "Upload complete"
       : flowStage === FLOW_STAGE.STARTING
@@ -938,7 +950,10 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       : flowStage === FLOW_STAGE.ANALYZED && !analysisResult
     ? "warning"
     : "neutral";
-  const hasCompletedAnalysis = flowStage !== FLOW_STAGE.IDLE && !analyzing && !preparing;
+  const hasCompletedAnalysis = flowStage !== FLOW_STAGE.IDLE && !analyzing;
+  const hasSkippedAnalysisNotice = Boolean(
+    clientParseError && clientParseError.toLowerCase().includes("analysis skipped")
+  );
 
   const handleSceneSelectionChange = (nextSceneName) => {
     setSceneName(nextSceneName);
@@ -1071,18 +1086,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
             </button>
           )}
 
-          {needsPrepareStep && (flowStage === FLOW_STAGE.ANALYZED || flowStage === FLOW_STAGE.PREPARING) && (
-            <button
-              className="btn btn-primary submit-primary-btn"
-              type="button"
-              onClick={handlePrepare}
-              disabled={!canPrepare}
-            >
-              {preparing ? "Preparing..." : "Prepare File"}
-            </button>
-          )}
-
-          {((!needsPrepareStep && flowStage === FLOW_STAGE.ANALYZED) || flowStage === FLOW_STAGE.PREPARED) && (
+          {(flowStage === FLOW_STAGE.ANALYZED || flowStage === FLOW_STAGE.PREPARED) && (
             <button
               className="btn btn-primary submit-primary-btn"
               type="button"
@@ -1114,7 +1118,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
             </button>
           )}
 
-          {(analyzing || preparing || uploading || starting) && (
+          {(analyzing || uploading || starting) && (
             <button
               className="btn btn-danger submit-primary-btn"
               type="button"
@@ -1124,8 +1128,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
             >
               {analyzing
                 ? "Stop Analyze"
-                : preparing
-                ? "Stop Prepare"
                 : uploading
                 ? "Stop Upload"
                 : "Stop Starting"}
@@ -1146,7 +1148,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
           )}
         </div>
 
-        {(analyzing || preparing || uploading || starting) && (
+        {(analyzing || uploading || starting) && (
           <div className="runtime-progress-wrap">
             <div className={`runtime-progress-track ${showIndeterminateProgress ? "indeterminate" : ""}`}>
               <div
@@ -1161,33 +1163,43 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
               <span>{stepLabel}</span>
               <span>
                 {uploading
-                  ? hasDeterminateUploadProgress
-                    ? `${uploadProgress}%`
-                    : "Uploading..."
+                  ? uploadProgressLabel
                   : "Working..."}
               </span>
             </div>
           </div>
         )}
 
-        {prepResult && (prepResult.warnings?.length > 0 || prepResult.errors?.length > 0) && (
+        {prepResult &&
+          ((prepResult.analysis_warnings?.length > 0 || prepResult.analysis_errors?.length > 0) ||
+            (prepResult.prepare_warnings?.length > 0 || prepResult.prepare_errors?.length > 0)) && (
           <div className="prep-results-panel">
-            {prepResult.errors?.map((msg, i) => (
-              <div key={i} className="prep-result-item prep-result-error">
-                <span className="prep-result-icon">✕</span> {msg}
-              </div>
-            ))}
-            {prepResult.warnings?.map((msg, i) => (
-              <div key={i} className="prep-result-item prep-result-warning">
-                <span className="prep-result-icon">⚠</span> {msg}
-              </div>
-            ))}
-          </div>
+              {prepResult.analysis_errors?.map((msg, i) => (
+                <div key={`analysis-error-${i}`} className="prep-result-item prep-result-error">
+                  <span className="prep-result-tag">[ANALYSIS][ERROR]</span> {msg}
+                </div>
+              ))}
+              {prepResult.analysis_warnings?.map((msg, i) => (
+                <div key={`analysis-warn-${i}`} className="prep-result-item prep-result-warning">
+                  <span className="prep-result-tag">[ANALYSIS][WARN]</span> {msg}
+                </div>
+              ))}
+              {prepResult.prepare_errors?.map((msg, i) => (
+                <div key={`prepare-error-${i}`} className="prep-result-item prep-result-error">
+                  <span className="prep-result-tag">[PREPARE][ERROR]</span> {msg}
+                </div>
+              ))}
+              {prepResult.prepare_warnings?.map((msg, i) => (
+                <div key={`prepare-warn-${i}`} className="prep-result-item prep-result-warning">
+                  <span className="prep-result-tag">[PREPARE][WARN]</span> {msg}
+                </div>
+              ))}
+            </div>
         )}
 
         {!blenderBin && flowStage === FLOW_STAGE.ANALYZED && (
           <div className="prep-no-blender">
-            Blender not found — assets will not be pre-packed. Install Blender to enable pre-render preparation.
+            Blender not found — headless analyze/prepare was skipped. Upload can continue without preparation.
           </div>
         )}
 
@@ -1437,11 +1449,14 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
           </div>
         )}
 
-        {hasCompletedAnalysis && clientParseError && <p className="error-text">{clientParseError}</p>}
+        {hasCompletedAnalysis && clientParseError && (
+          <p className={hasSkippedAnalysisNotice ? "muted" : "error-text"}>{clientParseError}</p>
+        )}
         {hasCompletedAnalysis && serverParseError && <p className="error-text">{serverParseError}</p>}
         {error && <p className="error-text">{error}</p>}
       </div>
     </div>
   );
 }
+
 

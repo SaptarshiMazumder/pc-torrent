@@ -1394,6 +1394,39 @@ body {
   margin: 8px 0;
 }
 
+.prep-results-panel {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-primary);
+}
+
+.prep-result-item {
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.prep-result-tag {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--text-muted);
+  font-family: "Consolas", "Monaco", "Courier New", monospace;
+  font-size: 11px;
+}
+
+.prep-result-error {
+  color: var(--danger);
+}
+
+.prep-result-warning {
+  color: #d97706;
+}
+
 .btn-back {
   background: none;
   border: none;
@@ -1576,6 +1609,65 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: rgba(17, 24, 39, 0.35);
+}
+
+.job-frame-gallery {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-secondary) 92%, black);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.job-frame-gallery-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.job-frame-gallery-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.job-frame-gallery-error {
+  margin: 0;
+}
+
+.job-frame-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.job-frame-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.job-frame-thumb {
+  width: 100%;
+  height: 110px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.35);
+}
+
+.job-frame-name {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .rentee-job-footer {

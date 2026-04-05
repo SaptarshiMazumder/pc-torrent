@@ -19,6 +19,11 @@ export class BlendParseError extends Error {
   }
 }
 
+// How much of a .blend to read for analysis. SDNA + scene blocks are always
+// near the start, so 32 MB is enough for any file regardless of total size.
+export const MAX_CLIENT_PARSE_BYTES = 32 * 1024 * 1024; // 32 MB
+const MAX_ZIP_FULL_FALLBACK_BYTES = 512 * 1024 * 1024; // 512 MB
+
 // ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
@@ -1039,16 +1044,55 @@ function parseBlendBuffer(input) {
  * @returns {Promise<{frame_start: number, frame_end: number, frame_step: number, total_frames: number, blender_version: number}>}
  * @throws {BlendParseError} on invalid or unparseable files
  */
-export async function parseBlendFile(file) {
-  const buffer = await file.arrayBuffer();
-  const uint8 = new Uint8Array(buffer);
-
-  // ZIP handling
+export function parseBlendBytes(input) {
+  const uint8 = input instanceof Uint8Array ? new Uint8Array(input) : new Uint8Array(input);
   if (isZip(uint8)) {
     const blendData = extractBlendFromZip(uint8);
     return parseBlendBuffer(blendData);
   }
+  return parseBlendBuffer(uint8);
+}
 
-  // Raw .blend (possibly compressed)
+export async function parseBlendFile(file, options = {}) {
+  const maxBytes =
+    Number.isFinite(options?.maxBytes) && options.maxBytes > 0
+      ? options.maxBytes
+      : Number.POSITIVE_INFINITY;
+  // Legacy default is full-file parse.
+  // If maxBytes is passed explicitly, parsing is bounded to the first chunk.
+  const declaredSize = Number(file?.size);
+  const needsSlice = Number.isFinite(declaredSize) && declaredSize > maxBytes;
+  const slice = needsSlice ? file.slice(0, maxBytes) : file;
+
+  const buffer = await slice.arrayBuffer();
+  const uint8 = new Uint8Array(buffer);
+
+  // ZIP handling — if the .blend is inside a zip and we sliced, the embedded
+  // .blend might be truncated. Retry with full read only for reasonably sized ZIPs.
+  if (isZip(uint8)) {
+    try {
+      const blendData = extractBlendFromZip(uint8);
+      return parseBlendBuffer(blendData);
+    } catch (e) {
+      const canFullRetry =
+        needsSlice &&
+        Number.isFinite(declaredSize) &&
+        declaredSize <= MAX_ZIP_FULL_FALLBACK_BYTES;
+      if (canFullRetry) {
+        const fullBuffer = await file.arrayBuffer();
+        const fullUint8 = new Uint8Array(fullBuffer);
+        const blendData = extractBlendFromZip(fullUint8);
+        return parseBlendBuffer(blendData);
+      }
+      if (needsSlice) {
+        throw new BlendParseError(
+          "Could not analyze ZIP from the initial chunk. Upload can continue; server-side parsing will run after upload."
+        );
+      }
+      throw e;
+    }
+  }
+
+  // Raw .blend (possibly gzip/zstd compressed)
   return parseBlendBuffer(uint8);
 }

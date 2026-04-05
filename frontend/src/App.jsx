@@ -286,11 +286,12 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
     try {
       const created = await createDistributedRenderGroup(
         machines.map((m) => m.id),
-        file.name
+        file.name,
+        file.size
       );
       setPendingGroupId(created.group_id || null);
 
-      await uploadDistributedRenderInput(created.upload_url, file, (pct) => {
+      await uploadDistributedRenderInput(created.group_id, file, (pct) => {
         setProgress(pct);
       });
 

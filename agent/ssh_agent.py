@@ -962,6 +962,7 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
 
     final_status = "failed"
     final_error = None
+    uploaded_outputs: set[str] = set()
 
     heartbeat_stop = threading.Event()
     progress_state = {
@@ -1162,6 +1163,82 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
         render_cmd = " ".join(env_parts) + f" {REMOTE_SCRIPTS}/render.sh 2>&1"
 
         render_log = []
+        remote_size_cache: dict[str, int] = {}
+        remote_stable_counts: dict[str, int] = {}
+        last_output_scan_at = 0.0
+
+        def scan_and_upload_remote_outputs(require_stable: bool = True, force: bool = False):
+            nonlocal last_output_scan_at
+            now = time.monotonic()
+            if not force and (now - last_output_scan_at) < 1.0:
+                return
+            last_output_scan_at = now
+
+            sftp = None
+            try:
+                sftp = client.open_sftp()
+                attrs = sftp.listdir_attr(remote_output_dir)
+            except Exception as exc:
+                log(label, f"[JOB {job_id[:8]}] Output scan failed: {exc}", level="warn")
+                if sftp is not None:
+                    try:
+                        sftp.close()
+                    except Exception:
+                        pass
+                return
+
+            ready_names: list[str] = []
+            try:
+                for attr in attrs:
+                    fname = attr.filename
+                    if fname.startswith(".") or fname in uploaded_outputs:
+                        continue
+                    size = int(getattr(attr, "st_size", 0) or 0)
+                    if size <= 0:
+                        continue
+                    prev_size = remote_size_cache.get(fname)
+                    if prev_size == size:
+                        remote_stable_counts[fname] = remote_stable_counts.get(fname, 0) + 1
+                    else:
+                        remote_stable_counts[fname] = 0
+                    remote_size_cache[fname] = size
+                    if not require_stable or remote_stable_counts.get(fname, 0) >= 1:
+                        ready_names.append(fname)
+
+                if not ready_names:
+                    return
+
+                output_files_data = []
+                for fname in sorted(ready_names):
+                    remote_path = f"{remote_output_dir}/{fname}"
+                    with sftp.open(remote_path, "rb") as f:
+                        data = f.read()
+                    output_files_data.append((fname, data))
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+            if not output_files_data:
+                return
+
+            try:
+                uploaded_now = upload_output_files(job_id, output_files_data)
+            except Exception as exc:
+                log(label, f"[JOB {job_id[:8]}] Incremental upload failed: {exc}", level="warn")
+                return
+            if not uploaded_now:
+                return
+            uploaded_outputs.update(uploaded_now)
+            for fname in uploaded_now:
+                remote_size_cache.pop(fname, None)
+                remote_stable_counts.pop(fname, None)
+            log(
+                label,
+                f"[JOB {job_id[:8]}] Incremental upload: {len(uploaded_now)} new file(s), "
+                f"{len(uploaded_outputs)} total uploaded",
+            )
 
         def on_line(line: str):
             event = parse_progress_line(line)
@@ -1182,6 +1259,8 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
                         progress_state["total_frames"],
                     )
                 push_progress(force=(event["kind"] == "meta"))
+                if event.get("kind") == "frame":
+                    scan_and_upload_remote_outputs(require_stable=True)
             else:
                 render_log.append(line)
                 log(label, line)
@@ -1194,6 +1273,9 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
             raise RuntimeError("Stop requested")
 
         missing_assets = any(m in "\n".join(render_log) for m in MISSING_LIBRARY_MARKERS)
+        # Flush any newly produced frames even if render exits with an error.
+        scan_and_upload_remote_outputs(require_stable=False, force=True)
+        scan_and_upload_remote_outputs(require_stable=False, force=True)
 
         if exit_code != 0:
             if missing_assets:
@@ -1202,6 +1284,10 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
                     "Use a packed .blend or .zip bundle."
                 )
             raise RuntimeError(f"Render exited with code {exit_code}")
+
+        # Final incremental scan after render exits
+        scan_and_upload_remote_outputs(require_stable=False, force=True)
+        scan_and_upload_remote_outputs(require_stable=False, force=True)
 
         # 5. Download output files via SFTP
         log(label, f"[JOB {job_id[:8]}] Collecting output files...")
@@ -1216,7 +1302,12 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
         if not output_filenames:
             raise RuntimeError("Render produced no output files")
 
-        log(label, f"[JOB {job_id[:8]}] Found {len(output_filenames)} output files on worker")
+        log(
+            label,
+            f"[JOB {job_id[:8]}] Found {len(output_filenames)} output files on worker "
+            f"({len(uploaded_outputs)} already uploaded incrementally)"
+        )
+        missing_names = [f for f in output_filenames if f not in uploaded_outputs]
         sftp = client.open_sftp()
         output_files_data = []
         try:
@@ -1225,7 +1316,7 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
                 sftp_channel.settimeout(120)
             except Exception:
                 pass
-            for fname in output_filenames:
+            for fname in missing_names:
                 remote_path = f"{remote_output_dir}/{fname}"
                 log(label, f"[JOB {job_id[:8]}] Downloading output from worker: {fname}")
                 with sftp.open(remote_path, "rb") as f:
@@ -1240,8 +1331,13 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
         push_progress(force=True)
 
         # 7. Upload to backend
-        log(label, f"[JOB {job_id[:8]}] Uploading {len(output_files_data)} output files...")
-        uploaded = upload_output_files(job_id, output_files_data)
+        if output_files_data:
+            log(label, f"[JOB {job_id[:8]}] Uploading {len(output_files_data)} remaining output files...")
+            uploaded = upload_output_files(job_id, output_files_data)
+            uploaded_outputs.update(uploaded)
+        else:
+            uploaded = []
+        uploaded = sorted(uploaded_outputs)
 
         if missing_assets:
             final_error = (
@@ -1259,6 +1355,10 @@ def execute_job(client: paramiko.SSHClient, job: dict, machine_id: str, label: s
     except Exception as e:
         log(label, f"[JOB {job_id[:8]}] Error: {e}", level="error")
         final_error = str(e)
+        if uploaded_outputs:
+            final_error = (
+                f"{final_error}. {len(uploaded_outputs)} frame(s) already uploaded and recoverable."
+            )
         push_progress(force=True)
         try:
             update_job_status(job_id, "failed", error=final_error)

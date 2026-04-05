@@ -1552,6 +1552,32 @@ body {
   font-family: "Cascadia Code", "Fira Code", monospace;
 }
 
+.job-latest-frame-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.job-latest-frame-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.job-latest-frame-meta code {
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+}
+
+.job-latest-frame-preview {
+  width: 100%;
+  max-width: 480px;
+  max-height: 260px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(17, 24, 39, 0.35);
+}
+
 .rentee-job-footer {
   display: flex;
   align-items: flex-end;

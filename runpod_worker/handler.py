@@ -20,10 +20,10 @@ Expected input:
 import base64
 import json
 import logging
-import math
 import os
 import subprocess
 import tempfile
+import threading
 import time
 
 import requests
@@ -39,6 +39,7 @@ RENDER_DRIVER_SCRIPT = os.getenv("RENDER_DRIVER_SCRIPT", "/scripts/render_driver
 
 # Push a progress update to backend at most every N seconds
 PROGRESS_PUSH_INTERVAL = float(os.getenv("PROGRESS_PUSH_INTERVAL", "2"))
+OUTPUT_SCAN_INTERVAL = float(os.getenv("OUTPUT_SCAN_INTERVAL", "1.0"))
 RENDER_FATAL_PATTERNS = (
     "[RENDER_DRIVER] ERROR:",
     "RuntimeError: Error: Cannot render, no camera",
@@ -139,12 +140,23 @@ def _push_progress(backend_url: str, job_id: str, rendered_frames: int, total_fr
         log.warning(f"Failed to push progress: {e}")
 
 
-def _upload_outputs(backend_url: str, job_id: str, output_dir: str) -> list[str]:
+def _upload_outputs(
+    backend_url: str,
+    job_id: str,
+    output_dir: str,
+    filenames: list[str] | None = None,
+) -> list[str]:
     """Upload rendered output files directly to R2 via presigned URLs (bypasses Cloud Run size limits)."""
-    files = sorted(
-        f for f in os.listdir(output_dir)
-        if os.path.isfile(os.path.join(output_dir, f))
-    )
+    if filenames is None:
+        files = sorted(
+            f for f in os.listdir(output_dir)
+            if os.path.isfile(os.path.join(output_dir, f))
+        )
+    else:
+        files = sorted(
+            f for f in filenames
+            if os.path.isfile(os.path.join(output_dir, f))
+        )
     if not files:
         log.warning("No output files found after render")
         return []
@@ -182,6 +194,143 @@ def _upload_outputs(backend_url: str, job_id: str, output_dir: str) -> list[str]
     ).raise_for_status()
 
     return uploaded
+
+
+class IncrementalOutputUploader:
+    """
+    Uploads output files to R2 as soon as they appear on disk.
+    Keeps already-uploaded frames safe if the render later fails.
+    """
+
+    def __init__(self, backend_url: str, job_id: str, output_dir: str):
+        self.backend_url = backend_url.rstrip("/")
+        self.job_id = job_id
+        self.output_dir = output_dir
+        self._uploaded: set[str] = set()
+        self._last_sizes: dict[str, int] = {}
+        self._stable_counts: dict[str, int] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def uploaded(self) -> list[str]:
+        return sorted(self._uploaded)
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"output-uploader-{self.job_id[:8]}",
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                self._scan_once(require_stable=True)
+            except Exception as exc:
+                log.warning(f"Incremental upload scan failed for {self.job_id}: {exc}")
+            self._stop.wait(OUTPUT_SCAN_INTERVAL)
+
+    def _candidate_files(self) -> list[str]:
+        try:
+            return sorted(
+                f for f in os.listdir(self.output_dir)
+                if not f.startswith(".") and os.path.isfile(os.path.join(self.output_dir, f))
+            )
+        except FileNotFoundError:
+            return []
+
+    def _scan_once(self, require_stable: bool):
+        ready: list[str] = []
+        for fname in self._candidate_files():
+            if fname in self._uploaded:
+                continue
+
+            fpath = os.path.join(self.output_dir, fname)
+            try:
+                size = os.path.getsize(fpath)
+            except OSError:
+                continue
+            if size <= 0:
+                continue
+
+            last_size = self._last_sizes.get(fname)
+            if last_size == size:
+                self._stable_counts[fname] = self._stable_counts.get(fname, 0) + 1
+            else:
+                self._stable_counts[fname] = 0
+            self._last_sizes[fname] = size
+
+            if not require_stable or self._stable_counts.get(fname, 0) >= 1:
+                ready.append(fname)
+
+        if ready:
+            self._upload_batch(ready)
+
+    def _upload_batch(self, filenames: list[str]):
+        resp = requests.post(
+            f"{self.backend_url}/jobs/{self.job_id}/request-upload-urls",
+            json={"filenames": filenames},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        urls: dict = resp.json().get("urls", {})
+
+        uploaded_now: list[str] = []
+        for fname in filenames:
+            if fname in self._uploaded:
+                continue
+            url = urls.get(fname)
+            if not url:
+                log.warning(f"No presigned URL returned for {fname}")
+                continue
+
+            fpath = os.path.join(self.output_dir, fname)
+            try:
+                with open(fpath, "rb") as fh:
+                    put_resp = requests.put(
+                        url,
+                        data=fh,
+                        headers={"Content-Type": "application/octet-stream"},
+                        timeout=600,
+                    )
+                    put_resp.raise_for_status()
+            except Exception as exc:
+                log.warning(f"Failed uploading frame {fname}: {exc}")
+                continue
+
+            uploaded_now.append(fname)
+
+        if not uploaded_now:
+            return
+
+        requests.post(
+            f"{self.backend_url}/jobs/{self.job_id}/register-outputs",
+            json={"filenames": uploaded_now},
+            timeout=30,
+        ).raise_for_status()
+
+        for fname in uploaded_now:
+            self._uploaded.add(fname)
+            self._last_sizes.pop(fname, None)
+            self._stable_counts.pop(fname, None)
+        log.info(
+            f"Registered {len(uploaded_now)} incremental output file(s) "
+            f"(total uploaded: {len(self._uploaded)})"
+        )
+
+    def flush_final(self):
+        # Render process has already stopped. Upload everything remaining.
+        self._scan_once(require_stable=False)
+        self._scan_once(require_stable=False)
 
 
 def _mark_done(backend_url: str, job_id: str, output_files: list[str]):
@@ -315,6 +464,8 @@ def handler(job: dict) -> dict:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        uploader = IncrementalOutputUploader(backend_url, job_id, output_dir)
+        uploader.start()
 
         # 5. Stream progress
         total_frames = (frame_end - frame_start) // frame_step + 1
@@ -349,25 +500,45 @@ def handler(job: dict) -> dict:
                     last_push = now
 
         proc.wait()
+        uploader.stop()
+        try:
+            uploader.flush_final()
+        except Exception as exc:
+            log.warning(f"Final incremental output flush failed: {exc}")
+        uploaded = uploader.uploaded
 
         if proc.returncode != 0 or fatal_render_error:
             if fatal_render_error:
                 err = f"Render runtime error detected: {fatal_render_error}"
             else:
                 err = f"render.sh exited with code {proc.returncode}"
+            if uploaded:
+                err = f"{err}. {len(uploaded)} frame(s) already uploaded and recoverable."
             log.error(err)
             _mark_failed(backend_url, job_id, err)
-            return {"status": "failed", "error": err}
+            return {"status": "failed", "error": err, "output_files": uploaded}
 
-        # 6. Upload outputs
-        log.info("Render complete, uploading outputs")
-        try:
-            uploaded = _upload_outputs(backend_url, job_id, output_dir)
-        except Exception as e:
-            err = f"Output upload failed: {e}"
-            log.error(err)
-            _mark_failed(backend_url, job_id, err)
-            return {"status": "failed", "error": err}
+        # 6. Catch up any files that were not incrementally uploaded
+        local_files = sorted(
+            f for f in os.listdir(output_dir)
+            if os.path.isfile(os.path.join(output_dir, f))
+        )
+        missing_files = [f for f in local_files if f not in uploaded]
+        if missing_files:
+            log.info(f"Uploading remaining {len(missing_files)} output file(s)")
+            try:
+                catch_up = _upload_outputs(
+                    backend_url,
+                    job_id,
+                    output_dir,
+                    filenames=missing_files,
+                )
+                uploaded += [f for f in catch_up if f not in uploaded]
+            except Exception as e:
+                err = f"Output catch-up upload failed: {e}"
+                log.error(err)
+                _mark_failed(backend_url, job_id, err)
+                return {"status": "failed", "error": err, "output_files": uploaded}
         if not uploaded:
             err = "Render produced no output files"
             log.error(err)
@@ -376,7 +547,7 @@ def handler(job: dict) -> dict:
 
         # 7. Mark done
         _mark_done(backend_url, job_id, uploaded)
-        log.info(f"Job {job_id} done — {len(uploaded)} files uploaded")
+        log.info(f"Job {job_id} done - {len(uploaded)} files uploaded")
         return {"status": "done", "output_files": uploaded}
 
 

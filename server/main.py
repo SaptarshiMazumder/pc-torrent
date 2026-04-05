@@ -1,9 +1,10 @@
-import asyncio
+﻿import asyncio
 import base64
 import collections
 import io
 import json
 import logging
+import re
 import threading
 import zipfile
 
@@ -148,6 +149,32 @@ def parse_output_files(raw: str | None) -> list[str]:
         return parsed if isinstance(parsed, list) else []
     except json.JSONDecodeError:
         return []
+
+
+_FRAME_INDEX_PATTERN = re.compile(r"(\d+)(?=\.[^.]+$)")
+
+
+def output_frame_sort_key(filename: str) -> tuple[int, str]:
+    """
+    Sort frame files numerically when they contain a frame suffix (e.g. frame0007.png).
+    Non-matching names are sorted after numbered frames.
+    """
+    if not isinstance(filename, str):
+        return (10**12, "")
+    match = _FRAME_INDEX_PATTERN.search(filename)
+    if not match:
+        return (10**12, filename.lower())
+    try:
+        frame_no = int(match.group(1))
+    except ValueError:
+        frame_no = 10**12
+    return (frame_no, filename.lower())
+
+
+def latest_output_filename(files: list[str]) -> str | None:
+    if not files:
+        return None
+    return sorted(files, key=output_frame_sort_key)[-1]
 
 
 def parse_json_object(raw: str | None, default: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -340,10 +367,13 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
     rendered_frames = max(0, job.get("rendered_frames") or 0)
     if total_frames is not None and total_frames > 0:
         rendered_frames = min(rendered_frames, total_frames)
+    latest_output = latest_output_filename(output_files)
 
     return {
         **job,
         "output_files": output_files,
+        "output_files_count": len(output_files),
+        "latest_output_file": latest_output,
         "total_frames": total_frames,
         "rendered_frames": rendered_frames,
         "progress_pct": compute_progress_pct(
@@ -856,6 +886,49 @@ def download_job_output_file(job_id: str, filename: str):
     return RedirectResponse(url=url)
 
 
+def build_job_output_entries(job: dict[str, Any]) -> list[dict[str, Any]]:
+    files = parse_output_files(job.get("output_files"))
+    ordered_files = sorted(files, key=output_frame_sort_key)
+    entries: list[dict[str, Any]] = []
+    for fname in ordered_files:
+        try:
+            safe_name = sanitize_filename(fname)
+        except HTTPException:
+            continue
+        r2_key = f"jobs/{job['id']}/output/{safe_name}"
+        try:
+            url = storage.generate_presigned_url(r2_key, download_name=safe_name)
+        except Exception:
+            continue
+        entries.append(
+            {
+                "job_id": job["id"],
+                "filename": safe_name,
+                "url": url,
+                "status": job.get("status"),
+            }
+        )
+    return entries
+
+
+@app.get("/jobs/{job_id}/outputs")
+def list_job_outputs(job_id: str):
+    """
+    List all currently available output files for a job.
+    Works for running/failed/done jobs, enabling partial frame recovery.
+    """
+    job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    entries = build_job_output_entries(job)
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "files": entries,
+        "count": len(entries),
+    }
+
+
 @app.get("/jobs/{job_id}/download")
 def download_job_output_archive(job_id: str):
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
@@ -868,13 +941,13 @@ def download_job_output_archive(job_id: str):
     if not files:
         raise HTTPException(status_code=404, detail="No output files found")
 
-    # Single file → redirect to presigned URL
+    # Single file â†’ redirect to presigned URL
     if len(files) == 1:
         r2_key = f"jobs/{job_id}/output/{files[0]}"
         url = storage.generate_presigned_url(r2_key, download_name=files[0])
         return RedirectResponse(url=url)
 
-    # Multiple files → zip them in memory
+    # Multiple files â†’ zip them in memory
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filename in files:
@@ -895,6 +968,7 @@ def download_job_output_archive(job_id: str):
 # -----------------------------------------------
 
 FAILOVER_STALE_SECONDS = 30  # longer than heartbeat to avoid false positives
+MIN_FRAMES_PER_WORKER = 5
 
 
 def compute_power_score(machine: dict) -> float:
@@ -905,6 +979,30 @@ def compute_power_score(machine: dict) -> float:
     return (vram * 4) + (cores * 1) + (ram * 0.3)
 
 
+def max_workers_for_frame_budget(total_frames: int, requested_workers: int) -> int:
+    """Cap workers so each gets at least MIN_FRAMES_PER_WORKER frames."""
+    if requested_workers <= 1:
+        return 1
+    if total_frames <= 0:
+        return 1
+    max_workers_by_frames = max(1, total_frames // MIN_FRAMES_PER_WORKER)
+    return max(1, min(requested_workers, max_workers_by_frames))
+
+
+def limit_machines_for_frame_budget(
+    machines: list[dict],
+    total_frames: int,
+) -> list[dict]:
+    """Use only as many machines as the frame budget can justify."""
+    if not machines:
+        return []
+    allowed = max_workers_for_frame_budget(total_frames, len(machines))
+    if allowed >= len(machines):
+        return machines
+    ranked = sorted(machines, key=compute_power_score, reverse=True)
+    return ranked[:allowed]
+
+
 def distribute_frames(
     total_frames: int,
     frame_start: int,
@@ -913,6 +1011,10 @@ def distribute_frames(
     machines: list[dict],
 ) -> list[dict]:
     """Split frames across machines proportionally to their power scores."""
+    machines = limit_machines_for_frame_budget(machines, total_frames)
+    if not machines:
+        return []
+
     scores = [(m, compute_power_score(m)) for m in machines]
     total_score = sum(s for _, s in scores)
     if total_score <= 0:
@@ -973,12 +1075,17 @@ def expand_serverless_assignments(
             expanded.append(a)
             continue
 
-        frames_per_worker = max(1, total_frames // workers_per_endpoint)
+        worker_count = max_workers_for_frame_budget(total_frames, workers_per_endpoint)
+        if worker_count <= 1:
+            expanded.append(a)
+            continue
+
+        frames_per_worker = max(1, total_frames // worker_count)
         current = frame_start
-        for w in range(workers_per_endpoint):
+        for w in range(worker_count):
             if current > frame_end:
                 break
-            if w == workers_per_endpoint - 1:
+            if w == worker_count - 1:
                 sub_end = frame_end
             else:
                 sub_end = current + (frames_per_worker - 1) * frame_step
@@ -1009,6 +1116,9 @@ def distribute_frames_by_chunk_size(
     """Split frame range into fixed-size chunks and assign in power-ranked round-robin."""
     if chunk_size_frames < 1:
         raise ValueError("chunk_size_frames must be >= 1")
+    effective_chunk_size = max(chunk_size_frames, MIN_FRAMES_PER_WORKER)
+    total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
+    machines = limit_machines_for_frame_budget(machines, total_frames)
     if not machines:
         return []
 
@@ -1025,7 +1135,17 @@ def distribute_frames_by_chunk_size(
     chunk_index = 0
     while current_frame <= frame_end:
         machine, score = ranked[chunk_index % len(ranked)]
-        chunk_end = current_frame + (chunk_size_frames - 1) * frame_step
+        frames_remaining = ((frame_end - current_frame) // frame_step) + 1
+        if frames_remaining <= effective_chunk_size:
+            frames_for_chunk = frames_remaining
+        else:
+            frames_for_chunk = effective_chunk_size
+            tail_frames = frames_remaining - frames_for_chunk
+            if 0 < tail_frames < MIN_FRAMES_PER_WORKER:
+                # Avoid creating a tiny tail chunk on the next iteration.
+                frames_for_chunk = frames_remaining
+
+        chunk_end = current_frame + (frames_for_chunk - 1) * frame_step
         chunk_end = min(chunk_end, frame_end)
         chunk_total = ((chunk_end - current_frame) // frame_step) + 1 if chunk_end >= current_frame else 0
         assignments.append({
@@ -1041,7 +1161,7 @@ def distribute_frames_by_chunk_size(
             "total_frames": chunk_total,
             "power_score": round(score, 1),
             "chunk_index": chunk_index,
-            "chunk_size_frames": chunk_size_frames,
+            "chunk_size_frames": effective_chunk_size,
         })
         current_frame = chunk_end + frame_step
         chunk_index += 1
@@ -1055,6 +1175,8 @@ def serialize_render_group_task(job: dict, machine: dict | None = None) -> dict:
     rendered_frames = max(0, job.get("rendered_frames") or 0)
     if total_frames and total_frames > 0:
         rendered_frames = min(rendered_frames, total_frames)
+    output_files = parse_output_files(job.get("output_files"))
+    latest_output = latest_output_filename(output_files)
 
     return {
         "job_id": job["id"],
@@ -1077,6 +1199,8 @@ def serialize_render_group_task(job: dict, machine: dict | None = None) -> dict:
         "attempt": job.get("attempt") or 0,
         "max_retries": job.get("max_retries") or 0,
         "priority": job.get("priority") or 0,
+        "output_files_count": len(output_files),
+        "latest_output_file": latest_output,
     }
 
 
@@ -1109,7 +1233,7 @@ def _check_failover(group_id: str, tasks_raw: list[dict]):
         if last_seen >= cutoff:
             continue
 
-        # Machine is stale — mark job as failed
+        # Machine is stale â€” mark job as failed
         execute(
             "UPDATE jobs SET status = 'failed', error = %s, completed_at = %s WHERE id = %s",
             ("Machine went offline", now_iso(), task["id"]),
@@ -1214,7 +1338,7 @@ def choose_retry_machine(group_id: str, failed_machine_id: str) -> str | None:
         (failed_machine_id,),
     )
     if not rows:
-        # No other machines available — fall back to the same machine
+        # No other machines available â€” fall back to the same machine
         return failed_machine_id
 
     # Prefer serverless endpoints (always available, instant spin-up)
@@ -1656,6 +1780,9 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
         overall_pct = round(min(100.0, total_rendered / total_frames * 100), 1)
     if overall_status == "done":
         overall_pct = 100.0
+    available_output_count = sum(t.get("output_files_count") or 0 for t in tasks)
+    latest_candidates = [t.get("latest_output_file") for t in tasks if t.get("latest_output_file")]
+    latest_output = latest_output_filename(latest_candidates) if latest_candidates else None
 
     return {
         "group_id": group_id,
@@ -1673,48 +1800,63 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
         "analysis_warnings": analysis_warnings,
         "overall_rendered_frames": total_rendered,
         "overall_progress_pct": overall_pct,
+        "available_output_files_count": available_output_count,
+        "latest_output_file": latest_output,
         "tasks": tasks,
+    }
+
+
+def build_render_group_output_entries(group_id: str) -> list[dict[str, Any]]:
+    jobs = query_all(
+        "SELECT id, status, output_files, frame_start, submitted_at FROM jobs WHERE group_id = %s ORDER BY submitted_at ASC, frame_start ASC",
+        (group_id,),
+    )
+    dedup_by_filename: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        for item in build_job_output_entries(job):
+            # If retries produced the same frame filename more than once,
+            # keep the most recently submitted job's copy.
+            dedup_by_filename[item["filename"]] = item
+    entries = list(dedup_by_filename.values())
+    entries.sort(key=lambda item: output_frame_sort_key(item.get("filename", "")))
+    return entries
+
+
+@app.get("/render-groups/{group_id}/outputs")
+def list_render_group_outputs(group_id: str):
+    """
+    List all currently available output files in a render group.
+    This endpoint is safe to call while rendering is still in progress.
+    """
+    group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+    files = build_render_group_output_entries(group_id)
+    return {
+        "group_id": group_id,
+        "status": group.get("status"),
+        "files": files,
+        "count": len(files),
     }
 
 
 @app.get("/render-groups/{group_id}/download")
 def download_render_group_output(group_id: str):
-    """Return presigned R2 URLs for all output files — client downloads directly from R2."""
+    """Return all output files once no tasks are pending/running."""
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
-
-    jobs = query_all(
-        "SELECT * FROM jobs WHERE group_id = %s AND status = 'done' ORDER BY frame_start ASC",
-        (group_id,),
-    )
 
     all_jobs = query_all("SELECT status FROM jobs WHERE group_id = %s", (group_id,))
     pending_or_running = [j for j in all_jobs if j["status"] in ("pending", "running")]
     if pending_or_running:
         raise HTTPException(status_code=400, detail="Render group has tasks still in progress")
 
-    # Collect all output files from done jobs
-    all_files: list[tuple[str, str]] = []  # (r2_key, filename)
-    for job in jobs:
-        files = parse_output_files(job["output_files"])
-        for fname in files:
-            r2_key = f"jobs/{job['id']}/output/{fname}"
-            all_files.append((r2_key, fname))
-
-    if not all_files:
+    files = build_render_group_output_entries(group_id)
+    if not files:
         raise HTTPException(status_code=404, detail="No output files found")
 
-    # Return presigned URLs — no data passes through the server
-    urls = []
-    for r2_key, fname in all_files:
-        try:
-            url = storage.generate_presigned_url(r2_key, download_name=fname)
-            urls.append({"filename": fname, "url": url})
-        except Exception:
-            continue
-
-    return {"files": urls, "group_id": group_id}
+    return {"files": files, "group_id": group_id}
 
 
 # -----------------------------------------------
@@ -1766,4 +1908,5 @@ def download_latest_release():
         raise HTTPException(status_code=404, detail="No release available")
     url = storage.generate_presigned_url("releases/PCRentAgent-Setup.exe", expires_in=7200)
     return RedirectResponse(url=url)
+
 

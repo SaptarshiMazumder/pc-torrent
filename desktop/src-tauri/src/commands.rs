@@ -1,7 +1,7 @@
 use serde_json::json;
 use serde::Serialize;
 use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
-use futures_util::TryStreamExt;
+use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, File};
@@ -31,6 +31,7 @@ enum UploadTaskStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl UploadTaskStatus {
@@ -39,6 +40,7 @@ impl UploadTaskStatus {
             UploadTaskStatus::Running => "running",
             UploadTaskStatus::Completed => "completed",
             UploadTaskStatus::Failed => "failed",
+            UploadTaskStatus::Cancelled => "cancelled",
         }
     }
 }
@@ -49,6 +51,7 @@ struct UploadTaskEntry {
     total_bytes: u64,
     status: UploadTaskStatus,
     error: Option<String>,
+    cancel_requested: bool,
 }
 
 #[derive(Serialize)]
@@ -120,6 +123,7 @@ pub async fn start_upload_file_to_presigned_url(
                 total_bytes,
                 status: UploadTaskStatus::Running,
                 error: None,
+                cancel_requested: false,
             },
         );
     }
@@ -129,15 +133,28 @@ pub async fn start_upload_file_to_presigned_url(
         let outcome = upload_file_streaming(path, upload_url, upload_id_for_task.clone(), total_bytes).await;
         if let Ok(mut tasks) = upload_tasks().lock() {
             if let Some(task) = tasks.get_mut(&upload_id_for_task) {
+                let cancelled = task.cancel_requested || matches!(task.status, UploadTaskStatus::Cancelled);
                 match outcome {
                     Ok(()) => {
-                        task.uploaded_bytes = task.total_bytes;
-                        task.status = UploadTaskStatus::Completed;
-                        task.error = None;
+                        if cancelled {
+                            task.status = UploadTaskStatus::Cancelled;
+                            if task.error.is_none() {
+                                task.error = Some("Cancelled by user".to_string());
+                            }
+                        } else {
+                            task.uploaded_bytes = task.total_bytes;
+                            task.status = UploadTaskStatus::Completed;
+                            task.error = None;
+                        }
                     }
                     Err(err) => {
-                        task.status = UploadTaskStatus::Failed;
-                        task.error = Some(err);
+                        if cancelled || err.to_lowercase().contains("cancelled") {
+                            task.status = UploadTaskStatus::Cancelled;
+                            task.error = Some("Cancelled by user".to_string());
+                        } else {
+                            task.status = UploadTaskStatus::Failed;
+                            task.error = Some(err);
+                        }
                     }
                 }
             }
@@ -153,21 +170,38 @@ async fn upload_file_streaming(
     upload_id: String,
     total_bytes: u64,
 ) -> Result<(), String> {
+    fn upload_cancelled(upload_id: &str) -> bool {
+        if let Ok(tasks) = upload_tasks().lock() {
+            if let Some(task) = tasks.get(upload_id) {
+                return task.cancel_requested || matches!(task.status, UploadTaskStatus::Cancelled);
+            }
+        }
+        false
+    }
+
     let file = tokio::fs::File::open(&file_path)
         .await
         .map_err(|err| format!("Failed to open file for upload: {err}"))?;
 
     let upload_id_for_stream = upload_id.clone();
-    let stream = ReaderStream::with_capacity(file, 256 * 1024).map_ok(move |chunk| {
-        if let Ok(mut tasks) = upload_tasks().lock() {
-            if let Some(task) = tasks.get_mut(&upload_id_for_stream) {
-                task.uploaded_bytes = task
-                    .uploaded_bytes
-                    .saturating_add(chunk.len() as u64)
-                    .min(task.total_bytes);
-            }
+    let stream = ReaderStream::with_capacity(file, 256 * 1024).map(move |item| {
+        if upload_cancelled(&upload_id_for_stream) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Upload cancelled by user",
+            ));
         }
-        chunk
+        item.map(|chunk| {
+            if let Ok(mut tasks) = upload_tasks().lock() {
+                if let Some(task) = tasks.get_mut(&upload_id_for_stream) {
+                    task.uploaded_bytes = task
+                        .uploaded_bytes
+                        .saturating_add(chunk.len() as u64)
+                        .min(task.total_bytes);
+                }
+            }
+            chunk
+        })
     });
 
     let response = reqwest::Client::new()
@@ -178,6 +212,9 @@ async fn upload_file_streaming(
         .send()
         .await
         .map_err(|err| {
+            if upload_cancelled(&upload_id) {
+                return "Upload cancelled by user".to_string();
+            }
             let mut msg = err.to_string();
             let mut source = err.source();
             while let Some(src) = source {
@@ -220,6 +257,7 @@ pub fn get_upload_progress(upload_id: String) -> Result<UploadProgressSnapshot, 
         UploadTaskStatus::Completed => 100,
         UploadTaskStatus::Running => raw_progress.min(99),
         UploadTaskStatus::Failed => raw_progress.min(99),
+        UploadTaskStatus::Cancelled => raw_progress.min(99),
     };
 
     Ok(UploadProgressSnapshot {
@@ -229,6 +267,23 @@ pub fn get_upload_progress(upload_id: String) -> Result<UploadProgressSnapshot, 
         total_bytes: task.total_bytes,
         error: task.error.clone(),
     })
+}
+
+#[tauri::command]
+pub fn cancel_upload_progress(upload_id: String) -> Result<(), String> {
+    let mut tasks = upload_tasks()
+        .lock()
+        .map_err(|_| "Failed to acquire upload task lock".to_string())?;
+    let task = tasks
+        .get_mut(&upload_id)
+        .ok_or_else(|| "Upload not found".to_string())?;
+
+    task.cancel_requested = true;
+    task.status = UploadTaskStatus::Cancelled;
+    if task.error.is_none() {
+        task.error = Some("Cancelled by user".to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -253,6 +308,10 @@ pub async fn upload_file_to_presigned_url(
             "completed" => {
                 let _ = clear_upload_progress(upload_id);
                 return Ok(());
+            }
+            "cancelled" => {
+                let _ = clear_upload_progress(upload_id);
+                return Err(snapshot.error.unwrap_or_else(|| "Upload cancelled".to_string()));
             }
             "failed" => {
                 let _ = clear_upload_progress(upload_id);

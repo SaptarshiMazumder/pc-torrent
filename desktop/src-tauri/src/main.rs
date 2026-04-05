@@ -40,6 +40,7 @@ fn main() {
             commands::run_preflight,
             commands::remove_image,
             commands::download_job_output_to_downloads,
+            commands::get_file_size,
             commands::find_blender,
             commands::prepare_blend_for_upload,
         ])

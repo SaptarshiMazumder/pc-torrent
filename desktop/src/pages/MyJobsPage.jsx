@@ -10,17 +10,27 @@ const STATUS_LABELS = {
   failed: "Failed",
 };
 
+function buildDownloadFolderName(jobFilename, id) {
+  const rawName = typeof jobFilename === "string" && jobFilename.trim()
+    ? jobFilename.trim()
+    : "render";
+  const baseName = rawName.replace(/\.[^/.]+$/, "");
+  const suffix = typeof id === "string" && id ? id.slice(0, 8) : "job";
+  return `render__${baseName}__${suffix}`;
+}
+
 export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
   const [downloadingId, setDownloadingId] = useState(null);
   const [downloadResults, setDownloadResults] = useState({});
 
-  const handleDownload = async (id, url) => {
+  const handleDownload = async (id, url, jobFilename) => {
     setDownloadResults((prev) => ({
       ...prev,
       [id]: { status: "loading", path: "", error: "", progress: "" },
     }));
     setDownloadingId(id);
     try {
+      const jobFolder = buildDownloadFolderName(jobFilename, id);
       // Fetch the list of presigned R2 URLs — no file data passes through the server
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
@@ -36,7 +46,10 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
           ...prev,
           [id]: { status: "loading", path: "", error: "", progress: `${i + 1} / ${files.length}` },
         }));
-        const result = await downloadJobOutputToDownloads(fileUrl);
+        const result = await downloadJobOutputToDownloads(fileUrl, {
+          jobFolder,
+          preferredFilename: filename,
+        });
         lastPath = result.path.replace(/[^\\/]+$/, ""); // folder path
       }
 
@@ -83,7 +96,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
                   downloadState={downloadState}
                   downloadingId={downloadingId}
                   onDownload={() =>
-                    handleDownload(id, renderGroupDownloadUrl(backendUrl, id))
+                    handleDownload(id, renderGroupDownloadUrl(backendUrl, id), job.filename)
                   }
                   onRemove={() => removeJob(id)}
                 />
@@ -98,7 +111,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl }) {
                 downloadState={downloadState}
                 downloadingId={downloadingId}
                 onDownload={() =>
-                  handleDownload(id, downloadUrl(backendUrl, id))
+                  handleDownload(id, downloadUrl(backendUrl, id), job.filename)
                 }
                 onRemove={() => removeJob(id)}
               />
@@ -192,8 +205,8 @@ function RenderGroupCard({ job, downloadState, downloadingId, onDownload, onRemo
               disabled={downloadingId === id}
             >
               {downloadingId === id
-                ? downloadResults[id]?.progress
-                  ? `Downloading... ${downloadResults[id].progress}`
+                ? downloadState?.progress
+                  ? `Downloading... ${downloadState.progress}`
                   : "Downloading..."
                 : "Download All"}
             </button>

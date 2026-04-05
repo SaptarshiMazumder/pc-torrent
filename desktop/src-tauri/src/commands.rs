@@ -33,6 +33,17 @@ fn downloads_dir() -> Result<PathBuf, String> {
     Err("Could not resolve the Downloads folder.".to_string())
 }
 
+#[tauri::command]
+pub fn get_file_size(file_path: String) -> Result<u64, String> {
+    let path = Path::new(&file_path);
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("Failed to read file metadata: {err}"))?;
+    if !metadata.is_file() {
+        return Err("Selected path is not a file.".to_string());
+    }
+    Ok(metadata.len())
+}
+
 fn sanitize_filename(name: &str) -> String {
     let raw = Path::new(name)
         .file_name()
@@ -46,6 +57,16 @@ fn sanitize_filename(name: &str) -> String {
             _ => ch,
         })
         .collect()
+}
+
+fn sanitize_path_component(name: &str, fallback: &str) -> String {
+    let sanitized = sanitize_filename(name);
+    let trimmed = sanitized.trim().trim_end_matches('.').trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn parse_download_filename(header: &str) -> Option<String> {
@@ -257,6 +278,8 @@ pub async fn remove_image(
 #[tauri::command]
 pub async fn download_job_output_to_downloads(
     url: String,
+    job_folder: Option<String>,
+    preferred_filename: Option<String>,
 ) -> Result<DownloadResult, String> {
     let client = reqwest::Client::new();
     let mut response = client
@@ -275,19 +298,28 @@ pub async fn download_job_output_to_downloads(
         });
     }
 
-    let filename = response
-        .headers()
-        .get(CONTENT_DISPOSITION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(parse_download_filename)
-        .or_else(|| filename_from_url(response.url().as_str()))
-        .unwrap_or_else(|| "download.bin".to_string());
+    let filename = preferred_filename
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| {
+            response
+                .headers()
+                .get(CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_download_filename)
+                .or_else(|| filename_from_url(response.url().as_str()))
+                .unwrap_or_else(|| "download.bin".to_string())
+        });
 
     let downloads = downloads_dir()?;
-    fs::create_dir_all(&downloads)
-        .map_err(|err| format!("Failed to create Downloads folder: {err}"))?;
+    let target_dir = if let Some(folder) = job_folder {
+        downloads.join(sanitize_path_component(&folder, "render_job"))
+    } else {
+        downloads
+    };
+    fs::create_dir_all(&target_dir)
+        .map_err(|err| format!("Failed to create destination folder: {err}"))?;
 
-    let file_path = unique_download_path(&downloads, &filename);
+    let file_path = unique_download_path(&target_dir, &filename);
     let mut file = File::create(&file_path)
         .map_err(|err| format!("Failed to create download file: {err}"))?;
 

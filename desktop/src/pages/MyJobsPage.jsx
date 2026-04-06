@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   cancelRenderGroup,
   getFirebaseToken,
@@ -16,6 +17,23 @@ const STATUS_LABELS = {
   cancelled: "Cancelled",
   failed: "Failed",
 };
+const TERMINAL_STATUSES = new Set(["done", "cancelled", "failed"]);
+
+function isTerminalStatus(status) {
+  return TERMINAL_STATUSES.has(status);
+}
+
+function terminalFallbackPct(status) {
+  if (status === "done") return 100;
+  if (status === "cancelled" || status === "failed") return 0;
+  return null;
+}
+
+function resolveJobFilename(job) {
+  if (typeof job?.filename === "string" && job.filename.trim()) return job.filename.trim();
+  if (typeof job?.input_filename === "string" && job.input_filename.trim()) return job.input_filename.trim();
+  return "Untitled";
+}
 
 function buildDownloadFolderName(jobFilename, id) {
   const rawName = typeof jobFilename === "string" && jobFilename.trim()
@@ -46,9 +64,9 @@ function jobKey(job) {
 }
 
 function buildAuthenticatedUrl(baseUrl, path, token, cacheBuster = null) {
-  if (!baseUrl) return "";
+  if (!baseUrl || !path) return "";
   const normalizedBase = String(baseUrl).trim().replace(/\/+$/, "");
-  const url = new URL(`${normalizedBase}${path}`);
+  const url = new URL(path, `${normalizedBase}/`);
   if (token) {
     url.searchParams.set("token", token);
   }
@@ -58,6 +76,10 @@ function buildAuthenticatedUrl(baseUrl, path, token, cacheBuster = null) {
   return url.toString();
 }
 
+function summarizeDownloadActions(actions) {
+  return `${actions.downloaded || 0} new, ${actions.overwritten || 0} updated, ${actions.skipped || 0} skipped`;
+}
+
 export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGroupCancelled }) {
   const [downloadingId, setDownloadingId] = useState(null);
   const [downloadResults, setDownloadResults] = useState({});
@@ -65,6 +87,8 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
   const [openFrameGalleries, setOpenFrameGalleries] = useState({});
   const [frameGalleries, setFrameGalleries] = useState({});
   const [authToken, setAuthToken] = useState("");
+  const [openingFrameKey, setOpeningFrameKey] = useState("");
+  const [frameViewer, setFrameViewer] = useState(null);
   const jobsRef = useRef(jobs);
 
   useEffect(() => {
@@ -101,7 +125,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
   const handleDownload = async (id, fetchOutputs, jobFilename) => {
     setDownloadResults((prev) => ({
       ...prev,
-      [id]: { status: "loading", path: "", error: "", progress: "" },
+      [id]: { status: "loading", path: "", error: "", progress: "", summary: "" },
     }));
     setDownloadingId(id);
     try {
@@ -109,31 +133,50 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
       // Fetch the list of presigned R2 URLs — no file data passes through the server
       const data = await fetchOutputs();
 
-      const files = data.files || [];
+      const files = Array.isArray(data?.files) ? data.files : [];
       if (files.length === 0) throw new Error("No output files found");
 
       let lastPath = "";
+      const stats = { downloaded: 0, overwritten: 0, skipped: 0 };
       for (let i = 0; i < files.length; i++) {
-        const { filename, url: fileUrl } = files[i];
+        const { filename, url: fileUrl, size_bytes: sizeBytes } = files[i];
         setDownloadResults((prev) => ({
           ...prev,
-          [id]: { status: "loading", path: "", error: "", progress: `${i + 1} / ${files.length}` },
+          [id]: {
+            status: "loading",
+            path: "",
+            error: "",
+            progress: `${i + 1} / ${files.length}`,
+            summary: summarizeDownloadActions(stats),
+          },
         }));
         const result = await downloadJobOutputToDownloads(fileUrl, {
           jobFolder,
           preferredFilename: filename,
+          expectedSizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
+          overwriteExisting: true,
         });
+        const action = String(result?.action || "downloaded");
+        if (action === "overwritten") stats.overwritten += 1;
+        else if (action === "skipped") stats.skipped += 1;
+        else stats.downloaded += 1;
         lastPath = result.path.replace(/[^\\/]+$/, ""); // folder path
       }
 
       setDownloadResults((prev) => ({
         ...prev,
-        [id]: { status: "done", path: lastPath || "Downloads", error: "", progress: "" },
+        [id]: {
+          status: "done",
+          path: lastPath || "Downloads",
+          error: "",
+          progress: "",
+          summary: summarizeDownloadActions(stats),
+        },
       }));
     } catch (error) {
       setDownloadResults((prev) => ({
         ...prev,
-        [id]: { status: "error", path: "", error: error.message || "Download failed.", progress: "" },
+        [id]: { status: "error", path: "", error: error.message || "Download failed.", progress: "", summary: "" },
       }));
     } finally {
       setDownloadingId(null);
@@ -182,7 +225,16 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
         const payload = job.group_id
           ? await getRenderGroupOutputs(backendUrl, id)
           : await getJobOutputs(backendUrl, id);
-        const files = Array.isArray(payload?.files) ? payload.files.slice().sort(outputSort) : [];
+        const files = Array.isArray(payload?.files)
+          ? payload.files
+              .map((file) => ({
+                ...file,
+                preview_url: file?.preview_path
+                  ? buildAuthenticatedUrl(backendUrl, file.preview_path, authToken, file.size_bytes ?? file.filename)
+                  : file?.url || "",
+              }))
+              .sort(outputSort)
+          : [];
         setFrameGalleries((prev) => ({
           ...prev,
           [id]: {
@@ -204,8 +256,51 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
         }));
       }
     },
-    [backendUrl]
+    [backendUrl, authToken]
   );
+
+  const handleOpenFrame = useCallback(async (job, file) => {
+    const id = jobKey(job);
+    if (!id || !file?.url || !file?.filename) return;
+    const fileKey = `${id}:${file.job_id || ""}:${file.filename}`;
+    const jobFolder = buildDownloadFolderName(resolveJobFilename(job), id);
+    setOpeningFrameKey(fileKey);
+    setFrameViewer({
+      title: file.filename,
+      loading: true,
+      error: "",
+      imageSrc: "",
+      localPath: "",
+      action: "",
+    });
+    try {
+      const result = await downloadJobOutputToDownloads(file.url, {
+        jobFolder,
+        preferredFilename: file.filename,
+        expectedSizeBytes: Number.isFinite(file.size_bytes) ? file.size_bytes : null,
+        overwriteExisting: true,
+      });
+      setFrameViewer({
+        title: file.filename,
+        loading: false,
+        error: "",
+        imageSrc: convertFileSrc(result.path),
+        localPath: result.path,
+        action: result?.action || "downloaded",
+      });
+    } catch (error) {
+      setFrameViewer({
+        title: file.filename,
+        loading: false,
+        error: error?.message || "Failed to load frame",
+        imageSrc: "",
+        localPath: "",
+        action: "",
+      });
+    } finally {
+      setOpeningFrameKey("");
+    }
+  }, []);
 
   const handleToggleFrameGallery = useCallback(
     (job) => {
@@ -264,7 +359,9 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
           {jobs.map((job) => {
             const isGroup = !!job.group_id;
             const id = isGroup ? job.group_id : job.job_id;
+            if (!id) return null;
             const downloadState = downloadResults[id];
+            const displayName = resolveJobFilename(job);
 
             if (isGroup) {
               return (
@@ -278,14 +375,18 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
                   authToken={authToken}
                   galleryOpen={!!openFrameGalleries[id]}
                   galleryState={frameGalleries[id]}
+                  openingFrameKey={openingFrameKey}
                   onDownload={() =>
-                    handleDownload(id, () => getRenderGroupOutputs(backendUrl, id), job.filename)
+                    handleDownload(id, () => getRenderGroupOutputs(backendUrl, id), displayName)
                   }
                   onCancel={() => {
                     void handleCancelRenderGroup(id);
                   }}
                   onToggleGallery={() => {
                     handleToggleFrameGallery(job);
+                  }}
+                  onOpenFrame={(file) => {
+                    void handleOpenFrame(job, file);
                   }}
                   onRemove={() => removeJob(id)}
                 />
@@ -303,17 +404,28 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
                 authToken={authToken}
                 galleryOpen={!!openFrameGalleries[id]}
                 galleryState={frameGalleries[id]}
+                openingFrameKey={openingFrameKey}
                 onDownload={() =>
-                  handleDownload(id, () => getJobOutputs(backendUrl, id), job.filename)
+                  handleDownload(id, () => getJobOutputs(backendUrl, id), displayName)
                 }
                 onToggleGallery={() => {
                   handleToggleFrameGallery(job);
+                }}
+                onOpenFrame={(file) => {
+                  void handleOpenFrame(job, file);
                 }}
                 onRemove={() => removeJob(id)}
               />
             );
           })}
         </div>
+      )}
+
+      {frameViewer && (
+        <FrameViewerModal
+          viewer={frameViewer}
+          onClose={() => setFrameViewer(null)}
+        />
       )}
     </div>
   );
@@ -328,18 +440,24 @@ function RenderGroupCard({
   authToken,
   galleryOpen,
   galleryState,
+  openingFrameKey,
   onDownload,
   onCancel,
   onToggleGallery,
+  onOpenFrame,
   onRemove,
 }) {
   const id = job.group_id;
-  const overallPct =
-    job.status === "done"
-      ? 100
-      : typeof job.overall_progress_pct === "number"
+  const isTerminal = isTerminalStatus(job.status);
+  const displayName = resolveJobFilename(job);
+  const rawOverallPct =
+    typeof job.overall_progress_pct === "number"
       ? Math.max(0, Math.min(100, job.overall_progress_pct))
       : null;
+  const overallPct = rawOverallPct !== null ? rawOverallPct : terminalFallbackPct(job.status);
+  const progressLabel = overallPct !== null ? `${Math.round(overallPct)}%` : "Working...";
+  const terminalStatusLabel =
+    isTerminal && job.status !== "done" ? ` · ${STATUS_LABELS[job.status] || job.status}` : "";
 
   const tasksDone = (job.tasks || []).filter((t) => t.status === "done").length;
   const taskCount = (job.tasks || []).length;
@@ -362,7 +480,7 @@ function RenderGroupCard({
           backendUrl,
           `/jobs/${latestTaskWithOutput.job_id}/output/${encodeURIComponent(
             latestTaskWithOutput.latest_output_file
-          )}`,
+          )}/preview`,
           authToken,
           availableOutputCount
         )
@@ -376,9 +494,9 @@ function RenderGroupCard({
     <div className="card rentee-job-card">
       <div className="rentee-job-header">
         <div className="rentee-job-info">
-          <div className="job-filename">{job.filename}</div>
+          <div className="job-filename">{displayName}</div>
           <div className="job-id">
-            {taskCount} machine{taskCount !== 1 ? "s" : ""} &middot; {id.slice(0, 8)}...
+            {taskCount} machine{taskCount !== 1 ? "s" : ""} &middot; {id ? `${id.slice(0, 8)}...` : "unknown"}
           </div>
         </div>
         <span className={`status-badge status-${job.status}`}>
@@ -398,7 +516,8 @@ function RenderGroupCard({
                 : "Analyzing..."}
             </span>
             <span>
-              {overallPct !== null ? `${Math.round(overallPct)}%` : "Working..."}
+              {progressLabel}
+              {terminalStatusLabel}
               {tasksDone > 0 && taskCount > 0 && (
                 <> &middot; {tasksDone}/{taskCount} machines done</>
               )}
@@ -447,6 +566,7 @@ function RenderGroupCard({
       {downloadState?.status === "done" && (
         <div className="rentee-job-success">
           Downloaded to <code>{downloadState.path}</code>
+          {downloadState?.summary ? <span>({downloadState.summary})</span> : null}
         </div>
       )}
       {downloadState?.status === "error" && (
@@ -502,6 +622,8 @@ function RenderGroupCard({
           files={galleryState?.files || []}
           loading={!!galleryState?.loading}
           error={galleryState?.error || ""}
+          openingFrameKey={openingFrameKey}
+          onOpenFrame={onOpenFrame}
         />
       )}
     </div>
@@ -516,22 +638,30 @@ function SingleJobCard({
   authToken,
   galleryOpen,
   galleryState,
+  openingFrameKey,
   onDownload,
   onToggleGallery,
+  onOpenFrame,
   onRemove,
 }) {
   const id = job.job_id;
+  const displayName = resolveJobFilename(job);
+  const isTerminal = isTerminalStatus(job.status);
   const totalFrames =
     typeof job.total_frames === "number" ? job.total_frames : null;
   const renderedFrames =
     typeof job.rendered_frames === "number" ? job.rendered_frames : 0;
-  const progressPct =
+  const rawProgressPct =
     typeof job.progress_pct === "number"
       ? Math.max(0, Math.min(100, job.progress_pct))
       : null;
+  const progressPct = rawProgressPct !== null ? rawProgressPct : terminalFallbackPct(job.status);
+  const progressLabel = progressPct !== null ? `${Math.round(progressPct)}%` : "Working...";
+  const terminalStatusLabel =
+    isTerminal && job.status !== "done" ? ` · ${STATUS_LABELS[job.status] || job.status}` : "";
   const hasTotalFrames = typeof totalFrames === "number" && totalFrames > 0;
   const showRenderProgress =
-    job.status === "running" || hasTotalFrames || renderedFrames > 0;
+    isTerminal || job.status === "running" || hasTotalFrames || renderedFrames > 0;
   const outputFiles = Array.isArray(job.output_files) ? job.output_files : [];
   const availableOutputCount =
     typeof job.output_files_count === "number" ? job.output_files_count : outputFiles.length;
@@ -541,7 +671,7 @@ function SingleJobCard({
     latestOutputFile && backendUrl
       ? buildAuthenticatedUrl(
           backendUrl,
-          `/jobs/${id}/output/${encodeURIComponent(latestOutputFile)}`,
+          `/jobs/${id}/output/${encodeURIComponent(latestOutputFile)}/preview`,
           authToken,
           availableOutputCount
         )
@@ -555,9 +685,9 @@ function SingleJobCard({
     <div className="card rentee-job-card">
       <div className="rentee-job-header">
         <div className="rentee-job-info">
-          <div className="job-filename">{job.filename}</div>
+          <div className="job-filename">{displayName}</div>
           <div className="job-id">
-            {job.machine_gpu} &middot; {id?.slice(0, 8)}...
+            {job.machine_gpu || "Unknown GPU"} &middot; {id ? `${id.slice(0, 8)}...` : "unknown"}
           </div>
         </div>
         <span className={`status-badge status-${job.status}`}>
@@ -578,10 +708,13 @@ function SingleJobCard({
             <span>
               {hasTotalFrames
                 ? `${Math.min(renderedFrames, totalFrames)} / ${totalFrames} frames rendered`
+                : isTerminal
+                ? "Render ended"
                 : "Preparing render..."}
             </span>
             <span>
-              {progressPct !== null ? `${Math.round(progressPct)}%` : "Working..."}
+              {progressLabel}
+              {terminalStatusLabel}
             </span>
           </div>
         </div>
@@ -638,6 +771,7 @@ function SingleJobCard({
       {downloadState?.status === "done" && (
         <div className="rentee-job-success">
           Downloaded to <code>{downloadState.path}</code>
+          {downloadState?.summary ? <span>({downloadState.summary})</span> : null}
         </div>
       )}
       {downloadState?.status === "error" && (
@@ -682,13 +816,15 @@ function SingleJobCard({
           files={galleryState?.files || []}
           loading={!!galleryState?.loading}
           error={galleryState?.error || ""}
+          openingFrameKey={openingFrameKey}
+          onOpenFrame={onOpenFrame}
         />
       )}
     </div>
   );
 }
 
-function FrameGalleryPanel({ id, files, loading, error }) {
+function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenFrame }) {
   return (
     <div className="job-frame-gallery">
       <div className="job-frame-gallery-head">
@@ -712,27 +848,143 @@ function FrameGalleryPanel({ id, files, loading, error }) {
         <div className="job-frame-grid">
           {files.map((file) => {
             const fileKey = `${id}:${file.job_id || ""}:${file.filename}`;
+            const isOpening = openingFrameKey === fileKey;
             return (
-              <a
+              <button
                 key={fileKey}
                 className="job-frame-tile"
-                href={file.url}
-                target="_blank"
-                rel="noreferrer"
+                type="button"
+                disabled={isOpening}
                 title={file.filename}
+                onClick={() => onOpenFrame(file)}
               >
                 <img
                   className="job-frame-thumb"
-                  src={file.url}
+                  src={file.preview_url || file.url}
                   alt={file.filename}
                   loading="lazy"
                 />
-                <span className="job-frame-name">{file.filename}</span>
-              </a>
+                <span className="job-frame-name">
+                  {isOpening ? "Caching full frame..." : file.filename}
+                </span>
+              </button>
             );
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+function FrameViewerModal({ viewer, onClose }) {
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const draggingRef = useRef(null);
+
+  useEffect(() => {
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+  }, [viewer?.imageSrc]);
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+      if (event.key === "0") {
+        setScale(1);
+        setOffset({ x: 0, y: 0 });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  const applyZoom = (nextValue) => {
+    setScale(Math.max(1, Math.min(8, nextValue)));
+  };
+
+  const onWheel = (event) => {
+    event.preventDefault();
+    applyZoom(scale + (event.deltaY > 0 ? -0.16 : 0.16));
+  };
+
+  const onMouseDown = (event) => {
+    if (viewer?.loading || viewer?.error) return;
+    draggingRef.current = { x: event.clientX, y: event.clientY };
+  };
+
+  const onMouseMove = (event) => {
+    if (!draggingRef.current) return;
+    const dx = event.clientX - draggingRef.current.x;
+    const dy = event.clientY - draggingRef.current.y;
+    draggingRef.current = { x: event.clientX, y: event.clientY };
+    setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+  };
+
+  const clearDrag = () => {
+    draggingRef.current = null;
+  };
+
+  return (
+    <div className="frame-viewer-modal" onClick={onClose}>
+      <div className="frame-viewer-card" onClick={(event) => event.stopPropagation()}>
+        <div className="frame-viewer-head">
+          <div>
+            <strong>{viewer?.title || "Frame"}</strong>
+            {viewer?.action ? (
+              <span className="frame-viewer-subtext"> ({viewer.action})</span>
+            ) : null}
+          </div>
+          <div className="frame-viewer-actions">
+            <button className="btn btn-secondary" type="button" onClick={() => applyZoom(scale - 0.2)}>-</button>
+            <button className="btn btn-secondary" type="button" onClick={() => applyZoom(scale + 0.2)}>+</button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => {
+                setScale(1);
+                setOffset({ x: 0, y: 0 });
+              }}
+            >
+              Reset
+            </button>
+            <button className="btn btn-secondary" type="button" onClick={onClose}>Close</button>
+          </div>
+        </div>
+
+        {viewer?.loading ? (
+          <div className="frame-viewer-status">Downloading full-resolution frame...</div>
+        ) : viewer?.error ? (
+          <div className="frame-viewer-status frame-viewer-error">{viewer.error}</div>
+        ) : (
+          <div
+            className="frame-viewer-canvas"
+            onWheel={onWheel}
+            onMouseDown={onMouseDown}
+            onMouseMove={onMouseMove}
+            onMouseUp={clearDrag}
+            onMouseLeave={clearDrag}
+          >
+            <img
+              className="frame-viewer-image"
+              src={viewer?.imageSrc || ""}
+              alt={viewer?.title || "Rendered frame"}
+              draggable={false}
+              style={{
+                transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+                cursor: scale > 1 ? "grab" : "default",
+              }}
+            />
+          </div>
+        )}
+
+        {viewer?.localPath ? (
+          <div className="frame-viewer-foot">
+            Saved at <code>{viewer.localPath}</code>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

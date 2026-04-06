@@ -45,10 +45,17 @@ export async function removeImage() {
 }
 
 export async function downloadJobOutputToDownloads(url, options = {}) {
-  const { jobFolder = null, preferredFilename = null } = options;
+  const {
+    jobFolder = null,
+    preferredFilename = null,
+    expectedSizeBytes = null,
+    overwriteExisting = true,
+  } = options;
   return invoke("download_job_output_to_downloads", {
     url,
     jobFolder,
     preferredFilename,
+    expectedSizeBytes,
+    overwriteExisting,
   });
 }

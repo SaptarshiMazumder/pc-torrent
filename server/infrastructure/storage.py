@@ -161,3 +161,15 @@ def file_exists(key: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def get_file_size(key: str) -> int | None:
+    """Return object size in bytes, or None when unavailable."""
+    try:
+        head = _get_client().head_object(Bucket=R2_BUCKET_NAME, Key=key)
+    except Exception:
+        return None
+    size = head.get("ContentLength")
+    if isinstance(size, int):
+        return size
+    return None

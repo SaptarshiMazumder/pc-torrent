@@ -1714,8 +1714,17 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  text-decoration: none;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
   color: inherit;
+  cursor: pointer;
+}
+
+.job-frame-tile:disabled {
+  cursor: progress;
+  opacity: 0.75;
 }
 
 .job-frame-thumb {
@@ -1734,6 +1743,95 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.frame-viewer-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(2, 6, 23, 0.86);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+.frame-viewer-card {
+  width: min(1040px, 100%);
+  height: min(90vh, 860px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card) 95%, black);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.frame-viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 88%, black);
+}
+
+.frame-viewer-subtext {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.frame-viewer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.frame-viewer-status {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+  padding: 14px;
+}
+
+.frame-viewer-error {
+  color: color-mix(in srgb, var(--danger) 80%, var(--text-primary));
+}
+
+.frame-viewer-canvas {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 30% 20%, rgba(30, 41, 59, 0.35), rgba(2, 6, 23, 0.6));
+}
+
+.frame-viewer-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  transform-origin: center center;
+  transition: transform 0.08s ease-out;
+}
+
+.frame-viewer-foot {
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.frame-viewer-foot code {
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  word-break: break-all;
 }
 
 .rentee-job-footer {
@@ -2122,6 +2220,21 @@ body {
 
 .login-form input:focus {
   border-color: var(--accent);
+}
+
+.login-remember {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.login-remember input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
 }
 
 .login-error {

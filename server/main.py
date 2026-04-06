@@ -7,6 +7,7 @@ import logging
 import math
 import re
 import threading
+import time
 import zipfile
 
 # Load .env before anything else reads os.environ
@@ -2004,8 +2005,10 @@ def confirm_render_group_upload(
             f"/render-groups/{group_id}/input/{group['input_filename']}"
         )
         overrides_b64 = base64.b64encode(overrides_json.encode()).decode()
-        for task in tasks:
+        for i, task in enumerate(tasks):
             if task.get("machine_id") and _machine_type_of(task["machine_id"]) == "runpod_serverless":
+                if i > 0:
+                    time.sleep(0.15)
                 try:
                     rp_job_id = runpod_dispatch.dispatch_and_save(
                         job_id=task["job_id"],

@@ -66,7 +66,7 @@ JOB_STATUS_POLL_INTERVAL_SEC = float(os.getenv("JOB_STATUS_POLL_INTERVAL_SEC", "
 # Timeout: job stuck IN_QUEUE (image pull / cold start). Healthy workers
 # start in seconds — anything beyond 60s means the worker node is bad.
 # We cancel and immediately respawn on the same endpoint (different node).
-IN_QUEUE_TIMEOUT_SEC = _env_float("IN_QUEUE_TIMEOUT_SEC", 60)
+IN_QUEUE_TIMEOUT_SEC = _env_float("IN_QUEUE_TIMEOUT_SEC", 120)
 
 # Timeout: job IN_PROGRESS but rendered_frames hasn't changed. Allows for
 # very long single frames (complex CYCLES scenes).

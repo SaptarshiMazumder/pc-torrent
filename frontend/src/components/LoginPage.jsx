@@ -2,16 +2,18 @@ import { useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 
 export default function LoginPage() {
-  const { signIn, signUp } = useAuth();
+  const { signIn, signUp, resetPassword } = useAuth();
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
+    setNotice("");
     setLoading(true);
     try {
       if (isSignUp) {
@@ -19,6 +21,26 @@ export default function LoginPage() {
       } else {
         await signIn(email, password);
       }
+    } catch (err) {
+      setError(friendlyError(err.code));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handlePasswordReset() {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setNotice("");
+      setError("Enter your email first, then click Forgot password.");
+      return;
+    }
+    setError("");
+    setNotice("");
+    setLoading(true);
+    try {
+      await resetPassword(trimmedEmail);
+      setNotice("Password reset link sent. Check your inbox and spam folder.");
     } catch (err) {
       setError(friendlyError(err.code));
     } finally {
@@ -38,6 +60,8 @@ export default function LoginPage() {
         return "Password must be at least 6 characters.";
       case "auth/invalid-email":
         return "Please enter a valid email address.";
+      case "auth/too-many-requests":
+        return "Too many attempts. Please wait a bit and try again.";
       default:
         return "Something went wrong. Please try again.";
     }
@@ -75,10 +99,24 @@ export default function LoginPage() {
             />
           </label>
 
+          {!isSignUp && (
+            <div className="login-helper">
+              <button
+                type="button"
+                className="btn-link"
+                onClick={handlePasswordReset}
+                disabled={loading}
+              >
+                Forgot password?
+              </button>
+            </div>
+          )}
+
           {error && <p className="login-error">{error}</p>}
+          {notice && <p className="login-success">{notice}</p>}
 
           <button type="submit" className="btn-primary" disabled={loading}>
-            {loading ? "Please wait…" : isSignUp ? "Create account" : "Sign in"}
+            {loading ? "Please wait..." : isSignUp ? "Create account" : "Sign in"}
           </button>
         </form>
 
@@ -86,7 +124,12 @@ export default function LoginPage() {
           {isSignUp ? "Already have an account?" : "Don't have an account?"}
           <button
             className="btn-link"
-            onClick={() => { setIsSignUp((v) => !v); setError(""); }}
+            type="button"
+            onClick={() => {
+              setIsSignUp((v) => !v);
+              setError("");
+              setNotice("");
+            }}
           >
             {isSignUp ? "Sign in" : "Sign up"}
           </button>

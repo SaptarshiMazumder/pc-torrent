@@ -1151,6 +1151,57 @@ body {
   gap: 14px;
 }
 
+.saved-files-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-primary) 88%, black);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.saved-files-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.saved-file-row {
+  border: 1px solid color-mix(in srgb, var(--border) 86%, black);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.saved-file-row.selected {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+}
+
+.saved-file-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.saved-file-sub {
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.saved-file-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .submit-file-row {
   display: flex;
   align-items: flex-start;
@@ -2078,6 +2129,15 @@ body {
   font-size: 0.82rem;
 }
 
+.login-success {
+  color: var(--success);
+  font-size: 0.82rem;
+}
+
+.login-helper {
+  margin-top: -0.25rem;
+}
+
 .login-toggle {
   margin-top: 1.25rem;
   font-size: 0.82rem;
@@ -2095,4 +2155,9 @@ body {
   cursor: pointer;
   padding: 0;
   text-decoration: underline;
+}
+
+.btn-link:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }

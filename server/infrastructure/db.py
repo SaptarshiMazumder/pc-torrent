@@ -240,5 +240,34 @@ def init_db():
 
                 ALTER TABLE machines ADD COLUMN IF NOT EXISTS user_id TEXT;
                 CREATE INDEX IF NOT EXISTS idx_machines_user_id ON machines(user_id);
+
+                CREATE TABLE IF NOT EXISTS user_input_files (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    input_filename TEXT NOT NULL,
+                    r2_key TEXT NOT NULL,
+                    frame_start INTEGER,
+                    frame_end INTEGER,
+                    frame_step INTEGER,
+                    analysis_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    render_overrides_json TEXT NOT NULL DEFAULT '{}',
+                    scheduling_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_user_input_files_user_r2_unique
+                ON user_input_files(user_id, r2_key);
+
+                CREATE INDEX IF NOT EXISTS idx_user_input_files_user_last_used
+                ON user_input_files(user_id, last_used_at DESC);
+
+                ALTER TABLE render_groups
+                ADD COLUMN IF NOT EXISTS source_asset_id TEXT;
+
+                CREATE INDEX IF NOT EXISTS idx_render_groups_source_asset_id
+                ON render_groups(source_asset_id);
                 """
             )

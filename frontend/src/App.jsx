@@ -7,6 +7,9 @@ import {
   getRenderGroup,
   renderGroupDownloadUrl,
   logsStreamUrl,
+  listInputFiles,
+  renameInputFile,
+  deleteInputFile,
 } from "./api";
 import { parseBlendFile } from "./lib/blend-parser";
 import { useAuth } from "./contexts/AuthContext";
@@ -194,6 +197,10 @@ function MachinesPage({ onContinue }) {
 // -----------------------------------------------
 function SubmitJobPage({ machines, onBack, onSubmitted }) {
   const [file, setFile] = useState(null);
+  const [savedInputs, setSavedInputs] = useState([]);
+  const [savedInputsLoading, setSavedInputsLoading] = useState(false);
+  const [savedInputsError, setSavedInputsError] = useState("");
+  const [selectedSavedInputId, setSelectedSavedInputId] = useState("");
   const [flowStage, setFlowStage] = useState("idle");
   const [analyzing, setAnalyzing] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -211,6 +218,44 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
   const powerScore = (m) =>
     (m.gpu_vram_gb || 0) * 4 + (m.cpu_cores || 0) + (m.ram_gb || 0) * 0.3;
   const totalPower = machines.reduce((s, m) => s + powerScore(m), 0);
+
+  const refreshSavedInputs = async () => {
+    setSavedInputsLoading(true);
+    setSavedInputsError("");
+    try {
+      const resp = await listInputFiles();
+      setSavedInputs(Array.isArray(resp?.files) ? resp.files : []);
+    } catch (err) {
+      setSavedInputsError(err.message || "Failed to load saved files");
+    } finally {
+      setSavedInputsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshSavedInputs();
+  }, []);
+
+  const applySavedInputPrefill = (asset) => {
+    const prefill = asset?.prefill_frame_range || null;
+    if (prefill) {
+      setFrameStart(String(prefill.frame_start));
+      setFrameEnd(String(prefill.frame_end));
+      setFrameStep(String(prefill.frame_step || 1));
+      setAnalysisResult({
+        frame_start: prefill.frame_start,
+        frame_end: prefill.frame_end,
+        frame_step: prefill.frame_step || 1,
+      });
+      setClientParseError("");
+    } else {
+      setFrameStart("");
+      setFrameEnd("");
+      setFrameStep("1");
+      setAnalysisResult(null);
+      setClientParseError("Saved file has no frame metadata. Enter frame range manually.");
+    }
+  };
 
   const parseManualFrameRange = () => {
     const fs = parseInt(frameStart, 10);
@@ -305,6 +350,65 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
     }
   };
 
+  const handleUseSavedInput = async () => {
+    if (!selectedSavedInputId) {
+      setError("Select a saved file first");
+      return;
+    }
+    setError(null);
+    setServerParseError("");
+    setStarting(true);
+    try {
+      const created = await createDistributedRenderGroup(
+        machines.map((m) => m.id),
+        null,
+        null,
+        selectedSavedInputId
+      );
+      setPendingGroupId(created.group_id || null);
+      applySavedInputPrefill(created.prefill || created.source_asset || null);
+      setFlowStage("uploaded");
+      setFile(null);
+      await refreshSavedInputs();
+    } catch (err) {
+      setError(err.message || "Failed to create render group from saved file");
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const handleRenameSavedInput = async (asset) => {
+    const initialName = asset?.display_name || asset?.input_filename || "";
+    const nextName = window.prompt("Rename saved file", initialName);
+    if (nextName === null) return;
+    const trimmed = nextName.trim();
+    if (!trimmed) {
+      setError("Name cannot be empty");
+      return;
+    }
+    try {
+      await renameInputFile(asset.id, trimmed);
+      await refreshSavedInputs();
+    } catch (err) {
+      setError(err.message || "Failed to rename saved file");
+    }
+  };
+
+  const handleDeleteSavedInput = async (asset) => {
+    const label = asset?.display_name || asset?.input_filename || "this file";
+    const ok = window.confirm(`Delete "${label}" from saved files?`);
+    if (!ok) return;
+    try {
+      await deleteInputFile(asset.id);
+      if (selectedSavedInputId === asset.id) {
+        setSelectedSavedInputId("");
+      }
+      await refreshSavedInputs();
+    } catch (err) {
+      setError(err.message || "Failed to delete saved file");
+    }
+  };
+
   const handleStartRendering = async () => {
     if (flowStage !== "uploaded") return;
     if (!pendingGroupId) {
@@ -312,14 +416,7 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
       return;
     }
 
-    const manualRange = parseManualFrameRange();
-    const frameRange = analysisResult
-      ? {
-          frame_start: analysisResult.frame_start,
-          frame_end: analysisResult.frame_end,
-          frame_step: analysisResult.frame_step || 1,
-        }
-      : manualRange;
+    const frameRange = parseManualFrameRange();
 
     if (!frameRange) {
       setError("Enter a valid manual frame range before starting render");
@@ -349,6 +446,7 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
       }
 
       setFlowStage("submitted");
+      await refreshSavedInputs();
       onSubmitted(result.group_id, result);
     } catch (err) {
       setError(err.message || "Failed to start render");
@@ -360,11 +458,19 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
 
   const handleFileChange = (event) => {
     setFile(event.target.files[0] || null);
+    setSelectedSavedInputId("");
     resetFlowForInputChange();
   };
 
   const canUpload = flowStage === "analyzed" && !analyzing && !uploading && !starting;
   const manualRangeValid = parseManualFrameRange() !== null;
+  const selectedSavedInput = savedInputs.find((asset) => asset.id === selectedSavedInputId) || null;
+  const canUseSaved =
+    !analyzing &&
+    !uploading &&
+    !starting &&
+    flowStage !== "starting" &&
+    !!selectedSavedInputId;
   const canStart =
     flowStage === "uploaded" &&
     !analyzing &&
@@ -416,6 +522,52 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
       <MachineSummary />
 
       <div className="submit-form">
+        <div className="saved-inputs-panel">
+          <div className="saved-inputs-head">
+            <strong>Saved Files</strong>
+            <button className="btn-secondary" type="button" onClick={refreshSavedInputs} disabled={savedInputsLoading || analyzing || uploading || starting}>
+              {savedInputsLoading ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+          {savedInputsError && <p className="error">{savedInputsError}</p>}
+          {savedInputsLoading && <p className="status">Loading saved files...</p>}
+          {!savedInputsLoading && savedInputs.length === 0 && (
+            <p className="status">No saved files yet. Upload and start one render to save it.</p>
+          )}
+          {savedInputs.map((asset) => (
+            <div key={asset.id} className={`saved-input-row ${selectedSavedInputId === asset.id ? "selected" : ""}`}>
+              <label className="saved-input-select">
+                <input
+                  type="radio"
+                  name="saved-input"
+                  checked={selectedSavedInputId === asset.id}
+                  onChange={() => setSelectedSavedInputId(asset.id)}
+                />
+                <span>
+                  {asset.display_name || asset.input_filename}
+                  <small> ({asset.input_filename})</small>
+                </span>
+              </label>
+              <div className="saved-input-actions">
+                <button className="btn-secondary" type="button" onClick={() => handleRenameSavedInput(asset)} disabled={analyzing || uploading || starting}>
+                  Rename
+                </button>
+                <button className="btn-secondary" type="button" onClick={() => handleDeleteSavedInput(asset)} disabled={analyzing || uploading || starting}>
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+          <button className="btn-primary" type="button" onClick={handleUseSavedInput} disabled={!canUseSaved}>
+            {starting ? "Preparing..." : "Use Saved File"}
+          </button>
+          {selectedSavedInput && (
+            <p className="status" style={{ paddingTop: 0 }}>
+              Selected: {selectedSavedInput.display_name || selectedSavedInput.input_filename}
+            </p>
+          )}
+        </div>
+
         <label>
           Project File (.blend or .zip)
           <input
@@ -488,7 +640,7 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
           </div>
         )}
 
-        {flowStage !== "idle" && !analysisResult && (
+        {flowStage !== "idle" && (
           <>
             <label>
               Start Frame

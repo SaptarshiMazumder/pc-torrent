@@ -179,6 +179,55 @@ header h1 {
   color: #666;
 }
 
+.saved-inputs-panel {
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: #141414;
+  padding: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.saved-inputs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.saved-input-row {
+  border: 1px solid #262626;
+  border-radius: 8px;
+  padding: 0.55rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.saved-input-row.selected {
+  border-color: #3b82f6;
+}
+
+.saved-input-select {
+  margin: 0;
+  color: #ccc;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.saved-input-select small {
+  color: #777;
+}
+
+.saved-input-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 /* Job card */
 .job-card {
   background: #141414;
@@ -513,6 +562,15 @@ header h1 {
   font-size: 0.82rem;
 }
 
+.login-success {
+  color: #65c466;
+  font-size: 0.82rem;
+}
+
+.login-helper {
+  margin-top: -0.25rem;
+}
+
 .login-toggle {
   margin-top: 1.25rem;
   font-size: 0.82rem;
@@ -530,6 +588,11 @@ header h1 {
   cursor: pointer;
   padding: 0;
   text-decoration: underline;
+}
+
+.btn-link:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 h2 { font-size: 1.1rem; font-weight: 600; color: #ddd; margin-bottom: 1rem; }

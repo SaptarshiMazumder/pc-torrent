@@ -255,6 +255,24 @@ export async function getMe() {
   return apiFetch("/me");
 }
 
+export async function listInputFiles() {
+  return apiFetch("/me/input-files");
+}
+
+export async function renameInputFile(assetId, displayName) {
+  return apiFetch(`/me/input-files/${assetId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ display_name: displayName }),
+  });
+}
+
+export async function deleteInputFile(assetId) {
+  return apiFetch(`/me/input-files/${assetId}`, {
+    method: "DELETE",
+  });
+}
+
 export async function updateMe(fields) {
   return apiFetch("/me", {
     method: "PUT",
@@ -312,15 +330,25 @@ export function downloadUrl(jobId) {
   return `${BASE}/jobs/${jobId}/download`;
 }
 
-export async function createDistributedRenderGroup(machineIds, filename, fileSizeBytes = null) {
+export async function createDistributedRenderGroup(
+  machineIds,
+  filename = null,
+  fileSizeBytes = null,
+  sourceAssetId = null
+) {
+  const body = {
+    machine_ids: machineIds,
+  };
+  if (sourceAssetId) {
+    body.source_asset_id = sourceAssetId;
+  } else {
+    body.filename = filename;
+    body.file_size_bytes = fileSizeBytes;
+  }
   return apiFetch("/render-groups/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      machine_ids: machineIds,
-      filename,
-      file_size_bytes: fileSizeBytes,
-    }),
+    body: JSON.stringify(body),
   });
 }
 

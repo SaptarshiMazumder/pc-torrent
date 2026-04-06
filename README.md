@@ -54,24 +54,46 @@ python agent.py
 
 ## Agent env vars
 
-| Variable       | Default                                                        | Description |
-|----------------|----------------------------------------------------------------|-------------|
-| `BACKEND_URL`  | `http://localhost:8000`                                        | API server URL |
-| `BLENDER_PATH` | `C:\Program Files\Blender Foundation\Blender 4.5\blender.exe` | Blender executable path |
-| `USE_SANDBOX`  | `false`                                                        | Set `true` to use Windows Sandbox |
-| `MOCK_MODE`    | `false`                                                        | Set `true` to simulate renders without Blender |
+| Variable       | Default                                                       | Description                                    |
+| -------------- | ------------------------------------------------------------- | ---------------------------------------------- |
+| `BACKEND_URL`  | `http://localhost:8000`                                       | API server URL                                 |
+| `BLENDER_PATH` | `C:\Program Files\Blender Foundation\Blender 4.5\blender.exe` | Blender executable path                        |
+| `USE_SANDBOX`  | `false`                                                       | Set `true` to use Windows Sandbox              |
+| `MOCK_MODE`    | `false`                                                       | Set `true` to simulate renders without Blender |
+
+## RunPod Worker (GHCR)
+
+The serverless worker image lives at `ghcr.io/saptarshimazumder/pcrent-worker`.
+
+### First-time setup
+
+```bash
+# Authenticate with GHCR using a GitHub PAT (write:packages scope)
+echo YOUR_GITHUB_PAT | docker login ghcr.io -u SaptarshiMazumder --password-stdin
+```
+
+After pushing, go to `github.com/SaptarshiMazumder` → **Packages** → `pcrent-worker` → **Package settings** → **Change visibility** → **Public** (one-time only).
+
+### Build and push a new version
+
+```bash
+docker build -t ghcr.io/saptarshimazumder/pcrent-worker:2.0x -f runpod_worker/Dockerfile .
+docker push ghcr.io/saptarshimazumder/pcrent-worker:2.0x
+```
+
+Then update the container image tag in your RunPod endpoint settings to match.
 
 ## API Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/machines/register` | Agent registers machine |
-| PUT | `/machines/{id}/available` | Mark machine as ready |
-| PUT | `/machines/{id}/idle` | Mark machine as offline |
-| GET | `/machines` | List available machines |
-| POST | `/jobs` | Submit render job (multipart: `machine_id` + `blender_file`) |
-| GET | `/jobs/{id}` | Get job status |
-| GET | `/jobs/{id}/download` | Download rendered output |
-| GET | `/jobs/next-for-machine/{id}` | Agent polls for next job |
-| PUT | `/jobs/{id}/status` | Agent updates job status |
-| POST | `/jobs/{id}/output` | Agent uploads output files |
+| Method | Path                          | Description                                                  |
+| ------ | ----------------------------- | ------------------------------------------------------------ |
+| POST   | `/machines/register`          | Agent registers machine                                      |
+| PUT    | `/machines/{id}/available`    | Mark machine as ready                                        |
+| PUT    | `/machines/{id}/idle`         | Mark machine as offline                                      |
+| GET    | `/machines`                   | List available machines                                      |
+| POST   | `/jobs`                       | Submit render job (multipart: `machine_id` + `blender_file`) |
+| GET    | `/jobs/{id}`                  | Get job status                                               |
+| GET    | `/jobs/{id}/download`         | Download rendered output                                     |
+| GET    | `/jobs/next-for-machine/{id}` | Agent polls for next job                                     |
+| PUT    | `/jobs/{id}/status`           | Agent updates job status                                     |
+| POST   | `/jobs/{id}/output`           | Agent uploads output files                                   |

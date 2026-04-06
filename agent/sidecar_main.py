@@ -149,11 +149,15 @@ def handle_command(cmd):
 
     elif action == "connect":
         backend_url = cmd.get("backend_url", "")
+        firebase_token = cmd.get("firebase_token", "")
+        cfg = load_config()
         if backend_url:
             os.environ["BACKEND_URL"] = backend_url
-            cfg = load_config()
             cfg["backend_url"] = backend_url
-            save_config(cfg)
+        if firebase_token:
+            import agent as _agent_mod
+            _agent_mod.FIREBASE_TOKEN = firebase_token
+        save_config(cfg)
 
         preflight_running, connect_running = _get_flags()
         runtime = get_runtime_state()

@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cancelRenderGroup, jobOutputsUrl, renderGroupOutputsUrl } from "../lib/api";
+import {
+  cancelRenderGroup,
+  getFirebaseToken,
+  getRenderGroupOutputs,
+  getJobOutputs,
+} from "../lib/api";
 import { downloadJobOutputToDownloads } from "../lib/sidecar";
 import SegmentedProgressBar from "../components/SegmentedProgressBar";
 
@@ -40,19 +45,60 @@ function jobKey(job) {
   return job?.group_id || job?.job_id || "";
 }
 
+function buildAuthenticatedUrl(baseUrl, path, token, cacheBuster = null) {
+  if (!baseUrl) return "";
+  const normalizedBase = String(baseUrl).trim().replace(/\/+$/, "");
+  const url = new URL(`${normalizedBase}${path}`);
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  if (cacheBuster !== null && cacheBuster !== undefined) {
+    url.searchParams.set("v", String(cacheBuster));
+  }
+  return url.toString();
+}
+
 export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGroupCancelled }) {
   const [downloadingId, setDownloadingId] = useState(null);
   const [downloadResults, setDownloadResults] = useState({});
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [openFrameGalleries, setOpenFrameGalleries] = useState({});
   const [frameGalleries, setFrameGalleries] = useState({});
+  const [authToken, setAuthToken] = useState("");
   const jobsRef = useRef(jobs);
 
   useEffect(() => {
     jobsRef.current = jobs;
   }, [jobs]);
 
-  const handleDownload = async (id, url, jobFilename) => {
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshToken = async () => {
+      try {
+        const token = await getFirebaseToken();
+        if (!cancelled) {
+          setAuthToken(token || "");
+        }
+      } catch {
+        if (!cancelled) {
+          setAuthToken("");
+        }
+      }
+    };
+
+    void refreshToken();
+    const timer = setInterval(() => {
+      void refreshToken();
+    }, 10 * 60 * 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const handleDownload = async (id, fetchOutputs, jobFilename) => {
     setDownloadResults((prev) => ({
       ...prev,
       [id]: { status: "loading", path: "", error: "", progress: "" },
@@ -61,9 +107,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
     try {
       const jobFolder = buildDownloadFolderName(jobFilename, id);
       // Fetch the list of presigned R2 URLs — no file data passes through the server
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-      const data = await resp.json();
+      const data = await fetchOutputs();
 
       const files = data.files || [];
       if (files.length === 0) throw new Error("No output files found");
@@ -122,10 +166,6 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
       const id = jobKey(job);
       if (!id) return;
 
-      const endpoint = job.group_id
-        ? renderGroupOutputsUrl(backendUrl, id)
-        : jobOutputsUrl(backendUrl, id);
-
       if (!silent) {
         setFrameGalleries((prev) => ({
           ...prev,
@@ -139,11 +179,9 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
       }
 
       try {
-        const resp = await fetch(endpoint);
-        if (!resp.ok) {
-          throw new Error(`Could not load frames (${resp.status})`);
-        }
-        const payload = await resp.json();
+        const payload = job.group_id
+          ? await getRenderGroupOutputs(backendUrl, id)
+          : await getJobOutputs(backendUrl, id);
         const files = Array.isArray(payload?.files) ? payload.files.slice().sort(outputSort) : [];
         setFrameGalleries((prev) => ({
           ...prev,
@@ -237,10 +275,11 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
                   downloadState={downloadState}
                   downloadingId={downloadingId}
                   canceling={!!cancelingGroupIds[id]}
+                  authToken={authToken}
                   galleryOpen={!!openFrameGalleries[id]}
                   galleryState={frameGalleries[id]}
                   onDownload={() =>
-                    handleDownload(id, renderGroupOutputsUrl(backendUrl, id), job.filename)
+                    handleDownload(id, () => getRenderGroupOutputs(backendUrl, id), job.filename)
                   }
                   onCancel={() => {
                     void handleCancelRenderGroup(id);
@@ -261,10 +300,11 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
                 backendUrl={backendUrl}
                 downloadState={downloadState}
                 downloadingId={downloadingId}
+                authToken={authToken}
                 galleryOpen={!!openFrameGalleries[id]}
                 galleryState={frameGalleries[id]}
                 onDownload={() =>
-                  handleDownload(id, jobOutputsUrl(backendUrl, id), job.filename)
+                  handleDownload(id, () => getJobOutputs(backendUrl, id), job.filename)
                 }
                 onToggleGallery={() => {
                   handleToggleFrameGallery(job);
@@ -285,6 +325,7 @@ function RenderGroupCard({
   downloadState,
   downloadingId,
   canceling,
+  authToken,
   galleryOpen,
   galleryState,
   onDownload,
@@ -317,9 +358,14 @@ function RenderGroupCard({
   }, null);
   const latestPreviewUrl =
     latestTaskWithOutput && latestTaskWithOutput.latest_output_file
-      ? `${backendUrl}/jobs/${latestTaskWithOutput.job_id}/output/${encodeURIComponent(
-          latestTaskWithOutput.latest_output_file
-        )}?v=${availableOutputCount}`
+      ? buildAuthenticatedUrl(
+          backendUrl,
+          `/jobs/${latestTaskWithOutput.job_id}/output/${encodeURIComponent(
+            latestTaskWithOutput.latest_output_file
+          )}`,
+          authToken,
+          availableOutputCount
+        )
       : "";
   const canDownloadAvailable = availableOutputCount > 0;
   const isDownloading = downloadingId === id;
@@ -467,6 +513,7 @@ function SingleJobCard({
   backendUrl,
   downloadState,
   downloadingId,
+  authToken,
   galleryOpen,
   galleryState,
   onDownload,
@@ -492,7 +539,12 @@ function SingleJobCard({
     job.latest_output_file || outputFiles.slice().sort((a, b) => frameIndexFromFilename(a) - frameIndexFromFilename(b)).pop() || "";
   const latestPreviewUrl =
     latestOutputFile && backendUrl
-      ? `${backendUrl}/jobs/${id}/output/${encodeURIComponent(latestOutputFile)}?v=${availableOutputCount}`
+      ? buildAuthenticatedUrl(
+          backendUrl,
+          `/jobs/${id}/output/${encodeURIComponent(latestOutputFile)}`,
+          authToken,
+          availableOutputCount
+        )
       : "";
   const visibleOutputFiles = outputFiles.slice(0, 12);
   const hiddenOutputCount = Math.max(0, outputFiles.length - visibleOutputFiles.length);
@@ -505,7 +557,7 @@ function SingleJobCard({
         <div className="rentee-job-info">
           <div className="job-filename">{job.filename}</div>
           <div className="job-id">
-            {job.machine_gpu} &middot; {id.slice(0, 8)}...
+            {job.machine_gpu} &middot; {id?.slice(0, 8)}...
           </div>
         </div>
         <span className={`status-badge status-${job.status}`}>

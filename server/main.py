@@ -487,6 +487,129 @@ def job_input_r2_key(job: dict[str, Any]) -> str:
     return f"jobs/{job['id']}/input/{job['input_filename']}"
 
 
+def serialize_input_file_asset(row: dict[str, Any]) -> dict[str, Any]:
+    frame_start = row.get("frame_start")
+    frame_end = row.get("frame_end")
+    frame_step = row.get("frame_step")
+    prefill_frame_range = None
+    if frame_start is not None and frame_end is not None:
+        prefill_frame_range = {
+            "frame_start": int(frame_start),
+            "frame_end": int(frame_end),
+            "frame_step": int(frame_step or 1),
+        }
+
+    analysis_snapshot = parse_json_object(row.get("analysis_snapshot_json"), {})
+    render_overrides = normalize_render_overrides(
+        parse_json_object(row.get("render_overrides_json"), {})
+    )
+    scheduling = normalize_scheduling(parse_json_object(row.get("scheduling_json"), {}))
+
+    return {
+        "id": row["id"],
+        "display_name": row.get("display_name") or row.get("input_filename"),
+        "input_filename": row.get("input_filename"),
+        "r2_key": row.get("r2_key"),
+        "frame_start": frame_start,
+        "frame_end": frame_end,
+        "frame_step": frame_step,
+        "analysis_snapshot": analysis_snapshot,
+        "render_overrides": render_overrides,
+        "scheduling": scheduling,
+        "prefill_frame_range": prefill_frame_range,
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "last_used_at": row.get("last_used_at"),
+    }
+
+
+def upsert_user_input_file(
+    *,
+    user_id: str,
+    input_filename: str,
+    r2_key: str,
+    frame_start: int | None = None,
+    frame_end: int | None = None,
+    frame_step: int | None = None,
+    analysis_snapshot: dict[str, Any] | None = None,
+    render_overrides: dict[str, Any] | None = None,
+    scheduling: dict[str, Any] | None = None,
+    used_at: str | None = None,
+) -> None:
+    ts = used_at or now_iso()
+    execute(
+        """
+        INSERT INTO user_input_files (
+            id, user_id, display_name, input_filename, r2_key,
+            frame_start, frame_end, frame_step,
+            analysis_snapshot_json, render_overrides_json, scheduling_json,
+            created_at, updated_at, last_used_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (user_id, r2_key) DO UPDATE
+        SET input_filename = EXCLUDED.input_filename,
+            frame_start = EXCLUDED.frame_start,
+            frame_end = EXCLUDED.frame_end,
+            frame_step = EXCLUDED.frame_step,
+            analysis_snapshot_json = EXCLUDED.analysis_snapshot_json,
+            render_overrides_json = EXCLUDED.render_overrides_json,
+            scheduling_json = EXCLUDED.scheduling_json,
+            updated_at = EXCLUDED.updated_at,
+            last_used_at = EXCLUDED.last_used_at
+        """,
+        (
+            str(uuid4()),
+            user_id,
+            input_filename,
+            input_filename,
+            r2_key,
+            frame_start,
+            frame_end,
+            frame_step,
+            json.dumps(analysis_snapshot or {}),
+            json.dumps(render_overrides or {}),
+            json.dumps(scheduling or {}),
+            ts,
+            ts,
+            ts,
+        ),
+    )
+
+
+def backfill_user_input_files(user_id: str) -> None:
+    groups = query_all(
+        """
+        SELECT input_filename, r2_input_key, frame_start, frame_end, frame_step,
+               analysis_snapshot_json, render_overrides_json, scheduling_json, submitted_at
+        FROM render_groups
+        WHERE user_id = %s
+          AND status != 'uploading'
+          AND r2_input_key IS NOT NULL
+          AND r2_input_key != ''
+        ORDER BY submitted_at DESC
+        """,
+        (user_id,),
+    )
+    for group in groups:
+        upsert_user_input_file(
+            user_id=user_id,
+            input_filename=group.get("input_filename") or "input.blend",
+            r2_key=group.get("r2_input_key") or "",
+            frame_start=group.get("frame_start"),
+            frame_end=group.get("frame_end"),
+            frame_step=group.get("frame_step"),
+            analysis_snapshot=parse_json_object(group.get("analysis_snapshot_json"), {}),
+            render_overrides=parse_json_object(group.get("render_overrides_json"), {}),
+            scheduling=parse_json_object(group.get("scheduling_json"), {}),
+            used_at=group.get("submitted_at") or now_iso(),
+        )
+
+
+def ensure_render_group_owner(group: dict[str, Any], current_user: dict) -> None:
+    if not group.get("user_id") or group["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
 # -----------------------------------------------
 # Health
 # -----------------------------------------------
@@ -502,6 +625,10 @@ class UpdateProfilePayload(BaseModel):
     display_name: str | None = None
     avatar_url: str | None = None
     billing_plan: str | None = None
+
+
+class UpdateInputFilePayload(BaseModel):
+    display_name: str
 
 
 @app.get("/me")
@@ -521,6 +648,92 @@ def update_me(payload: UpdateProfilePayload, current_user: dict = Depends(get_cu
     update_user_profile(current_user["uid"], updates)
     profile = get_user_profile(current_user["uid"]) or {}
     return {"uid": current_user["uid"], **profile}
+
+
+@app.get("/me/input-files")
+def list_my_input_files(current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    user_id = current_user["uid"]
+    backfill_user_input_files(user_id)
+    rows = query_all(
+        """
+        SELECT *
+        FROM user_input_files
+        WHERE user_id = %s
+        ORDER BY last_used_at DESC, created_at DESC
+        """,
+        (user_id,),
+    )
+    files = [serialize_input_file_asset(row) for row in rows]
+    return {"files": files, "count": len(files)}
+
+
+@app.patch("/me/input-files/{asset_id}")
+def rename_input_file(
+    asset_id: str,
+    payload: UpdateInputFilePayload,
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    asset = query_one(
+        "SELECT * FROM user_input_files WHERE id = %s AND user_id = %s",
+        (asset_id, current_user["uid"]),
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Saved input file not found")
+
+    display_name = (payload.display_name or "").strip()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="display_name cannot be empty")
+    if len(display_name) > 255:
+        raise HTTPException(status_code=400, detail="display_name is too long (max 255 chars)")
+
+    execute(
+        "UPDATE user_input_files SET display_name = %s, updated_at = %s WHERE id = %s",
+        (display_name, now_iso(), asset_id),
+    )
+    updated = query_one(
+        "SELECT * FROM user_input_files WHERE id = %s AND user_id = %s",
+        (asset_id, current_user["uid"]),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Saved input file not found")
+    return serialize_input_file_asset(updated)
+
+
+@app.delete("/me/input-files/{asset_id}")
+def delete_input_file(asset_id: str, current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    asset = query_one(
+        "SELECT * FROM user_input_files WHERE id = %s AND user_id = %s",
+        (asset_id, current_user["uid"]),
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Saved input file not found")
+
+    active_ref = query_one(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM render_groups
+        WHERE r2_input_key = %s
+          AND user_id = %s
+          AND status IN ('uploading', 'pending', 'running')
+        """,
+        (asset["r2_key"], current_user["uid"]),
+    )
+    if (active_ref or {}).get("cnt", 0) > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete while a render group is still uploading or rendering",
+        )
+
+    try:
+        storage.delete_file(asset["r2_key"])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete input file from storage: {exc}")
+
+    execute(
+        "DELETE FROM user_input_files WHERE id = %s AND user_id = %s",
+        (asset_id, current_user["uid"]),
+    )
+    return {"success": True, "deleted_id": asset_id}
 
 
 # -----------------------------------------------
@@ -1146,11 +1359,20 @@ def download_job_input_file(job_id: str, filename: str):
 @app.get("/render-groups/{group_id}/input/{filename}")
 def download_render_group_input_file(group_id: str, filename: str):
     """Serve input file for render group jobs (shared across all tasks)."""
+    group = query_one(
+        "SELECT input_filename, r2_input_key FROM render_groups WHERE id = %s",
+        (group_id,),
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
     safe_name = sanitize_filename(filename)
-    r2_key = f"jobs/{group_id}/input/{safe_name}"
+    canonical_name = sanitize_filename(group.get("input_filename") or safe_name)
+    if safe_name != canonical_name:
+        raise HTTPException(status_code=404, detail="File not found")
+    r2_key = group.get("r2_input_key") or f"jobs/{group_id}/input/{canonical_name}"
     if not storage.file_exists(r2_key):
         raise HTTPException(status_code=404, detail="File not found")
-    url = storage.generate_presigned_url(r2_key, download_name=safe_name)
+    url = storage.generate_presigned_url(r2_key, download_name=canonical_name)
     return RedirectResponse(url=url)
 
 
@@ -1633,8 +1855,9 @@ def _machine_type_of(machine_id: str) -> str:
 
 class CreateRenderGroupPayload(BaseModel):
     machine_ids: list[str]
-    filename: str
+    filename: str | None = None
     file_size_bytes: int | None = None
+    source_asset_id: str | None = None
 
 
 @app.post("/render-groups/create")
@@ -1642,14 +1865,6 @@ def create_render_group(payload: CreateRenderGroupPayload, current_user: dict = 
     """Create a render group for distributed rendering across multiple machines."""
     if not payload.machine_ids:
         raise HTTPException(status_code=400, detail="At least one machine required")
-
-    input_filename = sanitize_filename(payload.filename)
-    validate_job_input_filename(input_filename)
-    file_size_bytes = None
-    multipart_required = False
-    if payload.file_size_bytes is not None:
-        file_size_bytes = validate_upload_size(payload.file_size_bytes)
-        multipart_required = file_size_bytes > SINGLE_PUT_MAX_BYTES
 
     # Validate all machines exist and are available
     for mid in payload.machine_ids:
@@ -1664,23 +1879,66 @@ def create_render_group(payload: CreateRenderGroupPayload, current_user: dict = 
             )
 
     group_id = str(uuid4())
-    r2_key = f"jobs/{group_id}/input/{input_filename}"
-    upload_url = storage.generate_presigned_upload_url(r2_key)
+    source_asset = None
+    source_asset_id = None
+    upload_required = payload.source_asset_id is None
+    upload_url = None
+    file_size_bytes = None
+    multipart_required = False
+
+    if payload.source_asset_id:
+        source_asset = query_one(
+            "SELECT * FROM user_input_files WHERE id = %s AND user_id = %s",
+            (payload.source_asset_id, current_user["uid"]),
+        )
+        if not source_asset:
+            raise HTTPException(status_code=404, detail="Saved input file not found")
+        input_filename = sanitize_filename(source_asset["input_filename"])
+        validate_job_input_filename(input_filename)
+        r2_key = source_asset["r2_key"]
+        if not r2_key:
+            raise HTTPException(status_code=400, detail="Saved input file has no storage key")
+        if not storage.file_exists(r2_key):
+            raise HTTPException(status_code=400, detail="Saved input file is missing from storage")
+        source_asset_id = source_asset["id"]
+        status = "pending"
+    else:
+        if not payload.filename:
+            raise HTTPException(status_code=400, detail="filename is required when source_asset_id is not provided")
+        input_filename = sanitize_filename(payload.filename)
+        validate_job_input_filename(input_filename)
+        if payload.file_size_bytes is not None:
+            file_size_bytes = validate_upload_size(payload.file_size_bytes)
+            multipart_required = file_size_bytes > SINGLE_PUT_MAX_BYTES
+        r2_key = f"jobs/{group_id}/input/{input_filename}"
+        upload_url = storage.generate_presigned_upload_url(r2_key)
+        status = "uploading"
 
     execute(
         """
         INSERT INTO render_groups (id, input_filename, r2_input_key, total_frames,
-                                    frame_start, frame_end, frame_step, status, submitted_at, user_id)
-        VALUES (%s, %s, %s, 0, 1, 1, 1, 'uploading', %s, %s)
+                                    frame_start, frame_end, frame_step, status, submitted_at, user_id, source_asset_id)
+        VALUES (%s, %s, %s, 0, 1, 1, 1, %s, %s, %s, %s)
         """,
-        (group_id, input_filename, r2_key, now_iso(), current_user["uid"]),
+        (group_id, input_filename, r2_key, status, now_iso(), current_user["uid"], source_asset_id),
     )
+
+    if source_asset:
+        execute(
+            "UPDATE user_input_files SET last_used_at = %s, updated_at = %s WHERE id = %s AND user_id = %s",
+            (now_iso(), now_iso(), source_asset["id"], current_user["uid"]),
+        )
+
+    source_asset_payload = serialize_input_file_asset(source_asset) if source_asset else None
 
     return {
         "group_id": group_id,
         "upload_url": upload_url,
         "r2_key": r2_key,
         "machine_ids": payload.machine_ids,
+        "upload_required": upload_required,
+        "source_asset": source_asset_payload,
+        "prefill": source_asset_payload,
         "max_upload_bytes": MAX_UPLOAD_BYTES,
         "single_put_max_bytes": SINGLE_PUT_MAX_BYTES,
         "multipart_required": multipart_required,
@@ -1690,13 +1948,18 @@ def create_render_group(payload: CreateRenderGroupPayload, current_user: dict = 
 
 
 @app.post("/render-groups/{group_id}/multipart-upload/init")
-def init_render_group_multipart_upload(group_id: str, payload: MultipartInitPayload) -> dict[str, Any]:
+def init_render_group_multipart_upload(
+    group_id: str,
+    payload: MultipartInitPayload,
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
     group = query_one(
-        "SELECT id, r2_input_key, status FROM render_groups WHERE id = %s",
+        "SELECT id, r2_input_key, status, user_id FROM render_groups WHERE id = %s",
         (group_id,),
     )
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
+    ensure_render_group_owner(group, current_user)
     if group["status"] != "uploading":
         raise HTTPException(status_code=409, detail="Render group is not in uploading state")
 
@@ -1726,13 +1989,18 @@ def init_render_group_multipart_upload(group_id: str, payload: MultipartInitPayl
 
 
 @app.post("/render-groups/{group_id}/multipart-upload/part-urls")
-def render_group_multipart_part_urls(group_id: str, payload: MultipartPartUrlsPayload) -> dict[str, Any]:
+def render_group_multipart_part_urls(
+    group_id: str,
+    payload: MultipartPartUrlsPayload,
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
     group = query_one(
-        "SELECT id, r2_input_key, status FROM render_groups WHERE id = %s",
+        "SELECT id, r2_input_key, status, user_id FROM render_groups WHERE id = %s",
         (group_id,),
     )
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
+    ensure_render_group_owner(group, current_user)
     if group["status"] != "uploading":
         raise HTTPException(status_code=409, detail="Render group is not in uploading state")
 
@@ -1750,13 +2018,18 @@ def render_group_multipart_part_urls(group_id: str, payload: MultipartPartUrlsPa
 
 
 @app.post("/render-groups/{group_id}/multipart-upload/complete")
-def complete_render_group_multipart_upload(group_id: str, payload: MultipartCompletePayload) -> dict[str, Any]:
+def complete_render_group_multipart_upload(
+    group_id: str,
+    payload: MultipartCompletePayload,
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
     group = query_one(
-        "SELECT id, r2_input_key, status FROM render_groups WHERE id = %s",
+        "SELECT id, r2_input_key, status, user_id FROM render_groups WHERE id = %s",
         (group_id,),
     )
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
+    ensure_render_group_owner(group, current_user)
     if group["status"] != "uploading":
         raise HTTPException(status_code=409, detail="Render group is not in uploading state")
 
@@ -1778,13 +2051,18 @@ def complete_render_group_multipart_upload(group_id: str, payload: MultipartComp
 
 
 @app.post("/render-groups/{group_id}/multipart-upload/abort")
-def abort_render_group_multipart_upload(group_id: str, payload: MultipartAbortPayload) -> dict[str, Any]:
+def abort_render_group_multipart_upload(
+    group_id: str,
+    payload: MultipartAbortPayload,
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
     group = query_one(
-        "SELECT id, r2_input_key FROM render_groups WHERE id = %s",
+        "SELECT id, r2_input_key, user_id FROM render_groups WHERE id = %s",
         (group_id,),
     )
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
+    ensure_render_group_owner(group, current_user)
 
     r2_key = group["r2_input_key"]
     try:
@@ -1817,6 +2095,7 @@ def confirm_render_group_upload(
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
+    ensure_render_group_owner(group, current_user)
     if group["status"] not in ("uploading", "pending"):
         raise HTTPException(status_code=400, detail="Render group not in uploading state")
 
@@ -1867,6 +2146,16 @@ def confirm_render_group_upload(
                     group_id,
                 ),
             )
+            if group.get("user_id"):
+                upsert_user_input_file(
+                    user_id=group["user_id"],
+                    input_filename=group["input_filename"],
+                    r2_key=r2_key,
+                    analysis_snapshot=analysis_snapshot,
+                    render_overrides=render_overrides,
+                    scheduling=scheduling,
+                    used_at=group.get("submitted_at") or now_iso(),
+                )
             return {
                 "group_id": group_id,
                 "needs_frame_input": True,
@@ -1910,6 +2199,19 @@ def confirm_render_group_upload(
             group_id,
         ),
     )
+    if group.get("user_id"):
+        upsert_user_input_file(
+            user_id=group["user_id"],
+            input_filename=group["input_filename"],
+            r2_key=r2_key,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            analysis_snapshot=analysis_snapshot,
+            render_overrides=render_overrides,
+            scheduling=scheduling,
+            used_at=group.get("submitted_at") or now_iso(),
+        )
 
     machines = []
     for mid in payload.machine_ids:

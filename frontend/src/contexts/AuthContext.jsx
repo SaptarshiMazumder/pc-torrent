@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
 } from "firebase/auth";
@@ -28,12 +29,15 @@ export function AuthProvider({ children }) {
   const signIn = (email, password) =>
     signInWithEmailAndPassword(auth, email, password);
 
+  const resetPassword = (email) =>
+    sendPasswordResetEmail(auth, email);
+
   const signOut = () => firebaseSignOut(auth);
 
   const getIdToken = () => user?.getIdToken() ?? Promise.resolve(null);
 
   return (
-    <AuthContext.Provider value={{ user, loading, signUp, signIn, signOut, getIdToken }}>
+    <AuthContext.Provider value={{ user, loading, signUp, signIn, resetPassword, signOut, getIdToken }}>
       {children}
     </AuthContext.Provider>
   );

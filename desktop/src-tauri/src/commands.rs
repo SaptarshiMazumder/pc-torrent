@@ -1,6 +1,6 @@
 use serde_json::json;
 use serde::{Deserialize, Serialize};
-use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE};
 use futures_util::StreamExt;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::collections::HashMap;
@@ -391,11 +391,15 @@ async fn post_json(
     client: &reqwest::Client,
     url: &str,
     body: serde_json::Value,
+    auth_token: Option<&str>,
 ) -> Result<reqwest::Response, String> {
-    client
+    let mut req = client
         .post(url)
-        .header(CONTENT_TYPE, "application/json")
-        .body(body.to_string())
+        .header(CONTENT_TYPE, "application/json");
+    if let Some(token) = auth_token.map(str::trim).filter(|t| !t.is_empty()) {
+        req = req.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+    req.body(body.to_string())
         .send()
         .await
         .map_err(|err| format!("Request failed ({url}): {err}"))
@@ -406,6 +410,7 @@ async fn abort_render_group_multipart_best_effort(
     base_url: &str,
     group_id: &str,
     remote_upload_id: &str,
+    auth_token: Option<&str>,
 ) {
     let abort_url = format!("{base_url}/render-groups/{group_id}/multipart-upload/abort");
     let _ = post_json(
@@ -414,6 +419,7 @@ async fn abort_render_group_multipart_best_effort(
         json!({
             "upload_id": remote_upload_id
         }),
+        auth_token,
     )
     .await;
 }
@@ -423,6 +429,7 @@ pub async fn start_upload_file_to_render_group_multipart(
     file_path: String,
     backend_url: String,
     group_id: String,
+    auth_token: Option<String>,
 ) -> Result<String, String> {
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path)
@@ -463,6 +470,7 @@ pub async fn start_upload_file_to_render_group_multipart(
     let upload_id_for_task = upload_id.clone();
     let backend_url_for_task = normalize_backend_base_url(&backend_url);
     let group_id_for_task = group_id.clone();
+    let auth_token_for_task = auth_token.clone();
 
     tokio::spawn(async move {
         let outcome = upload_file_to_render_group_multipart(
@@ -471,6 +479,7 @@ pub async fn start_upload_file_to_render_group_multipart(
             group_id_for_task,
             upload_id_for_task.clone(),
             total_bytes,
+            auth_token_for_task,
         )
         .await;
 
@@ -513,6 +522,7 @@ async fn upload_file_to_render_group_multipart(
     group_id: String,
     upload_id: String,
     total_bytes: u64,
+    auth_token: Option<String>,
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
     let init_url = format!("{backend_url}/render-groups/{group_id}/multipart-upload/init");
@@ -523,6 +533,7 @@ async fn upload_file_to_render_group_multipart(
             "file_size_bytes": total_bytes,
             "content_type": "application/octet-stream",
         }),
+        auth_token.as_deref(),
     )
     .await?;
     if !init_response.status().is_success() {
@@ -552,7 +563,14 @@ async fn upload_file_to_render_group_multipart(
 
     for part_number in 1..=total_parts {
         if upload_cancelled(&upload_id) {
-            abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+            abort_render_group_multipart_best_effort(
+                &client,
+                &backend_url,
+                &group_id,
+                &remote_upload_id,
+                auth_token.as_deref(),
+            )
+            .await;
             return Err("Upload cancelled by user".to_string());
         }
 
@@ -570,10 +588,18 @@ async fn upload_file_to_render_group_multipart(
                     "upload_id": remote_upload_id,
                     "part_numbers": batch,
                 }),
+                auth_token.as_deref(),
             )
             .await?;
             if !urls_response.status().is_success() {
-                abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+                abort_render_group_multipart_best_effort(
+                    &client,
+                    &backend_url,
+                    &group_id,
+                    &remote_upload_id,
+                    auth_token.as_deref(),
+                )
+                .await;
                 return Err(format!(
                     "Failed to fetch multipart part URLs: {}",
                     response_error_detail(urls_response).await
@@ -608,7 +634,14 @@ async fn upload_file_to_render_group_multipart(
         let committed_before_part = current_uploaded_bytes(&upload_id);
         for attempt in 1..=3 {
             if upload_cancelled(&upload_id) {
-                abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+                abort_render_group_multipart_best_effort(
+                    &client,
+                    &backend_url,
+                    &group_id,
+                    &remote_upload_id,
+                    auth_token.as_deref(),
+                )
+                .await;
                 return Err("Upload cancelled by user".to_string());
             }
 
@@ -693,7 +726,14 @@ async fn upload_file_to_render_group_multipart(
         }
 
         if !part_uploaded {
-            abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+            abort_render_group_multipart_best_effort(
+                &client,
+                &backend_url,
+                &group_id,
+                &remote_upload_id,
+                auth_token.as_deref(),
+            )
+            .await;
             return Err(last_err.unwrap_or_else(|| format!("Failed uploading part {part_number}")));
         }
     }
@@ -705,10 +745,18 @@ async fn upload_file_to_render_group_multipart(
             "upload_id": remote_upload_id,
             "parts": completed_parts,
         }),
+        auth_token.as_deref(),
     )
     .await?;
     if !complete_response.status().is_success() {
-        abort_render_group_multipart_best_effort(&client, &backend_url, &group_id, &remote_upload_id).await;
+        abort_render_group_multipart_best_effort(
+            &client,
+            &backend_url,
+            &group_id,
+            &remote_upload_id,
+            auth_token.as_deref(),
+        )
+        .await;
         return Err(format!(
             "Failed to complete multipart upload: {}",
             response_error_detail(complete_response).await

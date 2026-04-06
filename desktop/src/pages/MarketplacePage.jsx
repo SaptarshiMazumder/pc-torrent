@@ -7,6 +7,10 @@ import {
   createDistributedRenderGroup,
   confirmDistributedJob,
   cancelRenderGroup,
+  listInputFiles,
+  renameInputFile,
+  deleteInputFile,
+  getFirebaseToken,
 } from "../lib/api";
 
 const SEGMENT_COLORS = [
@@ -257,6 +261,10 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const [loadingMachines, setLoadingMachines] = useState(true);
   const [machineError, setMachineError] = useState("");
   const [selectedMachineIds, setSelectedMachineIds] = useState([]);
+  const [savedInputs, setSavedInputs] = useState([]);
+  const [savedInputsLoading, setSavedInputsLoading] = useState(false);
+  const [savedInputsError, setSavedInputsError] = useState("");
+  const [selectedSavedInputId, setSelectedSavedInputId] = useState("");
 
   const [file, setFile] = useState(null);           // { name, size, path } — path set after native picker
   const [flowStage, setFlowStage] = useState(FLOW_STAGE.IDLE);
@@ -313,6 +321,10 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const availableViewLayers = useMemo(
     () => (Array.isArray(selectedSceneInfo?.view_layers) ? selectedSceneInfo.view_layers : []),
     [selectedSceneInfo]
+  );
+  const selectedSavedInput = useMemo(
+    () => savedInputs.find((item) => item.id === selectedSavedInputId) || null,
+    [savedInputs, selectedSavedInputId]
   );
 
   const resetSubmissionFlow = ({ clearFile = false } = {}) => {
@@ -376,8 +388,22 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     }
   };
 
+  const loadSavedInputs = async () => {
+    setSavedInputsLoading(true);
+    setSavedInputsError("");
+    try {
+      const data = await listInputFiles(backendUrl);
+      setSavedInputs(Array.isArray(data?.files) ? data.files : []);
+    } catch (err) {
+      setSavedInputsError(err?.message || "Failed to load saved files");
+    } finally {
+      setSavedInputsLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadMachines();
+    loadSavedInputs();
   }, [backendUrl]);
 
   useEffect(() => {
@@ -431,6 +457,62 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setForceCameraName("");
     setViewLayerName("");
     setCameraRanges([]);
+  };
+
+  const applySavedAssetPrefill = (asset) => {
+    const snapshot = asset?.analysis_snapshot && typeof asset.analysis_snapshot === "object"
+      ? asset.analysis_snapshot
+      : null;
+    if (snapshot) {
+      applyParsedAnalysis(snapshot);
+    } else {
+      clearAnalysisFields();
+    }
+
+    const overrides = asset?.render_overrides && typeof asset.render_overrides === "object"
+      ? asset.render_overrides
+      : {};
+    const timeline = overrides?.timeline && typeof overrides.timeline === "object"
+      ? overrides.timeline
+      : {};
+    const prefill = asset?.prefill_frame_range && typeof asset.prefill_frame_range === "object"
+      ? asset.prefill_frame_range
+      : null;
+
+    const preferredStart = Number.isInteger(prefill?.frame_start)
+      ? prefill.frame_start
+      : Number.isInteger(timeline?.frame_start)
+      ? timeline.frame_start
+      : null;
+    const preferredEnd = Number.isInteger(prefill?.frame_end)
+      ? prefill.frame_end
+      : Number.isInteger(timeline?.frame_end)
+      ? timeline.frame_end
+      : null;
+    const preferredStep = Number.isInteger(prefill?.frame_step)
+      ? prefill.frame_step
+      : Number.isInteger(timeline?.frame_step)
+      ? timeline.frame_step
+      : null;
+
+    if (preferredStart !== null) setFrameStart(String(preferredStart));
+    if (preferredEnd !== null) setFrameEnd(String(preferredEnd));
+    if (preferredStep !== null && preferredStep > 0) setFrameStep(String(preferredStep));
+
+    if (typeof overrides.scene_name === "string") setSceneName(overrides.scene_name || "");
+    if (typeof overrides.camera_mode === "string") setCameraMode(overrides.camera_mode || "auto_markers");
+    if (typeof overrides.camera_name === "string") setForceCameraName(overrides.camera_name || "");
+    if (typeof overrides.view_layer === "string") setViewLayerName(overrides.view_layer || "");
+
+    if (overrides.camera_mode === "camera_ranges" && Array.isArray(overrides.camera_ranges)) {
+      setCameraRanges(parseCameraRangeRows(overrides.camera_ranges));
+    }
+
+    setClientParseError(
+      preferredStart !== null && preferredEnd !== null
+        ? ""
+        : "Saved file metadata is incomplete. Enter frame range manually before start."
+    );
   };
 
   const handleAnalyze = async () => {
@@ -587,11 +669,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       );
       createdGroupId = created.group_id || "";
       setPendingGroupId(createdGroupId);
+      const authToken = await getFirebaseToken();
 
       uploadTaskId = await invoke("start_upload_file_to_render_group_multipart", {
         filePath: uploadPath,
         backendUrl,
         groupId: createdGroupId,
+        authToken: authToken || null,
       });
       activeUploadIdRef.current = uploadTaskId;
 
@@ -660,6 +744,72 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       setUploading(false);
     }
   };
+
+  const handleUseSavedInput = async () => {
+    if (!selectedSavedInputId) {
+      setError("Select a saved file first");
+      return;
+    }
+    if (selectedMachines.length === 0) {
+      setError("Select at least one machine before using a saved file");
+      return;
+    }
+
+    setError("");
+    setServerParseError("");
+    setStarting(true);
+    try {
+      const created = await createDistributedRenderGroup(
+        backendUrl,
+        selectedMachines.map((machine) => machine.id),
+        null,
+        null,
+        selectedSavedInputId
+      );
+      setPendingGroupId(created.group_id || "");
+      applySavedAssetPrefill(created.prefill || created.source_asset || selectedSavedInput);
+      setFlowStage(FLOW_STAGE.UPLOADED);
+      setFile(null);
+      await loadSavedInputs();
+    } catch (err) {
+      setError(err?.message || "Failed to create render group from saved file");
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const handleRenameSavedInput = async (asset) => {
+    const initial = asset?.display_name || asset?.input_filename || "";
+    const nextName = window.prompt("Rename saved file", initial);
+    if (nextName === null) return;
+    const trimmed = nextName.trim();
+    if (!trimmed) {
+      setError("Name cannot be empty");
+      return;
+    }
+    try {
+      await renameInputFile(backendUrl, asset.id, trimmed);
+      await loadSavedInputs();
+    } catch (err) {
+      setError(err?.message || "Failed to rename saved file");
+    }
+  };
+
+  const handleDeleteSavedInput = async (asset) => {
+    const label = asset?.display_name || asset?.input_filename || "this file";
+    const shouldDelete = window.confirm(`Delete "${label}" from saved files?`);
+    if (!shouldDelete) return;
+    try {
+      await deleteInputFile(backendUrl, asset.id);
+      if (selectedSavedInputId === asset.id) {
+        setSelectedSavedInputId("");
+      }
+      await loadSavedInputs();
+    } catch (err) {
+      setError(err?.message || "Failed to delete saved file");
+    }
+  };
+
   const handleStartRendering = async () => {
     if (flowStage !== FLOW_STAGE.UPLOADED) {
       return;
@@ -729,6 +879,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       }
 
       setFlowStage(FLOW_STAGE.SUBMITTED);
+      await loadSavedInputs();
       onJobSubmitted(
         result.group_id,
         file?.name || result.input_filename || "input.blend",
@@ -831,6 +982,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
         size = 0;
       }
       setFile({ name, path: filePath, size });
+      setSelectedSavedInputId("");
       resetSubmissionFlow();
     } catch (err) {
       setError(`Could not open file picker: ${err}`);
@@ -843,6 +995,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     if (!nextFile) return;
     // Inject path if WebView2 exposes it, otherwise store without path
     setFile({ name: nextFile.name, size: nextFile.size, path: nextFile.path || null, _fileObj: nextFile });
+    setSelectedSavedInputId("");
     resetSubmissionFlow();
   };
 
@@ -902,6 +1055,10 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   }, [cameraRanges, manualFrameRange]);
 
   const isBusy = analyzing || uploading || starting || cancelingRender;
+  const canUseSaved =
+    !isBusy &&
+    flowStage !== FLOW_STAGE.STARTING &&
+    Boolean(selectedSavedInputId);
   const canUpload =
     (flowStage === FLOW_STAGE.PREPARED || flowStage === FLOW_STAGE.ANALYZED) &&
     !isBusy;
@@ -1033,6 +1190,55 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       </div>
 
       <div className="card submit-panel">
+        <div className="saved-files-panel">
+          <div className="saved-files-head">
+            <strong>Saved Files</strong>
+            <button className="btn btn-secondary" type="button" onClick={loadSavedInputs} disabled={savedInputsLoading || isBusy}>
+              {savedInputsLoading ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+          {savedInputsError && <p className="error-text">{savedInputsError}</p>}
+          {savedInputsLoading && <p className="muted">Loading saved files...</p>}
+          {!savedInputsLoading && savedInputs.length === 0 && (
+            <p className="muted">No saved files yet. Upload and start one render to save it.</p>
+          )}
+          {savedInputs.map((asset) => (
+            <div
+              key={asset.id}
+              className={`saved-file-row ${selectedSavedInputId === asset.id ? "selected" : ""}`}
+            >
+              <label className="saved-file-select">
+                <input
+                  type="radio"
+                  name="saved-file"
+                  checked={selectedSavedInputId === asset.id}
+                  onChange={() => setSelectedSavedInputId(asset.id)}
+                />
+                <span>
+                  {asset.display_name || asset.input_filename}
+                  <span className="saved-file-sub">({asset.input_filename})</span>
+                </span>
+              </label>
+              <div className="saved-file-actions">
+                <button className="btn btn-secondary" type="button" onClick={() => handleRenameSavedInput(asset)} disabled={isBusy}>
+                  Rename
+                </button>
+                <button className="btn btn-secondary" type="button" onClick={() => handleDeleteSavedInput(asset)} disabled={isBusy}>
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+          <button className="btn btn-primary" type="button" onClick={() => { void handleUseSavedInput(); }} disabled={!canUseSaved}>
+            Use Saved File
+          </button>
+          {selectedSavedInput && (
+            <p className="muted">
+              Selected saved file: {selectedSavedInput.display_name || selectedSavedInput.input_filename}
+            </p>
+          )}
+        </div>
+
         <div className="submit-file-row">
           <div className="submit-file-main">
             {file ? (

@@ -1,8 +1,10 @@
 venv/
+node_modules/
 __pycache__/
 *.pyc
 jobs/
 pcrent.db
 .env
+creds/
 docker/
 *.tar.gz

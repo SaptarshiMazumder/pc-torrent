@@ -25,10 +25,12 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from db import execute, init_db, query_all, query_one, request_conn
-import storage
-import runpod_dispatch
-from blend_parser import parse_upload, BlendParseError
+from infrastructure.db import execute, init_db, query_all, query_one, request_conn
+import infrastructure.storage as storage
+import services.runpod_dispatch as runpod_dispatch
+from services.blend_parser import parse_upload, BlendParseError
+from firebase_auth import get_current_user, get_or_create_profile, get_user_profile, update_user_profile, write_job_record, write_render_group_record
+from fastapi import Depends
 
 # ---------------------------------------------------------------------------
 # In-memory log ring buffer + SSE broadcast
@@ -91,7 +93,7 @@ app.add_middleware(
 
 
 @app.get("/logs/stream")
-async def stream_logs():
+async def stream_logs(_: dict = Depends(get_current_user)):
     """SSE endpoint: streams application logs in real time."""
     q: asyncio.Queue[str] = asyncio.Queue(maxsize=200)
 
@@ -116,7 +118,7 @@ async def stream_logs():
 
 
 @app.get("/logs/recent")
-def recent_logs() -> list[str]:
+def recent_logs(_: dict = Depends(get_current_user)) -> list[str]:
     """Return the last N log lines as JSON array."""
     return list(_log_buffer)
 
@@ -493,14 +495,43 @@ def root() -> dict[str, str]:
 
 
 # -----------------------------------------------
+# User profile
+# -----------------------------------------------
+class UpdateProfilePayload(BaseModel):
+    display_name: str | None = None
+    avatar_url: str | None = None
+    billing_plan: str | None = None
+
+
+@app.get("/me")
+def get_me(current_user: dict = Depends(get_current_user)) -> dict:
+    """Return the current user's Firestore profile (creates it on first access)."""
+    profile = get_or_create_profile(current_user["uid"], current_user.get("email"))
+    return {"uid": current_user["uid"], **profile}
+
+
+@app.put("/me")
+def update_me(payload: UpdateProfilePayload, current_user: dict = Depends(get_current_user)) -> dict:
+    """Update editable profile fields."""
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    get_or_create_profile(current_user["uid"], current_user.get("email"))
+    update_user_profile(current_user["uid"], updates)
+    profile = get_user_profile(current_user["uid"]) or {}
+    return {"uid": current_user["uid"], **profile}
+
+
+# -----------------------------------------------
 # Machines
 # -----------------------------------------------
 @app.post("/machines/register")
-def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
+def register_machine(payload: RegisterMachinePayload, current_user: dict = Depends(get_current_user)) -> dict[str, str]:
     if not payload.gpu_model or payload.gpu_vram_gb is None:
         raise HTTPException(status_code=400, detail="Missing required fields")
 
     machine_key = payload.machine_key.strip() if payload.machine_key else None
+    user_id = current_user["uid"]
     current_time = now_iso()
 
     existing = None
@@ -516,14 +547,14 @@ def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
             UPDATE machines
             SET machine_key = %s, gpu_model = %s, gpu_vram_gb = %s, cpu_cores = %s, ram_gb = %s,
                 os_version = %s, nvidia_driver = %s, machine_type = %s,
-                status = 'idle', registered_at = %s, last_seen_at = %s
+                status = 'idle', registered_at = %s, last_seen_at = %s, user_id = %s
             WHERE id = %s
             """,
             (
                 machine_key, payload.gpu_model, payload.gpu_vram_gb,
                 payload.cpu_cores, payload.ram_gb,
                 payload.os_version, payload.nvidia_driver, payload.machine_type,
-                current_time, current_time, machine_id,
+                current_time, current_time, user_id, machine_id,
             ),
         )
     else:
@@ -532,15 +563,15 @@ def register_machine(payload: RegisterMachinePayload) -> dict[str, str]:
             """
             INSERT INTO machines (
                 id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb,
-                os_version, nvidia_driver, machine_type, status, registered_at, last_seen_at
+                os_version, nvidia_driver, machine_type, status, registered_at, last_seen_at, user_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'idle', %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'idle', %s, %s, %s)
             """,
             (
                 machine_id, machine_key, payload.gpu_model, payload.gpu_vram_gb,
                 payload.cpu_cores, payload.ram_gb,
                 payload.os_version, payload.nvidia_driver, payload.machine_type,
-                current_time, current_time,
+                current_time, current_time, user_id,
             ),
         )
 
@@ -581,7 +612,7 @@ def heartbeat_machine(machine_id: str) -> dict[str, bool]:
 
 
 @app.get("/machines")
-def list_available_machines() -> list[dict[str, Any]]:
+def list_available_machines(_: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=MACHINE_STALE_SECONDS)).isoformat()
     execute(
         """
@@ -635,7 +666,7 @@ class MultipartAbortPayload(BaseModel):
 
 
 @app.post("/jobs/request-upload")
-def request_upload(payload: RequestUploadPayload) -> dict[str, Any]:
+def request_upload(payload: RequestUploadPayload, current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """Get a presigned URL to upload directly to R2."""
     machine = query_one(
         "SELECT id FROM machines WHERE id = %s AND status = 'available'",
@@ -656,13 +687,12 @@ def request_upload(payload: RequestUploadPayload) -> dict[str, Any]:
     r2_key = f"jobs/{job_id}/input/{input_filename}"
     upload_url = storage.generate_presigned_upload_url(r2_key)
 
-    # Create job in 'uploading' state
     execute(
         """
-        INSERT INTO jobs (id, machine_id, input_filename, status, output_files, submitted_at)
-        VALUES (%s, %s, %s, 'uploading', '[]', %s)
+        INSERT INTO jobs (id, machine_id, input_filename, status, output_files, submitted_at, user_id)
+        VALUES (%s, %s, %s, 'uploading', '[]', %s, %s)
         """,
-        (job_id, payload.machine_id, input_filename, now_iso()),
+        (job_id, payload.machine_id, input_filename, now_iso(), current_user["uid"]),
     )
 
     return {
@@ -785,11 +815,13 @@ def abort_job_multipart_upload(job_id: str, payload: MultipartAbortPayload) -> d
 
 
 @app.post("/jobs/{job_id}/confirm-upload")
-def confirm_upload(job_id: str) -> dict[str, str]:
+def confirm_upload(job_id: str, current_user: dict = Depends(get_current_user)) -> dict[str, str]:
     """Confirm the file was uploaded to R2 and start the job."""
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") and job["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     if job["status"] != "uploading":
         raise HTTPException(status_code=400, detail="Job not in uploading state")
 
@@ -800,6 +832,17 @@ def confirm_upload(job_id: str) -> dict[str, str]:
 
     execute("UPDATE jobs SET status = 'pending' WHERE id = %s", (job_id,))
     execute("UPDATE machines SET status = 'processing' WHERE id = %s", (job["machine_id"],))
+
+    try:
+        write_job_record(current_user["uid"], job_id, {
+            "job_id": job_id,
+            "filename": job["input_filename"],
+            "status": "pending",
+            "machine_id": job["machine_id"],
+            "submitted_at": job["submitted_at"],
+        })
+    except Exception:
+        pass  # Firestore write failure should not block the job
 
     return {"job_id": job_id, "status": "pending"}
 
@@ -846,11 +889,22 @@ def get_next_job_for_machine(machine_id: str, request: Request) -> dict[str, Any
     return job
 
 
+@app.get("/jobs")
+def list_jobs(current_user: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
+    jobs = query_all(
+        "SELECT * FROM jobs WHERE user_id = %s ORDER BY submitted_at DESC",
+        (current_user["uid"],),
+    )
+    return [serialize_job(j) for j in jobs]
+
+
 @app.get("/jobs/{job_id}")
-def get_job(job_id: str) -> dict[str, Any]:
+def get_job(job_id: str, current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") and job["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     return serialize_job(job)
 
 
@@ -1100,7 +1154,7 @@ def download_render_group_input_file(group_id: str, filename: str):
 
 
 @app.get("/jobs/{job_id}/output/{filename}")
-def download_job_output_file(job_id: str, filename: str):
+def download_job_output_file(job_id: str, filename: str, current_user: dict = Depends(get_current_user)):
     safe_name = sanitize_filename(filename)
     r2_key = f"jobs/{job_id}/output/{safe_name}"
     if not storage.file_exists(r2_key):
@@ -1135,7 +1189,7 @@ def build_job_output_entries(job: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 @app.get("/jobs/{job_id}/outputs")
-def list_job_outputs(job_id: str):
+def list_job_outputs(job_id: str, current_user: dict = Depends(get_current_user)):
     """
     List all currently available output files for a job.
     Works for running/failed/done jobs, enabling partial frame recovery.
@@ -1153,7 +1207,7 @@ def list_job_outputs(job_id: str):
 
 
 @app.get("/jobs/{job_id}/download")
-def download_job_output_archive(job_id: str):
+def download_job_output_archive(job_id: str, current_user: dict = Depends(get_current_user)):
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1583,7 +1637,7 @@ class CreateRenderGroupPayload(BaseModel):
 
 
 @app.post("/render-groups/create")
-def create_render_group(payload: CreateRenderGroupPayload) -> dict[str, Any]:
+def create_render_group(payload: CreateRenderGroupPayload, current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """Create a render group for distributed rendering across multiple machines."""
     if not payload.machine_ids:
         raise HTTPException(status_code=400, detail="At least one machine required")
@@ -1615,10 +1669,10 @@ def create_render_group(payload: CreateRenderGroupPayload) -> dict[str, Any]:
     execute(
         """
         INSERT INTO render_groups (id, input_filename, r2_input_key, total_frames,
-                                    frame_start, frame_end, frame_step, status, submitted_at)
-        VALUES (%s, %s, %s, 0, 1, 1, 1, 'uploading', %s)
+                                    frame_start, frame_end, frame_step, status, submitted_at, user_id)
+        VALUES (%s, %s, %s, 0, 1, 1, 1, 'uploading', %s, %s)
         """,
-        (group_id, input_filename, r2_key, now_iso()),
+        (group_id, input_filename, r2_key, now_iso(), current_user["uid"]),
     )
 
     return {
@@ -1756,6 +1810,7 @@ def confirm_render_group_upload(
     group_id: str,
     payload: ConfirmRenderGroupPayload,
     request: Request,
+    current_user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Confirm upload, parse .blend, distribute frames, and create jobs."""
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
@@ -1977,6 +2032,20 @@ def confirm_render_group_upload(
                 except Exception as exc:
                     log.error(f"Failed to dispatch job {task['job_id']} to RunPod: {exc}")
 
+    try:
+        write_render_group_record(current_user["uid"], group_id, {
+            "group_id": group_id,
+            "filename": group["input_filename"],
+            "status": "pending",
+            "total_frames": total_frames,
+            "frame_start": frame_start,
+            "frame_end": frame_end,
+            "submitted_at": group["submitted_at"],
+            "machine_count": len(tasks),
+        })
+    except Exception:
+        pass
+
     return {
         "group_id": group_id,
         "status": "pending",
@@ -1994,9 +2063,9 @@ def confirm_render_group_upload(
 
 @app.post("/render-groups/cancel-all")
 def cancel_all_render_groups() -> dict[str, Any]:
-    """Cancel ALL active render groups and their jobs."""
+    """Cancel ALL active render groups and their jobs. No auth required (admin utility)."""
     groups = query_all(
-        "SELECT id FROM render_groups WHERE status IN ('pending', 'running', 'uploading')"
+        "SELECT id FROM render_groups WHERE status IN ('pending', 'running', 'uploading')",
     )
     total_cancelled = 0
     for g in groups:
@@ -2047,9 +2116,24 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
     return {"success": True, "cancelled_jobs": cancelled_count}
 
 
+@app.get("/render-groups")
+def list_render_groups(current_user: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
+    groups = query_all(
+        "SELECT id FROM render_groups WHERE user_id = %s ORDER BY submitted_at DESC",
+        (current_user["uid"],),
+    )
+    with request_conn():
+        return [_get_render_group_inner(g["id"]) for g in groups]
+
+
 @app.get("/render-groups/{group_id}")
-def get_render_group(group_id: str) -> dict[str, Any]:
+def get_render_group(group_id: str, current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """Get render group status with per-task progress."""
+    group = query_one("SELECT user_id FROM render_groups WHERE id = %s", (group_id,))
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+    if group.get("user_id") and group["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     with request_conn():
         return _get_render_group_inner(group_id)
 
@@ -2164,7 +2248,7 @@ def build_render_group_output_entries(group_id: str) -> list[dict[str, Any]]:
 
 
 @app.get("/render-groups/{group_id}/outputs")
-def list_render_group_outputs(group_id: str):
+def list_render_group_outputs(group_id: str, current_user: dict = Depends(get_current_user)):
     """
     List all currently available output files in a render group.
     This endpoint is safe to call while rendering is still in progress.
@@ -2172,6 +2256,8 @@ def list_render_group_outputs(group_id: str):
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
+    if group.get("user_id") and group["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     files = build_render_group_output_entries(group_id)
     return {
         "group_id": group_id,
@@ -2182,7 +2268,7 @@ def list_render_group_outputs(group_id: str):
 
 
 @app.get("/render-groups/{group_id}/download")
-def download_render_group_output(group_id: str):
+def download_render_group_output(group_id: str, current_user: dict = Depends(get_current_user)):
     """Return all output files once no tasks are pending/running."""
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
     if not group:

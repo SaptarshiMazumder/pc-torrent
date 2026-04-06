@@ -53,6 +53,25 @@ log_ok "R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:0:10}..."
 log_ok "R2_BUCKET_NAME: $R2_BUCKET_NAME"
 log_ok "CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:0:8}..."
 
+FIREBASE_SERVICE_ACCOUNT_PATH="${FIREBASE_SERVICE_ACCOUNT_PATH:-}"
+FIREBASE_SERVICE_ACCOUNT_JSON="${FIREBASE_SERVICE_ACCOUNT_JSON:-}"
+if [[ -z "$FIREBASE_SERVICE_ACCOUNT_PATH" ]]; then
+    auto_key_file=$(find "$PROJECT_ROOT/server/creds" -maxdepth 1 -name '*-adminsdk-*.json' -print -quit 2>/dev/null || true)
+    if [[ -n "$auto_key_file" ]]; then
+        FIREBASE_SERVICE_ACCOUNT_PATH="${auto_key_file#$PROJECT_ROOT/server/}"
+    fi
+fi
+if [[ -n "$FIREBASE_SERVICE_ACCOUNT_PATH" ]]; then
+    FIREBASE_KEY_FILE="$PROJECT_ROOT/server/$FIREBASE_SERVICE_ACCOUNT_PATH"
+    if [[ -f "$FIREBASE_KEY_FILE" ]]; then
+        FIREBASE_SERVICE_ACCOUNT_JSON="$(tr -d '\r\n' < "$FIREBASE_KEY_FILE")"
+        log_ok "Firebase key loaded from server/$FIREBASE_SERVICE_ACCOUNT_PATH"
+    else
+        log_error "FIREBASE_SERVICE_ACCOUNT_PATH not found: server/$FIREBASE_SERVICE_ACCOUNT_PATH"
+        exit 1
+    fi
+fi
+
 # -----------------------------------------------
 # [2/5] Deploy Backend to Cloud Run
 # -----------------------------------------------
@@ -89,6 +108,8 @@ gcloud run deploy "$SERVICE_NAME" \
     --set-env-vars "RUNPOD_GPU_VRAM_GB=${RUNPOD_GPU_VRAM_GB:-24}" \
     --set-env-vars "RUNPOD_CPU_CORES=${RUNPOD_CPU_CORES:-16}" \
     --set-env-vars "RUNPOD_RAM_GB=${RUNPOD_RAM_GB:-64}" \
+    --set-env-vars "AGENT_API_KEY=$AGENT_API_KEY" \
+    --set-env-vars "^|^FIREBASE_SERVICE_ACCOUNT_JSON=$FIREBASE_SERVICE_ACCOUNT_JSON" \
     --quiet
 
 BACKEND_URL=$(gcloud run services describe "$SERVICE_NAME" \

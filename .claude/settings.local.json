@@ -78,7 +78,9 @@
       "Bash(docker manifest:*)",
       "WebFetch(domain:garagefarm.net)",
       "WebFetch(domain:forum.garagefarm.net)",
-      "Bash(find /c/Users/googler/OneDrive/Desktop/Projects/pc-rent -name \"*.md\" ! -path \"*/venv/*\" -exec grep -l \"blend\\\\|render\\\\|farm\" {} \\\\;)"
+      "Bash(find /c/Users/googler/OneDrive/Desktop/Projects/pc-rent -name \"*.md\" ! -path \"*/venv/*\" -exec grep -l \"blend\\\\|render\\\\|farm\" {} \\\\;)",
+      "Bash(ls c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/server/*.py)",
+      "Bash(gcloud logging:*)"
     ]
   }
 }

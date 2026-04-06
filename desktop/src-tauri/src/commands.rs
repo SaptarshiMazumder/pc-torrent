@@ -21,58 +21,87 @@ const ANALYZE_BLEND_PY: &str = r#"
 import json
 import bpy
 
-def scene_payload(scene, active_name):
-    frame_start = int(scene.frame_start)
-    frame_end = int(scene.frame_end)
-    frame_step = max(1, int(scene.frame_step))
-    total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
-
-    cameras = []
-    active_camera = scene.camera.name if scene.camera else None
-    if active_camera:
-        cameras.append(active_camera)
-
-    camera_cuts = []
+def _safe_int(value, default=0):
     try:
-        markers = sorted(scene.timeline_markers, key=lambda m: int(m.frame))
+        return int(value)
     except Exception:
-        markers = []
-    for marker in markers:
-        camera_name = marker.camera.name if getattr(marker, "camera", None) else None
-        if camera_name:
-            cameras.append(camera_name)
-        camera_cuts.append({
-            "frame": int(marker.frame),
-            "camera_name": camera_name,
-        })
+        return default
 
-    for obj in bpy.data.objects:
-        if getattr(obj, "type", "") == "CAMERA":
-            cameras.append(obj.name)
+def _minimal_scene_payload(scene, active_name):
+    frame_start = _safe_int(getattr(scene, "frame_start", 1), 1)
+    frame_end = _safe_int(getattr(scene, "frame_end", frame_start), frame_start)
+    frame_step = max(1, _safe_int(getattr(scene, "frame_step", 1), 1))
+    total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
+    scene_name = getattr(scene, "name", "Scene")
+    camera = getattr(scene, "camera", None)
+    active_camera = getattr(camera, "name", None) if camera else None
+    return {
+        "name": scene_name,
+        "is_active": scene_name == active_name,
+        "frame_start": frame_start,
+        "frame_end": frame_end,
+        "frame_step": frame_step,
+        "total_frames": total_frames,
+        "active_camera": active_camera,
+        "cameras": [active_camera] if active_camera else [],
+        "view_layers": [],
+        "camera_cuts": [],
+    }
+
+def _scene_payload(scene, active_name):
+    payload = _minimal_scene_payload(scene, active_name)
+
+    cameras = list(payload["cameras"])
+    camera_cuts = []
+
+    try:
+        markers = sorted(getattr(scene, "timeline_markers", []), key=lambda marker: _safe_int(getattr(marker, "frame", 0), 0))
+        for marker in markers:
+            marker_camera = None
+            try:
+                marker_camera = marker.camera.name if getattr(marker, "camera", None) else None
+            except Exception:
+                marker_camera = None
+            if marker_camera:
+                cameras.append(marker_camera)
+            camera_cuts.append({
+                "frame": _safe_int(getattr(marker, "frame", 0), 0),
+                "camera_name": marker_camera,
+            })
+    except Exception:
+        pass
+
+    try:
+        for obj in bpy.data.objects:
+            if getattr(obj, "type", "") == "CAMERA":
+                cameras.append(getattr(obj, "name", "Camera"))
+    except Exception:
+        pass
 
     unique_cameras = []
     for name in cameras:
         if name and name not in unique_cameras:
             unique_cameras.append(name)
 
-    view_layers = [vl.name for vl in scene.view_layers]
+    view_layers = []
+    try:
+        view_layers = [getattr(layer, "name", "") for layer in getattr(scene, "view_layers", []) if getattr(layer, "name", "")]
+    except Exception:
+        view_layers = []
 
-    return {
-        "name": scene.name,
-        "is_active": scene.name == active_name,
-        "frame_start": frame_start,
-        "frame_end": frame_end,
-        "frame_step": frame_step,
-        "total_frames": total_frames,
-        "active_camera": active_camera,
-        "cameras": unique_cameras,
-        "view_layers": view_layers,
-        "camera_cuts": camera_cuts,
-    }
+    payload["cameras"] = unique_cameras
+    payload["view_layers"] = view_layers
+    payload["camera_cuts"] = camera_cuts
+    return payload
 
 active_scene = bpy.context.scene
 active_name = active_scene.name if active_scene else (bpy.data.scenes[0].name if bpy.data.scenes else "")
-scenes = [scene_payload(scene, active_name) for scene in bpy.data.scenes]
+scenes = []
+for scene in bpy.data.scenes:
+    try:
+        scenes.append(_scene_payload(scene, active_name))
+    except Exception:
+        scenes.append(_minimal_scene_payload(scene, active_name))
 if not scenes:
     raise RuntimeError("No scenes found in file")
 
@@ -935,6 +964,7 @@ async fn ensure_sidecar_running(
 pub async fn connect_agent(
     app: tauri::AppHandle,
     backend_url: String,
+    firebase_token: Option<String>,
     state: State<'_, Arc<Mutex<AgentState>>>,
     sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
 ) -> Result<(), String> {
@@ -943,7 +973,8 @@ pub async fn connect_agent(
     let mut handle = sidecar.lock().await;
     handle.send_command(&json!({
         "cmd": "connect",
-        "backend_url": backend_url
+        "backend_url": backend_url,
+        "firebase_token": firebase_token.unwrap_or_default()
     }))?;
 
     let mut s = state.lock().await;
@@ -1356,7 +1387,7 @@ fn _parse_prepare_output(
             errors.push(msg.trim().to_string());
             continue;
         }
-        if line.trim() == "PREP_DONE" {
+        if line.split_whitespace().any(|token| token == "PREP_DONE") {
             prep_done = true;
             continue;
         }
@@ -1443,7 +1474,7 @@ pub async fn prepare_blend_for_upload(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let (mut warnings, mut errors, prep_done, _, analysis_parse_errors) = _parse_prepare_output(&combined);
+    let (mut warnings, mut errors, prep_done_from_logs, _, analysis_parse_errors) = _parse_prepare_output(&combined);
     for err in analysis_parse_errors {
         warnings.push(format!("Analysis metadata warning: {err}"));
     }
@@ -1454,6 +1485,7 @@ pub async fn prepare_blend_for_upload(
             _tail_lines(&combined, 20)
         ));
     }
+    let prep_done = output.status.success() && (prep_done_from_logs || errors.is_empty());
 
     // Package the result
     let (prepared_path, prepared_filename) = if is_zip {
@@ -1592,9 +1624,6 @@ pub async fn analyze_and_prepare_blend(
                             .map(|msg| format!("Primary analysis payload issue (recovered by fallback): {msg}")),
                     );
                 }
-                analysis_warnings.push(
-                    "Primary analysis metadata missing in combined run; fallback analysis succeeded.".to_string(),
-                );
             }
             Err(err) => {
                 analysis_errors.push(format!(
@@ -1604,7 +1633,7 @@ pub async fn analyze_and_prepare_blend(
         }
     }
 
-    let mut prep_done = prep_done_from_logs && output.status.success();
+    let mut prep_done = output.status.success() && (prep_done_from_logs || prepare_errors.is_empty());
     let prepared_path = if prep_done {
         if is_zip {
             let new_zip = work_dir.join(&filename);

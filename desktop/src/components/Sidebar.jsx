@@ -22,7 +22,10 @@ const RENTEE_PAGES = [
   { id: "logs", label: "Logs", icon: "\u2630" },
 ];
 
+import { useAuth } from "../contexts/AuthContext";
+
 export default function Sidebar({ activePage, onNavigate, status, mode, onModeChange }) {
+  const { user, signOut } = useAuth();
   const pages = mode === "renter" ? RENTER_PAGES : RENTEE_PAGES;
   const dotColor = STATUS_COLORS[status] || "#6b7280";
 
@@ -84,6 +87,12 @@ export default function Sidebar({ activePage, onNavigate, status, mode, onModeCh
                       : "Setting up..."}
           </span>
         </div>
+        {user && (
+          <div className="sidebar-user">
+            <span className="sidebar-email">{user.email}</span>
+            <button className="btn-link" onClick={signOut}>Sign out</button>
+          </div>
+        )}
         <div className="version-label">v1.0.0</div>
       </div>
     </nav>

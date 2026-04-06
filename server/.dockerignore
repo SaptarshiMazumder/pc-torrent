@@ -4,5 +4,6 @@ __pycache__/
 jobs/
 pcrent.db
 .env
+creds/
 docker/
 *.tar.gz

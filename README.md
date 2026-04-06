@@ -92,6 +92,8 @@ Then update the container image tag in your RunPod endpoint settings to match.
 | PUT    | `/machines/{id}/idle`         | Mark machine as offline                                      |
 | GET    | `/machines`                   | List available machines                                      |
 | POST   | `/jobs`                       | Submit render job (multipart: `machine_id` + `blender_file`) |
+| GET    | `/jobs`                       | List **legacy single-machine jobs only** (`group_id` is null) |
+| GET    | `/render-groups`              | List distributed render groups and aggregated task progress  |
 | GET    | `/jobs/{id}`                  | Get job status                                               |
 | GET    | `/jobs/{id}/download`         | Download rendered output                                     |
 | GET    | `/jobs/next-for-machine/{id}` | Agent polls for next job                                     |

@@ -441,6 +441,116 @@ header h1 {
 .seg-gpu   { font-weight: 600; color: #ccc; }
 .seg-range { opacity: 0.6; }
 .seg-pct   { font-weight: 600; color: #6c63ff; }
+
+.status-frame-gallery {
+  border-top: 1px solid #1f1f1f;
+  padding-top: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.status-frame-gallery-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.82rem;
+  color: #9ca3af;
+}
+
+.status-frame-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.65rem;
+}
+
+.status-frame-tile {
+  border: 1px solid #2b2b2b;
+  border-radius: 8px;
+  background: #171717;
+  color: #cfcfcf;
+  text-align: left;
+  padding: 0.45rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  cursor: pointer;
+}
+
+.status-frame-tile:hover {
+  border-color: #3f3f46;
+}
+
+.status-frame-thumb {
+  width: 100%;
+  height: 98px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #2f2f2f;
+  background: #0b0b0b;
+}
+
+.status-frame-tile span {
+  font-size: 0.72rem;
+  color: #a6a6a6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.web-frame-viewer-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.82);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.web-frame-viewer-card {
+  width: min(1040px, 100%);
+  height: min(88vh, 860px);
+  border: 1px solid #2b2b2b;
+  border-radius: 10px;
+  background: #121212;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.web-frame-viewer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid #252525;
+}
+
+.web-frame-viewer-actions {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.web-frame-viewer-canvas {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 30% 20%, rgba(76, 86, 106, 0.22), rgba(9, 9, 11, 0.95));
+}
+
+.web-frame-viewer-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  transform-origin: center center;
+}
 .pct-done  { color: #10b981; }
 .pct-failed { color: #ef4444; }
 
@@ -555,6 +665,21 @@ header h1 {
 
 .login-form input:focus {
   border-color: #6c63ff;
+}
+
+.login-remember {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+  color: #888;
+  user-select: none;
+}
+
+.login-remember input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
 }
 
 .login-error {

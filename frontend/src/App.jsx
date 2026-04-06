@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   getMachines,
   createDistributedRenderGroup,
   uploadDistributedRenderInput,
   confirmDistributedJob,
   getRenderGroup,
+  getRenderGroupOutputs,
+  getFirebaseToken,
+  buildAuthenticatedApiUrl,
   renderGroupDownloadUrl,
   logsStreamUrl,
   listInputFiles,
@@ -23,6 +26,21 @@ const SEGMENT_COLORS = [
 function gpuShortName(name) {
   if (!name) return "GPU";
   return name.replace(/nvidia\s+/i, "").replace(/geforce\s+/i, "").trim();
+}
+
+function frameIndexFromFilename(filename) {
+  if (typeof filename !== "string") return -1;
+  const match = filename.match(/(\d+)(?=\.[^.]+$)/);
+  if (!match) return -1;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : -1;
+}
+
+function sortOutputEntries(a, b) {
+  const frameA = frameIndexFromFilename(a?.filename || "");
+  const frameB = frameIndexFromFilename(b?.filename || "");
+  if (frameA !== frameB) return frameA - frameB;
+  return String(a?.filename || "").localeCompare(String(b?.filename || ""));
 }
 
 // -----------------------------------------------
@@ -692,7 +710,12 @@ const STATUS_LABEL = {
 function RenderGroupStatusPage({ groupId, initialGroup, onBack }) {
   const [group, setGroup] = useState(initialGroup || null);
   const [error, setError] = useState(null);
+  const [frameFiles, setFrameFiles] = useState([]);
+  const [framesLoading, setFramesLoading] = useState(false);
+  const [framesError, setFramesError] = useState("");
+  const [viewer, setViewer] = useState(null);
   const intervalRef = useRef();
+  const frameIntervalRef = useRef();
 
   const fetchGroup = async () => {
     try {
@@ -706,11 +729,40 @@ function RenderGroupStatusPage({ groupId, initialGroup, onBack }) {
     }
   };
 
+  const fetchFrames = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setFramesLoading(true);
+    try {
+      const token = await getFirebaseToken();
+      const payload = await getRenderGroupOutputs(groupId);
+      const files = Array.isArray(payload?.files) ? payload.files.slice().sort(sortOutputEntries) : [];
+      const normalized = files.map((file) => ({
+        ...file,
+        preview_url: file?.preview_path
+          ? buildAuthenticatedApiUrl(file.preview_path, token || "", file.size_bytes ?? file.filename)
+          : file?.url || "",
+      }));
+      setFrameFiles(normalized);
+      setFramesError("");
+    } catch (err) {
+      setFramesError(err?.message || "Failed to load frames");
+    } finally {
+      if (!silent) setFramesLoading(false);
+    }
+  }, [groupId]);
+
   useEffect(() => {
     if (!initialGroup) fetchGroup();
     intervalRef.current = setInterval(fetchGroup, 3000);
     return () => clearInterval(intervalRef.current);
   }, [groupId]);
+
+  useEffect(() => {
+    void fetchFrames({ silent: false });
+    frameIntervalRef.current = setInterval(() => {
+      void fetchFrames({ silent: true });
+    }, 3000);
+    return () => clearInterval(frameIntervalRef.current);
+  }, [fetchFrames]);
 
   if (error) return <p className="error">{error}</p>;
   if (!group) return <p className="status">Loading...</p>;
@@ -762,11 +814,150 @@ function RenderGroupStatusPage({ groupId, initialGroup, onBack }) {
           </div>
         )}
 
+        <div className="status-frame-gallery">
+          <div className="status-frame-gallery-head">
+            <strong>Live Frames</strong>
+            <span>{frameFiles.length} available</span>
+          </div>
+          {framesLoading && frameFiles.length === 0 && (
+            <p className="status">Loading frame previews...</p>
+          )}
+          {!framesLoading && !framesError && frameFiles.length === 0 && (
+            <p className="status">No frames available yet.</p>
+          )}
+          {framesError && <p className="error">{framesError}</p>}
+          {frameFiles.length > 0 && (
+            <div className="status-frame-grid">
+              {frameFiles.map((file) => {
+                const fileKey = `${file.job_id || "job"}:${file.filename}`;
+                return (
+                  <button
+                    key={fileKey}
+                    type="button"
+                    className="status-frame-tile"
+                    onClick={() => {
+                      setViewer({
+                        filename: file.filename,
+                        fullUrl: file.url,
+                        previewUrl: file.preview_url,
+                      });
+                    }}
+                  >
+                    <img
+                      className="status-frame-thumb"
+                      src={file.preview_url}
+                      alt={file.filename}
+                      loading="lazy"
+                    />
+                    <span>{file.filename}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         <div className="job-meta">
           <span>Submitted: {new Date(group.submitted_at).toLocaleString()}</span>
           {group.completed_at && (
             <span>Completed: {new Date(group.completed_at).toLocaleString()}</span>
           )}
+        </div>
+      </div>
+      {viewer && (
+        <WebFrameViewerModal
+          frame={viewer}
+          onClose={() => setViewer(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function WebFrameViewerModal({ frame, onClose }) {
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const draggingRef = useRef(null);
+
+  useEffect(() => {
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, [frame?.fullUrl]);
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "0") {
+        setZoom(1);
+        setOffset({ x: 0, y: 0 });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  const applyZoom = (next) => setZoom(Math.max(1, Math.min(8, next)));
+
+  const onWheel = (event) => {
+    event.preventDefault();
+    applyZoom(zoom + (event.deltaY > 0 ? -0.16 : 0.16));
+  };
+
+  const onMouseDown = (event) => {
+    draggingRef.current = { x: event.clientX, y: event.clientY };
+  };
+
+  const onMouseMove = (event) => {
+    if (!draggingRef.current) return;
+    const dx = event.clientX - draggingRef.current.x;
+    const dy = event.clientY - draggingRef.current.y;
+    draggingRef.current = { x: event.clientX, y: event.clientY };
+    setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+  };
+
+  const clearDrag = () => {
+    draggingRef.current = null;
+  };
+
+  return (
+    <div className="web-frame-viewer-modal" onClick={onClose}>
+      <div className="web-frame-viewer-card" onClick={(event) => event.stopPropagation()}>
+        <div className="web-frame-viewer-head">
+          <strong>{frame?.filename || "Frame"}</strong>
+          <div className="web-frame-viewer-actions">
+            <button className="btn-secondary" type="button" onClick={() => applyZoom(zoom - 0.2)}>-</button>
+            <button className="btn-secondary" type="button" onClick={() => applyZoom(zoom + 0.2)}>+</button>
+            <button
+              className="btn-secondary"
+              type="button"
+              onClick={() => {
+                setZoom(1);
+                setOffset({ x: 0, y: 0 });
+              }}
+            >
+              Reset
+            </button>
+            <button className="btn-secondary" type="button" onClick={onClose}>Close</button>
+          </div>
+        </div>
+        <div
+          className="web-frame-viewer-canvas"
+          onWheel={onWheel}
+          onMouseDown={onMouseDown}
+          onMouseMove={onMouseMove}
+          onMouseUp={clearDrag}
+          onMouseLeave={clearDrag}
+        >
+          <img
+            className="web-frame-viewer-image"
+            src={frame?.fullUrl || frame?.previewUrl || ""}
+            alt={frame?.filename || "Frame"}
+            draggable={false}
+            style={{
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+              cursor: zoom > 1 ? "grab" : "default",
+            }}
+          />
         </div>
       </div>
     </div>

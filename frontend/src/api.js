@@ -255,6 +255,21 @@ export async function getMe() {
   return apiFetch("/me");
 }
 
+export async function getFirebaseToken() {
+  return auth.currentUser?.getIdToken() ?? null;
+}
+
+export function buildAuthenticatedApiUrl(path, token = "", cacheBuster = null) {
+  const url = new URL(path, `${BASE}/`);
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  if (cacheBuster !== null && cacheBuster !== undefined) {
+    url.searchParams.set("v", String(cacheBuster));
+  }
+  return url.toString();
+}
+
 export async function listInputFiles() {
   return apiFetch("/me/input-files");
 }

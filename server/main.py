@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import zipfile
+from urllib.parse import quote
 
 # Load .env before anything else reads os.environ
 try:
@@ -22,7 +23,8 @@ from uuid import uuid4
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -74,6 +76,8 @@ SINGLE_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024  # S3 PutObject hard limit
 MULTIPART_MIN_PART_SIZE_BYTES = 5 * 1024 * 1024  # S3 minimum except last part
 MULTIPART_DEFAULT_PART_SIZE_BYTES = 64 * 1024 * 1024
 MULTIPART_MAX_PARTS = 10_000
+PREVIEW_MAX_EDGE_PX = 512
+PREVIEW_WEBP_QUALITY = 75
 
 app = FastAPI(title="PC Rent Server")
 
@@ -1106,7 +1110,7 @@ def get_next_job_for_machine(machine_id: str, request: Request) -> dict[str, Any
 @app.get("/jobs")
 def list_jobs(current_user: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
     jobs = query_all(
-        "SELECT * FROM jobs WHERE user_id = %s ORDER BY submitted_at DESC",
+        "SELECT * FROM jobs WHERE user_id = %s AND group_id IS NULL ORDER BY submitted_at DESC",
         (current_user["uid"],),
     )
     return [serialize_job(j) for j in jobs]
@@ -1378,12 +1382,61 @@ def download_render_group_input_file(group_id: str, filename: str):
 
 @app.get("/jobs/{job_id}/output/{filename}")
 def download_job_output_file(job_id: str, filename: str, current_user: dict = Depends(get_current_user)):
+    job = query_one("SELECT id, user_id FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") and job["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     safe_name = sanitize_filename(filename)
     r2_key = f"jobs/{job_id}/output/{safe_name}"
     if not storage.file_exists(r2_key):
         raise HTTPException(status_code=404, detail="File not found")
     url = storage.generate_presigned_url(r2_key, download_name=safe_name)
     return RedirectResponse(url=url)
+
+
+@app.get("/jobs/{job_id}/output/{filename}/preview")
+def preview_job_output_file(job_id: str, filename: str, current_user: dict = Depends(get_current_user)):
+    job = query_one("SELECT id, user_id FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") and job["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    safe_name = sanitize_filename(filename)
+    r2_key = f"jobs/{job_id}/output/{safe_name}"
+    if not storage.file_exists(r2_key):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        raw_image = storage.download_file(r2_key)
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        with Image.open(io.BytesIO(raw_image)) as image:
+            if max(image.width, image.height) > PREVIEW_MAX_EDGE_PX:
+                image.thumbnail((PREVIEW_MAX_EDGE_PX, PREVIEW_MAX_EDGE_PX), Image.Resampling.LANCZOS)
+
+            has_alpha = "A" in image.getbands()
+            image = image.convert("RGBA" if has_alpha else "RGB")
+            output = io.BytesIO()
+            image.save(output, format="WEBP", quality=PREVIEW_WEBP_QUALITY, method=6)
+            payload = output.getvalue()
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=415, detail="File is not previewable as an image")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("Failed to generate preview for %s/%s: %s", job_id, safe_name, exc)
+        raise HTTPException(status_code=500, detail="Failed to generate image preview")
+
+    return Response(
+        content=payload,
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=60"},
+    )
 
 
 def build_job_output_entries(job: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1398,6 +1451,7 @@ def build_job_output_entries(job: dict[str, Any]) -> list[dict[str, Any]]:
         r2_key = f"jobs/{job['id']}/output/{safe_name}"
         try:
             url = storage.generate_presigned_url(r2_key, download_name=safe_name)
+            size_bytes = storage.get_file_size(r2_key)
         except Exception:
             continue
         entries.append(
@@ -1405,6 +1459,8 @@ def build_job_output_entries(job: dict[str, Any]) -> list[dict[str, Any]]:
                 "job_id": job["id"],
                 "filename": safe_name,
                 "url": url,
+                "preview_path": f"/jobs/{job['id']}/output/{quote(safe_name, safe='')}/preview",
+                "size_bytes": size_bytes,
                 "status": job.get("status"),
             }
         )
@@ -1420,6 +1476,8 @@ def list_job_outputs(job_id: str, current_user: dict = Depends(get_current_user)
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") and job["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     entries = build_job_output_entries(job)
     return {
         "job_id": job_id,
@@ -1434,6 +1492,8 @@ def download_job_output_archive(job_id: str, current_user: dict = Depends(get_cu
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") and job["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     if job["status"] != "done":
         raise HTTPException(status_code=400, detail="Job not complete yet")
 
@@ -2578,6 +2638,8 @@ def download_render_group_output(group_id: str, current_user: dict = Depends(get
     group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
     if not group:
         raise HTTPException(status_code=404, detail="Render group not found")
+    if group.get("user_id") and group["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     all_jobs = query_all("SELECT status FROM jobs WHERE group_id = %s", (group_id,))
     pending_or_running = [j for j in all_jobs if j["status"] in ("pending", "running")]

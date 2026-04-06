@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 
 export default function LoginPage() {
-  const { signIn, signUp, resetPassword } = useAuth();
+  const { signIn, signUp, resetPassword, rememberMe, setRememberMePreference } = useAuth();
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -17,9 +17,9 @@ export default function LoginPage() {
     setLoading(true);
     try {
       if (isSignUp) {
-        await signUp(email, password);
+        await signUp(email, password, { remember: rememberMe });
       } else {
-        await signIn(email, password);
+        await signIn(email, password, { remember: rememberMe });
       }
     } catch (err) {
       setError(friendlyError(err.code));
@@ -98,6 +98,18 @@ export default function LoginPage() {
               required
             />
           </label>
+
+          {!isSignUp && (
+            <label className="login-remember">
+              <input
+                type="checkbox"
+                checked={!!rememberMe}
+                onChange={(e) => setRememberMePreference(e.target.checked)}
+                disabled={loading}
+              />
+              <span>Remember me on this device</span>
+            </label>
+          )}
 
           {!isSignUp && (
             <div className="login-helper">

@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::Mutex;
@@ -148,6 +149,7 @@ use crate::state::{AgentState, LogEntry};
 pub struct DownloadResult {
     pub path: String,
     pub filename: String,
+    pub action: String,
 }
 
 #[derive(Clone, Copy)]
@@ -962,32 +964,68 @@ fn filename_from_url(url: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn unique_download_path(dir: &Path, filename: &str) -> PathBuf {
-    let sanitized = sanitize_filename(filename);
-    let candidate = dir.join(&sanitized);
-    if !candidate.exists() {
-        return candidate;
+fn duplicate_variant_name(stem: &str, ext: &str, candidate: &str) -> bool {
+    if candidate.is_empty() || stem.is_empty() {
+        return false;
+    }
+    let prefix = format!("{stem} (");
+    if !candidate.starts_with(&prefix) {
+        return false;
     }
 
-    let file_path = Path::new(&sanitized);
-    let stem = file_path
+    let suffix = if ext.is_empty() {
+        ")".to_string()
+    } else {
+        format!("){ext}")
+    };
+    if !candidate.ends_with(&suffix) {
+        return false;
+    }
+
+    let middle_start = prefix.len();
+    let middle_end = candidate.len().saturating_sub(suffix.len());
+    if middle_end <= middle_start {
+        return false;
+    }
+    candidate[middle_start..middle_end]
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+}
+
+fn remove_duplicate_variants(dir: &Path, canonical_filename: &str) -> Result<(), String> {
+    let canonical = Path::new(canonical_filename);
+    let stem = canonical
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("download");
-    let ext = file_path
+    let ext = canonical
         .extension()
         .and_then(|value| value.to_str())
         .map(|value| format!(".{value}"))
         .unwrap_or_default();
 
-    for index in 1..1000 {
-        let candidate = dir.join(format!("{stem} ({index}){ext}"));
-        if !candidate.exists() {
-            return candidate;
+    let entries = fs::read_dir(dir)
+        .map_err(|err| format!("Failed to list destination folder: {err}"))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("Failed to inspect destination folder: {err}"))?;
+        let path = entry.path();
+        let meta = entry
+            .metadata()
+            .map_err(|err| format!("Failed to read destination metadata: {err}"))?;
+        if !meta.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if duplicate_variant_name(stem, &ext, name) {
+            fs::remove_file(&path)
+                .map_err(|err| format!("Failed to remove duplicate file '{}': {err}", path.to_string_lossy()))?;
         }
     }
 
-    dir.join(format!("{stem}-copy{ext}"))
+    Ok(())
 }
 
 async fn ensure_sidecar_running(
@@ -1153,7 +1191,55 @@ pub async fn download_job_output_to_downloads(
     url: String,
     job_folder: Option<String>,
     preferred_filename: Option<String>,
+    expected_size_bytes: Option<u64>,
+    overwrite_existing: Option<bool>,
 ) -> Result<DownloadResult, String> {
+    let preferred_name = preferred_filename
+        .as_ref()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string);
+    let fallback_filename = preferred_name
+        .clone()
+        .unwrap_or_else(|| {
+            filename_from_url(&url)
+                .unwrap_or_else(|| "download.bin".to_string())
+        });
+    let mut filename = sanitize_filename(&fallback_filename);
+
+    let downloads = downloads_dir()?;
+    let target_dir = if let Some(folder) = job_folder {
+        downloads.join(sanitize_path_component(&folder, "render_job"))
+    } else {
+        downloads
+    };
+    fs::create_dir_all(&target_dir)
+        .map_err(|err| format!("Failed to create destination folder: {err}"))?;
+    remove_duplicate_variants(&target_dir, &filename)?;
+
+    let mut file_path = target_dir.join(&filename);
+    let should_overwrite = overwrite_existing.unwrap_or(true);
+
+    if file_path.exists() {
+        let existing_size = fs::metadata(&file_path)
+            .map_err(|err| format!("Failed to read existing file metadata: {err}"))?
+            .len();
+        if expected_size_bytes.is_some() && expected_size_bytes == Some(existing_size) {
+            return Ok(DownloadResult {
+                path: file_path.to_string_lossy().to_string(),
+                filename,
+                action: "skipped".to_string(),
+            });
+        }
+        if !should_overwrite {
+            return Ok(DownloadResult {
+                path: file_path.to_string_lossy().to_string(),
+                filename,
+                action: "skipped".to_string(),
+            });
+        }
+    }
+
     let client = reqwest::Client::new();
     let mut response = client
         .get(&url)
@@ -1171,29 +1257,50 @@ pub async fn download_job_output_to_downloads(
         });
     }
 
-    let filename = preferred_filename
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| {
-            response
-                .headers()
-                .get(CONTENT_DISPOSITION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(parse_download_filename)
-                .or_else(|| filename_from_url(response.url().as_str()))
-                .unwrap_or_else(|| "download.bin".to_string())
-        });
+    if preferred_name.is_none() {
+        if let Some(parsed) = response
+            .headers()
+            .get(CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_download_filename)
+        {
+            filename = sanitize_filename(&parsed);
+            remove_duplicate_variants(&target_dir, &filename)?;
+            file_path = target_dir.join(&filename);
+            if file_path.exists() {
+                let existing_size = fs::metadata(&file_path)
+                    .map_err(|err| format!("Failed to read existing file metadata: {err}"))?
+                    .len();
+                if expected_size_bytes.is_some() && expected_size_bytes == Some(existing_size) {
+                    return Ok(DownloadResult {
+                        path: file_path.to_string_lossy().to_string(),
+                        filename,
+                        action: "skipped".to_string(),
+                    });
+                }
+                if !should_overwrite {
+                    return Ok(DownloadResult {
+                        path: file_path.to_string_lossy().to_string(),
+                        filename,
+                        action: "skipped".to_string(),
+                    });
+                }
+            }
+        }
+    }
 
-    let downloads = downloads_dir()?;
-    let target_dir = if let Some(folder) = job_folder {
-        downloads.join(sanitize_path_component(&folder, "render_job"))
+    let action = if file_path.exists() {
+        "overwritten"
     } else {
-        downloads
+        "downloaded"
     };
-    fs::create_dir_all(&target_dir)
-        .map_err(|err| format!("Failed to create destination folder: {err}"))?;
 
-    let file_path = unique_download_path(&target_dir, &filename);
-    let mut file = File::create(&file_path)
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let temp_path = target_dir.join(format!(".{}.{}.part", filename, nonce));
+    let mut file = File::create(&temp_path)
         .map_err(|err| format!("Failed to create download file: {err}"))?;
 
     while let Some(chunk) = response
@@ -1204,10 +1311,22 @@ pub async fn download_job_output_to_downloads(
         file.write_all(&chunk)
             .map_err(|err| format!("Failed to write download file: {err}"))?;
     }
+    file.flush()
+        .map_err(|err| format!("Failed to finalize download file: {err}"))?;
+    drop(file);
+
+    if file_path.exists() {
+        fs::remove_file(&file_path)
+            .map_err(|err| format!("Failed to replace existing file: {err}"))?;
+    }
+    fs::rename(&temp_path, &file_path)
+        .map_err(|err| format!("Failed to move downloaded file into place: {err}"))?;
+    remove_duplicate_variants(&target_dir, &filename)?;
 
     Ok(DownloadResult {
         path: file_path.to_string_lossy().to_string(),
         filename,
+        action: action.to_string(),
     })
 }
 

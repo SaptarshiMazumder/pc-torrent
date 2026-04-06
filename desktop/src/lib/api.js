@@ -274,6 +274,24 @@ export async function getMachines(baseUrl) {
   return apiFetch(baseUrl, "/machines");
 }
 
+export async function listInputFiles(baseUrl) {
+  return apiFetch(baseUrl, "/me/input-files");
+}
+
+export async function renameInputFile(baseUrl, assetId, displayName) {
+  return apiFetch(baseUrl, `/me/input-files/${assetId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ display_name: displayName }),
+  });
+}
+
+export async function deleteInputFile(baseUrl, assetId) {
+  return apiFetch(baseUrl, `/me/input-files/${assetId}`, {
+    method: "DELETE",
+  });
+}
+
 export async function listJobs(baseUrl) {
   return apiFetch(baseUrl, "/jobs");
 }
@@ -323,15 +341,26 @@ export function jobOutputsUrl(baseUrl, jobId) {
   return `${normalizeBaseUrl(baseUrl)}/jobs/${jobId}/outputs`;
 }
 
-export async function createDistributedRenderGroup(baseUrl, machineIds, filename, fileSizeBytes = null) {
+export async function createDistributedRenderGroup(
+  baseUrl,
+  machineIds,
+  filename = null,
+  fileSizeBytes = null,
+  sourceAssetId = null
+) {
+  const body = {
+    machine_ids: machineIds,
+  };
+  if (sourceAssetId) {
+    body.source_asset_id = sourceAssetId;
+  } else {
+    body.filename = filename;
+    body.file_size_bytes = fileSizeBytes;
+  }
   return apiFetch(baseUrl, "/render-groups/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      machine_ids: machineIds,
-      filename,
-      file_size_bytes: fileSizeBytes,
-    }),
+    body: JSON.stringify(body),
   });
 }
 

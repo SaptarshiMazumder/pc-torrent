@@ -381,7 +381,7 @@ def handler(job: dict) -> dict:
         # 2. Download .blend (follow redirects — server URL redirects to R2)
         log.info(f"Downloading blend from {blend_url}")
         try:
-            r = requests.get(blend_url, timeout=300, allow_redirects=True)
+            r = requests.get(blend_url, timeout=300, allow_redirects=True, stream=True)
             r.raise_for_status()
         except Exception as e:
             err = f"Failed to download blend file: {e}"
@@ -389,12 +389,15 @@ def handler(job: dict) -> dict:
             _mark_failed(backend_url, job_id, err)
             return {"status": "failed", "error": err}
 
-        # Save download, then extract if it's a zip
+        # Stream download to disk to avoid loading entire file into RAM
         filename = blend_url.rstrip("/").split("/")[-1]
         raw_path = os.path.join(input_dir, filename)
+        downloaded_bytes = 0
         with open(raw_path, "wb") as f:
-            f.write(r.content)
-        log.info(f"File saved: {filename} ({len(r.content) / 1024 / 1024:.1f} MB)")
+            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                f.write(chunk)
+                downloaded_bytes += len(chunk)
+        log.info(f"File saved: {filename} ({downloaded_bytes / 1024 / 1024:.1f} MB)")
 
         if filename.lower().endswith(".zip"):
             import zipfile as _zf

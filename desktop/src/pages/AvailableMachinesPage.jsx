@@ -2,7 +2,8 @@
 import { getMachines } from "../lib/api";
 
 function machineTypeLabel(machine) {
-  if (machine?.machine_type === "runpod_serverless") return "Farm Endpoint";
+  if (machine?.machine_type === "runpod_serverless") return "RunPod Farm";
+  if (machine?.machine_type === "modal_serverless") return "Modal Farm";
   return "Desktop Worker";
 }
 
@@ -31,7 +32,7 @@ export default function AvailableMachinesPage({ backendUrl }) {
 
   const summary = useMemo(() => {
     const total = machines.length;
-    const farms = machines.filter((machine) => machine?.machine_type === "runpod_serverless").length;
+    const farms = machines.filter((m) => m?.machine_type === "runpod_serverless" || m?.machine_type === "modal_serverless").length;
     const desktops = Math.max(0, total - farms);
     return { total, farms, desktops };
   }, [machines]);

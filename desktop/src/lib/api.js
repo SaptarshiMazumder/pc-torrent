@@ -343,14 +343,15 @@ export function jobOutputsUrl(baseUrl, jobId) {
 
 export async function createDistributedRenderGroup(
   baseUrl,
-  machineIds,
+  machineIds = null,
   filename = null,
   fileSizeBytes = null,
   sourceAssetId = null
 ) {
-  const body = {
-    machine_ids: machineIds,
-  };
+  const body = {};
+  if (Array.isArray(machineIds) && machineIds.length > 0) {
+    body.machine_ids = machineIds;
+  }
   if (sourceAssetId) {
     body.source_asset_id = sourceAssetId;
   } else {
@@ -371,14 +372,17 @@ export async function uploadDistributedRenderInput(baseUrl, groupId, file, onPro
 export async function confirmDistributedJob(
   baseUrl,
   groupId,
-  machineIds,
+  machineIds = null,
   frameRange = null,
   renderOverrides = null,
   scheduling = null,
   analysisSnapshot = null,
   signal = null
 ) {
-  const body = { machine_ids: machineIds };
+  const body = {};
+  if (Array.isArray(machineIds) && machineIds.length > 0) {
+    body.machine_ids = machineIds;
+  }
   if (frameRange) {
     body.frame_start = frameRange.frame_start;
     body.frame_end = frameRange.frame_end;

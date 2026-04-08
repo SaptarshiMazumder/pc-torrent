@@ -352,7 +352,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
       {jobs.length === 0 ? (
         <div className="empty-state">
           <p>No jobs submitted yet.</p>
-          <p className="muted">Visit the Marketplace to get started.</p>
+          <p className="muted">Go to Create Render to start your first job.</p>
         </div>
       ) : (
         <div className="job-list">

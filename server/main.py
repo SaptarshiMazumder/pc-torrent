@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -514,6 +515,7 @@ def serialize_input_file_asset(row: dict[str, Any]) -> dict[str, Any]:
         "display_name": row.get("display_name") or row.get("input_filename"),
         "input_filename": row.get("input_filename"),
         "r2_key": row.get("r2_key"),
+        "size_bytes": row.get("size_bytes"),
         "frame_start": frame_start,
         "frame_end": frame_end,
         "frame_step": frame_step,
@@ -663,11 +665,16 @@ def list_my_input_files(current_user: dict = Depends(get_current_user)) -> dict[
         SELECT *
         FROM user_input_files
         WHERE user_id = %s
-        ORDER BY last_used_at DESC, created_at DESC
+        ORDER BY updated_at DESC, created_at DESC
         """,
         (user_id,),
     )
-    files = [serialize_input_file_asset(row) for row in rows]
+    files = []
+    for row in rows:
+        payload = dict(row)
+        r2_key = payload.get("r2_key")
+        payload["size_bytes"] = storage.get_file_size(r2_key) if r2_key else None
+        files.append(serialize_input_file_asset(payload))
     return {"files": files, "count": len(files)}
 
 
@@ -831,6 +838,10 @@ def heartbeat_machine(machine_id: str) -> dict[str, bool]:
 
 @app.get("/machines")
 def list_available_machines(_: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
+    return query_available_machines()
+
+
+def query_available_machines() -> list[dict[str, Any]]:
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=MACHINE_STALE_SECONDS)).isoformat()
     execute(
         """
@@ -1612,7 +1623,10 @@ def distribute_frames(
     return assignments
 
 
-WORKERS_PER_SERVERLESS = 3
+try:
+    WORKERS_PER_SERVERLESS = max(1, int(os.getenv("WORKERS_PER_SERVERLESS", "3")))
+except ValueError:
+    WORKERS_PER_SERVERLESS = 3
 
 
 def expand_serverless_assignments(
@@ -1808,7 +1822,7 @@ def _check_failover(group_id: str, tasks_raw: list[dict]):
         if new_start > new_end:
             continue  # all frames were already rendered
 
-        # Find the best available machine from the entire marketplace
+        # Find the best available machine from the current available pool
         best_machine_id = choose_retry_machine(group_id, task["machine_id"])
         if not best_machine_id or best_machine_id == task["machine_id"]:
             continue
@@ -1884,7 +1898,7 @@ def _check_failover(group_id: str, tasks_raw: list[dict]):
 
 
 def choose_retry_machine(group_id: str, failed_machine_id: str) -> str | None:
-    """Pick the best available machine from the entire marketplace.
+    """Pick the best available machine from the current available pool.
 
     Prefers: serverless (instant) > other available machines.
     Avoids the machine that just failed.
@@ -1914,7 +1928,7 @@ def _machine_type_of(machine_id: str) -> str:
 
 
 class CreateRenderGroupPayload(BaseModel):
-    machine_ids: list[str]
+    machine_ids: list[str] | None = None
     filename: str | None = None
     file_size_bytes: int | None = None
     source_asset_id: str | None = None
@@ -1923,20 +1937,18 @@ class CreateRenderGroupPayload(BaseModel):
 @app.post("/render-groups/create")
 def create_render_group(payload: CreateRenderGroupPayload, current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """Create a render group for distributed rendering across multiple machines."""
-    if not payload.machine_ids:
-        raise HTTPException(status_code=400, detail="At least one machine required")
-
-    # Validate all machines exist and are available
-    for mid in payload.machine_ids:
-        machine = query_one(
-            "SELECT id FROM machines WHERE id = %s AND status = 'available'",
-            (mid,),
-        )
-        if not machine:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Machine {mid[:8]}... is not available",
+    # Explicit machine mode keeps legacy behavior.
+    if payload.machine_ids:
+        for mid in payload.machine_ids:
+            machine = query_one(
+                "SELECT id FROM machines WHERE id = %s AND status = 'available'",
+                (mid,),
             )
+            if not machine:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Machine {mid[:8]}... is not available",
+                )
 
     group_id = str(uuid4())
     source_asset = None
@@ -1995,7 +2007,7 @@ def create_render_group(payload: CreateRenderGroupPayload, current_user: dict = 
         "group_id": group_id,
         "upload_url": upload_url,
         "r2_key": r2_key,
-        "machine_ids": payload.machine_ids,
+        "machine_ids": payload.machine_ids or [],
         "upload_required": upload_required,
         "source_asset": source_asset_payload,
         "prefill": source_asset_payload,
@@ -2135,7 +2147,7 @@ def abort_render_group_multipart_upload(
 
 
 class ConfirmRenderGroupPayload(BaseModel):
-    machine_ids: list[str]
+    machine_ids: list[str] | None = None
     frame_start: int | None = None
     frame_end: int | None = None
     frame_step: int | None = None
@@ -2273,12 +2285,17 @@ def confirm_render_group_upload(
             used_at=group.get("submitted_at") or now_iso(),
         )
 
-    machines = []
-    for mid in payload.machine_ids:
-        m = query_one("SELECT * FROM machines WHERE id = %s", (mid,))
-        if not m:
-            raise HTTPException(status_code=400, detail=f"Machine {mid[:8]}... not found")
-        machines.append(m)
+    machines: list[dict[str, Any]] = []
+    if payload.machine_ids:
+        for mid in payload.machine_ids:
+            m = query_one("SELECT * FROM machines WHERE id = %s", (mid,))
+            if not m:
+                raise HTTPException(status_code=400, detail=f"Machine {mid[:8]}... not found")
+            machines.append(m)
+    else:
+        machines = query_available_machines()
+        if not machines:
+            raise HTTPException(status_code=400, detail="No available machines right now. Try again shortly.")
 
     chunk_size_frames = scheduling.get("chunk_size_frames")
     if chunk_size_frames:

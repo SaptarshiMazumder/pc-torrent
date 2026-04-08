@@ -953,13 +953,16 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       }
 
       setFlowStage(FLOW_STAGE.SUBMITTED);
-      await loadSavedInputs();
+      // Clear "starting" state immediately once backend accepted the render
+      // so UI doesn't get stuck if background refresh calls are slow.
+      setStarting(false);
       onJobSubmitted(
         result.group_id,
         file?.name || result.input_filename || "input.blend",
         result.tasks || [],
         result.total_frames
       );
+      void loadSavedInputs();
     } catch (err) {
       if (err?.name === "AbortError") {
         setError("Render start cancelled");
@@ -1314,12 +1317,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     !starting &&
     Boolean(pendingGroupId) &&
     (cameraMode !== "camera_ranges" || (manualRangeValid && cameraRangesValidation.ok));
+  const isStartingStage = flowStage === FLOW_STAGE.STARTING;
 
   const stepLabel = analyzing
     ? "Analyzing"
     : uploading
     ? "Uploading"
-    : starting
+    : isStartingStage
     ? "Starting"
     : "";
   const showIndeterminateProgress = !uploading;
@@ -1622,7 +1626,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
             </button>
           )}
 
-          {(analyzing || uploading || starting) && (
+          {(analyzing || uploading || isStartingStage) && (
             <button
               className="btn btn-danger submit-primary-btn"
               type="button"
@@ -1652,7 +1656,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
           )}
         </div>
 
-        {(analyzing || uploading || starting) && (
+        {(analyzing || uploading || isStartingStage) && (
           <div className="runtime-progress-wrap">
             <div className={`runtime-progress-track ${showIndeterminateProgress ? "indeterminate" : ""}`}>
               <div

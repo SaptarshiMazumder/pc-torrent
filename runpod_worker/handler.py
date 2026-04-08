@@ -333,23 +333,41 @@ class IncrementalOutputUploader:
         self._scan_once(require_stable=False)
 
 
+def _put_status(backend_url: str, job_id: str, payload: dict, deadline: float = 600) -> None:
+    """PUT job status with retries for up to `deadline` seconds to tolerate Cloud Run cold starts."""
+    delay = 5
+    last_exc = None
+    start = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            requests.put(
+                f"{backend_url}/jobs/{job_id}/status",
+                json=payload,
+                timeout=60,
+            ).raise_for_status()
+            return
+        except Exception as e:
+            last_exc = e
+            elapsed = time.monotonic() - start
+            log.warning(f"Status update attempt {attempt} failed ({elapsed:.0f}s elapsed): {e}")
+            if time.monotonic() - start + delay >= deadline:
+                break
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+    raise last_exc
+
+
 def _mark_done(backend_url: str, job_id: str, output_files: list[str]):
-    requests.put(
-        f"{backend_url}/jobs/{job_id}/status",
-        json={"status": "done", "output_files": output_files},
-        timeout=15,
-    ).raise_for_status()
+    _put_status(backend_url, job_id, {"status": "done", "output_files": output_files})
 
 
 def _mark_failed(backend_url: str, job_id: str, error: str):
     try:
-        requests.put(
-            f"{backend_url}/jobs/{job_id}/status",
-            json={"status": "failed", "error": error},
-            timeout=15,
-        )
+        _put_status(backend_url, job_id, {"status": "failed", "error": error})
     except Exception as e:
-        log.error(f"Failed to mark job failed: {e}")
+        log.error(f"Failed to mark job failed after retries: {e}")
 
 
 # ---------------------------------------------------------------------------

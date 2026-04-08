@@ -77,12 +77,12 @@ export default function App() {
         )}
 
         {/* Rentee pages */}
-        {page === "create" && (
+        <div style={{ display: page === "create" ? "contents" : "none" }}>
           <CreateRenderPage
             backendUrl={backendUrl}
             onJobSubmitted={handleJobSubmitted}
           />
-        )}
+        </div>
         {page === "myjobs" && (
           <MyJobsPage
             jobs={jobsHook.jobs}

@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import subprocess
 import sys
 
 import bpy
@@ -228,6 +229,19 @@ def _activate_gpu_devices(compute_type: str) -> bool:
     return False
 
 
+def _gpu_names() -> list[str]:
+    """Best-effort GPU name probe via nvidia-smi."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def _apply_render(scene, overrides: dict):
     render = overrides.get("render") if isinstance(overrides.get("render"), dict) else {}
     render_settings = scene.render
@@ -277,7 +291,12 @@ def _apply_render(scene, overrides: dict):
 
     # AUTO: prefer OptiX, then CUDA. Fail instead of silently using CPU.
     if device_policy in {"", "AUTO"}:
-        for compute_type in ("OPTIX", "CUDA"):
+        compute_order = ("OPTIX", "CUDA")
+        # A100 frequently behaves better on CUDA in this worker path.
+        if any("A100" in name.upper() for name in _gpu_names()):
+            log("[RENDER_DRIVER] A100 detected: preferring CUDA before OPTIX.")
+            compute_order = ("CUDA", "OPTIX")
+        for compute_type in compute_order:
             if _activate_gpu_devices(compute_type):
                 _set_attr_safe(cycles, "device", "GPU")
                 return

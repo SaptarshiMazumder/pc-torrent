@@ -106,6 +106,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --set-env-vars "MODAL_TOKEN_ID=${MODAL_TOKEN_ID:-}" \
     --set-env-vars "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET:-}" \
     --set-env-vars "^@^MODAL_ENDPOINTS=${MODAL_ENDPOINTS:-}" \
+    --set-env-vars "^@^MODAL_DISABLED_GPU_TYPES=${MODAL_DISABLED_GPU_TYPES:-a100}" \
     --set-env-vars "MODAL_APP_NAME=${MODAL_APP_NAME:-pcrent-render}" \
     --set-env-vars "MODAL_WORKSPACE=${MODAL_WORKSPACE:-}" \
     --set-env-vars "MODAL_ENDPOINT_URL_PREFIX=${MODAL_ENDPOINT_URL_PREFIX:-}" \

@@ -464,8 +464,11 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
       }
 
       setFlowStage("submitted");
-      await refreshSavedInputs();
+      // Clear "starting" as soon as submission is accepted so UI does not
+      // remain in mixed submitted+starting state if refresh hangs.
+      setStarting(false);
       onSubmitted(result.group_id, result);
+      void refreshSavedInputs();
     } catch (err) {
       setError(err.message || "Failed to start render");
       setFlowStage("uploaded");
@@ -496,8 +499,9 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
     !starting &&
     !!pendingGroupId &&
     (analysisResult ? true : manualRangeValid);
+  const isStartingStage = flowStage === "starting";
 
-  const stepLabel = analyzing ? "Analyzing" : uploading ? "Uploading" : starting ? "Starting" : "";
+  const stepLabel = analyzing ? "Analyzing" : uploading ? "Uploading" : isStartingStage ? "Starting" : "";
 
   const MachineSummary = () => (
     <div className="machine-card" style={{ marginBottom: 16 }}>
@@ -630,7 +634,7 @@ function SubmitJobPage({ machines, onBack, onSubmitted }) {
           )}
         </div>
 
-        {(analyzing || uploading || starting) && (
+        {(analyzing || uploading || isStartingStage) && (
           <div className="progress-bar-wrap">
             <div
               className="progress-bar"

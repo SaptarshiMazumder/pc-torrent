@@ -52,6 +52,8 @@ fn main() {
             commands::prepare_blend_for_upload,
             commands::analyze_and_prepare_blend,
             commands::analyze_blend_with_blender,
+            commands::get_frame_cache_path,
+            commands::write_frame_cache,
         ])
         .setup(move |app| {
             match persistence::load_agent_state(&app.handle()) {

@@ -86,9 +86,11 @@ export default function App() {
         {page === "myjobs" && (
           <MyJobsPage
             jobs={jobsHook.jobs}
+            loading={jobsHook.loading}
             removeJob={jobsHook.removeJob}
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
+            onRefresh={jobsHook.refresh}
           />
         )}
         {page === "available" && (

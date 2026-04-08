@@ -8,6 +8,7 @@ import {
 } from "../lib/api";
 import { downloadJobOutputToDownloads } from "../lib/sidecar";
 import SegmentedProgressBar from "../components/SegmentedProgressBar";
+import FrameThumb from "../components/FrameThumb";
 
 const STATUS_LABELS = {
   pending: "Pending",
@@ -80,7 +81,7 @@ function summarizeDownloadActions(actions) {
   return `${actions.downloaded || 0} new, ${actions.overwritten || 0} updated, ${actions.skipped || 0} skipped`;
 }
 
-export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGroupCancelled }) {
+export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh }) {
   const [downloadingId, setDownloadingId] = useState(null);
   const [downloadResults, setDownloadResults] = useState({});
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
@@ -226,14 +227,7 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
           ? await getRenderGroupOutputs(backendUrl, id)
           : await getJobOutputs(backendUrl, id);
         const files = Array.isArray(payload?.files)
-          ? payload.files
-              .map((file) => ({
-                ...file,
-                preview_url: file?.preview_path
-                  ? buildAuthenticatedUrl(backendUrl, file.preview_path, authToken, file.size_bytes ?? file.filename)
-                  : file?.url || "",
-              }))
-              .sort(outputSort)
+          ? payload.files.slice().sort(outputSort)
           : [];
         setFrameGalleries((prev) => ({
           ...prev,
@@ -347,6 +341,15 @@ export default function MyJobsPage({ jobs, removeJob, backendUrl, markRenderGrou
         <span className="log-count">
           {jobs.length} job{jobs.length !== 1 ? "s" : ""}
         </span>
+        <button
+          className="btn btn-secondary"
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          style={{ marginLeft: "auto" }}
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
       </div>
 
       {jobs.length === 0 ? (
@@ -624,6 +627,7 @@ function RenderGroupCard({
           error={galleryState?.error || ""}
           openingFrameKey={openingFrameKey}
           onOpenFrame={onOpenFrame}
+          backendUrl={backendUrl}
         />
       )}
     </div>
@@ -818,13 +822,14 @@ function SingleJobCard({
           error={galleryState?.error || ""}
           openingFrameKey={openingFrameKey}
           onOpenFrame={onOpenFrame}
+          backendUrl={backendUrl}
         />
       )}
     </div>
   );
 }
 
-function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenFrame }) {
+function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenFrame, backendUrl }) {
   return (
     <div className="job-frame-gallery">
       <div className="job-frame-gallery-head">
@@ -858,11 +863,10 @@ function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenF
                 title={file.filename}
                 onClick={() => onOpenFrame(file)}
               >
-                <img
+                <FrameThumb
                   className="job-frame-thumb"
-                  src={file.preview_url || file.url}
-                  alt={file.filename}
-                  loading="lazy"
+                  file={file}
+                  backendUrl={backendUrl}
                 />
                 <span className="job-frame-name">
                   {isOpening ? "Caching full frame..." : file.filename}

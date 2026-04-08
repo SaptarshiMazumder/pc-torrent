@@ -14,8 +14,6 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 log = logging.getLogger(__name__)
 
-AGENT_API_KEY = os.environ.get("AGENT_API_KEY", "")
-
 _bearer = HTTPBearer(auto_error=False)
 
 
@@ -75,18 +73,6 @@ def get_current_user(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-
-def get_agent_auth(
-    creds: HTTPAuthorizationCredentials | None = Security(_bearer),
-) -> bool:
-    """Validate the static AGENT_API_KEY sent by render agents."""
-    if not creds:
-        raise HTTPException(status_code=401, detail="Missing agent key")
-    if not AGENT_API_KEY:
-        raise HTTPException(status_code=500, detail="AGENT_API_KEY not configured on server")
-    if creds.credentials != AGENT_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid agent key")
-    return True
 
 
 # ---------------------------------------------------------------------------

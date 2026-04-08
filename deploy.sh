@@ -103,11 +103,21 @@ gcloud run deploy "$SERVICE_NAME" \
     --set-env-vars "RUNPOD_API_KEY=$RUNPOD_API_KEY" \
     --set-env-vars "RUNPOD_ENDPOINT_ID=${RUNPOD_ENDPOINT_ID:-}" \
     --set-env-vars "^@^RUNPOD_ENDPOINTS=${RUNPOD_ENDPOINTS:-}" \
+    --set-env-vars "MODAL_TOKEN_ID=${MODAL_TOKEN_ID:-}" \
+    --set-env-vars "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET:-}" \
+    --set-env-vars "^@^MODAL_ENDPOINTS=${MODAL_ENDPOINTS:-}" \
+    --set-env-vars "MODAL_APP_NAME=${MODAL_APP_NAME:-pcrent-render}" \
+    --set-env-vars "MODAL_WORKSPACE=${MODAL_WORKSPACE:-}" \
+    --set-env-vars "MODAL_ENDPOINT_URL_PREFIX=${MODAL_ENDPOINT_URL_PREFIX:-}" \
     --set-env-vars "PUBLIC_BACKEND_URL=$PUBLIC_BACKEND_URL" \
     --set-env-vars "RUNPOD_GPU_MODEL=${RUNPOD_GPU_MODEL:-RunPod Serverless}" \
     --set-env-vars "RUNPOD_GPU_VRAM_GB=${RUNPOD_GPU_VRAM_GB:-24}" \
     --set-env-vars "RUNPOD_CPU_CORES=${RUNPOD_CPU_CORES:-16}" \
     --set-env-vars "RUNPOD_RAM_GB=${RUNPOD_RAM_GB:-64}" \
+    --set-env-vars "MODAL_GPU_VRAM_GB=${MODAL_GPU_VRAM_GB:-24}" \
+    --set-env-vars "MODAL_CPU_CORES=${MODAL_CPU_CORES:-16}" \
+    --set-env-vars "MODAL_RAM_GB=${MODAL_RAM_GB:-64}" \
+    --set-env-vars "MODAL_WORKERS_PER_ENDPOINT=${MODAL_WORKERS_PER_ENDPOINT:-3}" \
     --set-env-vars "AGENT_API_KEY=$AGENT_API_KEY" \
     --set-env-vars "^|^FIREBASE_SERVICE_ACCOUNT_JSON=$FIREBASE_SERVICE_ACCOUNT_JSON" \
     --quiet

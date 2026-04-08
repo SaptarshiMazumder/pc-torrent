@@ -3,21 +3,22 @@ import Sidebar from "./components/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
-import MarketplacePage from "./pages/MarketplacePage";
+import CreateRenderPage from "./pages/CreateRenderPage";
 import MyJobsPage from "./pages/MyJobsPage";
+import AvailableMachinesPage from "./pages/AvailableMachinesPage";
 import LoginPage from "./components/LoginPage";
 import { useAgent } from "./hooks/useAgent";
 import { useJobs } from "./hooks/useJobs";
 import { useAuth } from "./contexts/AuthContext";
 
-const DEFAULT_PAGES = { renter: "dashboard", rentee: "marketplace" };
+const DEFAULT_PAGES = { renter: "dashboard", rentee: "create" };
 
 export default function App() {
   const { user, loading: authLoading } = useAuth();
   const [mode, setMode] = useState(
     () => localStorage.getItem("pcrent_mode") || "rentee"
   );
-  const [page, setPage] = useState(() => DEFAULT_PAGES[localStorage.getItem("pcrent_mode") || "rentee"] || "marketplace");
+  const [page, setPage] = useState(() => DEFAULT_PAGES[localStorage.getItem("pcrent_mode") || "rentee"] || "create");
   const [backendUrl, setBackendUrl] = useState(
     "https://pcrent-server-930713698987.asia-northeast1.run.app"
   );
@@ -76,8 +77,8 @@ export default function App() {
         )}
 
         {/* Rentee pages */}
-        {page === "marketplace" && (
-          <MarketplacePage
+        {page === "create" && (
+          <CreateRenderPage
             backendUrl={backendUrl}
             onJobSubmitted={handleJobSubmitted}
           />
@@ -89,6 +90,9 @@ export default function App() {
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
           />
+        )}
+        {page === "available" && (
+          <AvailableMachinesPage backendUrl={backendUrl} />
         )}
 
         {/* Shared pages */}

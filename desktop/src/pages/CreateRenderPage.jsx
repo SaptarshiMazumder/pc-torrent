@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
-import MachineCard from "../components/MachineCard";
 import {
-  getMachines,
   createDistributedRenderGroup,
   confirmDistributedJob,
   cancelRenderGroup,
@@ -12,15 +10,6 @@ import {
   deleteInputFile,
   getFirebaseToken,
 } from "../lib/api";
-
-const SEGMENT_COLORS = [
-  "#6c63ff",
-  "#3b82f6",
-  "#10b981",
-  "#f59e0b",
-  "#ef4444",
-  "#8b5cf6",
-];
 
 const FLOW_STAGE = {
   IDLE: "idle",
@@ -37,12 +26,128 @@ const CAMERA_MODE_OPTIONS = [
   { value: "camera_ranges", label: "Camera Ranges (Editable)" },
 ];
 
+const SAVED_FILE_GROUPS = [
+  { key: "today", label: "Today" },
+  { key: "previous7", label: "Previous 7 days" },
+  { key: "previous30", label: "Previous 30 days" },
+  { key: "earlier", label: "Earlier" },
+];
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function powerScore(machine) {
-  return (machine.gpu_vram_gb || 0) * 4 + (machine.cpu_cores || 0) + (machine.ram_gb || 0) * 0.3;
+function resolveSavedInputTimestamp(asset) {
+  const raw = asset?.updated_at || asset?.created_at || asset?.last_used_at || null;
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
+function formatSavedInputTimestamp(timestamp) {
+  if (!timestamp) return "Unknown";
+  const now = new Date();
+  const isToday =
+    timestamp.getFullYear() === now.getFullYear() &&
+    timestamp.getMonth() === now.getMonth() &&
+    timestamp.getDate() === now.getDate();
+  if (isToday) {
+    return timestamp.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  return timestamp.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
+function detectSavedInputKind(name) {
+  const normalized = String(name || "").toLowerCase();
+  if (normalized.endsWith(".blend")) return "blend";
+  if (normalized.endsWith(".zip")) return "zip";
+  return "file";
+}
+
+function formatSizeMb(sizeBytes) {
+  const size = Number(sizeBytes);
+  if (!Number.isFinite(size) || size <= 0) return "Size unknown";
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function SavedFileKindIcon({ kind }) {
+  if (kind === "zip") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M7 3h7l4 4v14H7z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinejoin="round"
+        />
+        <path d="M14 3v4h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+        <rect x="11" y="7.5" width="2" height="2" rx="0.4" fill="currentColor" />
+        <rect x="11" y="10.4" width="2" height="2" rx="0.4" fill="currentColor" />
+        <rect x="11" y="13.3" width="2" height="2" rx="0.4" fill="currentColor" />
+        <rect x="11" y="16.2" width="2" height="2" rx="0.4" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (kind === "blend") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M3.8 12.2l7.8-5.7v3.7h4.6a5.2 5.2 0 1 1 0 4.1h-3.1"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <circle cx="16.6" cy="12.2" r="2.1" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M7 3h7l4 4v14H7z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+      <path d="M14 3v4h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ProceedStatusIcon({ canProceed }) {
+  if (canProceed) {
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="1.7" />
+        <path
+          d="M6.2 10.3l2.3 2.4 5.4-5.3"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path
+        d="M7 7l6 6M13 7l-6 6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function parseManualFrameRange(frameStart, frameEnd, frameStep) {
@@ -213,60 +318,16 @@ function validateCameraRanges(rows, frameRange) {
   return { ok: true, error: "", rows: parsedRows };
 }
 
-function SelectedMachinesSummary({ machines }) {
-  const totalPower = useMemo(
-    () => machines.reduce((sum, machine) => sum + powerScore(machine), 0),
-    [machines]
-  );
-
-  return (
-    <div className="selected-machines-list">
-      <h3>
-        {machines.length} machine{machines.length !== 1 ? "s" : ""} selected
-      </h3>
-      <div className="power-distribution-preview">
-        {machines.map((machine, index) => {
-          const share = totalPower > 0 ? (powerScore(machine) / totalPower) * 100 : 0;
-          return (
-            <div
-              key={machine.id}
-              className="power-preview-segment"
-              style={{ width: `${Math.max(share, 3)}%` }}
-              title={`${machine.gpu_model}: ~${Math.round(share)}%`}
-            >
-              <div className="power-preview-fill" data-color-index={index % SEGMENT_COLORS.length} />
-            </div>
-          );
-        })}
-      </div>
-      <div className="power-preview-labels">
-        {machines.map((machine, index) => {
-          const share = totalPower > 0 ? Math.round((powerScore(machine) / totalPower) * 100) : 0;
-          return (
-            <div className="power-preview-label" data-color-index={index % SEGMENT_COLORS.length} key={machine.id}>
-              <span className="power-label-dot" />
-              <span>{machine.gpu_model}</span>
-              <span>~{share}% of frames</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
-  const [view, setView] = useState("browse");
-  const [machines, setMachines] = useState([]);
-  const [loadingMachines, setLoadingMachines] = useState(true);
-  const [machineError, setMachineError] = useState("");
-  const [selectedMachineIds, setSelectedMachineIds] = useState([]);
+export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const [savedInputs, setSavedInputs] = useState([]);
   const [savedInputsLoading, setSavedInputsLoading] = useState(false);
   const [savedInputsError, setSavedInputsError] = useState("");
   const [selectedSavedInputId, setSelectedSavedInputId] = useState("");
+  const [savedInputSearch, setSavedInputSearch] = useState("");
+  const [dragOverUpload, setDragOverUpload] = useState(false);
+  const [analysisTab, setAnalysisTab] = useState("settings");
 
-  const [file, setFile] = useState(null);           // { name, size, path } — path set after native picker
+  const [file, setFile] = useState(null);           // { name, size, path } - path set after native picker
   const [flowStage, setFlowStage] = useState(FLOW_STAGE.IDLE);
   const [analyzing, setAnalyzing] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -297,11 +358,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   const [viewLayerName, setViewLayerName] = useState("");
   const [cameraRanges, setCameraRanges] = useState([]);
 
-  const selectedMachines = useMemo(
-    () => machines.filter((machine) => selectedMachineIds.includes(machine.id)),
-    [machines, selectedMachineIds]
-  );
-  const selectedMachineIdSet = useMemo(() => new Set(selectedMachineIds), [selectedMachineIds]);
   const analyzedScenes = useMemo(
     () => (Array.isArray(analysisResult?.scenes) ? analysisResult.scenes : []),
     [analysisResult]
@@ -326,6 +382,59 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     () => savedInputs.find((item) => item.id === selectedSavedInputId) || null,
     [savedInputs, selectedSavedInputId]
   );
+  const filteredSavedInputs = useMemo(() => {
+    const query = savedInputSearch.trim().toLowerCase();
+    if (!query) return savedInputs;
+    return savedInputs.filter((asset) => {
+      const display = String(asset?.display_name || "").toLowerCase();
+      const filename = String(asset?.input_filename || "").toLowerCase();
+      return display.includes(query) || filename.includes(query);
+    });
+  }, [savedInputs, savedInputSearch]);
+  const savedInputSections = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfPrevious7 = new Date(startOfToday);
+    startOfPrevious7.setDate(startOfToday.getDate() - 7);
+    const startOfPrevious30 = new Date(startOfToday);
+    startOfPrevious30.setDate(startOfToday.getDate() - 30);
+
+    const grouped = {
+      today: [],
+      previous7: [],
+      previous30: [],
+      earlier: [],
+    };
+
+    filteredSavedInputs.forEach((asset) => {
+      const timestamp = resolveSavedInputTimestamp(asset);
+      const entry = { asset, timestamp };
+
+      if (timestamp && timestamp >= startOfToday) {
+        grouped.today.push(entry);
+      } else if (timestamp && timestamp >= startOfPrevious7) {
+        grouped.previous7.push(entry);
+      } else if (timestamp && timestamp >= startOfPrevious30) {
+        grouped.previous30.push(entry);
+      } else {
+        grouped.earlier.push(entry);
+      }
+    });
+
+    Object.keys(grouped).forEach((key) => {
+      grouped[key].sort((a, b) => {
+        const bTime = b.timestamp ? b.timestamp.getTime() : 0;
+        const aTime = a.timestamp ? a.timestamp.getTime() : 0;
+        return bTime - aTime;
+      });
+    });
+
+    return SAVED_FILE_GROUPS.map(({ key, label }) => ({
+      key,
+      label,
+      items: grouped[key],
+    })).filter((section) => section.items.length > 0);
+  }, [filteredSavedInputs]);
 
   const resetSubmissionFlow = ({ clearFile = false } = {}) => {
     analyzeRunRef.current += 1;
@@ -363,6 +472,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     setForceCameraName("");
     setViewLayerName("");
     setCameraRanges([]);
+    setAnalysisTab("settings");
     if (clearFile) {
       setFile(null);
     }
@@ -374,19 +484,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       .then((bin) => setBlenderBin(bin || null))
       .catch(() => setBlenderBin(null));
   }, []);
-
-  const loadMachines = async () => {
-    setLoadingMachines(true);
-    setMachineError("");
-    try {
-      const data = await getMachines(backendUrl);
-      setMachines(Array.isArray(data) ? data : []);
-    } catch (err) {
-      setMachineError(err.message || "Cannot reach backend");
-    } finally {
-      setLoadingMachines(false);
-    }
-  };
 
   const loadSavedInputs = async () => {
     setSavedInputsLoading(true);
@@ -402,25 +499,8 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   };
 
   useEffect(() => {
-    loadMachines();
     loadSavedInputs();
   }, [backendUrl]);
-
-  useEffect(() => {
-    if (view === "submit" && selectedMachines.length === 0) {
-      setView("browse");
-    }
-  }, [view, selectedMachines.length]);
-
-  const handleToggleMachine = (machine) => {
-    resetSubmissionFlow();
-    setSelectedMachineIds((prev) => {
-      if (prev.includes(machine.id)) {
-        return prev.filter((id) => id !== machine.id);
-      }
-      return [...prev, machine.id];
-    });
-  };
 
   const applyParsedAnalysis = (parsed) => {
     setAnalysisResult(parsed);
@@ -516,12 +596,13 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   };
 
   const handleAnalyze = async () => {
-    if (!file) {
-      setError("Select a .blend file or .zip project bundle first");
+    setAnalysisTab("settings");
+    if (!file && selectedSavedInputId) {
+      await handleUseSavedInput(selectedSavedInputId);
       return;
     }
-    if (selectedMachines.length === 0) {
-      setError("Select at least one machine before analyzing");
+    if (!file) {
+      setError("Select a .blend file or .zip project bundle first");
       return;
     }
 
@@ -631,10 +712,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       setError("Select a .blend file or .zip project bundle first");
       return;
     }
-    if (selectedMachines.length === 0) {
-      setError("Select at least one machine before uploading");
-      return;
-    }
     const fallbackStage = flowStage === FLOW_STAGE.PREPARED ? FLOW_STAGE.PREPARED : FLOW_STAGE.ANALYZED;
     setError("");
     setServerParseError("");
@@ -663,7 +740,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     try {
       const created = await createDistributedRenderGroup(
         backendUrl,
-        selectedMachines.map((machine) => machine.id),
+        null,
         uploadFilename,
         Number.isFinite(file?.size) ? file.size : null
       );
@@ -745,29 +822,26 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     }
   };
 
-  const handleUseSavedInput = async () => {
-    if (!selectedSavedInputId) {
+  const handleUseSavedInput = async (assetId = selectedSavedInputId) => {
+    if (!assetId) {
       setError("Select a saved file first");
       return;
     }
-    if (selectedMachines.length === 0) {
-      setError("Select at least one machine before using a saved file");
-      return;
-    }
-
     setError("");
     setServerParseError("");
     setStarting(true);
     try {
       const created = await createDistributedRenderGroup(
         backendUrl,
-        selectedMachines.map((machine) => machine.id),
         null,
         null,
-        selectedSavedInputId
+        null,
+        assetId
       );
+      const selectedAsset = savedInputs.find((item) => item.id === assetId) || selectedSavedInput;
       setPendingGroupId(created.group_id || "");
-      applySavedAssetPrefill(created.prefill || created.source_asset || selectedSavedInput);
+      setSelectedSavedInputId(assetId);
+      applySavedAssetPrefill(created.prefill || created.source_asset || selectedAsset);
       setFlowStage(FLOW_STAGE.UPLOADED);
       setFile(null);
       await loadSavedInputs();
@@ -860,7 +934,7 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
       const result = await confirmDistributedJob(
         backendUrl,
         pendingGroupId,
-        selectedMachines.map((machine) => machine.id),
+        null,
         frameRange,
         renderOverrides,
         null,
@@ -989,6 +1063,43 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     }
   };
 
+  const handleUploadCardDrop = async (event) => {
+    event.preventDefault();
+    setDragOverUpload(false);
+    if (isBusy) return;
+
+    const droppedFile = event?.dataTransfer?.files?.[0] || null;
+    if (!droppedFile) return;
+
+    const name = String(droppedFile.name || "").trim();
+    const extension = name.toLowerCase().split(".").pop() || "";
+    if (extension !== "blend" && extension !== "zip") {
+      setError("Only .blend or .zip files are supported");
+      return;
+    }
+
+    const filePath = droppedFile.path || null;
+    if (!filePath) {
+      setError("Dropped file path is unavailable. Use 'New File' click picker.");
+      return;
+    }
+
+    let size = Number.isFinite(droppedFile.size) && droppedFile.size >= 0 ? droppedFile.size : 0;
+    if (!size) {
+      try {
+        const resolvedSize = await invoke("get_file_size", { filePath });
+        size = Number.isFinite(resolvedSize) && resolvedSize >= 0 ? resolvedSize : 0;
+      } catch {
+        size = 0;
+      }
+    }
+
+    setError("");
+    setFile({ name, path: filePath, size });
+    setSelectedSavedInputId("");
+    resetSubmissionFlow();
+  };
+
   // Legacy handler kept for the hidden <input> (used only as fallback)
   const handleFileChange = (event) => {
     const nextFile = event.target.files?.[0] || null;
@@ -1055,13 +1166,146 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
   }, [cameraRanges, manualFrameRange]);
 
   const isBusy = analyzing || uploading || starting || cancelingRender;
-  const canUseSaved =
-    !isBusy &&
-    flowStage !== FLOW_STAGE.STARTING &&
-    Boolean(selectedSavedInputId);
   const canUpload =
     (flowStage === FLOW_STAGE.PREPARED || flowStage === FLOW_STAGE.ANALYZED) &&
     !isBusy;
+  const showSourceChooser =
+    flowStage === FLOW_STAGE.IDLE &&
+    !analyzing &&
+    !pendingGroupId &&
+    !starting;
+  const hasInputSourceSelected = Boolean(file) || Boolean(selectedSavedInputId) || Boolean(pendingGroupId);
+  const selectedSourceLabel = file
+    ? file.name
+    : selectedSavedInput
+    ? selectedSavedInput.display_name || selectedSavedInput.input_filename
+    : "";
+  const localFileKind = file ? detectSavedInputKind(file.name) : "file";
+  const showStageBubble = hasInputSourceSelected || flowStage !== FLOW_STAGE.IDLE;
+  const canAnalyze = (Boolean(file) || Boolean(selectedSavedInputId)) && !analyzing && !uploading && !starting;
+  const showAnalysisTabs = flowStage !== FLOW_STAGE.IDLE && !analyzing;
+  const analysisErrorCount =
+    (prepResult?.analysis_errors?.length || 0) +
+    (prepResult?.prepare_errors?.length || 0);
+  const analysisWarningCount =
+    (prepResult?.analysis_warnings?.length || 0) +
+    (prepResult?.prepare_warnings?.length || 0);
+  const proceedErrorCount = analysisErrorCount + (serverParseError ? 1 : 0);
+  const proceedWarningCount = analysisWarningCount + (clientParseError ? 1 : 0);
+  const hasRenderBlockingIssues = proceedErrorCount > 0;
+  const proceedStatusTone = hasRenderBlockingIssues
+    ? "danger"
+    : proceedWarningCount > 0
+    ? "warning"
+    : "success";
+  const proceedStatusText = hasRenderBlockingIssues
+    ? `Render cannot proceed (${proceedErrorCount} error${proceedErrorCount === 1 ? "" : "s"})`
+    : proceedWarningCount > 0
+    ? `Render can proceed with ${proceedWarningCount} warning${proceedWarningCount === 1 ? "" : "s"}`
+    : "Render can proceed with no warnings";
+  const analysisSuccessChecks = useMemo(() => {
+    if (flowStage === FLOW_STAGE.IDLE || analyzing) return [];
+    const checks = [];
+    if (analysisResult) {
+      const sceneCount = analyzedScenes.length;
+      checks.push(`Scene check passed: ${sceneCount} scene${sceneCount === 1 ? "" : "s"} detected.`);
+      if (availableCameras.length > 0) {
+        checks.push(`Camera check passed: ${availableCameras.length} camera${availableCameras.length === 1 ? "" : "s"} found.`);
+      }
+      if (availableViewLayers.length > 0) {
+        checks.push(
+          `View layer check passed: ${availableViewLayers.length} view layer${availableViewLayers.length === 1 ? "" : "s"} found.`
+        );
+      }
+    }
+    const issueText = [
+      ...(prepResult?.analysis_errors || []),
+      ...(prepResult?.prepare_errors || []),
+      ...(prepResult?.analysis_warnings || []),
+      ...(prepResult?.prepare_warnings || []),
+      clientParseError || "",
+      serverParseError || "",
+    ]
+      .join(" ")
+      .toLowerCase();
+    if (!/(texture|image|missing library|cannot pack|not found)/.test(issueText)) {
+      checks.push("Texture check passed: no texture/image issues were reported.");
+    }
+    if (!serverParseError) {
+      checks.push("Server validation check passed.");
+    }
+    return checks;
+  }, [
+    flowStage,
+    analyzing,
+    analysisResult,
+    analyzedScenes,
+    availableCameras,
+    availableViewLayers,
+    prepResult,
+    clientParseError,
+    serverParseError,
+  ]);
+  const analysisReportEntries = useMemo(() => {
+    const entries = [];
+    analysisSuccessChecks.forEach((message, index) => {
+      entries.push({
+        key: `info-check-${index}`,
+        level: "INFO",
+        tone: "info",
+        message,
+      });
+    });
+    (prepResult?.analysis_warnings || []).forEach((message, index) => {
+      entries.push({
+        key: `analysis-warning-${index}`,
+        level: "WARNING",
+        tone: "warning",
+        message,
+      });
+    });
+    (prepResult?.prepare_warnings || []).forEach((message, index) => {
+      entries.push({
+        key: `prepare-warning-${index}`,
+        level: "WARNING",
+        tone: "warning",
+        message,
+      });
+    });
+    if (clientParseError) {
+      entries.push({
+        key: "client-parse-warning",
+        level: "WARNING",
+        tone: "warning",
+        message: clientParseError,
+      });
+    }
+    (prepResult?.analysis_errors || []).forEach((message, index) => {
+      entries.push({
+        key: `analysis-error-${index}`,
+        level: "ERROR",
+        tone: "error",
+        message,
+      });
+    });
+    (prepResult?.prepare_errors || []).forEach((message, index) => {
+      entries.push({
+        key: `prepare-error-${index}`,
+        level: "ERROR",
+        tone: "error",
+        message,
+      });
+    });
+    if (serverParseError) {
+      entries.push({
+        key: "server-parse-error",
+        level: "ERROR",
+        tone: "error",
+        message: serverParseError,
+      });
+    }
+    return entries;
+  }, [analysisSuccessChecks, prepResult, clientParseError, serverParseError]);
   const manualRangeValid = manualFrameRange !== null;
   const canStart =
     flowStage === FLOW_STAGE.UPLOADED &&
@@ -1108,9 +1352,6 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     ? "warning"
     : "neutral";
   const hasCompletedAnalysis = flowStage !== FLOW_STAGE.IDLE && !analyzing;
-  const hasSkippedAnalysisNotice = Boolean(
-    clientParseError && clientParseError.toLowerCase().includes("analysis skipped")
-  );
 
   const handleSceneSelectionChange = (nextSceneName) => {
     setSceneName(nextSceneName);
@@ -1126,172 +1367,229 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
     }
   };
 
-  if (view === "browse") {
-    return (
-      <div className="page">
-        <div className="page-header">
-          <h2>Marketplace</h2>
-          <div className="page-header-actions">
-            <button className="btn btn-secondary" onClick={loadMachines} disabled={loadingMachines}>
-              {loadingMachines ? "Refreshing..." : "Refresh"}
-            </button>
-            <button
-              className="btn btn-primary"
-              disabled={selectedMachines.length === 0}
-              onClick={() => setView("submit")}
-            >
-              Continue ({selectedMachines.length})
-            </button>
-          </div>
-        </div>
-
-        {selectedMachines.length > 0 && (
-          <div className="selection-summary">
-            <span className="selection-count">{selectedMachines.length} selected</span>
-            <span className="selection-hint">Frames will be split proportionally by machine power</span>
-          </div>
-        )}
-
-        {machineError && <p className="error-text">{machineError}</p>}
-
-        {loadingMachines ? (
-          <div className="empty-state">
-            <p>Loading machines...</p>
-          </div>
-        ) : machines.length === 0 ? (
-          <div className="empty-state">
-            <p>No machines available right now.</p>
-          </div>
-        ) : (
-          <div className="machine-list">
-            {machines.map((machine) => (
-              <MachineCard
-                key={machine.id}
-                machine={machine}
-                selected={selectedMachineIdSet.has(machine.id)}
-                onToggle={handleToggleMachine}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className="page">
-      <button className="btn-back" onClick={() => setView("browse")}>
-        {"<- Back to Marketplace"}
-      </button>
-      <h2>Distributed Render Submission</h2>
-
-      <div className="card selected-machine-card">
-        <SelectedMachinesSummary machines={selectedMachines} />
-      </div>
+      <h2>Create Render</h2>
 
       <div className="card submit-panel">
-        <div className="saved-files-panel">
-          <div className="saved-files-head">
-            <strong>Saved Files</strong>
-            <button className="btn btn-secondary" type="button" onClick={loadSavedInputs} disabled={savedInputsLoading || isBusy}>
-              {savedInputsLoading ? "Refreshing..." : "Refresh"}
-            </button>
-          </div>
-          {savedInputsError && <p className="error-text">{savedInputsError}</p>}
-          {savedInputsLoading && <p className="muted">Loading saved files...</p>}
-          {!savedInputsLoading && savedInputs.length === 0 && (
-            <p className="muted">No saved files yet. Upload and start one render to save it.</p>
-          )}
-          {savedInputs.map((asset) => (
-            <div
-              key={asset.id}
-              className={`saved-file-row ${selectedSavedInputId === asset.id ? "selected" : ""}`}
-            >
-              <label className="saved-file-select">
-                <input
-                  type="radio"
-                  name="saved-file"
-                  checked={selectedSavedInputId === asset.id}
-                  onChange={() => setSelectedSavedInputId(asset.id)}
-                />
-                <span>
-                  {asset.display_name || asset.input_filename}
-                  <span className="saved-file-sub">({asset.input_filename})</span>
+        {showSourceChooser ? (
+          <div className="upload-source-panel">
+            <div className="upload-source-topbar">
+              <div className="selected-source-inline-subtle">
+                {selectedSourceLabel ? (
+                  <>
+                    <span className="selected-source-subtle-label">Selected:</span>{" "}
+                    <span className="selected-source-subtle-name">{selectedSourceLabel}</span>
+                  </>
+                ) : (
+                  <span className="selected-source-subtle-empty">No file selected</span>
+                )}
+              </div>
+              <button
+                className="btn btn-primary upload-source-analyze-btn"
+                type="button"
+                onClick={handleAnalyze}
+                disabled={!canAnalyze}
+              >
+                Analyze
+              </button>
+            </div>
+
+            <div className="upload-source-actions">
+              <button
+                type="button"
+                className={`upload-plus-btn ${dragOverUpload ? "drag-over" : ""} ${file ? "local-file-selected" : ""}`}
+                onClick={handlePickFile}
+                disabled={isBusy}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  if (!isBusy) setDragOverUpload(true);
+                }}
+                onDragLeave={() => setDragOverUpload(false)}
+                onDrop={(event) => {
+                  void handleUploadCardDrop(event);
+                }}
+              >
+                {file && (
+                  <button
+                    type="button"
+                    className="upload-plus-clear-btn"
+                    aria-label="Clear local file"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setFile(null);
+                      setDragOverUpload(false);
+                    }}
+                    disabled={isBusy}
+                  >
+                    x
+                  </button>
+                )}
+                <span className={`upload-plus-icon ${file ? `file-kind ${localFileKind}` : ""}`} aria-hidden="true">
+                  {file ? <SavedFileKindIcon kind={localFileKind} /> : "+"}
                 </span>
-              </label>
-              <div className="saved-file-actions">
-                <button className="btn btn-secondary" type="button" onClick={() => handleRenameSavedInput(asset)} disabled={isBusy}>
-                  Rename
-                </button>
-                <button className="btn btn-secondary" type="button" onClick={() => handleDeleteSavedInput(asset)} disabled={isBusy}>
-                  Delete
-                </button>
+                <span className="upload-plus-title">{file ? file.name : "New File"}</span>
+                <span className="upload-plus-subtitle">
+                  {file ? formatSizeMb(file.size) : "Drop `.blend`/`.zip` here or click to upload"}
+                </span>
+              </button>
+            </div>
+
+            <div className="saved-picker-panel">
+              <div className="saved-picker-head">
+                <strong>Recent Files</strong>
+                <div className="saved-picker-tools">
+                  <input
+                    type="text"
+                    className="saved-picker-search"
+                    placeholder="Search file name"
+                    value={savedInputSearch}
+                    onChange={(event) => setSavedInputSearch(event.target.value)}
+                  />
+                  <button
+                    className="btn btn-secondary"
+                    type="button"
+                    onClick={loadSavedInputs}
+                    disabled={savedInputsLoading || isBusy}
+                  >
+                    {savedInputsLoading ? "Refreshing..." : "Refresh"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="saved-picker-body">
+                <div className="saved-picker-columns">
+                  <span>Name</span>
+                  <span>Date modified</span>
+                  <span>Type</span>
+                  <span>Size</span>
+                </div>
+
+                {savedInputsError && <p className="error-text">{savedInputsError}</p>}
+                {savedInputsLoading && <p className="muted">Loading past files...</p>}
+                {!savedInputsLoading && filteredSavedInputs.length === 0 && (
+                  <p className="saved-picker-empty">
+                    {savedInputs.length === 0
+                      ? "No saved files yet. Upload and start one render to save it."
+                      : "No files match your search."}
+                  </p>
+                )}
+
+                {savedInputSections.map((section) => (
+                  <div key={section.key} className="saved-picker-section">
+                    <div className="saved-picker-section-label">{section.label}</div>
+                    {section.items.map(({ asset, timestamp }) => {
+                      const fileKind = detectSavedInputKind(asset.input_filename);
+                      const displayName = asset.display_name || asset.input_filename;
+                      const hasAlias = displayName !== asset.input_filename;
+
+                      return (
+                        <div
+                          key={asset.id}
+                          className={`saved-picker-row ${selectedSavedInputId === asset.id ? "selected" : ""}`}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => {
+                            if (isBusy) return;
+                            setFile(null);
+                            setDragOverUpload(false);
+                            setSelectedSavedInputId(asset.id);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              if (isBusy) return;
+                              setFile(null);
+                              setDragOverUpload(false);
+                              setSelectedSavedInputId(asset.id);
+                            }
+                          }}
+                        >
+                          <div className="saved-picker-row-main">
+                            <span className={`saved-file-icon ${fileKind}`} aria-hidden="true">
+                              <SavedFileKindIcon kind={fileKind} />
+                            </span>
+                            <span className="saved-picker-name-wrap">
+                              <span className="saved-picker-display-name">{displayName}</span>
+                              {hasAlias && (
+                                <span className="saved-picker-original-name">{asset.input_filename}</span>
+                              )}
+                            </span>
+                          </div>
+
+                          <span className="saved-picker-date">{formatSavedInputTimestamp(timestamp)}</span>
+                          <span className="saved-picker-type">
+                            {fileKind === "blend" ? "Blend" : fileKind === "zip" ? "Zip" : "File"}
+                          </span>
+                          <span className="saved-picker-size">{formatSizeMb(asset?.size_bytes)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
               </div>
             </div>
-          ))}
-          <button className="btn btn-primary" type="button" onClick={() => { void handleUseSavedInput(); }} disabled={!canUseSaved}>
-            Use Saved File
-          </button>
-          {selectedSavedInput && (
-            <p className="muted">
-              Selected saved file: {selectedSavedInput.display_name || selectedSavedInput.input_filename}
-            </p>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="submit-file-row">
+            <div className="submit-file-main">
+              {file ? (
+                <>
+                  <div className="submit-file-name">{file.name}</div>
+                  <div className="submit-file-meta">{formatSizeMb(file.size)}</div>
+                </>
+              ) : selectedSavedInput ? (
+                <>
+                  <div className="submit-file-name">{selectedSavedInput.display_name || selectedSavedInput.input_filename}</div>
+                  <div className="submit-file-meta">Using saved file</div>
+                </>
+              ) : (
+                <>
+                  <div className="submit-file-name submit-file-empty">No input file selected</div>
+                  <div className="submit-file-meta">Reset to choose a file.</div>
+                </>
+              )}
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => {
+                setSelectedSavedInputId("");
+                resetSubmissionFlow({ clearFile: true });
+              }}
+              disabled={isBusy}
+            >
+              Choose Different File
+            </button>
+          </div>
+        )}
 
-        <div className="submit-file-row">
-          <div className="submit-file-main">
-            {file ? (
-              <>
-                <div className="submit-file-name">{file.name}</div>
-                <div className="submit-file-meta">
-                  {(file.size / 1024 / 1024).toFixed(1)} MB
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="submit-file-name submit-file-empty">No input file selected</div>
-                <div className="submit-file-meta">
-                  Choose a `.blend` or `.zip` project bundle to continue.
-                </div>
-              </>
+        {showStageBubble && (
+          <div className="submit-stage-row">
+            <div className="submit-stage-meta">
+              <span className={`submit-stage-pill ${currentStageTone}`}>{currentStageLabel}</span>
+              {hasCompletedAnalysis && (
+                <span className={`submit-proceed-pill ${proceedStatusTone}`} role="status" aria-live="polite">
+                  <span className="submit-proceed-icon" aria-hidden="true">
+                    <ProceedStatusIcon canProceed={!hasRenderBlockingIssues} />
+                  </span>
+                  <span>{proceedStatusText}</span>
+                </span>
+              )}
+            </div>
+            {flowStage !== FLOW_STAGE.IDLE && (
+              <button
+                className="btn btn-secondary submit-reset-btn"
+                type="button"
+                onClick={() => resetSubmissionFlow()}
+              >
+                Reset
+              </button>
             )}
           </div>
-          <div className="file-input-wrap">
-            <button
-              type="button"
-              className="btn btn-secondary file-input-btn submit-file-btn"
-              onClick={handlePickFile}
-            >
-              {file ? "Change File" : "Choose File"}
-            </button>
-          </div>
-        </div>
-        <p className="submit-file-hint">
-          Use a single `.blend` only if textures are packed. Otherwise upload a `.zip` with the full project folder.
-        </p>
-
-        <div className="submit-stage-row">
-          <span className={`submit-stage-pill ${currentStageTone}`}>{currentStageLabel}</span>
-          {flowStage !== FLOW_STAGE.IDLE && (
-            <button className="btn btn-secondary submit-reset-btn" type="button" onClick={() => resetSubmissionFlow()}>
-              Reset
-            </button>
-          )}
-        </div>
+        )}
 
         <div className="submit-action-row">
-          {flowStage === FLOW_STAGE.IDLE && (
-            <button
-              className="btn btn-primary submit-primary-btn"
-              type="button"
-              onClick={handleAnalyze}
-              disabled={!file || selectedMachines.length === 0 || analyzing || uploading || starting}
-            >
-              {analyzing ? "Analyzing..." : "Analyze"}
-            </button>
-          )}
-
           {(flowStage === FLOW_STAGE.ANALYZED || flowStage === FLOW_STAGE.PREPARED) && (
             <button
               className="btn btn-primary submit-primary-btn"
@@ -1376,293 +1674,305 @@ export default function MarketplacePage({ backendUrl, onJobSubmitted }) {
           </div>
         )}
 
-        {prepResult &&
-          ((prepResult.analysis_warnings?.length > 0 || prepResult.analysis_errors?.length > 0) ||
-            (prepResult.prepare_warnings?.length > 0 || prepResult.prepare_errors?.length > 0)) && (
-          <div className="prep-results-panel">
-              {prepResult.analysis_errors?.map((msg, i) => (
-                <div key={`analysis-error-${i}`} className="prep-result-item prep-result-error">
-                  <span className="prep-result-tag">[ANALYSIS][ERROR]</span> {msg}
-                </div>
-              ))}
-              {prepResult.analysis_warnings?.map((msg, i) => (
-                <div key={`analysis-warn-${i}`} className="prep-result-item prep-result-warning">
-                  <span className="prep-result-tag">[ANALYSIS][WARN]</span> {msg}
-                </div>
-              ))}
-              {prepResult.prepare_errors?.map((msg, i) => (
-                <div key={`prepare-error-${i}`} className="prep-result-item prep-result-error">
-                  <span className="prep-result-tag">[PREPARE][ERROR]</span> {msg}
-                </div>
-              ))}
-              {prepResult.prepare_warnings?.map((msg, i) => (
-                <div key={`prepare-warn-${i}`} className="prep-result-item prep-result-warning">
-                  <span className="prep-result-tag">[PREPARE][WARN]</span> {msg}
-                </div>
-              ))}
+        {showAnalysisTabs && (
+          <div className="analysis-tabs-wrap">
+            <div className="analysis-tabs">
+              <button
+                type="button"
+                className={`analysis-tab-btn ${analysisTab === "settings" ? "active" : ""}`}
+                onClick={() => setAnalysisTab("settings")}
+              >
+                Render settings
+              </button>
+              <button
+                type="button"
+                className={`analysis-tab-btn ${analysisTab === "report" ? "active" : ""}`}
+                onClick={() => setAnalysisTab("report")}
+              >
+                Analysis Report
+              </button>
             </div>
+
+            {analysisTab === "settings" && (
+              <div className="analysis-tab-panel">
+                {hasCompletedAnalysis && analysisResult && (
+                  <div className="manual-range-panel">
+                    <div className="manual-range-title">Render settings</div>
+                    <div className="manual-range-subtitle">
+                      Choose how camera selection is applied across frames.
+                    </div>
+                    <div className="manual-range-grid">
+                      <label className="manual-range-field">
+                        <span className="manual-range-label">Scene</span>
+                        <select
+                          value={sceneName}
+                          onChange={(event) => handleSceneSelectionChange(event.target.value)}
+                          className="manual-range-input"
+                        >
+                          {(analyzedScenes.length ? analyzedScenes : [{ name: "", label: "Default Scene" }]).map((scene) => (
+                            <option key={scene.name || "default"} value={scene.name || ""}>
+                              {scene.name || "Default Scene"}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="manual-range-field">
+                        <span className="manual-range-label">Camera Mode</span>
+                        <select
+                          value={cameraMode}
+                          onChange={(event) => setCameraMode(event.target.value)}
+                          className="manual-range-input"
+                        >
+                          {CAMERA_MODE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="manual-range-field">
+                        <span className="manual-range-label">Force Camera</span>
+                        <select
+                          value={forceCameraName}
+                          onChange={(event) => setForceCameraName(event.target.value)}
+                          className="manual-range-input"
+                          disabled={cameraMode !== "force_camera" || availableCameras.length === 0}
+                        >
+                          {availableCameras.length > 0 ? (
+                            availableCameras.map((cameraName) => (
+                              <option key={cameraName} value={cameraName}>
+                                {cameraName}
+                              </option>
+                            ))
+                          ) : (
+                            <option value="">No cameras found</option>
+                          )}
+                        </select>
+                      </label>
+                      <label className="manual-range-field">
+                        <span className="manual-range-label">View Layer</span>
+                        <select
+                          value={viewLayerName}
+                          onChange={(event) => setViewLayerName(event.target.value)}
+                          className="manual-range-input"
+                        >
+                          {availableViewLayers.length > 0 ? (
+                            availableViewLayers.map((layerName) => (
+                              <option key={layerName} value={layerName}>
+                                {layerName}
+                              </option>
+                            ))
+                          ) : (
+                            <option value="">Default</option>
+                          )}
+                        </select>
+                      </label>
+                    </div>
+                    {cameraMode === "auto_markers" && (
+                      <div className="manual-range-subtitle" style={{ marginTop: 8 }}>
+                        Auto mode follows scene camera and timeline marker cuts for per-frame camera switching.
+                      </div>
+                    )}
+                    {cameraMode === "camera_ranges" && (
+                      <div className="camera-ranges-panel">
+                        <div className="camera-ranges-head">
+                          <div className="manual-range-subtitle camera-ranges-subtitle">
+                            Edit exactly which camera is used for which frame ranges.
+                          </div>
+                          <div className="camera-ranges-actions">
+                            <button type="button" className="btn btn-secondary" onClick={handleCameraRangesAutoFill}>
+                              Use Marker Cuts
+                            </button>
+                            <button type="button" className="btn btn-secondary" onClick={handleCameraRangeAdd}>
+                              Add Range
+                            </button>
+                          </div>
+                        </div>
+                        <div className="camera-ranges-table-wrap">
+                          <table className="camera-ranges-table">
+                            <thead>
+                              <tr>
+                                <th>Use</th>
+                                <th>Camera</th>
+                                <th>Start</th>
+                                <th>End</th>
+                                <th>Step</th>
+                                <th>Frames</th>
+                                <th />
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {cameraRanges.map((row) => (
+                                <tr key={row.id}>
+                                  <td>
+                                    <input
+                                      type="checkbox"
+                                      checked={row.enabled !== false}
+                                      onChange={(event) => handleCameraRangeUpdate(row.id, { enabled: event.target.checked })}
+                                    />
+                                  </td>
+                                  <td>
+                                    <select
+                                      value={row.camera_name || ""}
+                                      onChange={(event) => handleCameraRangeUpdate(row.id, { camera_name: event.target.value })}
+                                      className="manual-range-input camera-ranges-input"
+                                    >
+                                      {availableCameras.length > 0 ? (
+                                        availableCameras.map((cameraName) => (
+                                          <option key={cameraName} value={cameraName}>
+                                            {cameraName}
+                                          </option>
+                                        ))
+                                      ) : (
+                                        <option value="">No cameras</option>
+                                      )}
+                                    </select>
+                                  </td>
+                                  <td>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      value={row.frame_start ?? ""}
+                                      onChange={(event) => handleCameraRangeUpdate(row.id, { frame_start: event.target.value })}
+                                      className="manual-range-input camera-ranges-input"
+                                    />
+                                  </td>
+                                  <td>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      value={row.frame_end ?? ""}
+                                      onChange={(event) => handleCameraRangeUpdate(row.id, { frame_end: event.target.value })}
+                                      className="manual-range-input camera-ranges-input"
+                                    />
+                                  </td>
+                                  <td>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      value={row.frame_step ?? 1}
+                                      onChange={(event) => handleCameraRangeUpdate(row.id, { frame_step: event.target.value })}
+                                      className="manual-range-input camera-ranges-input"
+                                    />
+                                  </td>
+                                  <td>
+                                    <span className="camera-ranges-count">
+                                      {cameraRangeFrameCounts.get(row.id) || 0}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary camera-ranges-remove"
+                                      onClick={() => handleCameraRangeRemove(row.id)}
+                                    >
+                                      Remove
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                              {cameraRanges.length === 0 && (
+                                <tr>
+                                  <td colSpan={7} className="camera-ranges-empty">
+                                    No camera ranges configured. Add one to continue.
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                        {manualFrameRange && (
+                          <div className="manual-range-subtitle camera-ranges-subtitle">
+                            Timeline has {countFramesInRange(
+                              manualFrameRange.frame_start,
+                              manualFrameRange.frame_end,
+                              manualFrameRange.frame_step
+                            )} frames after step filtering.
+                          </div>
+                        )}
+                        {!cameraRangesValidation.ok && (
+                          <p className="error-text camera-ranges-error">{cameraRangesValidation.error}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {hasCompletedAnalysis && (
+                  <div className="manual-range-panel">
+                    <div className="manual-range-title">Frame Range</div>
+                    <div className="manual-range-subtitle">
+                      {analysisResult
+                        ? "Auto-filled from analysis. You can edit before upload/start."
+                        : "Required because this file could not be parsed locally."}
+                    </div>
+                    <div className="manual-range-grid">
+                      <label className="manual-range-field">
+                        <span className="manual-range-label">Start Frame</span>
+                        <input
+                          type="number"
+                          min="1"
+                          value={frameStart}
+                          onChange={(event) => setFrameStart(event.target.value)}
+                          className="manual-range-input"
+                        />
+                      </label>
+                      <label className="manual-range-field">
+                        <span className="manual-range-label">End Frame</span>
+                        <input
+                          type="number"
+                          min="1"
+                          value={frameEnd}
+                          onChange={(event) => setFrameEnd(event.target.value)}
+                          className="manual-range-input"
+                        />
+                      </label>
+                      <label className="manual-range-field">
+                        <span className="manual-range-label">Frame Step</span>
+                        <input
+                          type="number"
+                          min="1"
+                          value={frameStep}
+                          onChange={(event) => setFrameStep(event.target.value)}
+                          className="manual-range-input"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {analysisTab === "report" && (
+              <div className="analysis-tab-panel">
+                {analysisReportEntries.length > 0 ? (
+                  <div className="prep-results-panel">
+                    {analysisReportEntries.map((entry) => (
+                      <div key={entry.key} className={`prep-result-item prep-result-${entry.tone}`}>
+                        <span className="prep-result-tag">[{entry.level}]</span> {entry.message}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="prep-results-panel prep-results-empty">
+                    No analysis logs yet.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {!blenderBin && flowStage === FLOW_STAGE.ANALYZED && (
           <div className="prep-no-blender">
-            Blender not found — headless analyze/prepare was skipped. Upload can continue without preparation.
+            Blender not found - headless analyze/prepare was skipped. Upload can continue without preparation.
           </div>
         )}
-
-        {hasCompletedAnalysis && analysisResult && (
-          <div className="manual-range-panel">
-            <div className="manual-range-title">Scene & Camera</div>
-            <div className="manual-range-subtitle">
-              Choose how camera selection is applied across frames.
-            </div>
-            <div className="manual-range-grid">
-              <label className="manual-range-field">
-                <span className="manual-range-label">Scene</span>
-                <select
-                  value={sceneName}
-                  onChange={(event) => handleSceneSelectionChange(event.target.value)}
-                  className="manual-range-input"
-                >
-                  {(analyzedScenes.length ? analyzedScenes : [{ name: "", label: "Default Scene" }]).map((scene) => (
-                    <option key={scene.name || "default"} value={scene.name || ""}>
-                      {scene.name || "Default Scene"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="manual-range-field">
-                <span className="manual-range-label">Camera Mode</span>
-                <select
-                  value={cameraMode}
-                  onChange={(event) => setCameraMode(event.target.value)}
-                  className="manual-range-input"
-                >
-                  {CAMERA_MODE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="manual-range-field">
-                <span className="manual-range-label">Force Camera</span>
-                <select
-                  value={forceCameraName}
-                  onChange={(event) => setForceCameraName(event.target.value)}
-                  className="manual-range-input"
-                  disabled={cameraMode !== "force_camera" || availableCameras.length === 0}
-                >
-                  {availableCameras.length > 0 ? (
-                    availableCameras.map((cameraName) => (
-                      <option key={cameraName} value={cameraName}>
-                        {cameraName}
-                      </option>
-                    ))
-                  ) : (
-                    <option value="">No cameras found</option>
-                  )}
-                </select>
-              </label>
-              <label className="manual-range-field">
-                <span className="manual-range-label">View Layer</span>
-                <select
-                  value={viewLayerName}
-                  onChange={(event) => setViewLayerName(event.target.value)}
-                  className="manual-range-input"
-                >
-                  {availableViewLayers.length > 0 ? (
-                    availableViewLayers.map((layerName) => (
-                      <option key={layerName} value={layerName}>
-                        {layerName}
-                      </option>
-                    ))
-                  ) : (
-                    <option value="">Default</option>
-                  )}
-                </select>
-              </label>
-            </div>
-            {cameraMode === "auto_markers" && (
-              <div className="manual-range-subtitle" style={{ marginTop: 8 }}>
-                Auto mode follows scene camera and timeline marker cuts for per-frame camera switching.
-              </div>
-            )}
-            {cameraMode === "camera_ranges" && (
-              <div className="camera-ranges-panel">
-                <div className="camera-ranges-head">
-                  <div className="manual-range-subtitle camera-ranges-subtitle">
-                    Edit exactly which camera is used for which frame ranges.
-                  </div>
-                  <div className="camera-ranges-actions">
-                    <button type="button" className="btn btn-secondary" onClick={handleCameraRangesAutoFill}>
-                      Use Marker Cuts
-                    </button>
-                    <button type="button" className="btn btn-secondary" onClick={handleCameraRangeAdd}>
-                      Add Range
-                    </button>
-                  </div>
-                </div>
-                <div className="camera-ranges-table-wrap">
-                  <table className="camera-ranges-table">
-                    <thead>
-                      <tr>
-                        <th>Use</th>
-                        <th>Camera</th>
-                        <th>Start</th>
-                        <th>End</th>
-                        <th>Step</th>
-                        <th>Frames</th>
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {cameraRanges.map((row) => (
-                        <tr key={row.id}>
-                          <td>
-                            <input
-                              type="checkbox"
-                              checked={row.enabled !== false}
-                              onChange={(event) => handleCameraRangeUpdate(row.id, { enabled: event.target.checked })}
-                            />
-                          </td>
-                          <td>
-                            <select
-                              value={row.camera_name || ""}
-                              onChange={(event) => handleCameraRangeUpdate(row.id, { camera_name: event.target.value })}
-                              className="manual-range-input camera-ranges-input"
-                            >
-                              {availableCameras.length > 0 ? (
-                                availableCameras.map((cameraName) => (
-                                  <option key={cameraName} value={cameraName}>
-                                    {cameraName}
-                                  </option>
-                                ))
-                              ) : (
-                                <option value="">No cameras</option>
-                              )}
-                            </select>
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="1"
-                              value={row.frame_start ?? ""}
-                              onChange={(event) => handleCameraRangeUpdate(row.id, { frame_start: event.target.value })}
-                              className="manual-range-input camera-ranges-input"
-                            />
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="1"
-                              value={row.frame_end ?? ""}
-                              onChange={(event) => handleCameraRangeUpdate(row.id, { frame_end: event.target.value })}
-                              className="manual-range-input camera-ranges-input"
-                            />
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="1"
-                              value={row.frame_step ?? 1}
-                              onChange={(event) => handleCameraRangeUpdate(row.id, { frame_step: event.target.value })}
-                              className="manual-range-input camera-ranges-input"
-                            />
-                          </td>
-                          <td>
-                            <span className="camera-ranges-count">
-                              {cameraRangeFrameCounts.get(row.id) || 0}
-                            </span>
-                          </td>
-                          <td>
-                            <button
-                              type="button"
-                              className="btn btn-secondary camera-ranges-remove"
-                              onClick={() => handleCameraRangeRemove(row.id)}
-                            >
-                              Remove
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                      {cameraRanges.length === 0 && (
-                        <tr>
-                          <td colSpan={7} className="camera-ranges-empty">
-                            No camera ranges configured. Add one to continue.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-                {manualFrameRange && (
-                  <div className="manual-range-subtitle camera-ranges-subtitle">
-                    Timeline has {countFramesInRange(
-                      manualFrameRange.frame_start,
-                      manualFrameRange.frame_end,
-                      manualFrameRange.frame_step
-                    )} frames after step filtering.
-                  </div>
-                )}
-                {!cameraRangesValidation.ok && (
-                  <p className="error-text camera-ranges-error">{cameraRangesValidation.error}</p>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {hasCompletedAnalysis && (
-          <div className="manual-range-panel">
-            <div className="manual-range-title">Frame Range</div>
-            <div className="manual-range-subtitle">
-              {analysisResult
-                ? "Auto-filled from analysis. You can edit before upload/start."
-                : "Required because this file could not be parsed locally."}
-            </div>
-            <div className="manual-range-grid">
-              <label className="manual-range-field">
-                <span className="manual-range-label">Start Frame</span>
-                <input
-                  type="number"
-                  min="1"
-                  value={frameStart}
-                  onChange={(event) => setFrameStart(event.target.value)}
-                  className="manual-range-input"
-                />
-              </label>
-              <label className="manual-range-field">
-                <span className="manual-range-label">End Frame</span>
-                <input
-                  type="number"
-                  min="1"
-                  value={frameEnd}
-                  onChange={(event) => setFrameEnd(event.target.value)}
-                  className="manual-range-input"
-                />
-              </label>
-              <label className="manual-range-field">
-                <span className="manual-range-label">Frame Step</span>
-                <input
-                  type="number"
-                  min="1"
-                  value={frameStep}
-                  onChange={(event) => setFrameStep(event.target.value)}
-                  className="manual-range-input"
-                />
-              </label>
-            </div>
-          </div>
-        )}
-
-        {hasCompletedAnalysis && clientParseError && (
-          <p className={hasSkippedAnalysisNotice ? "muted" : "error-text"}>{clientParseError}</p>
-        )}
-        {hasCompletedAnalysis && serverParseError && <p className="error-text">{serverParseError}</p>}
         {error && <p className="error-text">{error}</p>}
       </div>
     </div>
   );
 }
+
 
 

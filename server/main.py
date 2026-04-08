@@ -32,6 +32,7 @@ from sse_starlette.sse import EventSourceResponse
 from infrastructure.db import execute, init_db, query_all, query_one, request_conn
 import infrastructure.storage as storage
 import services.runpod_dispatch as runpod_dispatch
+import services.modal_dispatch as modal_dispatch
 from services.blend_parser import parse_upload, BlendParseError
 from firebase_auth import get_current_user, get_or_create_profile, get_user_profile, update_user_profile, write_job_record, write_render_group_record
 from fastapi import Depends
@@ -69,6 +70,10 @@ logging.root.setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
 MACHINE_STALE_SECONDS = 15
+SERVERLESS_TYPES = {"runpod_serverless", "modal_serverless"}
+
+def _is_serverless(machine_type: str) -> bool:
+    return machine_type in SERVERLESS_TYPES
 DEFAULT_DEVICE_POLICY = "AUTO"
 ALLOWED_DEVICE_POLICIES = {"AUTO", "OPTIX", "CUDA", "CPU"}
 ALLOWED_CAMERA_MODES = {"auto_markers", "force_camera", "camera_ranges"}
@@ -88,6 +93,8 @@ def _startup():
     init_db()
     runpod_dispatch.register_virtual_machines(execute, query_one, now_iso)
     runpod_dispatch.start_heartbeat_thread(execute, now_iso)
+    modal_dispatch.register_virtual_machines(execute, query_one, now_iso)
+    modal_dispatch.start_heartbeat_thread(execute, now_iso)
 
 app.add_middleware(
     CORSMiddleware,
@@ -848,7 +855,7 @@ def query_available_machines() -> list[dict[str, Any]]:
         UPDATE machines
         SET status = 'idle'
         WHERE status = 'available'
-          AND machine_type != 'runpod_serverless'
+          AND machine_type NOT IN ('runpod_serverless', 'modal_serverless')
           AND (last_seen_at IS NULL OR last_seen_at < %s)
         """,
         (cutoff,),
@@ -1187,7 +1194,7 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
     if payload.status in ("done", "failed"):
         completed_at = now_iso()
         # Serverless machines are always-available; heartbeat manages their last_seen_at
-        if _machine_type_of(job["machine_id"]) != "runpod_serverless":
+        if not _is_serverless(_machine_type_of(job["machine_id"])):
             execute(
                 "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
                 (completed_at, job["machine_id"]),
@@ -1298,6 +1305,41 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
                         )
                     except Exception as exc:
                         log.error(f"Retry dispatch to RunPod failed for {retry_job_id}: {exc}")
+            elif retry_machine_type == "modal_serverless" and modal_dispatch.is_enabled():
+                group = query_one("SELECT * FROM render_groups WHERE id = %s", (job["group_id"],))
+                if group:
+                    blend_url = (
+                        f"{modal_dispatch.PUBLIC_BACKEND_URL}"
+                        f"/render-groups/{job['group_id']}/input/{group['input_filename']}"
+                    )
+                    overrides_b64 = base64.b64encode(
+                        (job.get("render_overrides_json") or "{}").encode()
+                    ).decode()
+                    try:
+                        modal_job_id = modal_dispatch.dispatch_and_save(
+                            job_id=retry_job_id,
+                            blend_url=blend_url,
+                            frame_start=remaining_start,
+                            frame_end=remaining_end,
+                            frame_step=step,
+                            render_overrides_b64=overrides_b64,
+                            machine_id=retry_machine_id,
+                            db_execute=execute,
+                        )
+                        modal_dispatch.start_monitoring_thread(
+                            job_id=retry_job_id,
+                            provider_job_id=modal_job_id,
+                            db_execute=execute,
+                            db_query_one=query_one,
+                            now_iso=now_iso,
+                            machine_id=retry_machine_id,
+                            blend_url=blend_url,
+                            render_overrides_b64=overrides_b64,
+                            db_query_all=query_all,
+                            group_id=job["group_id"],
+                        )
+                    except Exception as exc:
+                        log.error(f"Retry dispatch to Modal failed for {retry_job_id}: {exc}")
 
     if retry_job_id and payload.status == "failed":
         return {"success": True, "retry_scheduled": True, "retry_job_id": retry_job_id}
@@ -1636,7 +1678,16 @@ def expand_serverless_assignments(
     """Split each serverless assignment into multiple sub-assignments for parallel workers."""
     expanded: list[dict] = []
     for a in assignments:
-        if a.get("machine_type") != "runpod_serverless" or workers_per_endpoint <= 1:
+        mt = a.get("machine_type", "")
+        if not _is_serverless(mt):
+            expanded.append(a)
+            continue
+        # Use provider-specific worker count
+        if mt == "modal_serverless":
+            effective_workers = modal_dispatch.MODAL_WORKERS_PER_ENDPOINT
+        else:
+            effective_workers = workers_per_endpoint
+        if effective_workers <= 1:
             expanded.append(a)
             continue
 
@@ -1649,7 +1700,7 @@ def expand_serverless_assignments(
             expanded.append(a)
             continue
 
-        worker_count = max_workers_for_frame_budget(total_frames, workers_per_endpoint)
+        worker_count = max_workers_for_frame_budget(total_frames, effective_workers)
         if worker_count <= 1:
             expanded.append(a)
             continue
@@ -1893,6 +1944,41 @@ def _check_failover(group_id: str, tasks_raw: list[dict]):
                     )
                 except Exception as exc:
                     log.error(f"Failover dispatch to RunPod failed for {new_job_id}: {exc}")
+        elif best_machine.get("machine_type") == "modal_serverless" and modal_dispatch.is_enabled():
+            group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
+            if group:
+                blend_url = (
+                    f"{modal_dispatch.PUBLIC_BACKEND_URL}"
+                    f"/render-groups/{group_id}/input/{group['input_filename']}"
+                )
+                overrides_b64 = base64.b64encode(
+                    (task.get("render_overrides_json") or "{}").encode()
+                ).decode()
+                try:
+                    modal_job_id = modal_dispatch.dispatch_and_save(
+                        job_id=new_job_id,
+                        blend_url=blend_url,
+                        frame_start=new_start,
+                        frame_end=new_end,
+                        frame_step=step,
+                        render_overrides_b64=overrides_b64,
+                        machine_id=best_machine["id"],
+                        db_execute=execute,
+                    )
+                    modal_dispatch.start_monitoring_thread(
+                        job_id=new_job_id,
+                        provider_job_id=modal_job_id,
+                        db_execute=execute,
+                        db_query_one=query_one,
+                        now_iso=now_iso,
+                        machine_id=best_machine["id"],
+                        blend_url=blend_url,
+                        render_overrides_b64=overrides_b64,
+                        db_query_all=query_all,
+                        group_id=group_id,
+                    )
+                except Exception as exc:
+                    log.error(f"Failover dispatch to Modal failed for {new_job_id}: {exc}")
 
     return new_job_ids
 
@@ -1916,7 +2002,7 @@ def choose_retry_machine(group_id: str, failed_machine_id: str) -> str | None:
         return failed_machine_id
 
     # Prefer serverless endpoints (always available, instant spin-up)
-    serverless = [r for r in rows if r.get("machine_type") == "runpod_serverless"]
+    serverless = [r for r in rows if _is_serverless(r.get("machine_type", ""))]
     if serverless:
         return serverless[0]["id"]
     return rows[0]["id"]
@@ -2351,7 +2437,7 @@ def confirm_render_group_upload(
             ),
         )
         # Serverless machines are always-available; don't flip them to 'processing'
-        if a.get("machine_type") != "runpod_serverless":
+        if not _is_serverless(a.get("machine_type", "")):
             execute(
                 "UPDATE machines SET status = 'processing' WHERE id = %s",
                 (a["machine_id"],),
@@ -2414,6 +2500,56 @@ def confirm_render_group_upload(
                 except Exception as exc:
                     log.error(f"Failed to dispatch job {task['job_id']} to RunPod: {exc}")
 
+    # Dispatch modal_serverless tasks in background so API response is not
+    # blocked by long Modal web endpoint requests.
+    if modal_dispatch.is_enabled():
+        blend_url = (
+            f"{modal_dispatch.PUBLIC_BACKEND_URL}"
+            f"/render-groups/{group_id}/input/{group['input_filename']}"
+        )
+        overrides_b64 = base64.b64encode(overrides_json.encode()).decode()
+        modal_tasks = [
+            t for t in tasks
+            if t.get("machine_id") and _machine_type_of(t["machine_id"]) == "modal_serverless"
+        ]
+
+        def _dispatch_modal_task(task: dict):
+            try:
+                modal_job_id = modal_dispatch.dispatch_and_save(
+                    job_id=task["job_id"],
+                    blend_url=blend_url,
+                    frame_start=task["frame_start"],
+                    frame_end=task["frame_end"],
+                    frame_step=task["frame_step"],
+                    render_overrides_b64=overrides_b64,
+                    machine_id=task["machine_id"],
+                    db_execute=execute,
+                )
+                modal_dispatch.start_monitoring_thread(
+                    job_id=task["job_id"],
+                    provider_job_id=modal_job_id,
+                    db_execute=execute,
+                    db_query_one=query_one,
+                    now_iso=now_iso,
+                    machine_id=task["machine_id"],
+                    blend_url=blend_url,
+                    render_overrides_b64=overrides_b64,
+                    db_query_all=query_all,
+                    group_id=group_id,
+                )
+            except Exception as exc:
+                log.error(f"Failed to dispatch job {task['job_id']} to Modal: {exc}")
+
+        for i, task in enumerate(modal_tasks):
+            if i > 0:
+                time.sleep(0.05)
+            threading.Thread(
+                target=_dispatch_modal_task,
+                args=(task,),
+                daemon=True,
+                name=f"modal-dispatch-{task['job_id'][:8]}",
+            ).start()
+
     try:
         write_render_group_record(current_user["uid"], group_id, {
             "group_id": group_id,
@@ -2472,18 +2608,24 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
     for job in jobs:
         # Cancel RunPod job if it has one
         rp_job_id = job.get("runpod_job_id")
-        if rp_job_id and runpod_dispatch.is_enabled():
+        job_machine_type = _machine_type_of(job["machine_id"])
+        if rp_job_id and job_machine_type == "runpod_serverless" and runpod_dispatch.is_enabled():
             try:
                 runpod_dispatch.cancel_job(rp_job_id, job["machine_id"])
             except Exception as exc:
                 log.warning(f"Failed to cancel RunPod job {rp_job_id}: {exc}")
+        elif rp_job_id and job_machine_type == "modal_serverless" and modal_dispatch.is_enabled():
+            try:
+                modal_dispatch.cancel_job(rp_job_id, job["machine_id"])
+            except Exception as exc:
+                log.warning(f"Failed to cancel Modal job {rp_job_id}: {exc}")
 
         execute(
             "UPDATE jobs SET status = 'cancelled', completed_at = %s, error = 'Cancelled by user' WHERE id = %s",
             (now_iso(), job["id"]),
         )
         # Release non-serverless machines
-        if _machine_type_of(job["machine_id"]) != "runpod_serverless":
+        if not _is_serverless(job_machine_type):
             execute(
                 "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
                 (now_iso(), job["machine_id"]),

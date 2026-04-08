@@ -94,7 +94,15 @@ attempt_render() {
                 echo "GPU detected:"
                 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
-                for device in OPTIX CUDA; do
+                device_order=(OPTIX CUDA)
+                # A100 frequently stalls with OPTIX in our Blender path; prefer
+                # CUDA first on that GPU family while keeping OPTIX as fallback.
+                if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -qi "A100"; then
+                    echo "A100 detected: trying CUDA before OPTIX."
+                    device_order=(CUDA OPTIX)
+                fi
+
+                for device in "${device_order[@]}"; do
                     if run_render "$device" "$device (GPU)" "$log_file"; then
                         if log_contains_fatal_render_error "$log_file"; then
                             echo "ERROR: Fatal render error detected in Blender output."

@@ -54,12 +54,21 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_csv_set(name: str, default: str = "") -> set[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 MODAL_TOKEN_ID = os.getenv("MODAL_TOKEN_ID", "")
 MODAL_TOKEN_SECRET = os.getenv("MODAL_TOKEN_SECRET", "")
 MODAL_APP_NAME = os.getenv("MODAL_APP_NAME", "pcrent-render")
+# Comma-separated gpu_type values to exclude from registration/dispatch.
+MODAL_DISABLED_GPU_TYPES = _env_csv_set("MODAL_DISABLED_GPU_TYPES", "a100")
 
 # Specs reported to the available machines list (shared across all endpoints)
 MODAL_GPU_VRAM_GB = _env_float("MODAL_GPU_VRAM_GB", 24.0)
@@ -71,6 +80,14 @@ PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000")
 
 # Monitoring: how often to check the DB for stuck Modal jobs (seconds)
 MONITOR_INTERVAL_SEC = 30
+
+# HTTP timeout for the initial Modal dispatch POST.
+# Modal web endpoints are synchronous and can run for a long time, so this
+# must be large enough to avoid disconnecting and cancelling the remote run.
+_raw_modal_dispatch_timeout = _env_float("MODAL_DISPATCH_TIMEOUT_SEC", 6 * 60 * 60)
+MODAL_DISPATCH_TIMEOUT_SEC: float | None = (
+    None if _raw_modal_dispatch_timeout <= 0 else _raw_modal_dispatch_timeout
+)
 
 # Timeout: job stuck in 'pending' (cold start / queue). Mirrors RunPod logic.
 IN_QUEUE_TIMEOUT_SEC = _env_float("IN_QUEUE_TIMEOUT_SEC", 120)
@@ -113,9 +130,17 @@ def _parse_endpoints() -> list[dict]:
             continue
         if ":" in part:
             gpu_type, label = part.split(":", 1)
-            endpoints.append({"id": gpu_type.strip(), "label": label.strip()})
+            gpu_type = gpu_type.strip()
+            if gpu_type.lower() in MODAL_DISABLED_GPU_TYPES:
+                log.warning(f"Skipping disabled Modal endpoint gpu_type={gpu_type}")
+                continue
+            endpoints.append({"id": gpu_type, "label": label.strip()})
         else:
-            endpoints.append({"id": part, "label": f"Modal {part.upper()}"})
+            gpu_type = part.strip()
+            if gpu_type.lower() in MODAL_DISABLED_GPU_TYPES:
+                log.warning(f"Skipping disabled Modal endpoint gpu_type={gpu_type}")
+                continue
+            endpoints.append({"id": gpu_type, "label": f"Modal {gpu_type.upper()}"})
     return endpoints
 
 
@@ -197,10 +222,18 @@ def register_virtual_machines(db_execute, db_query_one, now_iso) -> list[str]:
     Upsert one virtual machine row per Modal endpoint.
     Returns list of machine_ids, or empty list if Modal is not configured.
     """
-    if not is_enabled():
+    if not (MODAL_TOKEN_ID and MODAL_TOKEN_SECRET):
         _machine_endpoint_map.clear()
         _deactivate_stale_virtual_machines(db_execute, [])
         log.info("Modal not configured (MODAL_TOKEN_ID / MODAL_TOKEN_SECRET / MODAL_ENDPOINTS unset) - skipping")
+        return []
+    if not ENDPOINTS:
+        _machine_endpoint_map.clear()
+        _deactivate_stale_virtual_machines(db_execute, [])
+        log.info(
+            "Modal configured but no active endpoints after filtering "
+            "(check MODAL_ENDPOINTS / MODAL_DISABLED_GPU_TYPES)"
+        )
         return []
 
     _machine_endpoint_map.clear()
@@ -329,17 +362,36 @@ def dispatch_job(
         }
     }
 
-    resp = httpx.post(
-        url,
-        headers={
-            "Modal-Key": MODAL_TOKEN_ID,
-            "Modal-Secret": MODAL_TOKEN_SECRET,
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=60,
+    log.info(
+        f"Dispatching job {job_id} to Modal endpoint {gpu_type} url={url}"
     )
-    resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            url,
+            headers={
+                "Modal-Key": MODAL_TOKEN_ID,
+                "Modal-Secret": MODAL_TOKEN_SECRET,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=MODAL_DISPATCH_TIMEOUT_SEC,
+        )
+        resp.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(
+            f"Modal dispatch timeout for job {job_id} endpoint={gpu_type} url={url} "
+            f"timeout={MODAL_DISPATCH_TIMEOUT_SEC}"
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        body = ""
+        try:
+            body = (exc.response.text or "")[:300]
+        except Exception:
+            body = ""
+        raise RuntimeError(
+            f"Modal dispatch HTTP {exc.response.status_code} for job {job_id} "
+            f"endpoint={gpu_type} url={url} body={body}"
+        ) from exc
 
     # Modal web endpoints return the function result synchronously for short
     # calls.  For long-running renders the connection stays open.  We use a

@@ -1581,7 +1581,7 @@ def download_job_output_archive(job_id: str, current_user: dict = Depends(get_cu
 # -----------------------------------------------
 
 FAILOVER_STALE_SECONDS = 30  # longer than heartbeat to avoid false positives
-MIN_FRAMES_PER_WORKER = 5
+MIN_FRAMES_PER_WORKER = 2
 
 
 def compute_power_score(machine: dict) -> float:
@@ -2402,6 +2402,17 @@ def confirm_render_group_upload(
     assignments = expand_serverless_assignments(assignments)
     for i, a in enumerate(assignments):
         a["chunk_index"] = i
+    try:
+        assignment_counts: dict[str, int] = {}
+        for a in assignments:
+            mt = a.get("machine_type", "unknown")
+            assignment_counts[mt] = assignment_counts.get(mt, 0) + 1
+        log.info(
+            f"Render group {group_id}: assignment counts by machine_type = "
+            f"{assignment_counts}"
+        )
+    except Exception:
+        pass
 
     tasks = []
     max_retries = scheduling.get("max_retries_per_chunk", 0)

@@ -5,8 +5,13 @@ function normalizeBaseUrl(baseUrl) {
 }
 
 async function authHeaders() {
-  const token = await auth.currentUser?.getIdToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  try {
+    const token = await auth.currentUser?.getIdToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch (error) {
+    const detail = error?.message || String(error);
+    throw new Error(`Auth token refresh failed: ${detail}`);
+  }
 }
 
 async function readErrorDetail(response, fallbackMessage) {
@@ -42,7 +47,13 @@ async function apiFetch(baseUrl, path, options = {}) {
     ...(await authHeaders()),
   };
 
-  const response = await fetch(`${normalizedBase}${path}`, { ...options, headers });
+  let response;
+  try {
+    response = await fetch(`${normalizedBase}${path}`, { ...options, headers });
+  } catch (error) {
+    const detail = error?.message || String(error);
+    throw new Error(`Network error reaching ${normalizedBase}${path}: ${detail}`);
+  }
   if (!response.ok) {
     const detail = await readErrorDetail(response, `Request failed (${response.status})`);
     throw new Error(detail);

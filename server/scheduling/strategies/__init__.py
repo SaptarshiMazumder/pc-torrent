@@ -6,13 +6,14 @@ from scheduling.strategies.base import ProvisionStrategy
 from scheduling.strategies.community_strategy import CommunityStrategy
 from scheduling.strategies.modal_strategy import ModalStrategy
 from scheduling.strategies.runpod_strategy import RunPodStrategy
+from scheduling.strategies.vast_strategy import VastStrategy
 
 _STRATEGIES: dict[str, ProvisionStrategy] = {}
 _FALLBACK = CommunityStrategy()
 
 
 def _register_defaults() -> None:
-    for strategy in (RunPodStrategy(), ModalStrategy(), CommunityStrategy()):
+    for strategy in (RunPodStrategy(), ModalStrategy(), VastStrategy(), CommunityStrategy()):
         _STRATEGIES[strategy.machine_type] = strategy
 
 

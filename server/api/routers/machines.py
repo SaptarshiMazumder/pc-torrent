@@ -104,7 +104,5 @@ def heartbeat_machine(machine_id: str) -> dict[str, bool]:
 
 
 @router.get("/machines")
-def list_available_machines(
-    _: dict = Depends(get_current_user),
-) -> list[dict[str, Any]]:
+def list_available_machines() -> list[dict[str, Any]]:
     return get_available_machines()

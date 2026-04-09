@@ -81,7 +81,9 @@
       "Bash(find /c/Users/googler/OneDrive/Desktop/Projects/pc-rent -name \"*.md\" ! -path \"*/venv/*\" -exec grep -l \"blend\\\\|render\\\\|farm\" {} \\\\;)",
       "Bash(ls c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/server/*.py)",
       "Bash(gcloud logging:*)",
-      "WebFetch(domain:modal.com)"
+      "WebFetch(domain:modal.com)",
+      "Bash(curl -s \"https://console.vast.ai/api/v0/bundles/?q=%7B%22gpu_name%22%3A%7B%22eq%22%3A%22RTX+4090%22%7D%2C%22num_gpus%22%3A%7B%22eq%22%3A1%7D%2C%22rentable%22%3A%7B%22eq%22%3Atrue%7D%2C%22dph_total%22%3A%7B%22lte%22%3A0.50%7D%2C%22disk_space%22%3A%7B%22gte%22%3A20%7D%2C%22order%22%3A%5B%5B%22dph_total%22%2C%22asc%22%5D%5D%2C%22limit%22%3A3%7D\" -H \"Authorization: Bearer e57f35ee0b4d10e91b2c37b71a25e04e8c6b6da572f87e9e2800bdf07602b725\")",
+      "Bash(curl -s -X GET 'https://pcrent-server-930713698987.asia-northeast1.run.app/machines' -H 'accept: application/json')"
     ]
   }
 }

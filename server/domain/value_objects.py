@@ -19,7 +19,7 @@ from typing import Any
 # Constants
 # ---------------------------------------------------------------------------
 
-SERVERLESS_TYPES: frozenset[str] = frozenset({"runpod_serverless", "modal_serverless"})
+SERVERLESS_TYPES: frozenset[str] = frozenset({"runpod_serverless", "modal_serverless", "vast_serverless"})
 
 DEFAULT_DEVICE_POLICY = "AUTO"
 ALLOWED_DEVICE_POLICIES = {"AUTO", "OPTIX", "CUDA", "CPU"}

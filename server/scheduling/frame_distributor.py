@@ -284,7 +284,7 @@ def get_available_machines() -> list[dict[str, Any]]:
         UPDATE machines
         SET status = 'idle'
         WHERE status = 'available'
-          AND machine_type NOT IN ('runpod_serverless', 'modal_serverless')
+          AND machine_type NOT IN ('runpod_serverless', 'modal_serverless', 'vast_serverless')
           AND (last_seen_at IS NULL OR last_seen_at < %s)
         """,
         (cutoff,),
@@ -292,7 +292,11 @@ def get_available_machines() -> list[dict[str, Any]]:
     rows = query_all(
         """
         SELECT * FROM machines
-        WHERE status = 'available' AND last_seen_at >= %s
+        WHERE status = 'available'
+          AND (
+            machine_type IN ('runpod_serverless', 'modal_serverless', 'vast_serverless')
+            OR last_seen_at >= %s
+          )
         ORDER BY gpu_vram_gb DESC
         """,
         (cutoff,),

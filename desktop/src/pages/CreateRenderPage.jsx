@@ -30,12 +30,14 @@ const CAMERA_MODE_OPTIONS = [
 const FLEET_OPTIONS = [
   { value: "runpod", label: "RunPod", machineTypes: ["runpod_serverless"] },
   { value: "modal", label: "Modal", machineTypes: ["modal_serverless"] },
+  { value: "vast", label: "Vast.ai", machineTypes: ["vast_serverless"] },
   { value: "community", label: "Community", machineTypes: ["windows"] },
 ];
 
 function classifyMachineFleet(machine) {
   if (machine?.machine_type === "runpod_serverless") return "runpod";
   if (machine?.machine_type === "modal_serverless") return "modal";
+  if (machine?.machine_type === "vast_serverless") return "vast";
   return "community";
 }
 
@@ -372,7 +374,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const [cameraRanges, setCameraRanges] = useState([]);
   const [renderEngine, setRenderEngine] = useState("scene_default");
 
-  const [enabledFleets, setEnabledFleets] = useState(() => new Set(["runpod", "modal", "community"]));
+  const [enabledFleets, setEnabledFleets] = useState(() => new Set(["runpod", "modal", "vast", "community"]));
   const [availableMachines, setAvailableMachines] = useState([]);
   const [machinesLoading, setMachinesLoading] = useState(false);
 
@@ -520,7 +522,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   }, [backendUrl]);
 
   const fleetCounts = useMemo(() => {
-    const counts = { runpod: 0, modal: 0, community: 0 };
+    const counts = { runpod: 0, modal: 0, vast: 0, community: 0 };
     for (const m of availableMachines) {
       const fleet = classifyMachineFleet(m);
       counts[fleet] = (counts[fleet] || 0) + 1;

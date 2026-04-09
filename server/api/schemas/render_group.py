@@ -17,7 +17,6 @@ class ConfirmRenderGroupPayload(BaseModel):
     render_overrides: dict[str, Any] | None = None
     scheduling: dict[str, Any] | None = None
     analysis_snapshot: dict[str, Any] | None = None
-    allowed_machine_types: list[str] | None = None
 
 
 class UpdateInputFilePayload(BaseModel):

@@ -141,20 +141,6 @@ def _build_render_group_output_entries(group_id: str) -> list[dict[str, Any]]:
 # Failover helper (stale desktop detection)
 # ---------------------------------------------------------------------------
 
-def _load_group_allowed_types(group_id: str) -> list[str] | None:
-    raw = query_one(
-        "SELECT allowed_machine_types_json FROM render_groups WHERE id = %s",
-        (group_id,),
-    )
-    if not raw or not raw.get("allowed_machine_types_json"):
-        return None
-    try:
-        parsed = json.loads(raw["allowed_machine_types_json"])
-        return parsed if isinstance(parsed, list) else None
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
 def _check_failover(group_id: str, tasks_raw: list[dict[str, Any]]) -> list[str]:
     """
     Detect stale physical desktop machines and reassign their in-progress tasks.
@@ -166,7 +152,6 @@ def _check_failover(group_id: str, tasks_raw: list[dict[str, Any]]) -> list[str]
         datetime.now(timezone.utc) - timedelta(seconds=FAILOVER_STALE_SECONDS)
     ).isoformat()
     new_job_ids: list[str] = []
-    allowed_types = _load_group_allowed_types(group_id)
 
     machine_ids = list({t["machine_id"] for t in tasks_raw})
     machines_map = {
@@ -198,7 +183,7 @@ def _check_failover(group_id: str, tasks_raw: list[dict[str, Any]]) -> list[str]
         if new_start > new_end:
             continue
 
-        best_machine_id = choose_retry_machine(group_id, task["machine_id"], allowed_types)
+        best_machine_id = choose_retry_machine(group_id, task["machine_id"])
         if not best_machine_id or best_machine_id == task["machine_id"]:
             continue
         best_machine = query_one("SELECT * FROM machines WHERE id = %s", (best_machine_id,))
@@ -670,16 +655,12 @@ def confirm_render_group_upload(
     if total_frames <= 0:
         raise HTTPException(status_code=400, detail="No renderable frames found in .blend file")
 
-    allowed_machine_types = payload.allowed_machine_types or None
-    allowed_types_json = json.dumps(allowed_machine_types) if allowed_machine_types else None
-
     execute(
         """
         UPDATE render_groups
         SET total_frames = %s, frame_start = %s, frame_end = %s, frame_step = %s,
             render_overrides_json = %s, scheduling_json = %s,
             analysis_snapshot_json = %s, analysis_warnings_json = %s,
-            allowed_machine_types_json = %s,
             status = 'pending'
         WHERE id = %s
         """,
@@ -687,7 +668,6 @@ def confirm_render_group_upload(
             total_frames, frame_start, frame_end, frame_step,
             json.dumps(render_overrides), json.dumps(scheduling),
             json.dumps(analysis_snapshot), json.dumps(analysis_warnings),
-            allowed_types_json,
             group_id,
         ),
     )
@@ -705,7 +685,6 @@ def confirm_render_group_upload(
             used_at=group.get("submitted_at") or now_iso(),
         )
 
-    # Machine selection — respect allowed_machine_types
     if payload.machine_ids:
         machines: list[dict[str, Any]] = []
         for mid in payload.machine_ids:
@@ -724,15 +703,6 @@ def confirm_render_group_upload(
         if not machines:
             raise HTTPException(
                 status_code=400, detail="No available machines right now. Try again shortly."
-            )
-
-    if allowed_machine_types:
-        allowed_set = set(allowed_machine_types)
-        machines = [m for m in machines if m.get("machine_type", "windows") in allowed_set]
-        if not machines:
-            raise HTTPException(
-                status_code=400,
-                detail="No available machines match the selected fleet(s). Try enabling more fleets.",
             )
 
     # Frame distribution

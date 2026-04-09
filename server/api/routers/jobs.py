@@ -542,22 +542,6 @@ def update_job_status(
     return {"success": True}
 
 
-def _load_group_allowed_types(group_id: str) -> list[str] | None:
-    if not group_id:
-        return None
-    row = query_one(
-        "SELECT allowed_machine_types_json FROM render_groups WHERE id = %s",
-        (group_id,),
-    )
-    if not row or not row.get("allowed_machine_types_json"):
-        return None
-    try:
-        parsed = json.loads(row["allowed_machine_types_json"])
-        return parsed if isinstance(parsed, list) else None
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
 def _schedule_retry(job: dict[str, Any], rendered_frames: int) -> str | None:
     """Create a retry job for a failed group task and dispatch if serverless."""
     if _group_blocks_new_jobs(job["group_id"]):
@@ -575,9 +559,8 @@ def _schedule_retry(job: dict[str, Any], rendered_frames: int) -> str | None:
     if remaining_start > remaining_end:
         return None
 
-    allowed_types = _load_group_allowed_types(job["group_id"])
     retry_machine_id = (
-        choose_retry_machine(job["group_id"], job["machine_id"], allowed_types)
+        choose_retry_machine(job["group_id"], job["machine_id"])
         or job["machine_id"]
     )
     retry_job_id = str(uuid4())

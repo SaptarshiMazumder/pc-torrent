@@ -40,6 +40,7 @@ from scheduling.frame_distributor import (
     distribute_frames,
     distribute_frames_by_chunk_size,
     expand_serverless_assignments,
+    filter_enabled_machines,
     get_available_machines,
 )
 from scheduling.dispatch_coordinator import coordinator
@@ -712,6 +713,12 @@ def confirm_render_group_upload(
             if not m:
                 raise HTTPException(status_code=400, detail=f"Machine {mid[:8]}... not found")
             machines.append(m)
+        machines = filter_enabled_machines(machines)
+        if not machines:
+            raise HTTPException(
+                status_code=400,
+                detail="Selected machines are currently disabled or unavailable.",
+            )
     else:
         machines = get_available_machines()
         if not machines:

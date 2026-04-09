@@ -37,6 +37,18 @@ def compute_power_score(machine: dict[str, Any]) -> float:
     return (vram * 4) + (cores * 1) + (ram * 0.3)
 
 
+def filter_enabled_machines(machines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop machines whose provision strategy is currently disabled."""
+    from scheduling.strategies import get_strategy
+
+    enabled: list[dict[str, Any]] = []
+    for machine in machines:
+        machine_type = machine.get("machine_type", "windows")
+        if get_strategy(machine_type).is_enabled():
+            enabled.append(machine)
+    return enabled
+
+
 # ---------------------------------------------------------------------------
 # Worker budget capping
 # ---------------------------------------------------------------------------
@@ -277,7 +289,7 @@ def get_available_machines() -> list[dict[str, Any]]:
         """,
         (cutoff,),
     )
-    return query_all(
+    rows = query_all(
         """
         SELECT * FROM machines
         WHERE status = 'available' AND last_seen_at >= %s
@@ -285,6 +297,7 @@ def get_available_machines() -> list[dict[str, Any]]:
         """,
         (cutoff,),
     )
+    return filter_enabled_machines(rows)
 
 
 def choose_retry_machine(
@@ -306,6 +319,7 @@ def choose_retry_machine(
         "SELECT * FROM machines WHERE status = 'available' AND id != %s ORDER BY gpu_vram_gb DESC",
         (failed_machine_id,),
     )
+    rows = filter_enabled_machines(rows)
     if allowed_machine_types:
         allowed_set = set(allowed_machine_types)
         rows = [r for r in rows if r.get("machine_type", "windows") in allowed_set]

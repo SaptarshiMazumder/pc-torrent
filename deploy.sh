@@ -115,6 +115,10 @@ gcloud run deploy "$SERVICE_NAME" \
     --set-env-vars "RUNPOD_GPU_VRAM_GB=${RUNPOD_GPU_VRAM_GB:-24}" \
     --set-env-vars "RUNPOD_CPU_CORES=${RUNPOD_CPU_CORES:-16}" \
     --set-env-vars "RUNPOD_RAM_GB=${RUNPOD_RAM_GB:-64}" \
+    --set-env-vars "RUNPOD_INIT_STALL_SEC=${RUNPOD_INIT_STALL_SEC:-60}" \
+    --set-env-vars "RUNPOD_AUTOSCALE_MIN_WORKERS=${RUNPOD_AUTOSCALE_MIN_WORKERS:-2}" \
+    --set-env-vars "RUNPOD_AUTOSCALE_MAX_WORKERS=${RUNPOD_AUTOSCALE_MAX_WORKERS:-4}" \
+    --set-env-vars "RUNPOD_AUTOSCALE_SAFETY_SWEEP_SEC=${RUNPOD_AUTOSCALE_SAFETY_SWEEP_SEC:-60}" \
     --set-env-vars "MODAL_GPU_VRAM_GB=${MODAL_GPU_VRAM_GB:-24}" \
     --set-env-vars "MODAL_CPU_CORES=${MODAL_CPU_CORES:-16}" \
     --set-env-vars "MODAL_RAM_GB=${MODAL_RAM_GB:-64}" \

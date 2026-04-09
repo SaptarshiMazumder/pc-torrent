@@ -33,6 +33,8 @@ from infrastructure.db import execute, init_db, query_all, query_one, request_co
 import infrastructure.storage as storage
 import services.runpod_dispatch as runpod_dispatch
 import services.modal_dispatch as modal_dispatch
+import services.runpod_autoscaler as runpod_autoscaler
+import services.failure_tracker as failure_tracker
 from services.blend_parser import parse_upload, BlendParseError
 from firebase_auth import get_current_user, get_or_create_profile, get_user_profile, update_user_profile, write_job_record, write_render_group_record
 from fastapi import Depends
@@ -95,6 +97,13 @@ def _startup():
     runpod_dispatch.start_heartbeat_thread(execute, now_iso)
     modal_dispatch.register_virtual_machines(execute, query_one, now_iso)
     modal_dispatch.start_heartbeat_thread(execute, now_iso)
+    if runpod_dispatch.is_enabled():
+        runpod_autoscaler.configure(
+            [ep["id"] for ep in runpod_dispatch.ENDPOINTS],
+            query_all,
+        )
+        runpod_autoscaler.scale_down_all()
+        runpod_autoscaler.start_safety_sweep()
 
 app.add_middleware(
     CORSMiddleware,
@@ -136,6 +145,21 @@ def recent_logs(_: dict = Depends(get_current_user)) -> list[str]:
     return list(_log_buffer)
 
 
+@app.get("/failure-events")
+def get_failure_events(
+    limit: int = 100,
+    provider: str | None = None,
+    endpoint_id: str | None = None,
+    failure_type: str | None = None,
+) -> list[dict]:
+    return failure_tracker.get_recent_failures(
+        limit=limit,
+        provider=provider,
+        endpoint_id=endpoint_id,
+        failure_type=failure_type,
+    )
+
+
 class RegisterMachinePayload(BaseModel):
     machine_key: str | None = None
     gpu_model: str
@@ -156,6 +180,11 @@ class UpdateJobStatusPayload(BaseModel):
 class UpdateJobProgressPayload(BaseModel):
     total_frames: int | None = None
     rendered_frames: int
+
+
+class HeartbeatPayload(BaseModel):
+    phase: str
+    detail: str | None = None
 
 
 def now_iso() -> str:
@@ -1182,19 +1211,41 @@ def update_job_progress(job_id: str, payload: UpdateJobProgressPayload) -> dict[
     return {"success": True}
 
 
+@app.put("/jobs/{job_id}/heartbeat")
+def update_job_heartbeat(job_id: str, payload: HeartbeatPayload) -> dict[str, bool]:
+    job = query_one("SELECT id FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    phase = (payload.phase or "").strip()[:64]
+    if not phase:
+        raise HTTPException(status_code=400, detail="phase is required")
+    execute(
+        """
+        UPDATE jobs
+        SET last_heartbeat_at = %s, heartbeat_phase = %s
+        WHERE id = %s
+        """,
+        (now_iso(), phase, job_id),
+    )
+    return {"success": True}
+
+
 @app.put("/jobs/{job_id}/status")
 def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str, Any]:
     job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    machine_type = _machine_type_of(job["machine_id"])
+    is_runpod_serverless = machine_type == "runpod_serverless"
+    previous_status = job.get("status")
     completed_at = job.get("completed_at")
     total_frames = job.get("total_frames")
     rendered_frames = max(0, job.get("rendered_frames") or 0)
-    if payload.status in ("done", "failed"):
+    if payload.status in ("done", "failed", "cancelled"):
         completed_at = now_iso()
         # Serverless machines are always-available; heartbeat manages their last_seen_at
-        if not _is_serverless(_machine_type_of(job["machine_id"])):
+        if not _is_serverless(machine_type):
             execute(
                 "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
                 (completed_at, job["machine_id"]),
@@ -1229,7 +1280,36 @@ def update_job_status(job_id: str, payload: UpdateJobStatusPayload) -> dict[str,
     if job.get("group_id"):
         g = query_one("SELECT status FROM render_groups WHERE id = %s", (job["group_id"],))
         group_status = g["status"] if g else None
-    if payload.status == "failed" and job.get("group_id") and group_status not in ("cancelled", "failed", "done"):
+
+    if is_runpod_serverless:
+        endpoint_id = ""
+        try:
+            endpoint_id = runpod_dispatch.endpoint_id_for_machine(job["machine_id"])
+        except Exception as exc:
+            log.warning(f"Failed to resolve RunPod endpoint for job {job_id}: {exc}")
+
+        if payload.status in ("done", "cancelled"):
+            runpod_autoscaler.notify_job_terminal(job_id, endpoint_id)
+        elif payload.status == "failed":
+            if previous_status not in ("done", "failed", "cancelled") and group_status not in ("cancelled", "failed", "done"):
+                result = runpod_dispatch.handle_local_failure(
+                    job_id=job_id,
+                    error=payload.error or "RunPod worker reported failure",
+                    db_execute=execute,
+                    db_query_one=query_one,
+                    db_query_all=query_all,
+                    now_iso=now_iso,
+                )
+                retry_job_id = result.get("retry_job_id")
+            else:
+                runpod_autoscaler.notify_job_terminal(job_id, endpoint_id)
+
+    if (
+        payload.status == "failed"
+        and not is_runpod_serverless
+        and job.get("group_id")
+        and group_status not in ("cancelled", "failed", "done")
+    ):
         # Calculate remaining frames (don't re-render what's already done)
         already_rendered = max(0, rendered_frames)
         step = job.get("frame_step") or 1
@@ -2616,11 +2696,18 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
     )
 
     cancelled_count = 0
+    affected_runpod_endpoints: set[str] = set()
     for job in jobs:
         # Cancel RunPod job if it has one
         rp_job_id = job.get("runpod_job_id")
         job_machine_type = _machine_type_of(job["machine_id"])
         if rp_job_id and job_machine_type == "runpod_serverless" and runpod_dispatch.is_enabled():
+            try:
+                affected_runpod_endpoints.add(
+                    runpod_dispatch.endpoint_id_for_machine(job["machine_id"])
+                )
+            except Exception as exc:
+                log.warning(f"Failed to resolve RunPod endpoint during cancel for {job['id']}: {exc}")
             try:
                 runpod_dispatch.cancel_job(rp_job_id, job["machine_id"])
             except Exception as exc:
@@ -2635,6 +2722,23 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
             "UPDATE jobs SET status = 'cancelled', completed_at = %s, error = 'Cancelled by user' WHERE id = %s",
             (now_iso(), job["id"]),
         )
+        if job_machine_type == "runpod_serverless":
+            endpoint_id = ""
+            try:
+                endpoint_id = runpod_dispatch.endpoint_id_for_machine(job["machine_id"])
+            except Exception:
+                endpoint_id = ""
+            failure_tracker.record_failure(
+                provider="runpod",
+                endpoint_id=endpoint_id,
+                job_id=job["id"],
+                group_id=group_id,
+                failure_type="cancelled",
+                error_msg="Cancelled by user",
+                action_taken="cancelled_by_user",
+            )
+            if endpoint_id:
+                runpod_autoscaler.notify_job_terminal(job["id"], endpoint_id)
         # Release non-serverless machines
         if not _is_serverless(job_machine_type):
             execute(
@@ -2647,6 +2751,9 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
         "UPDATE render_groups SET status = 'cancelled', completed_at = %s WHERE id = %s",
         (now_iso(), group_id),
     )
+
+    for endpoint_id in affected_runpod_endpoints:
+        runpod_autoscaler.maybe_scale_down(endpoint_id, force=True)
 
     return {"success": True, "cancelled_jobs": cancelled_count}
 

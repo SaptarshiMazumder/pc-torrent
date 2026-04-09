@@ -226,6 +226,12 @@ def init_db():
                 ALTER TABLE jobs
                 ADD COLUMN IF NOT EXISTS runpod_job_id TEXT;
 
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS last_heartbeat_at TEXT;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS heartbeat_phase TEXT;
+
                 CREATE INDEX IF NOT EXISTS idx_jobs_machine_pending_priority
                 ON jobs(machine_id, status, priority DESC, submitted_at ASC);
 
@@ -269,5 +275,29 @@ def init_db():
 
                 CREATE INDEX IF NOT EXISTS idx_render_groups_source_asset_id
                 ON render_groups(source_asset_id);
+
+                CREATE TABLE IF NOT EXISTS failure_events (
+                    id TEXT PRIMARY KEY,
+                    occurred_at TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    endpoint_id TEXT,
+                    job_id TEXT NOT NULL,
+                    group_id TEXT,
+                    failure_type TEXT NOT NULL,
+                    error_msg TEXT,
+                    action_taken TEXT NOT NULL,
+                    reassigned_job_id TEXT,
+                    reassigned_to_endpoint TEXT,
+                    resolved BOOLEAN NOT NULL DEFAULT FALSE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_failure_events_occurred_at
+                ON failure_events(occurred_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_failure_events_provider
+                ON failure_events(provider);
+
+                CREATE INDEX IF NOT EXISTS idx_failure_events_job_id
+                ON failure_events(job_id);
                 """
             )

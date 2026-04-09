@@ -269,5 +269,8 @@ def init_db():
 
                 CREATE INDEX IF NOT EXISTS idx_render_groups_source_asset_id
                 ON render_groups(source_asset_id);
+
+                ALTER TABLE render_groups
+                ADD COLUMN IF NOT EXISTS allowed_machine_types_json TEXT;
                 """
             )

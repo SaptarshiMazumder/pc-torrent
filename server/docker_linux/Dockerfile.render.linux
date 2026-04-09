@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget xz-utils libxi6 libxxf86vm1 libxfixes3 \
     libxrender1 libgl1-mesa-glx libxkbcommon0 \
     libsm6 libice6 libxrandr2 libxinerama1 libxcursor1 \
+    libegl1-mesa libgles2-mesa \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # Download Blender 5.0.1 portable (headless, no GUI needed)

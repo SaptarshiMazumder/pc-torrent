@@ -22,10 +22,13 @@ import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import base64
+
 import httpx
 
 from domain.value_objects import now_iso
-from infrastructure.db import execute, query_one
+from infrastructure.db import execute, query_all, query_one
+from services import runpod_autoscaler
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +88,7 @@ JOB_STATUS_POLL_INTERVAL_SEC = float(os.getenv("JOB_STATUS_POLL_INTERVAL_SEC", "
 IN_QUEUE_TIMEOUT_SEC = _env_float("IN_QUEUE_TIMEOUT_SEC", 120)
 RUNPOD_KILL_THROTTLED_IMMEDIATELY = _env_bool("RUNPOD_KILL_THROTTLED_IMMEDIATELY", True)
 IN_PROGRESS_STALE_SEC = _env_float("IN_PROGRESS_STALE_SEC", 90 * 60)
+RUNPOD_INIT_STALL_SEC = _env_float("RUNPOD_INIT_STALL_SEC", 120)
 
 _HEARTBEAT_INTERVAL = 10
 
@@ -390,7 +394,7 @@ def _runpod_status_hint(data: dict) -> str:
     return " ".join(str(v) for v in values if v).upper()
 
 
-def handle_local_failure(
+def start_polling_thread(
     job_id: str,
     runpod_job_id: str,
     machine_id: str = "",
@@ -401,6 +405,7 @@ def handle_local_failure(
     """
     Start a background thread that polls RunPod /status until the job
     completes or fails, then delegates retry/failover to DispatchCoordinator.
+    Every exit path calls notify_job_terminal so the autoscaler can scale down.
     """
     endpoint_id = (
         _endpoint_id_for_machine(machine_id) if machine_id else ENDPOINTS[0]["id"]
@@ -414,176 +419,173 @@ def handle_local_failure(
         last_rendered_frames = None
         last_frame_change_at = time.monotonic()
 
-        while True:
-            time.sleep(JOB_STATUS_POLL_INTERVAL_SEC)
-            try:
-                resp = httpx.get(
-                    f"https://api.runpod.ai/v2/{endpoint_id}/status/{runpod_job_id}",
-                    headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                rp_status: str = str(data.get("status", "")).upper()
-                delay_reason = str(
-                    data.get("delayReason") or data.get("delay_reason") or ""
-                ).upper()
-                status_hint = _runpod_status_hint(data)
-                throttled_signal = "THROTTL" in status_hint
-                queue_like_status = (
-                    rp_status in {"IN_QUEUE", "QUEUED", "THROTTLED"}
-                    or "THROTTL" in delay_reason
-                )
-
-                job = query_one(
-                    """
-                    SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
-                           rendered_frames, input_filename, render_overrides_json,
-                           chunk_index, chunk_size_frames, priority
-                    FROM jobs WHERE id = %s
-                    """,
-                    (job_id,),
-                )
-                if not job:
-                    log.warning(f"Poll: job {job_id} not found in DB, stopping")
-                    break
-
-                current_runpod_job_id = job.get("runpod_job_id")
-                if current_runpod_job_id and current_runpod_job_id != runpod_job_id:
-                    log.info(
-                        f"Poll: stopping stale RunPod poll for job {job_id} "
-                        f"({runpod_job_id} superseded by {current_runpod_job_id})"
+        try:
+            while True:
+                time.sleep(JOB_STATUS_POLL_INTERVAL_SEC)
+                try:
+                    resp = httpx.get(
+                        f"https://api.runpod.ai/v2/{endpoint_id}/status/{runpod_job_id}",
+                        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+                        timeout=15,
                     )
-                    break
-
-                local_status: str = job["status"]
-                elapsed = time.monotonic() - started_at
-
-                # Throttled: cancel immediately and route to failover
-                if (
-                    RUNPOD_KILL_THROTTLED_IMMEDIATELY
-                    and throttled_signal
-                    and rp_status not in {"COMPLETED", "IN_PROGRESS", "FAILED", "CANCELLED", "TIMED_OUT"}
-                ):
-                    throttle_error = (
-                        f"RunPod throttled (status={rp_status}, "
-                        f"delay_reason={delay_reason or 'n/a'}); cancelling for failover"
+                    resp.raise_for_status()
+                    data = resp.json()
+                    rp_status: str = str(data.get("status", "")).upper()
+                    delay_reason = str(
+                        data.get("delayReason") or data.get("delay_reason") or ""
+                    ).upper()
+                    status_hint = _runpod_status_hint(data)
+                    throttled_signal = "THROTTL" in status_hint
+                    queue_like_status = (
+                        rp_status in {"IN_QUEUE", "QUEUED", "THROTTLED"}
+                        or "THROTTL" in delay_reason
                     )
-                    log.warning(f"Job {job_id}: {throttle_error}")
-                    try:
-                        cancel_job(runpod_job_id, machine_id)
-                    except Exception as ce:
-                        log.warning(f"Cancel failed during throttling: {ce}")
-                    rp_status = "FAILED"
-                    data["error"] = throttle_error
 
-                elif queue_like_status and elapsed > IN_QUEUE_TIMEOUT_SEC:
-                    queue_error = (
-                        f"Worker stuck in queue for {elapsed:.0f}s "
-                        f"(status={rp_status}, delay_reason={delay_reason or 'n/a'})"
+                    job = query_one(
+                        """
+                        SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
+                               rendered_frames, input_filename, render_overrides_json,
+                               chunk_index, chunk_size_frames, priority, last_heartbeat_at,
+                               heartbeat_phase, runpod_job_id
+                        FROM jobs WHERE id = %s
+                        """,
+                        (job_id,),
                     )
-                    log.warning(f"Job {job_id}: {queue_error}")
-                    try:
-                        cancel_job(runpod_job_id, machine_id)
-                    except Exception as ce:
-                        log.warning(f"Cancel failed during IN_QUEUE timeout: {ce}")
-                    rp_status = "FAILED"
-                    data["error"] = queue_error
+                    if not job:
+                        log.warning(f"Poll: job {job_id} not found in DB, stopping")
+                        return
 
-                elif rp_status == "IN_PROGRESS":
-                    if first_in_progress_at is None:
-                        first_in_progress_at = time.monotonic()
-                    cur_frames = job.get("rendered_frames") or 0
-                    if cur_frames != last_rendered_frames:
-                        last_rendered_frames = cur_frames
-                        last_frame_change_at = time.monotonic()
-                    if cur_frames == 0:
-                        init_stall_error = ""
-                        hb_age = _heartbeat_age_seconds(job.get("last_heartbeat_at"))
-                        if hb_age is not None and hb_age > RUNPOD_INIT_STALL_SEC:
-                            init_stall_error = (
-                                f"Worker IN_PROGRESS with 0 rendered frames and heartbeat stopped "
-                                f"for {hb_age:.0f}s (phase={job.get('heartbeat_phase') or 'unknown'})"
-                            )
-                        elif (
-                            hb_age is None
-                            and first_in_progress_at is not None
-                            and (time.monotonic() - first_in_progress_at) > RUNPOD_INIT_STALL_SEC
-                        ):
-                            init_stall_error = (
-                                f"Worker IN_PROGRESS for {RUNPOD_INIT_STALL_SEC:.0f}s "
-                                f"but rendered_frames still 0"
-                            )
-                        if init_stall_error:
-                            log.warning(f"Job {job_id}: {init_stall_error}")
-                            try:
-                                cancel_job(runpod_job_id, machine_id)
-                            except Exception as ce:
-                                log.warning(f"Cancel failed during init stall handling: {ce}")
-                            _handle_failure(
-                                job_id=job_id,
-                                job=job,
-                                error=init_stall_error,
-                                failure_type="init_stall",
-                                blend_url=blend_url,
-                                render_overrides_b64=render_overrides_b64,
-                                machine_id=machine_id,
-                                group_id=group_id,
-                                db_execute=db_execute,
-                                db_query_one=db_query_one,
-                                db_query_all=db_query_all,
-                                now_iso=now_iso,
-                            )
-                            break
-                    elif time.monotonic() - last_frame_change_at > IN_PROGRESS_STALE_SEC:
-                        timeout_err = (
-                            f"RunPod job IN_PROGRESS but no new frames for "
-                            f"{IN_PROGRESS_STALE_SEC/60:.0f} min — cancelling"
+                    current_runpod_job_id = job.get("runpod_job_id")
+                    if current_runpod_job_id and current_runpod_job_id != runpod_job_id:
+                        log.info(
+                            f"Poll: stopping stale RunPod poll for job {job_id} "
+                            f"({runpod_job_id} superseded by {current_runpod_job_id})"
                         )
-                        log.warning(f"Job {job_id}: {timeout_err}")
+                        return
+
+                    local_status: str = job["status"]
+                    elapsed = time.monotonic() - started_at
+
+                    # Throttled: cancel immediately and route to failover
+                    if (
+                        RUNPOD_KILL_THROTTLED_IMMEDIATELY
+                        and throttled_signal
+                        and rp_status not in {"COMPLETED", "IN_PROGRESS", "FAILED", "CANCELLED", "TIMED_OUT"}
+                    ):
+                        throttle_error = (
+                            f"RunPod throttled (status={rp_status}, "
+                            f"delay_reason={delay_reason or 'n/a'}); cancelling for failover"
+                        )
+                        log.warning(f"Job {job_id}: {throttle_error}")
                         try:
                             cancel_job(runpod_job_id, machine_id)
                         except Exception as ce:
-                            log.warning(f"Cancel failed during IN_PROGRESS timeout: {ce}")
+                            log.warning(f"Cancel failed during throttling: {ce}")
                         rp_status = "FAILED"
-                        data["error"] = timeout_err
+                        data["error"] = throttle_error
 
-                # State transitions
-                if rp_status == "IN_PROGRESS" and local_status == "pending":
-                    execute("UPDATE jobs SET status = 'running' WHERE id = %s", (job_id,))
-                    log.info(f"Job {job_id} marked running (RunPod IN_PROGRESS)")
-
-                elif rp_status == "COMPLETED":
-                    if local_status not in ("done", "failed", "cancelled"):
-                        log.warning(
-                            f"Job {job_id} RunPod COMPLETED but local={local_status}, forcing done"
+                    elif queue_like_status and elapsed > IN_QUEUE_TIMEOUT_SEC:
+                        queue_error = (
+                            f"Worker stuck in queue for {elapsed:.0f}s "
+                            f"(status={rp_status}, delay_reason={delay_reason or 'n/a'})"
                         )
-                        execute(
-                            "UPDATE jobs SET status = 'done', completed_at = %s WHERE id = %s",
-                            (now_iso(), job_id),
+                        log.warning(f"Job {job_id}: {queue_error}")
+                        try:
+                            cancel_job(runpod_job_id, machine_id)
+                        except Exception as ce:
+                            log.warning(f"Cancel failed during IN_QUEUE timeout: {ce}")
+                        rp_status = "FAILED"
+                        data["error"] = queue_error
+
+                    elif rp_status == "IN_PROGRESS":
+                        if first_in_progress_at is None:
+                            first_in_progress_at = time.monotonic()
+                        cur_frames = job.get("rendered_frames") or 0
+                        if cur_frames != last_rendered_frames:
+                            last_rendered_frames = cur_frames
+                            last_frame_change_at = time.monotonic()
+                        if cur_frames == 0:
+                            init_stall_error = ""
+                            hb_age = _heartbeat_age_seconds(job.get("last_heartbeat_at"))
+                            if hb_age is not None and hb_age > RUNPOD_INIT_STALL_SEC:
+                                init_stall_error = (
+                                    f"Worker IN_PROGRESS with 0 rendered frames and heartbeat stopped "
+                                    f"for {hb_age:.0f}s (phase={job.get('heartbeat_phase') or 'unknown'})"
+                                )
+                            elif (
+                                hb_age is None
+                                and first_in_progress_at is not None
+                                and (time.monotonic() - first_in_progress_at) > RUNPOD_INIT_STALL_SEC
+                            ):
+                                init_stall_error = (
+                                    f"Worker IN_PROGRESS for {RUNPOD_INIT_STALL_SEC:.0f}s "
+                                    f"but rendered_frames still 0"
+                                )
+                            if init_stall_error:
+                                log.warning(f"Job {job_id}: {init_stall_error}")
+                                try:
+                                    cancel_job(runpod_job_id, machine_id)
+                                except Exception as ce:
+                                    log.warning(f"Cancel failed during init stall handling: {ce}")
+                                coordinator.handle_failure(
+                                    job_id=job_id,
+                                    job=job,
+                                    error=init_stall_error,
+                                    blend_url=blend_url,
+                                    render_overrides_b64=render_overrides_b64,
+                                    failed_machine_id=machine_id,
+                                    group_id=group_id,
+                                )
+                                return
+                        elif time.monotonic() - last_frame_change_at > IN_PROGRESS_STALE_SEC:
+                            timeout_err = (
+                                f"RunPod job IN_PROGRESS but no new frames for "
+                                f"{IN_PROGRESS_STALE_SEC/60:.0f} min — cancelling"
+                            )
+                            log.warning(f"Job {job_id}: {timeout_err}")
+                            try:
+                                cancel_job(runpod_job_id, machine_id)
+                            except Exception as ce:
+                                log.warning(f"Cancel failed during IN_PROGRESS timeout: {ce}")
+                            rp_status = "FAILED"
+                            data["error"] = timeout_err
+
+                    # State transitions
+                    if rp_status == "IN_PROGRESS" and local_status == "pending":
+                        execute("UPDATE jobs SET status = 'running' WHERE id = %s", (job_id,))
+                        log.info(f"Job {job_id} marked running (RunPod IN_PROGRESS)")
+
+                    elif rp_status == "COMPLETED":
+                        if local_status not in ("done", "failed", "cancelled"):
+                            log.warning(
+                                f"Job {job_id} RunPod COMPLETED but local={local_status}, forcing done"
+                            )
+                            execute(
+                                "UPDATE jobs SET status = 'done', completed_at = %s WHERE id = %s",
+                                (now_iso(), job_id),
+                            )
+                        return
+
+                    elif rp_status in ("FAILED", "CANCELLED", "TIMED_OUT"):
+                        if local_status in ("done", "failed", "cancelled"):
+                            return
+                        error = str(data.get("error") or f"RunPod status: {rp_status}")
+                        coordinator.handle_failure(
+                            job_id=job_id,
+                            job=job,
+                            error=error,
+                            blend_url=blend_url,
+                            render_overrides_b64=render_overrides_b64,
+                            failed_machine_id=machine_id,
+                            group_id=group_id,
                         )
-                    runpod_autoscaler.notify_job_terminal(job_id, endpoint_id)
-                    break
+                        return
 
-                elif rp_status in ("FAILED", "CANCELLED", "TIMED_OUT"):
-                    if local_status in ("done", "failed", "cancelled"):
-                        if local_status in ("done", "cancelled"):
-                            runpod_autoscaler.notify_job_terminal(job_id, endpoint_id)
-                        break
-                    error = str(data.get("error") or f"RunPod status: {rp_status}")
-                    coordinator.handle_failure(
-                        job_id=job_id,
-                        job=job,
-                        error=error,
-                        blend_url=blend_url,
-                        render_overrides_b64=render_overrides_b64,
-                        failed_machine_id=machine_id,
-                        group_id=group_id,
-                    )
-                    break
-
-            except Exception as e:
-                log.error(f"RunPod poll error for job {job_id}: {e}")
+                except Exception as e:
+                    log.error(f"RunPod poll error for job {job_id}: {e}")
+        finally:
+            # Every exit path notifies the autoscaler so it can scale down
+            runpod_autoscaler.notify_job_terminal(job_id, endpoint_id)
 
     t = threading.Thread(target=_poll, daemon=True, name=f"runpod-poll-{job_id[:8]}")
     t.start()

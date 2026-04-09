@@ -244,6 +244,8 @@ class DispatchCoordinator:
         self, failed_machine_id: str, allowed_machine_types: list[str] | None = None
     ) -> dict[str, Any] | None:
         """Return the best available machine excluding the one that failed."""
+        from scheduling.frame_distributor import filter_enabled_machines
+
         rows = query_all(
             """
             SELECT * FROM machines
@@ -252,6 +254,7 @@ class DispatchCoordinator:
             """,
             (failed_machine_id,),
         )
+        rows = filter_enabled_machines(rows)
         if allowed_machine_types:
             allowed_set = set(allowed_machine_types)
             rows = [r for r in rows if r.get("machine_type", "windows") in allowed_set]

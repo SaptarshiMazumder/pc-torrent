@@ -60,6 +60,19 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    log.warning(f"Invalid {name}='{raw}', using default {default}")
+    return default
+
+
 def _env_csv_set(name: str, default: str = "") -> set[str]:
     raw = os.getenv(name)
     if raw is None:
@@ -74,6 +87,7 @@ def _env_csv_set(name: str, default: str = "") -> set[str]:
 MODAL_TOKEN_ID = os.getenv("MODAL_TOKEN_ID", "")
 MODAL_TOKEN_SECRET = os.getenv("MODAL_TOKEN_SECRET", "")
 MODAL_APP_NAME = os.getenv("MODAL_APP_NAME", "pcrent-render")
+MODAL_PROVISIONING_ENABLED = _env_bool("MODAL_PROVISIONING_ENABLED", True)
 MODAL_DISABLED_GPU_TYPES = _env_csv_set("MODAL_DISABLED_GPU_TYPES", "a100")
 
 MODAL_GPU_VRAM_GB = _env_float("MODAL_GPU_VRAM_GB", 24.0)
@@ -161,7 +175,9 @@ def _endpoint_url(gpu_type: str) -> str:
 # ---------------------------------------------------------------------------
 
 def is_enabled() -> bool:
-    return bool(MODAL_TOKEN_ID and MODAL_TOKEN_SECRET and ENDPOINTS)
+    return bool(
+        MODAL_PROVISIONING_ENABLED and MODAL_TOKEN_ID and MODAL_TOKEN_SECRET and ENDPOINTS
+    )
 
 
 def _deactivate_stale_virtual_machines(active_machine_keys: list[str]) -> None:
@@ -182,6 +198,11 @@ def _deactivate_stale_virtual_machines(active_machine_keys: list[str]) -> None:
 
 def register_virtual_machines() -> list[str]:
     """Upsert one virtual machine row per Modal endpoint."""
+    if not MODAL_PROVISIONING_ENABLED:
+        _machine_endpoint_map.clear()
+        _deactivate_stale_virtual_machines([])
+        log.info("Modal provisioning disabled via MODAL_PROVISIONING_ENABLED")
+        return []
     if not (MODAL_TOKEN_ID and MODAL_TOKEN_SECRET):
         _machine_endpoint_map.clear()
         _deactivate_stale_virtual_machines([])
@@ -288,6 +309,8 @@ def dispatch_job(
     machine_id: str = "",
 ) -> str:
     """POST a job to the correct Modal web endpoint. Returns a job identifier."""
+    if not is_enabled():
+        raise RuntimeError("Modal provisioning is disabled or not configured")
     gpu_type = _gpu_type_for_machine(machine_id)
     url = _endpoint_url(gpu_type)
 

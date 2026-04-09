@@ -25,7 +25,20 @@ class RunPodStrategy:
         render_overrides_b64: str,
         group_id: str,
     ) -> None:
-        from services import runpod_dispatch
+        from services import runpod_autoscaler, runpod_dispatch
+
+        endpoint_id = runpod_dispatch.endpoint_id_for_machine(machine_id)
+
+        # Scale up the endpoint before dispatching
+        try:
+            runpod_autoscaler.scale_up(endpoint_id)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error(
+                f"Autoscaler scale_up FAILED for {endpoint_id}: {exc}"
+            )
+
+        runpod_autoscaler.notify_job_started(job_id, endpoint_id)
 
         rp_job_id = runpod_dispatch.dispatch_and_save(
             job_id=job_id,

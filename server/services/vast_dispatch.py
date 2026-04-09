@@ -12,10 +12,11 @@ Each dispatch creates a new Vast.ai instance with job parameters passed as
 env vars. The instance runs the handler, calls back to the backend, then
 exits. The polling thread detects completion and destroys the instance.
 
+GPU endpoints are configured in server/config.json under "vast_instances".
+
 Env var format:
   VAST_API_KEY=your_key
   VAST_DOCKER_IMAGE=yourrepo/pc-rent-vast:latest
-  VAST_INSTANCES=RTX 4090:Vast RTX 4090 24GB,H100 80GB SXM:Vast H100 80GB
   VAST_DISK_GB=20          (default: 20)
   VAST_MAX_PRICE_PER_GPU=0.50   ($/hr cap, default: 0.50)
 """
@@ -70,8 +71,6 @@ def _env_int(name: str, default: int) -> int:
 # ---------------------------------------------------------------------------
 
 VAST_API_KEY = os.getenv("VAST_API_KEY", "")
-# Defaults to the same RunPod GHCR image — /vast_handler.py is baked in there.
-# Override with VAST_DOCKER_IMAGE if you want to use a different tag.
 VAST_DOCKER_IMAGE = os.getenv("VAST_DOCKER_IMAGE") or os.getenv("MODAL_WORKER_IMAGE", "")
 
 VAST_GPU_VRAM_GB = _env_float("VAST_GPU_VRAM_GB", 24.0)
@@ -95,28 +94,27 @@ _HEARTBEAT_INTERVAL = 10
 
 
 # ---------------------------------------------------------------------------
-# Endpoint parsing
+# Endpoint parsing — reads from server/config.json
 # ---------------------------------------------------------------------------
 
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+
+
 def _parse_endpoints() -> list[dict]:
-    """
-    VAST_INSTANCES=RTX 4090:Vast RTX 4090 24GB,H100 80GB SXM:Vast H100 80GB
-    The part before the first ':' is the GPU model name used for offer searches.
-    """
-    raw = os.getenv("VAST_INSTANCES", "").strip()
-    if not raw:
+    """Load Vast.ai GPU endpoints from config.json -> vast_instances[]."""
+    try:
+        with open(_CONFIG_PATH, "r") as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        log.warning(f"Could not load {_CONFIG_PATH}: {exc}")
         return []
 
     endpoints = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if ":" in part:
-            gpu_name, label = part.split(":", 1)
-            endpoints.append({"id": gpu_name.strip(), "label": label.strip()})
-        else:
-            endpoints.append({"id": part, "label": f"Vast {part}"})
+    for entry in cfg.get("vast_instances", []):
+        gpu_name = entry.get("gpu_name", "").strip()
+        label = entry.get("label", "").strip() or f"Vast {gpu_name}"
+        if gpu_name:
+            endpoints.append({"id": gpu_name, "label": label})
     return endpoints
 
 
@@ -136,6 +134,8 @@ def is_enabled() -> bool:
 
 def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {VAST_API_KEY}", "Content-Type": "application/json"}
+
+
 
 
 def _deactivate_stale_virtual_machines(active_machine_keys: list[str]) -> None:
@@ -227,7 +227,7 @@ def start_heartbeat_thread() -> None:
                     execute(
                         """
                         UPDATE machines
-                        SET last_seen_at = %s
+                        SET status = 'available', last_seen_at = %s
                         WHERE machine_key = %s AND machine_type = 'vast_serverless'
                         """,
                         (now_iso(), mk),
@@ -254,25 +254,39 @@ def _gpu_name_for_machine(machine_id: str) -> str:
 # Vast.ai API calls
 # ---------------------------------------------------------------------------
 
-def search_offers(gpu_name: str) -> list[dict]:
-    """Find the cheapest rentable single-GPU offers matching gpu_name."""
-    query = json.dumps({
+def _search_offers_query(gpu_name: str, *, verified_only: bool) -> list[dict]:
+    """Run a single Vast.ai offer search."""
+    filters: dict = {
         "gpu_name": {"eq": gpu_name},
         "num_gpus": {"eq": 1},
         "rentable": {"eq": True},
+        "reliability2": {"gte": 0.90},
+        "cuda_max_good": {"gte": 12.0},
         "dph_total": {"lte": VAST_MAX_PRICE_PER_GPU},
         "disk_space": {"gte": VAST_DISK_GB},
-        "order": [["dph_total", "asc"]],
+        "order": [["reliability2", "desc"], ["dph_total", "asc"]],
         "limit": 10,
-    })
+    }
+    if verified_only:
+        filters["verified"] = {"eq": True}
     resp = httpx.get(
         f"{VAST_API_BASE}/bundles/",
         headers=_auth_headers(),
-        params={"q": query},
+        params={"q": json.dumps(filters)},
         timeout=30,
     )
     resp.raise_for_status()
     return resp.json().get("offers", [])
+
+
+def search_offers(gpu_name: str) -> list[dict]:
+    """Find reliable rentable offers; prefer verified hosts, fall back to all."""
+    offers = _search_offers_query(gpu_name, verified_only=True)
+    if offers:
+        log.info(f"Vast.ai: found {len(offers)} verified offers for {gpu_name}")
+        return offers
+    log.info(f"Vast.ai: no verified offers for {gpu_name}, trying unverified")
+    return _search_offers_query(gpu_name, verified_only=False)
 
 
 def create_instance(
@@ -286,13 +300,13 @@ def create_instance(
 ) -> int:
     """Rent a Vast.ai instance from offer_id and start the render handler."""
     env_vars = {
-        "-e JOB_ID": job_id,
-        "-e BLEND_URL": blend_url,
-        "-e FRAME_START": str(frame_start),
-        "-e FRAME_END": str(frame_end),
-        "-e FRAME_STEP": str(frame_step),
-        "-e RENDER_OVERRIDES_B64": render_overrides_b64,
-        "-e BACKEND_URL": PUBLIC_BACKEND_URL,
+        "JOB_ID": job_id,
+        "BLEND_URL": blend_url,
+        "FRAME_START": str(frame_start),
+        "FRAME_END": str(frame_end),
+        "FRAME_STEP": str(frame_step),
+        "RENDER_OVERRIDES_B64": render_overrides_b64,
+        "BACKEND_URL": PUBLIC_BACKEND_URL,
     }
 
     resp = httpx.put(
@@ -304,11 +318,8 @@ def create_instance(
             "env": env_vars,
             "disk": VAST_DISK_GB,
             "label": f"pcrent-{job_id[:12]}",
-            # Override the RunPod image's default CMD so the RunPod SDK loop
-            # never starts. /vast_handler.py is baked into the same image.
-            "onstart": "python3 -u /vast_handler.py",
             "runtype": "args",
-            "args_str": "sleep infinity",
+            "args": ["python3", "-u", "/vast_handler.py"],
         },
         timeout=30,
     )
@@ -459,8 +470,15 @@ def start_polling_thread(
             try:
                 inst = get_instance(vast_instance_id)
                 if inst is None:
-                    # Instance gone — check DB to decide if that's OK
-                    job = query_one("SELECT status FROM jobs WHERE id = %s", (job_id,))
+                    job = query_one(
+                        """
+                        SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
+                               rendered_frames, input_filename, render_overrides_json,
+                               chunk_index, chunk_size_frames, priority
+                        FROM jobs WHERE id = %s
+                        """,
+                        (job_id,),
+                    )
                     local_status = job["status"] if job else "unknown"
                     if local_status in ("done", "failed", "cancelled"):
                         log.info(f"Vast.ai instance {vast_instance_id} gone; job {job_id} is {local_status}")
@@ -548,9 +566,16 @@ def start_polling_thread(
                     )
                     destroy_instance(vast_instance_id)
 
-                    # Re-check DB after short pause (worker callback may be in flight)
                     time.sleep(5)
-                    job = query_one("SELECT status FROM jobs WHERE id = %s", (job_id,))
+                    job = query_one(
+                        """
+                        SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
+                               rendered_frames, input_filename, render_overrides_json,
+                               chunk_index, chunk_size_frames, priority
+                        FROM jobs WHERE id = %s
+                        """,
+                        (job_id,),
+                    )
                     local_status = job["status"] if job else "unknown"
 
                     if local_status in ("done", "failed", "cancelled"):

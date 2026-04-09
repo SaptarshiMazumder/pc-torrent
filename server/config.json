@@ -1,0 +1,6 @@
+{
+  "vast_instances": [
+    { "gpu_name": "RTX 4090", "label": "Vast RTX 4090 24GB" },
+    { "gpu_name": "RTX 3090", "label": "Vast RTX 3090 24GB" }
+  ]
+}

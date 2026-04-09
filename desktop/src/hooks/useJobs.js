@@ -249,5 +249,7 @@ export function useJobs(backendUrl) {
     return () => clearInterval(id);
   }, []);
 
-  return { jobs, loading, addJob, addRenderGroup, removeJob, markRenderGroupCancelled };
+  const refresh = useCallback(() => fetchAll(backendUrlRef.current), [fetchAll]);
+
+  return { jobs, loading, addJob, addRenderGroup, removeJob, markRenderGroupCancelled, refresh };
 }

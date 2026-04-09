@@ -17,6 +17,28 @@ if ! [[ "$FRAME_STEP" =~ ^[0-9]+$ ]] || [ "$FRAME_STEP" -lt 1 ]; then
 fi
 export OUTPUT_DIR INPUT_DIR FRAME_STEP DEVICE_POLICY
 
+# Start a virtual X11 display for EEVEE (which uses OpenGL/EGL, not CUDA).
+# Without this, Blender falls back to CPU Mesa software rendering on headless
+# containers where /dev/dri device nodes are inaccessible.
+XVFB_PID=""
+if command -v Xvfb &>/dev/null && [ -z "${DISPLAY:-}" ]; then
+    DISPLAY_NUM=99
+    Xvfb ":${DISPLAY_NUM}" -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &>/dev/null &
+    XVFB_PID=$!
+    export DISPLAY=":${DISPLAY_NUM}"
+    echo "Xvfb started on DISPLAY=${DISPLAY} (pid ${XVFB_PID})"
+    sleep 0.5  # give Xvfb a moment to initialise
+else
+    echo "Xvfb not available or DISPLAY already set (DISPLAY=${DISPLAY:-<unset>}); skipping"
+fi
+
+cleanup_xvfb() {
+    if [ -n "$XVFB_PID" ]; then
+        kill "$XVFB_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup_xvfb EXIT
+
 if [ -z "$BLEND_FILE" ]; then
     BLEND_FILE=$(find "$INPUT_DIR" -name "*.blend" -print -quit)
 fi

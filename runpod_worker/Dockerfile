@@ -28,5 +28,6 @@ RUN sed -i 's/\r$//' /scripts/render.sh && chmod +x /scripts/render.sh
 RUN pip3 install --no-cache-dir runpod==1.7.9 requests==2.32.3
 
 COPY runpod_worker/handler.py /handler.py
+COPY vast_worker/handler.py /vast_handler.py
 
 CMD ["python3", "-u", "/handler.py"]

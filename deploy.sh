@@ -87,6 +87,11 @@ log_ok "Docker image built and pushed"
 
 cd "$PROJECT_ROOT"
 
+# Re-read comma-containing env vars directly to avoid IFS='=' parsing issues
+RUNPOD_ENDPOINTS=$(grep '^RUNPOD_ENDPOINTS=' "$PROJECT_ROOT/server/.env" | head -1 | cut -d'=' -f2-)
+MODAL_ENDPOINTS=$(grep '^MODAL_ENDPOINTS=' "$PROJECT_ROOT/server/.env" | head -1 | cut -d'=' -f2-)
+VAST_INSTANCES=$(grep '^VAST_INSTANCES=' "$PROJECT_ROOT/server/.env" | head -1 | cut -d'=' -f2-)
+
 log_info "Deploying container to Cloud Run (region: $GCP_REGION)..."
 gcloud run deploy "$SERVICE_NAME" \
     --image "gcr.io/$GCP_PROJECT/$SERVICE_NAME" \
@@ -124,6 +129,12 @@ gcloud run deploy "$SERVICE_NAME" \
     --set-env-vars "MODAL_CPU_CORES=${MODAL_CPU_CORES:-16}" \
     --set-env-vars "MODAL_RAM_GB=${MODAL_RAM_GB:-64}" \
     --set-env-vars "MODAL_WORKERS_PER_ENDPOINT=${MODAL_WORKERS_PER_ENDPOINT:-3}" \
+    --set-env-vars "VAST_API_KEY=${VAST_API_KEY:-}" \
+    --set-env-vars "VAST_DOCKER_IMAGE=${VAST_DOCKER_IMAGE:-}" \
+    --set-env-vars "^@^VAST_INSTANCES=${VAST_INSTANCES:-}" \
+    --set-env-vars "VAST_MAX_PRICE_PER_GPU=${VAST_MAX_PRICE_PER_GPU:-0.50}" \
+    --set-env-vars "VAST_DISK_GB=${VAST_DISK_GB:-20}" \
+    --set-env-vars "VAST_WORKERS_PER_ENDPOINT=${VAST_WORKERS_PER_ENDPOINT:-2}" \
     --set-env-vars "AGENT_API_KEY=$AGENT_API_KEY" \
     --set-env-vars "^|^FIREBASE_SERVICE_ACCOUNT_JSON=$FIREBASE_SERVICE_ACCOUNT_JSON" \
     --quiet

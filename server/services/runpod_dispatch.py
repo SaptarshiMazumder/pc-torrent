@@ -77,6 +77,7 @@ def _env_bool(name: str, default: bool) -> bool:
 # ---------------------------------------------------------------------------
 
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "")
+RUNPOD_PROVISIONING_ENABLED = _env_bool("RUNPOD_PROVISIONING_ENABLED", True)
 
 RUNPOD_GPU_VRAM_GB = _env_float("RUNPOD_GPU_VRAM_GB", 24.0)
 RUNPOD_CPU_CORES = _env_int("RUNPOD_CPU_CORES", 16)
@@ -131,7 +132,7 @@ _machine_endpoint_map: dict[str, str] = {}
 # ---------------------------------------------------------------------------
 
 def is_enabled() -> bool:
-    return bool(RUNPOD_API_KEY and ENDPOINTS)
+    return bool(RUNPOD_PROVISIONING_ENABLED and RUNPOD_API_KEY and ENDPOINTS)
 
 
 def _deactivate_stale_virtual_machines(active_machine_keys: list[str]) -> None:

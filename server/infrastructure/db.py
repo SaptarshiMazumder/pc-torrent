@@ -276,28 +276,7 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_render_groups_source_asset_id
                 ON render_groups(source_asset_id);
 
-                CREATE TABLE IF NOT EXISTS failure_events (
-                    id TEXT PRIMARY KEY,
-                    occurred_at TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    endpoint_id TEXT,
-                    job_id TEXT NOT NULL,
-                    group_id TEXT,
-                    failure_type TEXT NOT NULL,
-                    error_msg TEXT,
-                    action_taken TEXT NOT NULL,
-                    reassigned_job_id TEXT,
-                    reassigned_to_endpoint TEXT,
-                    resolved BOOLEAN NOT NULL DEFAULT FALSE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_failure_events_occurred_at
-                ON failure_events(occurred_at DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_failure_events_provider
-                ON failure_events(provider);
-
-                CREATE INDEX IF NOT EXISTS idx_failure_events_job_id
-                ON failure_events(job_id);
+                ALTER TABLE render_groups
+                ADD COLUMN IF NOT EXISTS allowed_machine_types_json TEXT;
                 """
             )

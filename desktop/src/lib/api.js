@@ -388,7 +388,8 @@ export async function confirmDistributedJob(
   renderOverrides = null,
   scheduling = null,
   analysisSnapshot = null,
-  signal = null
+  signal = null,
+  allowedMachineTypes = null
 ) {
   const body = {};
   if (Array.isArray(machineIds) && machineIds.length > 0) {
@@ -402,6 +403,9 @@ export async function confirmDistributedJob(
   if (renderOverrides) body.render_overrides = renderOverrides;
   if (scheduling) body.scheduling = scheduling;
   if (analysisSnapshot) body.analysis_snapshot = analysisSnapshot;
+  if (Array.isArray(allowedMachineTypes) && allowedMachineTypes.length > 0) {
+    body.allowed_machine_types = allowedMachineTypes;
+  }
 
   return apiFetch(baseUrl, `/render-groups/${groupId}/confirm-upload`, {
     method: "POST",

@@ -9,6 +9,7 @@ import {
   renameInputFile,
   deleteInputFile,
   getFirebaseToken,
+  getMachines,
 } from "../lib/api";
 
 const FLOW_STAGE = {
@@ -25,6 +26,18 @@ const CAMERA_MODE_OPTIONS = [
   { value: "force_camera", label: "Force Single Camera" },
   { value: "camera_ranges", label: "Camera Ranges (Editable)" },
 ];
+
+const FLEET_OPTIONS = [
+  { value: "runpod", label: "RunPod", machineTypes: ["runpod_serverless"] },
+  { value: "modal", label: "Modal", machineTypes: ["modal_serverless"] },
+  { value: "community", label: "Community", machineTypes: ["windows"] },
+];
+
+function classifyMachineFleet(machine) {
+  if (machine?.machine_type === "runpod_serverless") return "runpod";
+  if (machine?.machine_type === "modal_serverless") return "modal";
+  return "community";
+}
 
 const SAVED_FILE_GROUPS = [
   { key: "today", label: "Today" },
@@ -357,6 +370,11 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const [forceCameraName, setForceCameraName] = useState("");
   const [viewLayerName, setViewLayerName] = useState("");
   const [cameraRanges, setCameraRanges] = useState([]);
+  const [renderEngine, setRenderEngine] = useState("scene_default");
+
+  const [enabledFleets, setEnabledFleets] = useState(() => new Set(["runpod", "modal", "community"]));
+  const [availableMachines, setAvailableMachines] = useState([]);
+  const [machinesLoading, setMachinesLoading] = useState(false);
 
   const analyzedScenes = useMemo(
     () => (Array.isArray(analysisResult?.scenes) ? analysisResult.scenes : []),
@@ -485,6 +503,64 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       .catch(() => setBlenderBin(null));
   }, []);
 
+  const loadMachines = async () => {
+    setMachinesLoading(true);
+    try {
+      const data = await getMachines(backendUrl);
+      setAvailableMachines(Array.isArray(data) ? data : []);
+    } catch {
+      setAvailableMachines([]);
+    } finally {
+      setMachinesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadMachines();
+  }, [backendUrl]);
+
+  const fleetCounts = useMemo(() => {
+    const counts = { runpod: 0, modal: 0, community: 0 };
+    for (const m of availableMachines) {
+      const fleet = classifyMachineFleet(m);
+      counts[fleet] = (counts[fleet] || 0) + 1;
+    }
+    return counts;
+  }, [availableMachines]);
+
+  const filteredMachineIds = useMemo(() => {
+    const allEnabled = FLEET_OPTIONS.every((opt) => enabledFleets.has(opt.value));
+    if (allEnabled) return null;
+    return availableMachines
+      .filter((m) => enabledFleets.has(classifyMachineFleet(m)))
+      .map((m) => m.id);
+  }, [availableMachines, enabledFleets]);
+
+  const allowedMachineTypes = useMemo(() => {
+    const allEnabled = FLEET_OPTIONS.every((opt) => enabledFleets.has(opt.value));
+    if (allEnabled) return null;
+    const types = [];
+    for (const opt of FLEET_OPTIONS) {
+      if (enabledFleets.has(opt.value)) {
+        types.push(...opt.machineTypes);
+      }
+    }
+    return types;
+  }, [enabledFleets]);
+
+  const toggleFleet = (fleet) => {
+    setEnabledFleets((prev) => {
+      const next = new Set(prev);
+      if (next.has(fleet)) {
+        if (next.size <= 1) return prev;
+        next.delete(fleet);
+      } else {
+        next.add(fleet);
+      }
+      return next;
+    });
+  };
+
   const loadSavedInputs = async () => {
     setSavedInputsLoading(true);
     setSavedInputsError("");
@@ -583,6 +659,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     if (typeof overrides.camera_mode === "string") setCameraMode(overrides.camera_mode || "auto_markers");
     if (typeof overrides.camera_name === "string") setForceCameraName(overrides.camera_name || "");
     if (typeof overrides.view_layer === "string") setViewLayerName(overrides.view_layer || "");
+    if (typeof overrides.render?.engine === "string") setRenderEngine(overrides.render.engine || "scene_default");
 
     if (overrides.camera_mode === "camera_ranges" && Array.isArray(overrides.camera_ranges)) {
       setCameraRanges(parseCameraRangeRows(overrides.camera_ranges));
@@ -789,6 +866,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         }
       }
       setFlowStage(FLOW_STAGE.UPLOADED);
+      loadMachines();
     } catch (err) {
       const cancelled = err?.name === "AbortError";
       const detail =
@@ -930,16 +1008,20 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
               frame_step: frameRange.frame_step || 1,
             }
           : {},
+        render: {
+          engine: renderEngine !== "scene_default" ? renderEngine : null,
+        },
       };
       const result = await confirmDistributedJob(
         backendUrl,
         pendingGroupId,
-        null,
+        filteredMachineIds,
         frameRange,
         renderOverrides,
         null,
         analysisResult,
-        controller.signal
+        controller.signal,
+        allowedMachineTypes
       );
 
       if (result.needs_frame_input) {
@@ -1771,6 +1853,19 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                           )}
                         </select>
                       </label>
+                      <label className="manual-range-field">
+                        <span className="manual-range-label">Render Engine</span>
+                        <select
+                          value={renderEngine}
+                          onChange={(event) => setRenderEngine(event.target.value)}
+                          className="manual-range-input"
+                        >
+                          <option value="scene_default">Scene Default</option>
+                          <option value="BLENDER_EEVEE">EEVEE</option>
+                          <option value="CYCLES">Cycles</option>
+                          <option value="BLENDER_WORKBENCH">Workbench</option>
+                        </select>
+                      </label>
                     </div>
                     {cameraMode === "auto_markers" && (
                       <div className="manual-range-subtitle" style={{ marginTop: 8 }}>
@@ -1899,6 +1994,35 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                         )}
                       </div>
                     )}
+                  </div>
+                )}
+
+                {hasCompletedAnalysis && (
+                  <div className="manual-range-panel">
+                    <div className="manual-range-title">Fleet</div>
+                    <div className="manual-range-subtitle">
+                      Toggle which machine pools to use. Disabled fleets stay off for retries too.
+                    </div>
+                    <div className="fleet-picker">
+                      {FLEET_OPTIONS.map((opt) => {
+                        const count = fleetCounts[opt.value] || 0;
+                        const isOn = enabledFleets.has(opt.value);
+                        const isOnly = isOn && enabledFleets.size === 1;
+                        return (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            className={`fleet-btn ${isOn ? "active" : "off"}`}
+                            disabled={count === 0 && !isOn}
+                            onClick={() => toggleFleet(opt.value)}
+                            title={isOnly ? "At least one fleet must be enabled" : ""}
+                          >
+                            <span className="fleet-btn-label">{opt.label}</span>
+                            <span className="fleet-btn-count">{count}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
 

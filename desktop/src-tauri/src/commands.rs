@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
@@ -1915,4 +1915,42 @@ pub async fn analyze_blend_with_blender(
 
     serde_json::from_str::<serde_json::Value>(&json_line)
         .map_err(|e| format!("Invalid Blender analysis JSON: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Frame preview cache (local JPEG storage)
+// ---------------------------------------------------------------------------
+
+fn frame_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("Failed to get app cache dir: {e}"))?;
+    let dir = cache_dir.join("frame-previews");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create frame cache dir: {e}"))?;
+    Ok(dir)
+}
+
+/// Returns the local path if a cached JPEG exists for this key, otherwise None.
+#[tauri::command]
+pub fn get_frame_cache_path(app: AppHandle, cache_key: String) -> Result<Option<String>, String> {
+    let dir = frame_cache_dir(&app)?;
+    // cache_key may contain slashes (job_id/filename) — flatten to a safe filename
+    let safe_key = cache_key.replace(['/', '\\', ':'], "_");
+    let path = dir.join(format!("{safe_key}.jpg"));
+    if path.exists() {
+        Ok(Some(path.to_string_lossy().into_owned()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Write JPEG bytes to the local frame preview cache. Returns the saved file path.
+#[tauri::command]
+pub fn write_frame_cache(app: AppHandle, cache_key: String, data: Vec<u8>) -> Result<String, String> {
+    let dir = frame_cache_dir(&app)?;
+    let safe_key = cache_key.replace(['/', '\\', ':'], "_");
+    let path = dir.join(format!("{safe_key}.jpg"));
+    fs::write(&path, &data).map_err(|e| format!("Failed to write frame cache: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
 }

@@ -68,7 +68,6 @@ class DispatchCoordinator:
         render_overrides_b64: str,
         failed_machine_id: str,
         group_id: str,
-        allowed_machine_types: list[str] | None = None,
     ) -> str | None:
         """
         Handle a failed job: retry on same endpoint first, then fail over.
@@ -133,9 +132,6 @@ class DispatchCoordinator:
             log.error(f"Job {job_id} failed, no failover possible: {error}")
             return None
 
-        if allowed_machine_types is None:
-            allowed_machine_types = self._load_allowed_types(group_id)
-
         return self._do_failover(
             job_id=job_id,
             job=job,
@@ -147,7 +143,6 @@ class DispatchCoordinator:
             render_overrides_b64=render_overrides_b64,
             failed_machine_id=failed_machine_id,
             group_id=group_id,
-            allowed_machine_types=allowed_machine_types,
         )
 
     # ------------------------------------------------------------------
@@ -166,7 +161,6 @@ class DispatchCoordinator:
         render_overrides_b64: str,
         failed_machine_id: str,
         group_id: str,
-        allowed_machine_types: list[str] | None = None,
     ) -> str | None:
         """Mark original job failed and create a new job on the best available machine."""
         execute(
@@ -178,7 +172,7 @@ class DispatchCoordinator:
             (now_iso(), f"Failed, migrating remaining frames ({error})", job_id),
         )
 
-        failover_machine = self._find_failover_machine(failed_machine_id, allowed_machine_types)
+        failover_machine = self._find_failover_machine(failed_machine_id)
         if not failover_machine:
             log.error(f"Job {job_id}: no available machines for failover")
             return None
@@ -241,7 +235,7 @@ class DispatchCoordinator:
         return new_job_id
 
     def _find_failover_machine(
-        self, failed_machine_id: str, allowed_machine_types: list[str] | None = None
+        self, failed_machine_id: str
     ) -> dict[str, Any] | None:
         """Return the best available machine excluding the one that failed."""
         from scheduling.frame_distributor import filter_enabled_machines
@@ -255,9 +249,6 @@ class DispatchCoordinator:
             (failed_machine_id,),
         )
         rows = filter_enabled_machines(rows)
-        if allowed_machine_types:
-            allowed_set = set(allowed_machine_types)
-            rows = [r for r in rows if r.get("machine_type", "windows") in allowed_set]
         if not rows:
             return None
         serverless = [r for r in rows if r.get("machine_type") in SERVERLESS_TYPES]
@@ -266,24 +257,6 @@ class DispatchCoordinator:
     def _machine_type_of(self, machine_id: str) -> str:
         row = query_one("SELECT machine_type FROM machines WHERE id = %s", (machine_id,))
         return row["machine_type"] if row else "windows"
-
-    @staticmethod
-    def _load_allowed_types(group_id: str) -> list[str] | None:
-        """Load the persisted allowed_machine_types for a render group."""
-        import json
-        if not group_id:
-            return None
-        row = query_one(
-            "SELECT allowed_machine_types_json FROM render_groups WHERE id = %s",
-            (group_id,),
-        )
-        if not row or not row.get("allowed_machine_types_json"):
-            return None
-        try:
-            parsed = json.loads(row["allowed_machine_types_json"])
-            return parsed if isinstance(parsed, list) else None
-        except (json.JSONDecodeError, TypeError):
-            return None
 
 
 coordinator = DispatchCoordinator()

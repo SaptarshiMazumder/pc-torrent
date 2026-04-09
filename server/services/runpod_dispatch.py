@@ -5,12 +5,15 @@ Responsibilities:
 - Register/maintain a virtual "runpod_serverless" machine per endpoint
 - Keep heartbeats alive so they stay visible in the available machines list
 - Dispatch render jobs to the correct RunPod endpoint
-- Poll RunPod /status/{id} until COMPLETED or FAILED and reconcile DB state
+- Poll RunPod /status/{id} until COMPLETED or FAILED, then delegate
+  retry/failover to DispatchCoordinator
 
 Env var formats (pick one):
   Multi-endpoint:  RUNPOD_ENDPOINTS=id1:Label One,id2:Label Two
   Single (legacy): RUNPOD_ENDPOINT_ID=id1
 """
+
+from __future__ import annotations
 
 import logging
 import os
@@ -20,7 +23,11 @@ from uuid import uuid4
 
 import httpx
 
+from domain.value_objects import now_iso
+from infrastructure.db import execute, query_one
+
 log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Env parsing helpers
@@ -64,33 +71,20 @@ def _env_bool(name: str, default: bool) -> bool:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "")
 
-# Specs reported to the available machines list (shared across all endpoints)
 RUNPOD_GPU_VRAM_GB = _env_float("RUNPOD_GPU_VRAM_GB", 24.0)
 RUNPOD_CPU_CORES = _env_int("RUNPOD_CPU_CORES", 16)
 RUNPOD_RAM_GB = _env_float("RUNPOD_RAM_GB", 64.0)
 
-# Public URL your server is reachable at from inside RunPod workers
 PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000")
 
-# How often to poll RunPod /status (seconds)
 JOB_STATUS_POLL_INTERVAL_SEC = float(os.getenv("JOB_STATUS_POLL_INTERVAL_SEC", "5"))
-
-# Timeout: job stuck IN_QUEUE (image pull / cold start). Healthy workers
-# start in seconds; beyond this threshold the worker/node is considered unhealthy.
-# Queue-stuck jobs are treated as failures and routed through normal retry/failover.
 IN_QUEUE_TIMEOUT_SEC = _env_float("IN_QUEUE_TIMEOUT_SEC", 120)
-
-# If RunPod reports throttling, kill the request immediately and route through
-# normal retry/failover instead of waiting in queue.
 RUNPOD_KILL_THROTTLED_IMMEDIATELY = _env_bool("RUNPOD_KILL_THROTTLED_IMMEDIATELY", True)
-
-# Timeout: job IN_PROGRESS but rendered_frames hasn't changed. Allows for
-# very long single frames (complex CYCLES scenes).
 IN_PROGRESS_STALE_SEC = _env_float("IN_PROGRESS_STALE_SEC", 90 * 60)
 
-# Heartbeat cadence for virtual machine rows (seconds)
 _HEARTBEAT_INTERVAL = 10
 
 
@@ -99,16 +93,6 @@ _HEARTBEAT_INTERVAL = 10
 # ---------------------------------------------------------------------------
 
 def _parse_endpoints() -> list[dict]:
-    """
-    Parse RunPod endpoints from env vars.
-
-    Multi-endpoint format (preferred):
-        RUNPOD_ENDPOINTS=id1:Label 1,id2:Label 2
-
-    Legacy single-endpoint format:
-        RUNPOD_ENDPOINT_ID=id1
-        RUNPOD_GPU_MODEL=Label 1        (optional, for display name)
-    """
     raw = os.getenv("RUNPOD_ENDPOINTS", "").strip()
     if raw:
         endpoints = []
@@ -124,18 +108,16 @@ def _parse_endpoints() -> list[dict]:
                 endpoints.append({"id": part, "label": f"{base_label} #{i}"})
         return endpoints
 
-    # Legacy single endpoint
     eid = os.getenv("RUNPOD_ENDPOINT_ID", "").strip()
     if eid:
         label = os.getenv("RUNPOD_GPU_MODEL", "RunPod Serverless (RTX 4090)")
         return [{"id": eid, "label": label}]
-
     return []
 
 
 ENDPOINTS = _parse_endpoints()
 
-# machine_id -> endpoint_id (populated during registration)
+# machine_id -> endpoint_id
 _machine_endpoint_map: dict[str, str] = {}
 
 
@@ -147,23 +129,12 @@ def is_enabled() -> bool:
     return bool(RUNPOD_API_KEY and ENDPOINTS)
 
 
-def _deactivate_stale_virtual_machines(db_execute, active_machine_keys: list[str]) -> None:
-    """
-    Keep only currently configured RunPod virtual machines visible.
-    Any legacy/removed endpoint rows are marked idle so /machines excludes them.
-    """
+def _deactivate_stale_virtual_machines(active_machine_keys: list[str]) -> None:
     if not active_machine_keys:
-        db_execute(
-            """
-            UPDATE machines
-            SET status = 'idle'
-            WHERE machine_type = 'runpod_serverless'
-            """
-        )
+        execute("UPDATE machines SET status = 'idle' WHERE machine_type = 'runpod_serverless'")
         return
-
     placeholders = ", ".join(["%s"] * len(active_machine_keys))
-    db_execute(
+    execute(
         f"""
         UPDATE machines
         SET status = 'idle'
@@ -174,15 +145,12 @@ def _deactivate_stale_virtual_machines(db_execute, active_machine_keys: list[str
     )
 
 
-def register_virtual_machines(db_execute, db_query_one, now_iso) -> list[str]:
-    """
-    Upsert one virtual machine row per RunPod endpoint.
-    Returns list of machine_ids, or empty list if RunPod is not configured.
-    """
+def register_virtual_machines() -> list[str]:
+    """Upsert one virtual machine row per RunPod endpoint."""
     if not is_enabled():
         _machine_endpoint_map.clear()
-        _deactivate_stale_virtual_machines(db_execute, [])
-        log.info("RunPod not configured (RUNPOD_API_KEY / RUNPOD_ENDPOINTS unset) - skipping")
+        _deactivate_stale_virtual_machines([])
+        log.info("RunPod not configured — skipping registration")
         return []
 
     _machine_endpoint_map.clear()
@@ -196,13 +164,10 @@ def register_virtual_machines(db_execute, db_query_one, now_iso) -> list[str]:
         machine_key = f"runpod-serverless-{endpoint_id}"
         active_machine_keys.append(machine_key)
 
-        existing = db_query_one(
-            "SELECT id FROM machines WHERE machine_key = %s", (machine_key,)
-        )
-
+        existing = query_one("SELECT id FROM machines WHERE machine_key = %s", (machine_key,))
         if existing:
             machine_id = existing["id"]
-            db_execute(
+            execute(
                 """
                 UPDATE machines
                 SET gpu_model = %s, gpu_vram_gb = %s, cpu_cores = %s, ram_gb = %s,
@@ -210,15 +175,13 @@ def register_virtual_machines(db_execute, db_query_one, now_iso) -> list[str]:
                     status = 'available', last_seen_at = %s
                 WHERE id = %s
                 """,
-                (
-                    label, RUNPOD_GPU_VRAM_GB, RUNPOD_CPU_CORES, RUNPOD_RAM_GB,
-                    "Linux", "runpod_serverless", now, machine_id,
-                ),
+                (label, RUNPOD_GPU_VRAM_GB, RUNPOD_CPU_CORES, RUNPOD_RAM_GB,
+                 "Linux", "runpod_serverless", now, machine_id),
             )
             log.info(f"RunPod endpoint {endpoint_id} updated: {machine_id} ({label})")
         else:
             machine_id = str(uuid4())
-            db_execute(
+            execute(
                 """
                 INSERT INTO machines (
                     id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb,
@@ -226,26 +189,20 @@ def register_virtual_machines(db_execute, db_query_one, now_iso) -> list[str]:
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'available', %s, %s)
                 """,
-                (
-                    machine_id, machine_key,
-                    label, RUNPOD_GPU_VRAM_GB, RUNPOD_CPU_CORES, RUNPOD_RAM_GB,
-                    "Linux", "runpod_serverless", now, now,
-                ),
+                (machine_id, machine_key,
+                 label, RUNPOD_GPU_VRAM_GB, RUNPOD_CPU_CORES, RUNPOD_RAM_GB,
+                 "Linux", "runpod_serverless", now, now),
             )
             log.info(f"RunPod endpoint {endpoint_id} registered: {machine_id} ({label})")
 
         _machine_endpoint_map[machine_id] = endpoint_id
         machine_ids.append(machine_id)
 
-    _deactivate_stale_virtual_machines(db_execute, active_machine_keys)
+    _deactivate_stale_virtual_machines(active_machine_keys)
     return machine_ids
 
 
-def start_heartbeat_thread(db_execute, now_iso):
-    """
-    Background thread: refreshes last_seen_at for all RunPod virtual
-    machines every _HEARTBEAT_INTERVAL seconds.
-    """
+def start_heartbeat_thread() -> None:
     if not is_enabled():
         return
 
@@ -255,7 +212,7 @@ def start_heartbeat_thread(db_execute, now_iso):
         while True:
             try:
                 for mk in machine_keys:
-                    db_execute(
+                    execute(
                         """
                         UPDATE machines
                         SET last_seen_at = %s
@@ -273,11 +230,9 @@ def start_heartbeat_thread(db_execute, now_iso):
 
 
 def _endpoint_id_for_machine(machine_id: str) -> str:
-    """Resolve which RunPod endpoint a machine_id maps to."""
     eid = _machine_endpoint_map.get(machine_id)
     if eid:
         return eid
-    # Fallback for single-endpoint setups
     if len(ENDPOINTS) == 1:
         return ENDPOINTS[0]["id"]
     raise ValueError(f"No RunPod endpoint mapped for machine_id={machine_id}")
@@ -292,11 +247,7 @@ def dispatch_job(
     render_overrides_b64: str,
     machine_id: str = "",
 ) -> str:
-    """
-    POST a job to the correct RunPod serverless endpoint.
-    Returns the RunPod job ID.
-    Raises on failure.
-    """
+    """POST a job to the correct RunPod endpoint. Returns the RunPod job ID."""
     endpoint_id = _endpoint_id_for_machine(machine_id)
 
     resp = httpx.post(
@@ -321,12 +272,9 @@ def dispatch_job(
     return runpod_job_id
 
 
-def cancel_job(runpod_job_id: str, machine_id: str = ""):
-    """Cancel a running job on RunPod."""
+def cancel_job(runpod_job_id: str, machine_id: str = "") -> None:
     endpoint_id = (
-        _endpoint_id_for_machine(machine_id)
-        if machine_id
-        else ENDPOINTS[0]["id"]
+        _endpoint_id_for_machine(machine_id) if machine_id else ENDPOINTS[0]["id"]
     )
     resp = httpx.post(
         f"https://api.runpod.ai/v2/{endpoint_id}/cancel/{runpod_job_id}",
@@ -345,9 +293,8 @@ def dispatch_and_save(
     frame_step: int,
     render_overrides_b64: str,
     machine_id: str,
-    db_execute,
 ) -> str:
-    """Dispatch to RunPod and immediately persist the RunPod job ID on the job row."""
+    """Dispatch to RunPod and immediately persist the RunPod job ID."""
     rp_job_id = dispatch_job(
         job_id=job_id,
         blend_url=blend_url,
@@ -357,34 +304,8 @@ def dispatch_and_save(
         render_overrides_b64=render_overrides_b64,
         machine_id=machine_id,
     )
-    db_execute(
-        "UPDATE jobs SET runpod_job_id = %s WHERE id = %s",
-        (rp_job_id, job_id),
-    )
+    execute("UPDATE jobs SET runpod_job_id = %s WHERE id = %s", (rp_job_id, job_id))
     return rp_job_id
-
-
-def _find_failover_machine(db_query_one, db_query_all, failed_machine_id: str):
-    """
-    Find the best available machine to take over a failed job.
-    Prefers: other serverless endpoints > available linux/windows PCs.
-    Returns (machine_row, machine_type) or (None, None).
-    """
-    rows = db_query_all(
-        """
-        SELECT * FROM machines
-        WHERE status = 'available' AND id != %s
-        ORDER BY gpu_vram_gb DESC
-        """,
-        (failed_machine_id,),
-    )
-    if not rows:
-        return None, None
-    # Prefer serverless (always available, instant spin-up), then others
-    serverless = [r for r in rows if r.get("machine_type") == "runpod_serverless"]
-    if serverless:
-        return serverless[0], "runpod_serverless"
-    return rows[0], rows[0].get("machine_type", "windows")
 
 
 def _runpod_status_hint(data: dict) -> str:
@@ -405,28 +326,22 @@ def _runpod_status_hint(data: dict) -> str:
 def start_polling_thread(
     job_id: str,
     runpod_job_id: str,
-    db_execute,
-    db_query_one,
-    now_iso,
     machine_id: str = "",
     blend_url: str = "",
     render_overrides_b64: str = "",
-    db_query_all=None,
     group_id: str = "",
-):
+) -> None:
     """
-    Background thread: polls RunPod /status/{runpod_job_id} every
-    JOB_STATUS_POLL_INTERVAL_SEC seconds.
-    On failure: retries on same endpoint first, then fails over to any
-    available machine in the pool.
+    Start a background thread that polls RunPod /status until the job
+    completes or fails, then delegates retry/failover to DispatchCoordinator.
     """
     endpoint_id = (
-        _endpoint_id_for_machine(machine_id)
-        if machine_id
-        else ENDPOINTS[0]["id"]
+        _endpoint_id_for_machine(machine_id) if machine_id else ENDPOINTS[0]["id"]
     )
 
     def _poll():
+        from scheduling.dispatch_coordinator import coordinator
+
         started_at = time.monotonic()
         last_rendered_frames = None
         last_frame_change_at = time.monotonic()
@@ -452,8 +367,13 @@ def start_polling_thread(
                     or "THROTTL" in delay_reason
                 )
 
-                job = db_query_one(
-                    "SELECT status, attempt, max_retries, frame_start, frame_end, frame_step, rendered_frames, input_filename, render_overrides_json, chunk_index, chunk_size_frames, priority FROM jobs WHERE id = %s",
+                job = query_one(
+                    """
+                    SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
+                           rendered_frames, input_filename, render_overrides_json,
+                           chunk_index, chunk_size_frames, priority
+                    FROM jobs WHERE id = %s
+                    """,
                     (job_id,),
                 )
                 if not job:
@@ -461,24 +381,23 @@ def start_polling_thread(
                     break
 
                 local_status: str = job["status"]
-
-                # Timeout checks
                 elapsed = time.monotonic() - started_at
 
+                # Throttled: cancel immediately and route to failover
                 if (
                     RUNPOD_KILL_THROTTLED_IMMEDIATELY
                     and throttled_signal
                     and rp_status not in {"COMPLETED", "IN_PROGRESS", "FAILED", "CANCELLED", "TIMED_OUT"}
                 ):
                     throttle_error = (
-                        "RunPod throttled this request; cancelling immediately for failover "
-                        f"(status={rp_status}, delay_reason={delay_reason or 'n/a'})"
+                        f"RunPod throttled (status={rp_status}, "
+                        f"delay_reason={delay_reason or 'n/a'}); cancelling for failover"
                     )
                     log.warning(f"Job {job_id}: {throttle_error}")
                     try:
                         cancel_job(runpod_job_id, machine_id)
                     except Exception as ce:
-                        log.warning(f"Cancel failed during throttling handling: {ce}")
+                        log.warning(f"Cancel failed during throttling: {ce}")
                     rp_status = "FAILED"
                     data["error"] = throttle_error
 
@@ -487,14 +406,11 @@ def start_polling_thread(
                         f"Worker stuck in queue for {elapsed:.0f}s "
                         f"(status={rp_status}, delay_reason={delay_reason or 'n/a'})"
                     )
-                    log.warning(f"Job {job_id}: {queue_error} -> cancelling and routing to failover logic")
+                    log.warning(f"Job {job_id}: {queue_error}")
                     try:
                         cancel_job(runpod_job_id, machine_id)
                     except Exception as ce:
                         log.warning(f"Cancel failed during IN_QUEUE timeout: {ce}")
-
-                    # Route queue stalls through the normal FAILED path so retry counters
-                    # and cross-machine failover are enforced (prevents infinite respawn loops).
                     rp_status = "FAILED"
                     data["error"] = queue_error
 
@@ -506,7 +422,7 @@ def start_polling_thread(
                     elif time.monotonic() - last_frame_change_at > IN_PROGRESS_STALE_SEC:
                         timeout_err = (
                             f"RunPod job IN_PROGRESS but no new frames for "
-                            f"{IN_PROGRESS_STALE_SEC/60:.0f} min - cancelling"
+                            f"{IN_PROGRESS_STALE_SEC/60:.0f} min — cancelling"
                         )
                         log.warning(f"Job {job_id}: {timeout_err}")
                         try:
@@ -516,11 +432,9 @@ def start_polling_thread(
                         rp_status = "FAILED"
                         data["error"] = timeout_err
 
-                # Normal status handling
+                # State transitions
                 if rp_status == "IN_PROGRESS" and local_status == "pending":
-                    db_execute(
-                        "UPDATE jobs SET status = 'running' WHERE id = %s", (job_id,)
-                    )
+                    execute("UPDATE jobs SET status = 'running' WHERE id = %s", (job_id,))
                     log.info(f"Job {job_id} marked running (RunPod IN_PROGRESS)")
 
                 elif rp_status == "COMPLETED":
@@ -528,7 +442,7 @@ def start_polling_thread(
                         log.warning(
                             f"Job {job_id} RunPod COMPLETED but local={local_status}, forcing done"
                         )
-                        db_execute(
+                        execute(
                             "UPDATE jobs SET status = 'done', completed_at = %s WHERE id = %s",
                             (now_iso(), job_id),
                         )
@@ -538,183 +452,19 @@ def start_polling_thread(
                     if local_status in ("done", "failed", "cancelled"):
                         break
                     error = str(data.get("error") or f"RunPod status: {rp_status}")
-
-                    # Calculate remaining frames (skip already rendered ones)
-                    rendered = max(0, job.get("rendered_frames") or 0)
-                    step = job.get("frame_step") or 1
-                    remaining_start = job["frame_start"] + rendered * step
-                    remaining_end = job["frame_end"]
-
-                    # --- Attempt 1: retry on same endpoint ---
-                    attempt = job.get("attempt") or 0
-                    max_retries = job.get("max_retries") or 0
-                    if attempt < max_retries and blend_url and remaining_start <= remaining_end:
-                        next_attempt = attempt + 1
-                        db_execute(
-                            """
-                            UPDATE jobs
-                            SET status = 'pending', attempt = %s,
-                                rendered_frames = 0, error = %s,
-                                frame_start = %s
-                            WHERE id = %s
-                            """,
-                            (next_attempt, f"Retry {next_attempt}/{max_retries} (was: {error})", remaining_start, job_id),
-                        )
-                        log.warning(
-                            f"Job {job_id} failed, retrying on same endpoint "
-                            f"({next_attempt}/{max_retries}): {error}"
-                        )
-                        try:
-                            new_rp_job_id = dispatch_and_save(
-                                job_id=job_id,
-                                blend_url=blend_url,
-                                frame_start=remaining_start,
-                                frame_end=remaining_end,
-                                frame_step=step,
-                                render_overrides_b64=render_overrides_b64,
-                                machine_id=machine_id,
-                                db_execute=db_execute,
-                            )
-                            start_polling_thread(
-                                job_id=job_id,
-                                runpod_job_id=new_rp_job_id,
-                                db_execute=db_execute,
-                                db_query_one=db_query_one,
-                                now_iso=now_iso,
-                                machine_id=machine_id,
-                                blend_url=blend_url,
-                                render_overrides_b64=render_overrides_b64,
-                                db_query_all=db_query_all,
-                                group_id=group_id,
-                            )
-                        except Exception as dispatch_err:
-                            log.error(f"Same-endpoint retry failed for {job_id}: {dispatch_err}")
-                            # Fall through to failover below
-                            _handle_failover(
-                                job_id=job_id, job=job, error=str(dispatch_err),
-                                remaining_start=remaining_start, remaining_end=remaining_end,
-                                step=step, blend_url=blend_url,
-                                render_overrides_b64=render_overrides_b64,
-                                failed_machine_id=machine_id, group_id=group_id,
-                                db_execute=db_execute, db_query_one=db_query_one,
-                                db_query_all=db_query_all, now_iso=now_iso,
-                            )
-                        break
-
-                    # --- Attempt 2: failover to any available machine ---
-                    if blend_url and remaining_start <= remaining_end and db_query_all:
-                        _handle_failover(
-                            job_id=job_id, job=job, error=error,
-                            remaining_start=remaining_start, remaining_end=remaining_end,
-                            step=step, blend_url=blend_url,
-                            render_overrides_b64=render_overrides_b64,
-                            failed_machine_id=machine_id, group_id=group_id,
-                            db_execute=db_execute, db_query_one=db_query_one,
-                            db_query_all=db_query_all, now_iso=now_iso,
-                        )
-                    else:
-                        db_execute(
-                            """
-                            UPDATE jobs
-                            SET status = 'failed', completed_at = %s, error = %s
-                            WHERE id = %s
-                            """,
-                            (now_iso(), error, job_id),
-                        )
-                        log.error(f"Job {job_id} failed, no failover possible: {error}")
+                    coordinator.handle_failure(
+                        job_id=job_id,
+                        job=job,
+                        error=error,
+                        blend_url=blend_url,
+                        render_overrides_b64=render_overrides_b64,
+                        failed_machine_id=machine_id,
+                        group_id=group_id,
+                    )
                     break
-
-                # IN_QUEUE or unknown -> keep polling
 
             except Exception as e:
                 log.error(f"RunPod poll error for job {job_id}: {e}")
-                # keep retrying - transient network issues shouldn't kill the loop
 
     t = threading.Thread(target=_poll, daemon=True, name=f"runpod-poll-{job_id[:8]}")
     t.start()
-
-
-def _handle_failover(
-    job_id, job, error, remaining_start, remaining_end, step,
-    blend_url, render_overrides_b64, failed_machine_id, group_id,
-    db_execute, db_query_one, db_query_all, now_iso,
-):
-    """Mark original job failed, create a new job on the best available machine."""
-    import uuid
-
-    db_execute(
-        """
-        UPDATE jobs
-        SET status = 'failed', completed_at = %s, error = %s
-        WHERE id = %s
-        """,
-        (now_iso(), f"Failed, migrating remaining frames ({error})", job_id),
-    )
-
-    failover_machine, failover_type = _find_failover_machine(
-        db_query_one, db_query_all, failed_machine_id,
-    )
-    if not failover_machine:
-        log.error(f"Job {job_id}: no available machines for failover")
-        return
-
-    new_total = ((remaining_end - remaining_start) // step) + 1
-    new_job_id = str(uuid.uuid4())
-    db_execute(
-        """
-        INSERT INTO jobs (id, machine_id, group_id, input_filename, status,
-                          total_frames, rendered_frames, output_files,
-                          frame_start, frame_end, frame_step,
-                          render_overrides_json, attempt, max_retries, priority,
-                          chunk_index, chunk_size_frames, submitted_at)
-        VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, 0, %s, %s, %s, %s, %s)
-        """,
-        (
-            new_job_id, failover_machine["id"], group_id,
-            job.get("input_filename"), new_total,
-            remaining_start, remaining_end, step,
-            job.get("render_overrides_json") or "{}",
-            job.get("max_retries") or 0,
-            job.get("priority") or 0,
-            job.get("chunk_index"),
-            job.get("chunk_size_frames"),
-            now_iso(),
-        ),
-    )
-    log.info(
-        f"Job {job_id} failed over -> new job {new_job_id} on "
-        f"{failover_machine.get('gpu_model', '?')} ({failover_type})"
-    )
-
-    # Dispatch the new job if it's serverless
-    if failover_type == "runpod_serverless":
-        try:
-            rp_job_id = dispatch_and_save(
-                job_id=new_job_id,
-                blend_url=blend_url,
-                frame_start=remaining_start,
-                frame_end=remaining_end,
-                frame_step=step,
-                render_overrides_b64=render_overrides_b64,
-                machine_id=failover_machine["id"],
-                db_execute=db_execute,
-            )
-            start_polling_thread(
-                job_id=new_job_id,
-                runpod_job_id=rp_job_id,
-                db_execute=db_execute,
-                db_query_one=db_query_one,
-                now_iso=now_iso,
-                machine_id=failover_machine["id"],
-                blend_url=blend_url,
-                render_overrides_b64=render_overrides_b64,
-                db_query_all=db_query_all,
-                group_id=group_id,
-            )
-        except Exception as exc:
-            log.error(f"Failover dispatch failed for new job {new_job_id}: {exc}")
-            db_execute(
-                "UPDATE jobs SET status = 'failed', completed_at = %s, error = %s WHERE id = %s",
-                (now_iso(), f"Failover dispatch failed: {exc}", new_job_id),
-            )
-

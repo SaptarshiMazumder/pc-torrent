@@ -9,6 +9,9 @@ COPY main.py ./
 COPY firebase_auth.py ./
 COPY infrastructure/ ./infrastructure/
 COPY services/ ./services/
+COPY domain/ ./domain/
+COPY scheduling/ ./scheduling/
+COPY api/ ./api/
 
 EXPOSE 8080
 

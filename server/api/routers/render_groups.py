@@ -817,7 +817,7 @@ def confirm_render_group_upload(
         })
 
     # Dispatch serverless tasks
-    from services import runpod_dispatch, modal_dispatch
+    from services import runpod_dispatch, modal_dispatch, vast_dispatch
 
     overrides_b64 = base64.b64encode(overrides_json.encode()).decode()
     blend_url_base = (
@@ -882,6 +882,43 @@ def confirm_render_group_upload(
                 args=(task,),
                 daemon=True,
                 name=f"modal-dispatch-{task['job_id'][:8]}",
+            ).start()
+
+    vast_strategy = get_strategy("vast_serverless")
+    if vast_strategy.is_enabled():
+        vast_blend_url = (
+            f"{vast_dispatch.PUBLIC_BACKEND_URL}"
+            f"/render-groups/{group_id}/input/{group['input_filename']}"
+        )
+        vast_tasks = [
+            t for t in tasks
+            if _machine_type_of(t["machine_id"]) == "vast_serverless"
+        ]
+
+        def _dispatch_vast(task: dict):
+            try:
+                coordinator.dispatch(
+                    job_id=task["job_id"],
+                    machine_id=task["machine_id"],
+                    machine_type="vast_serverless",
+                    blend_url=vast_blend_url,
+                    frame_start=task["frame_start"],
+                    frame_end=task["frame_end"],
+                    frame_step=task["frame_step"],
+                    render_overrides_b64=overrides_b64,
+                    group_id=group_id,
+                )
+            except Exception as exc:
+                log.error(f"Failed to dispatch job {task['job_id']} to Vast.ai: {exc}")
+
+        for i, task in enumerate(vast_tasks):
+            if i > 0:
+                time.sleep(0.05)
+            threading.Thread(
+                target=_dispatch_vast,
+                args=(task,),
+                daemon=True,
+                name=f"vast-dispatch-{task['job_id'][:8]}",
             ).start()
 
     try:

@@ -307,15 +307,11 @@ def get_available_machines() -> list[dict[str, Any]]:
 def choose_retry_machine(
     group_id: str,
     failed_machine_id: str,
-    allowed_machine_types: list[str] | None = None,
 ) -> str | None:
     """
     Pick the best available machine from the pool, excluding the one that failed.
     Prefers serverless endpoints (instant spin-up).
     Falls back to the failed machine itself if nothing else is available.
-
-    When *allowed_machine_types* is set, only machines of those types are
-    considered — this enforces the user's fleet selection on retries.
     """
     from infrastructure.db import query_all
 
@@ -324,9 +320,6 @@ def choose_retry_machine(
         (failed_machine_id,),
     )
     rows = filter_enabled_machines(rows)
-    if allowed_machine_types:
-        allowed_set = set(allowed_machine_types)
-        rows = [r for r in rows if r.get("machine_type", "windows") in allowed_set]
     if not rows:
         return failed_machine_id
     serverless = [r for r in rows if r.get("machine_type") in SERVERLESS_TYPES]

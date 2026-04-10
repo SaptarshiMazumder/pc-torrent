@@ -155,7 +155,7 @@ export function resolveTimestamp(asset) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-// ── Analysis cache ──────────────────────────────────────────
+// ── Analysis cache (in-memory) ──────────────────────────────
 // Keyed by (file path + file size) so re-selecting the same file skips analysis.
 
 const _analysisCache = new Map();
@@ -174,4 +174,44 @@ export function setCachedAnalysis(filePath, fileSize, result) {
     const first = _analysisCache.keys().next().value;
     _analysisCache.delete(first);
   }
+}
+
+// ── Group analysis cache (localStorage) ─────────────────────
+// Persists analysis per render group so Re-render can show the full settings UI.
+
+const GROUP_ANALYSIS_LS_KEY = "pcrent_group_analysis";
+const GROUP_ANALYSIS_MAX = 100;
+
+function _loadGroupAnalysisStore() {
+  try {
+    return JSON.parse(localStorage.getItem(GROUP_ANALYSIS_LS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function _saveGroupAnalysisStore(store) {
+  try {
+    localStorage.setItem(GROUP_ANALYSIS_LS_KEY, JSON.stringify(store));
+  } catch {
+    // Ignore quota errors
+  }
+}
+
+export function saveGroupAnalysis(groupId, analysis) {
+  if (!groupId || !analysis || typeof analysis !== "object") return;
+  const store = _loadGroupAnalysisStore();
+  store[groupId] = analysis;
+  // Evict oldest entries if over limit
+  const keys = Object.keys(store);
+  if (keys.length > GROUP_ANALYSIS_MAX) {
+    keys.slice(0, keys.length - GROUP_ANALYSIS_MAX).forEach((k) => delete store[k]);
+  }
+  _saveGroupAnalysisStore(store);
+}
+
+export function getGroupAnalysis(groupId) {
+  if (!groupId) return null;
+  const store = _loadGroupAnalysisStore();
+  return store[groupId] || null;
 }

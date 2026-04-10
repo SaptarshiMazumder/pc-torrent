@@ -53,3 +53,7 @@ class VastStrategy:
     def workers_per_endpoint(self) -> int:
         from services import vast_dispatch
         return vast_dispatch.VAST_WORKERS_PER_ENDPOINT
+
+    @property
+    def min_frames_per_instance(self) -> int:
+        return 25

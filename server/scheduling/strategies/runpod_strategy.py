@@ -66,3 +66,7 @@ class RunPodStrategy:
     def workers_per_endpoint(self) -> int:
         from scheduling.frame_distributor import WORKERS_PER_SERVERLESS
         return WORKERS_PER_SERVERLESS
+
+    @property
+    def min_frames_per_instance(self) -> int:
+        return 10

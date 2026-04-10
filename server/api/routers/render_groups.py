@@ -430,6 +430,7 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
     )
     scheduling = normalize_scheduling(parse_json_object(group.get("scheduling_json"), {}))
     analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
+    analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 
     jobs = query_all(
         "SELECT * FROM jobs WHERE group_id = %s ORDER BY frame_start ASC", (group_id,)
@@ -554,6 +555,7 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
         "error": group.get("error"),
         "resolved_render_settings": resolved_render_settings,
         "scheduling": scheduling,
+        "analysis_snapshot": analysis_snapshot,
         "analysis_warnings": analysis_warnings,
         "overall_rendered_frames": total_rendered,
         "overall_progress_pct": overall_pct,

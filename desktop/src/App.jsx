@@ -22,6 +22,7 @@ export default function App() {
   const [backendUrl, setBackendUrl] = useState(
     "https://pcrent-server-930713698987.asia-northeast1.run.app"
   );
+  const [reRenderSource, setReRenderSource] = useState(null);
 
   const agent = useAgent(user && mode === "renter" ? backendUrl : null);
   const jobsHook = useJobs(user ? backendUrl : null);
@@ -38,6 +39,7 @@ export default function App() {
   const handleJobSubmitted = useCallback(
     (groupId, filename, tasks, totalFrames) => {
       jobsHook.addRenderGroup(groupId, filename, tasks, totalFrames);
+      setReRenderSource(null);
       setPage("myjobs");
     },
     [jobsHook.addRenderGroup]
@@ -81,6 +83,7 @@ export default function App() {
           <CreateRenderPage
             backendUrl={backendUrl}
             onJobSubmitted={handleJobSubmitted}
+            reRenderSource={reRenderSource}
           />
         </div>
         {page === "myjobs" && (
@@ -91,7 +94,7 @@ export default function App() {
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
             onRefresh={jobsHook.refresh}
-            onReRenderSubmitted={handleJobSubmitted}
+            onReRender={(job) => { setReRenderSource(job); setPage("create"); }}
           />
         )}
         {page === "available" && (

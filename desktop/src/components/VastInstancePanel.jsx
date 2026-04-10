@@ -113,7 +113,7 @@ function InstanceCard({ task, live }) {
         {lastPoll && (
           <span style={{ marginLeft: "auto", color: "#4b5563" }}>polled {fmtTime(lastPoll)}</span>
         )}
-        {!live && (
+        {!live && !["done", "failed", "cancelled"].includes(jobStatus) && (
           <span style={{ marginLeft: "auto", color: "#4b5563", fontStyle: "italic" }}>
             live data pending…
           </span>
@@ -201,18 +201,21 @@ export default function VastInstancePanel({ tasks, backendUrl }) {
   const vastTasks = (tasks || []).filter(
     (t) => {
       const mt = t.machine_type;
-      // Show if machine_type is known and vast, or if gpu_model contains "Vast" / "RTX" heuristic
       const isVast = mt === "vast_serverless"
         || (!mt && (t.machine_gpu || "").toLowerCase().includes("vast"));
-      return isVast && ["pending", "running"].includes(t.status);
+      if (!isVast) return false;
+      return ["pending", "running", "done", "failed", "cancelled"].includes(t.status);
     }
   );
 
-  const jobIdsKey = vastTasks.map((t) => t.job_id).join(",");
+  const activeTasks = vastTasks.filter(
+    (t) => ["pending", "running"].includes(t.status)
+  );
+  const activeIdsKey = activeTasks.map((t) => t.job_id).join(",");
 
   useEffect(() => {
-    if (!backendUrl || !jobIdsKey) return;
-    const jobIdSet = new Set(vastTasks.map((t) => t.job_id));
+    if (!backendUrl || !activeIdsKey) return;
+    const jobIdSet = new Set(activeTasks.map((t) => t.job_id));
     let cancelled = false;
 
     async function poll() {
@@ -234,7 +237,7 @@ export default function VastInstancePanel({ tasks, backendUrl }) {
     const id = setInterval(poll, 5_000);
     return () => { cancelled = true; clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, jobIdsKey]);
+  }, [backendUrl, activeIdsKey]);
 
   if (vastTasks.length === 0) return null;
 

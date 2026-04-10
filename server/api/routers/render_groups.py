@@ -1289,16 +1289,16 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
     # The DB update above is what actually stops the work; this is cleanup.
     def _cancel_providers() -> None:
         for job in jobs:
-            rp_job_id = job.get("runpod_job_id")
-            if not rp_job_id:
-                continue
             job_machine_type = _machine_type_of(job["machine_id"])
             strategy = get_strategy(job_machine_type)
+            provider_job_id = strategy.provider_job_id_from_job(job)
+            if not provider_job_id:
+                continue
             if strategy.is_enabled():
                 try:
-                    strategy.cancel(rp_job_id, job["machine_id"])
+                    strategy.cancel(provider_job_id, job["machine_id"])
                 except Exception as exc:
-                    log.warning(f"Failed to cancel provider job {rp_job_id}: {exc}")
+                    log.warning(f"Failed to cancel provider job {provider_job_id}: {exc}")
 
     threading.Thread(target=_cancel_providers, daemon=True, name=f"cancel-{group_id[:8]}").start()
 

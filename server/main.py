@@ -15,7 +15,17 @@ from infrastructure.db import init_db, query_all
 from services import runpod_autoscaler, runpod_dispatch
 from services import modal as modal_dispatch
 from services import vast as vast_dispatch
-from api.routers import health, logs, machines, jobs, render_groups, assets, docker, vast
+from api.routers import (
+    health,
+    logs,
+    machines,
+    jobs,
+    render_groups,
+    assets,
+    docker,
+    vast,
+    modal_instances,
+)
 from api.routers.logs import setup_log_broadcast
 
 app = FastAPI(title="PC Rent Server")
@@ -37,6 +47,7 @@ def _startup():
     runpod_dispatch.start_heartbeat_thread()
     modal_dispatch.register_virtual_machines()
     modal_dispatch.start_heartbeat_thread()
+    modal_dispatch.recover_polling_threads()
     vast_dispatch.register_virtual_machines()
     vast_dispatch.start_heartbeat_thread()
     vast_dispatch.recover_polling_threads()
@@ -60,3 +71,4 @@ app.include_router(render_groups.router)
 app.include_router(assets.router)
 app.include_router(docker.router)
 app.include_router(vast.router)
+app.include_router(modal_instances.router)

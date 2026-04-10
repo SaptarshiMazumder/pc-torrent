@@ -49,6 +49,10 @@ class VastStrategy:
         from services import vast
         vast.cancel_job(provider_job_id, machine_id)
 
+    def provider_job_id_from_job(self, job: dict) -> str | None:
+        value = (job.get("runpod_job_id") or "").strip()
+        return value or None
+
     @property
     def workers_per_endpoint(self) -> int:
         from services import vast

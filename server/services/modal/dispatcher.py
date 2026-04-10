@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 
-from infrastructure.db import execute
 from services.modal.client import ModalApiClient
 from services.modal.config import ModalConfig
+from services.modal.job_state import save_function_call_id
 from services.modal.machine_registrar import MachineRegistrar
 
 log = logging.getLogger(__name__)
@@ -72,9 +72,26 @@ class ModalDispatcher:
             render_overrides_b64=render_overrides_b64,
             machine_id=machine_id,
         )
-        execute("UPDATE jobs SET runpod_job_id = %s WHERE id = %s", (modal_job_id, job_id))
+        save_function_call_id(job_id, modal_job_id)
         return modal_job_id
 
     def cancel(self, provider_job_id: str) -> None:
-        """No-op: Modal cancellation is handled via DB status change."""
-        log.info(f"Modal cancel requested for {provider_job_id} (handled via DB status)")
+        """Cancel a live Modal function call when we have a real call id."""
+        provider_job_id = (provider_job_id or "").strip()
+        if not provider_job_id:
+            log.warning("Modal cancel requested with empty provider job id")
+            return
+        if provider_job_id.startswith("modal-"):
+            log.warning(
+                f"Modal cancel requested for synthetic id {provider_job_id}; "
+                "redeploy modal_worker/app.py so dispatch returns a real function_call_id"
+            )
+            return
+
+        try:
+            import modal
+
+            modal.FunctionCall.from_id(provider_job_id).cancel(terminate_containers=True)
+            log.info(f"Cancelled Modal function call {provider_job_id}")
+        except Exception as exc:
+            log.warning(f"Failed to cancel Modal function call {provider_job_id}: {exc}")

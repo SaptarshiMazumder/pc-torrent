@@ -8,12 +8,14 @@ imports httpx directly.
 from __future__ import annotations
 
 import logging
+import re
 
 import httpx
 
 from services.modal.config import ModalConfig
 
 log = logging.getLogger(__name__)
+_CALL_ID_RE = re.compile(r"\b(fc-[A-Za-z0-9]+)\b")
 
 
 class ModalApiClient:
@@ -58,13 +60,37 @@ class ModalApiClient:
                 headers=self._headers(),
                 json=payload,
                 timeout=self._cfg.dispatch_timeout_sec,
+                follow_redirects=False,
             )
-            resp.raise_for_status()
         except httpx.TimeoutException as exc:
             raise RuntimeError(
                 f"Modal dispatch timeout for job {job_id} endpoint={gpu_type} "
                 f"timeout={self._cfg.dispatch_timeout_sec}"
             ) from exc
+
+        if resp.status_code in (301, 302, 303, 307, 308):
+            redirected_id = self._extract_call_id(resp)
+            if redirected_id:
+                log.warning(
+                    "Modal dispatch returned HTTP %s for job %s endpoint=%s; "
+                    "using function_call_id from redirect: %s",
+                    resp.status_code,
+                    job_id,
+                    gpu_type,
+                    redirected_id,
+                )
+                return redirected_id
+            log.warning(
+                "Modal dispatch returned HTTP %s for job %s endpoint=%s without "
+                "call id; treating as accepted with synthetic id",
+                resp.status_code,
+                job_id,
+                gpu_type,
+            )
+            return f"modal-{job_id[:12]}"
+
+        try:
+            resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             body = ""
             try:
@@ -77,5 +103,53 @@ class ModalApiClient:
             ) from exc
 
         modal_job_id = f"modal-{job_id[:12]}"
+        header_call_id = self._extract_call_id(resp)
+        if header_call_id:
+            modal_job_id = header_call_id
+
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+
+        function_call_id = str(
+            body.get("function_call_id")
+            or body.get("call_id")
+            or body.get("provider_job_id")
+            or ""
+        ).strip()
+        if function_call_id:
+            modal_job_id = function_call_id
+        elif not modal_job_id.startswith("fc-"):
+            log.warning(
+                f"Modal endpoint {gpu_type} returned no function_call_id for job {job_id}; "
+                "falling back to synthetic provider id, cancellation unavailable"
+            )
+
         log.info(f"Dispatched job {job_id} -> Modal endpoint {gpu_type} ({modal_job_id})")
         return modal_job_id
+
+    def _extract_call_id(self, response: httpx.Response) -> str:
+        candidates: list[str] = []
+        for key in (
+            "x-modal-function-call-id",
+            "x-function-call-id",
+            "x-call-id",
+            "location",
+        ):
+            value = response.headers.get(key)
+            if value:
+                candidates.append(value)
+
+        try:
+            body_text = (response.text or "").strip()
+        except Exception:
+            body_text = ""
+        if body_text:
+            candidates.append(body_text)
+
+        for candidate in candidates:
+            match = _CALL_ID_RE.search(candidate)
+            if match:
+                return match.group(1)
+        return ""

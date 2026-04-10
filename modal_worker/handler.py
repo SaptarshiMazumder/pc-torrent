@@ -360,11 +360,21 @@ def _put_status(backend_url: str, job_id: str, payload: dict, deadline: float = 
     while True:
         attempt += 1
         try:
-            requests.put(
+            resp = requests.put(
                 f"{backend_url}/jobs/{job_id}/status",
                 json=payload,
                 timeout=60,
-            ).raise_for_status()
+            )
+            resp.raise_for_status()
+            try:
+                body = resp.json()
+            except ValueError:
+                body = None
+            if isinstance(body, dict) and body.get("success") is False:
+                reason = str(body.get("reason") or "backend rejected status update").strip()
+                raise RuntimeError(
+                    f"Backend rejected status update for job {job_id}: {reason}"
+                )
             return
         except Exception as e:
             last_exc = e
@@ -592,6 +602,18 @@ def handler(job: dict) -> dict:
             log.error(err)
             _mark_failed(backend_url, job_id, err)
             return {"status": "failed", "error": err}
+
+        # Push a final progress snapshot based on the outputs that actually made
+        # it to storage so the backend can reconcile the chunk before `done`.
+        try:
+            _push_progress(
+                backend_url,
+                job_id,
+                max(rendered_frames, len(uploaded)),
+                total_frames,
+            )
+        except Exception:
+            pass
 
         # 7. Mark done
         _mark_done(backend_url, job_id, uploaded)

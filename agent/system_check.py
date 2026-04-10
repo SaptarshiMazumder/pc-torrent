@@ -30,7 +30,6 @@ def get_windows_version():
     else:
         major = 10
 
-    # Get display name from systeminfo or registry
     display = f"Windows {major} (build {build})"
     try:
         import winreg
@@ -40,6 +39,17 @@ def get_windows_version():
         ) as key:
             product_name, _ = winreg.QueryValueEx(key, "ProductName")
             display_ver, _ = winreg.QueryValueEx(key, "DisplayVersion")
+
+            # The registry ProductName can be stale (e.g. still says
+            # "Windows 10" on a Windows 11 machine).  Trust the build
+            # number over the registry when they disagree.
+            if major == 11 and "10" in product_name and "11" not in product_name:
+                try:
+                    edition, _ = winreg.QueryValueEx(key, "EditionID")
+                except Exception:
+                    edition = "Home" if "Home" in product_name else "Pro"
+                product_name = f"Windows 11 {edition}"
+
             display = f"{product_name} {display_ver}"
     except Exception:
         pass

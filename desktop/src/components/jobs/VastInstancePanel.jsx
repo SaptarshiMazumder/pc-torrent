@@ -2,240 +2,204 @@ import { useEffect, useRef, useState } from "react";
 import { getVastInstances } from "../../services/api";
 
 const STATUS_COLOR = {
-  created:      "#888",
-  provisioning: "#a78bfa",
-  loading:      "#a78bfa",
-  running:      "#22c55e",
-  exited:       "#f59e0b",
-  stopped:      "#f59e0b",
-  offline:      "#f59e0b",
-  gone:         "#6b7280",
-  done:         "#22c55e",
-  failed:       "#ef4444",
-  cancelled:    "#6b7280",
-  pending:      "#888",
+  created: "#888", provisioning: "#f5a623", loading: "#f5a623",
+  running: "#22c55e", exited: "#f59e0b", stopped: "#f59e0b",
+  offline: "#f59e0b", gone: "#6b7280", done: "#22c55e",
+  failed: "#ef4444", cancelled: "#6b7280", pending: "#888",
 };
 
-function statusColor(s) {
-  return STATUS_COLOR[s] || "#ef4444";
-}
+function statusColor(s) { return STATUS_COLOR[s] || "#ef4444"; }
 
 function fmtElapsed(sec) {
-  if (sec == null) return "—";
+  if (sec == null) return null;
   const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  const s2 = sec % 60;
+  return m > 0 ? `${m}m ${s2}s` : `${s2}s`;
 }
 
 function fmtTime(iso) {
-  if (!iso) return "—";
+  if (!iso) return "";
   return new Date(iso).toLocaleTimeString();
 }
 
-function InstanceCard({ task, live }) {
+function gpuShortName(name) {
+  if (!name) return "GPU";
+  return name.replace(/nvidia\s+/i, "").replace(/geforce\s+/i, "").replace(/^Vast\s+/i, "").trim();
+}
+
+function CircleProgress({ pct, color, size = 48, stroke = 3.5 }) {
+  const r = (size - stroke) / 2;
+  const circ = 2 * Math.PI * r;
+  const offset = circ - (pct / 100) * circ;
+  return (
+    <svg width={size} height={size} className="inst-ring">
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none"
+        stroke="rgba(255,255,255,0.04)" strokeWidth={stroke} />
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none"
+        stroke={color} strokeWidth={stroke} strokeLinecap="round"
+        strokeDasharray={circ} strokeDashoffset={offset}
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        style={{ transition: "stroke-dashoffset 0.4s ease", filter: `drop-shadow(0 0 6px ${color}44)` }}
+      />
+      <text x="50%" y="50%" textAnchor="middle" dominantBaseline="central"
+        fill="#eaeaf1" fontSize="11" fontWeight="700" fontFamily="Inter, sans-serif">
+        {pct}%
+      </text>
+    </svg>
+  );
+}
+
+function StatChip({ icon, children }) {
+  return (
+    <span className="inst-stat-chip">
+      {icon}
+      <span>{children}</span>
+    </span>
+  );
+}
+
+const ICON = {
+  frames: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>,
+  range: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 8l4 4-4 4M7 16l-4-4 4-4M14 4l-4 16" /></svg>,
+  uptime: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>,
+  cost: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" /></svg>,
+};
+
+/* ── Active card — full detail with progress ring, stats, timeline, logs ── */
+function ActiveCard({ task, live }) {
   const [showLogs, setShowLogs] = useState(false);
   const logsRef = useRef(null);
 
   useEffect(() => {
-    if (showLogs && logsRef.current) {
-      logsRef.current.scrollTop = logsRef.current.scrollHeight;
-    }
+    if (showLogs && logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
   }, [live?.logs, showLogs]);
 
-  // What we always know from the task (DB data via group status API)
   const liveVram = live?.gpu_vram_gb ? `${Math.round(live.gpu_vram_gb)}GB` : "";
-  const gpuLabel = live?.gpu_model
-    ? `Vast ${live.gpu_model} ${liveVram}`.trim()
-    : (task.machine_gpu || "Vast GPU");
-  const jobStatus  = task.status;
-  const frameStart = task.frame_start;
-  const frameEnd   = task.frame_end;
-  const rendered   = task.rendered_frames ?? 0;
-  const total      = task.total_frames;
-  const instanceId = task.runpod_job_id; // Vast stores instance_id here
-
-  // Live data from the in-memory registry (may be absent for older jobs)
-  const actualStatus  = live?.actual_status ?? null;
-  const dph           = live?.dph_total;
-  const elapsedSec    = live?.elapsed_sec;
-  const lastPoll      = live?.last_poll_at;
-  const liveError     = live?.error;
-  const statusMsg     = live?.status_msg || "";
-  const logs          = live?.logs || "";
-  const history       = live?.status_history || [];
-
-  // Derive a display status: prefer actual Vast status, fall back to job status
-  const displayStatus = actualStatus || jobStatus;
+  const gpuLabel = live?.gpu_model ? `${live.gpu_model} ${liveVram}`.trim() : gpuShortName(task.machine_gpu);
+  const rendered = task.rendered_frames ?? 0;
+  const total = task.total_frames;
+  const actualStatus = live?.actual_status ?? null;
+  const dph = live?.dph_total;
+  const elapsedSec = live?.elapsed_sec;
+  const liveError = live?.error;
+  const statusMsg = live?.status_msg || "";
+  const logs = live?.logs || "";
+  const history = live?.status_history || [];
+  const displayStatus = actualStatus || task.status;
   const dot = statusColor(displayStatus);
-
-  const framesLabel = total != null
-    ? `${rendered} / ${total}`
-    : `${rendered} rendered`;
+  const pct = total ? Math.min(100, Math.round((rendered / total) * 100)) : null;
+  const rangeLabel = task.frame_start != null && task.frame_end != null ? `${task.frame_start}–${task.frame_end}` : null;
+  const fillPct = pct ?? 0;
 
   return (
-    <div style={{
-      background: "var(--bg-secondary, #1a1a1a)",
-      border: `1px solid ${dot}44`,
-      borderLeft: `3px solid ${dot}`,
-      borderRadius: 8,
-      padding: "10px 14px",
-      fontSize: 12,
-      fontFamily: "monospace",
-    }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-        <span style={{
-          width: 8, height: 8, borderRadius: "50%",
-          background: dot, display: "inline-block", flexShrink: 0,
-          boxShadow: displayStatus === "running" ? `0 0 6px ${dot}` : "none",
-        }} />
-        <strong style={{ color: "#e5e7eb" }}>{gpuLabel}</strong>
-        {instanceId && <span style={{ color: "#6b7280" }}>#{instanceId}</span>}
-        <span style={{
-          padding: "1px 7px", borderRadius: 4, fontSize: 11,
-          background: dot + "22", color: dot, fontWeight: 600,
-        }}>
-          {actualStatus ? `${actualStatus} / ${jobStatus}` : jobStatus}
-        </span>
-        {dph != null && (
-          <span style={{ color: "#6b7280", marginLeft: "auto" }}>
-            ${Number(dph).toFixed(3)}/hr
-          </span>
+    <div className="inst-active-card" style={{ "--inst-color": dot }}>
+      <div className="inst-active-left">
+        {pct != null ? <CircleProgress pct={pct} color={dot} /> : (
+          <div className="inst-active-avatar" style={{ borderColor: dot }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={dot} strokeWidth="1.8"><rect x="4" y="4" width="16" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></svg>
+          </div>
         )}
       </div>
+      <div className="inst-active-right">
+        <div className="inst-active-header">
+          <span className="inst-active-gpu">{gpuLabel}</span>
+          <span className="inst-active-pill" style={{ background: dot + "18", color: dot }}>{displayStatus}</span>
+        </div>
+        <div className="inst-active-stats">
+          <StatChip icon={ICON.frames}>{rendered}{total != null ? ` / ${total}` : ""} frames</StatChip>
+          {rangeLabel && <StatChip icon={ICON.range}>{rangeLabel}</StatChip>}
+          {elapsedSec != null && <StatChip icon={ICON.uptime}>{fmtElapsed(elapsedSec)}</StatChip>}
+          {dph != null && <StatChip icon={ICON.cost}>${Number(dph).toFixed(3)}/hr</StatChip>}
+        </div>
+        <div className="inst-mini-bar">
+          <div className="inst-mini-fill" style={{ width: `${fillPct}%`, background: dot }} />
+        </div>
 
-      {/* Stats */}
-      <div style={{ display: "flex", gap: 16, color: "#9ca3af", flexWrap: "wrap", marginBottom: 4 }}>
-        <span>Frames: <span style={{ color: "#d1d5db" }}>{framesLabel}</span></span>
-        {frameStart != null && frameEnd != null && (
-          <span style={{ color: "#6b7280" }}>range {frameStart}–{frameEnd}</span>
+        {(liveError || (task.status === "failed" && task.error)) && (
+          <div className="inst-error">{liveError || task.error}</div>
         )}
-        {elapsedSec != null && (
-          <span>Up: <span style={{ color: "#d1d5db" }}>{fmtElapsed(elapsedSec)}</span></span>
+        {statusMsg && !liveError && <div className="inst-status-msg">{statusMsg}</div>}
+
+        {history.length > 1 && (
+          <div className="inst-timeline">
+            {history.map((h, i) => (
+              <span key={i} className="inst-timeline-step">
+                {i > 0 && <span className="inst-timeline-arrow">→</span>}
+                <span className="inst-timeline-dot" style={{ background: statusColor(h.status) }} />
+                <span style={{ color: statusColor(h.status) }}>{h.status}</span>
+                <span className="inst-timeline-time">{fmtTime(h.at)}</span>
+              </span>
+            ))}
+          </div>
         )}
-        {lastPoll && (
-          <span style={{ marginLeft: "auto", color: "#4b5563" }}>polled {fmtTime(lastPoll)}</span>
-        )}
-        {!live && !["done", "failed", "cancelled"].includes(jobStatus) && (
-          <span style={{ marginLeft: "auto", color: "#4b5563", fontStyle: "italic" }}>
-            live data pending…
-          </span>
+
+        {logs && (
+          <div className="inst-logs-section">
+            <button className="inst-logs-toggle" onClick={() => setShowLogs((v) => !v)}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
+              {showLogs ? "Hide logs" : "Show logs"}
+            </button>
+            {showLogs && <pre ref={logsRef} className="inst-logs-pre">{logs}</pre>}
+          </div>
         )}
       </div>
-
-      {/* Error */}
-      {(liveError || (task.status === "failed" && task.error)) && (
-        <div style={{ color: "#f87171", marginTop: 4, wordBreak: "break-word" }}>
-          {liveError || task.error}
-        </div>
-      )}
-      {/* Vast status_msg — shows container startup errors before they trigger failover */}
-      {statusMsg && !liveError && (
-        <div style={{ color: "#9ca3af", marginTop: 4, wordBreak: "break-word", fontSize: 11 }}>
-          {statusMsg}
-        </div>
-      )}
-
-      {/* Status history */}
-      {history.length > 1 && (
-        <div style={{ color: "#6b7280", marginTop: 4, fontSize: 11 }}>
-          {history.map((h, i) => (
-            <span key={i}>
-              {i > 0 && <span style={{ color: "#374151" }}> → </span>}
-              <span style={{ color: statusColor(h.status) }}>{h.status}</span>
-              <span style={{ color: "#374151" }}> @{fmtTime(h.at)}</span>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Logs */}
-      {logs && (
-        <div style={{ marginTop: 6 }}>
-          <button
-            onClick={() => setShowLogs((v) => !v)}
-            style={{
-              background: "none", border: "1px solid #374151", color: "#9ca3af",
-              borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 11,
-            }}
-          >
-            {showLogs ? "Hide logs" : "Show logs"}
-          </button>
-          {showLogs && (
-            <pre
-              ref={logsRef}
-              style={{
-                marginTop: 6,
-                background: "#060606",
-                border: "1px solid #1f2937",
-                borderRadius: 4,
-                padding: "8px 10px",
-                fontSize: 11,
-                maxHeight: 300,
-                overflowY: "auto",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-all",
-                color: "#d1d5db",
-              }}
-            >
-              {logs}
-            </pre>
-          )}
-        </div>
-      )}
     </div>
   );
 }
 
-/**
- * Shows a live status card for every Vast task in a render group.
- * Works from task data immediately (no registry needed).
- * Enriches with real-time Vast instance data from /vast/instances
- * once the server is running the new polling code.
- *
- * Props:
- *   tasks      - array of task objects from the render group (all, not just vast)
- *   backendUrl - backend base URL
- */
+/* ── Finished row — compact inline for done/failed/cancelled ── */
+function FinishedRow({ task }) {
+  const rendered = task.rendered_frames ?? 0;
+  const total = task.total_frames;
+  const dot = statusColor(task.status);
+  const rangeLabel = task.frame_start != null && task.frame_end != null ? `${task.frame_start}–${task.frame_end}` : null;
+  const hasError = task.status === "failed" && task.error;
+  const [showError, setShowError] = useState(false);
+
+  return (
+    <div className="inst-fin-row" style={{ "--inst-color": dot }}>
+      <div className="inst-fin-main">
+        <span className="inst-fin-dot" style={{ background: dot, boxShadow: `0 0 6px ${dot}55` }} />
+        <span className="inst-fin-gpu">{gpuShortName(task.machine_gpu)}</span>
+        <span className="inst-fin-pill" style={{ background: dot + "18", color: dot }}>{task.status}</span>
+        <span className="inst-fin-stat">{rendered}{total != null ? ` / ${total}` : ""} frames</span>
+        {rangeLabel && <span className="inst-fin-stat inst-fin-range">{rangeLabel}</span>}
+        {hasError && (
+          <button className="inst-fin-err-toggle" onClick={() => setShowError((v) => !v)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+          </button>
+        )}
+      </div>
+      {showError && hasError && <div className="inst-error" style={{ marginTop: 6 }}>{task.error}</div>}
+    </div>
+  );
+}
+
 export default function VastInstancePanel({ tasks, backendUrl }) {
-  const [liveMap, setLiveMap] = useState({}); // job_id -> registry entry
-
-  // Filter to vast tasks that are active or recently terminal
-  const vastTasks = (tasks || []).filter(
-    (t) => {
-      const mt = t.machine_type;
-      const isVast = mt === "vast_serverless"
-        || (!mt && (t.machine_gpu || "").toLowerCase().includes("vast"));
-      if (!isVast) return false;
-      return ["pending", "running", "done", "failed", "cancelled"].includes(t.status);
-    }
-  );
-
-  const activeTasks = vastTasks.filter(
-    (t) => ["pending", "running"].includes(t.status)
-  );
+  const [liveMap, setLiveMap] = useState({});
+  const vastTasks = (tasks || []).filter((t) => {
+    const mt = t.machine_type;
+    const isVast = mt === "vast_serverless" || (!mt && (t.machine_gpu || "").toLowerCase().includes("vast"));
+    return isVast && ["pending", "running", "done", "failed", "cancelled"].includes(t.status);
+  });
+  const activeTasks = vastTasks.filter((t) => ["pending", "running"].includes(t.status));
+  const finishedTasks = vastTasks.filter((t) => ["done", "failed", "cancelled"].includes(t.status));
   const activeIdsKey = activeTasks.map((t) => t.job_id).join(",");
 
   useEffect(() => {
     if (!backendUrl || !activeIdsKey) return;
     const jobIdSet = new Set(activeTasks.map((t) => t.job_id));
     let cancelled = false;
-
     async function poll() {
       try {
         const all = await getVastInstances(backendUrl);
         if (!cancelled && Array.isArray(all)) {
           const map = {};
-          for (const entry of all) {
-            if (jobIdSet.has(entry.job_id)) map[entry.job_id] = entry;
-          }
+          for (const entry of all) { if (jobIdSet.has(entry.job_id)) map[entry.job_id] = entry; }
           setLiveMap(map);
         }
-      } catch {
-        // silently ignore — endpoint may not exist on older server
-      }
+      } catch {}
     }
-
     void poll();
     const id = setInterval(poll, 5_000);
     return () => { cancelled = true; clearInterval(id); };
@@ -244,27 +208,44 @@ export default function VastInstancePanel({ tasks, backendUrl }) {
 
   if (vastTasks.length === 0) return null;
 
+  const doneCount = finishedTasks.filter((t) => t.status === "done").length;
+  const failedCount = finishedTasks.filter((t) => t.status === "failed").length;
+
   return (
-    <div style={{ marginTop: 10 }}>
-      <div style={{
-        fontSize: 11, color: "#6b7280", marginBottom: 6,
-        textTransform: "uppercase", letterSpacing: "0.05em",
-        display: "flex", alignItems: "center", gap: 8,
-      }}>
-        <span>Vast.ai instances ({vastTasks.length})</span>
-        {Object.keys(liveMap).length > 0 && (
-          <span style={{ color: "#22c55e", fontWeight: 600 }}>● live</span>
-        )}
+    <div className="inst-panel">
+      <div className="inst-panel-header">
+        <div className="inst-panel-title-row">
+          <div className="inst-panel-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 14h.01M10 14h.01M14 14h.01" /></svg>
+          </div>
+          <span className="inst-panel-title">GPU Instances</span>
+          <span className="inst-panel-count">{vastTasks.length}</span>
+        </div>
+        <div className="inst-panel-chips">
+          {activeTasks.length > 0 && <span className="inst-chip inst-chip--active"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{activeTasks.length} active</span>}
+          {doneCount > 0 && <span className="inst-chip inst-chip--done"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{doneCount} done</span>}
+          {failedCount > 0 && <span className="inst-chip inst-chip--failed"><span className="inst-chip-dot" style={{ background: "#f87171" }} />{failedCount} failed</span>}
+        </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {vastTasks.map((task) => (
-          <InstanceCard
-            key={task.job_id}
-            task={task}
-            live={liveMap[task.job_id] || null}
-          />
-        ))}
-      </div>
+
+      {/* Active / in-progress instances — full cards */}
+      {activeTasks.length > 0 && (
+        <div className="inst-active-list">
+          {activeTasks.map((task) => (
+            <ActiveCard key={task.job_id} task={task} live={liveMap[task.job_id] || null} />
+          ))}
+        </div>
+      )}
+
+      {/* Finished instances — compact rows */}
+      {finishedTasks.length > 0 && (
+        <div className="inst-fin-list">
+          {activeTasks.length > 0 && <div className="inst-fin-divider">Completed</div>}
+          {finishedTasks.map((task) => (
+            <FinishedRow key={task.job_id} task={task} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

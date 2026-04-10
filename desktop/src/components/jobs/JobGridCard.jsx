@@ -52,6 +52,11 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
     }
   };
 
+  const taskCount = Array.isArray(job?.tasks) ? job.tasks.length : 0;
+  const machineLabel = job?.group_id
+    ? `${taskCount} machine${taskCount !== 1 ? "s" : ""}`
+    : job?.machine_gpu || "1 machine";
+
   return (
     <button
       type="button"
@@ -62,43 +67,37 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
       <div className="job-grid-thumb-wrap">
         <JobThumbnail job={job} authToken={authToken} backendUrl={backendUrl} />
 
-        <div className="job-grid-overlay">
-          <div className="job-grid-overlay-top">
-            <span
-              role="button"
-              tabIndex={0}
-              className={`job-grid-delete-btn${removing ? " removing" : ""}`}
-              onClick={handleRemove}
-              onKeyDown={(e) => e.key === "Enter" && handleRemove(e)}
-              title="Delete job"
-            >
-              {removing ? (
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.5" strokeDasharray="8 6" strokeLinecap="round"><animateTransform attributeName="transform" type="rotate" from="0 7 7" to="360 7 7" dur="0.7s" repeatCount="indefinite"/></circle></svg>
-              ) : (
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3.5 4h7M5.5 4V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M6 6.5v3M8 6.5v3M4.5 4l.5 7a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1l.5-7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-              )}
-            </span>
-            <span className={`job-grid-status-pill status-${status}`}>
-              {status === "running" && <span className="status-badge-dot" />}
-              {STATUS_LABELS[status] || status}
-            </span>
-          </div>
-          <div className="job-grid-name-gradient">
-            <span className="job-grid-name-text">{displayName}</span>
-          </div>
-        </div>
-      </div>
+        <span
+          role="button"
+          tabIndex={0}
+          className={`job-grid-delete-btn${removing ? " removing" : ""}`}
+          onClick={handleRemove}
+          onKeyDown={(e) => e.key === "Enter" && handleRemove(e)}
+          title="Delete job"
+        >
+          {removing ? (
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.5" strokeDasharray="8 6" strokeLinecap="round"><animateTransform attributeName="transform" type="rotate" from="0 7 7" to="360 7 7" dur="0.7s" repeatCount="indefinite"/></circle></svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3.5 4h7M5.5 4V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M6 6.5v3M8 6.5v3M4.5 4l.5 7a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1l.5-7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          )}
+        </span>
 
-      <div className="job-grid-footer">
-        <span className={`job-grid-footer-status status-${status}`}>
+        <span className={`job-grid-status-pill status-${status}`}>
+          {status === "running" && <span className="status-badge-dot" />}
           {STATUS_LABELS[status] || status}
         </span>
-        {job?.submitted_at && (
-          <span className="job-grid-duration" title="Duration">
-            {formatDuration(job.submitted_at, job.completed_at)}
+      </div>
+
+      <div className="job-grid-info">
+        <span className="job-grid-title">{displayName}</span>
+        <div className="job-grid-meta">
+          <span className="job-grid-meta-item">{machineLabel}</span>
+          <span className="job-grid-meta-sep">&middot;</span>
+          <span className="job-grid-meta-item">
+            {formatDuration(job?.submitted_at, job?.completed_at)}
           </span>
-        )}
-        <span className="job-grid-date">{formatRelativeDate(job?.submitted_at)}</span>
+          <span className="job-grid-meta-date">{formatRelativeDate(job?.submitted_at)}</span>
+        </div>
       </div>
     </button>
   );

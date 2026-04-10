@@ -6,25 +6,19 @@ import {
   getRenderGroupOutputs,
   getJobOutputs,
 } from "../services/api";
-import { downloadJobOutputToDownloads, cacheViewerFrame } from "../services/sidecar";
+import { cacheViewerFrame } from "../services/sidecar";
 import {
   jobKey,
   resolveJobFilename,
-  buildDownloadFolderName,
   outputSort,
-  summarizeDownloadActions,
 } from "../utils/jobUtils";
 import JobGrid from "../components/jobs/JobGrid";
 import JobDetailView from "../components/jobs/JobDetailView";
 import FrameViewerModal from "../components/jobs/FrameViewerModal";
+import { useDownloads } from "../contexts/DownloadContext";
 
-// Persists download results across page navigations (component unmounts/remounts)
-const _downloadResultsStore = {};
-
-export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onReRender }) {
+export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onReRender, onNavigate }) {
   const [selectedJobId, setSelectedJobId] = useState(null);
-  const [downloadingId, setDownloadingId] = useState(null);
-  const [downloadResults, _setDownloadResults] = useState(() => ({ ..._downloadResultsStore }));
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [openFrameGalleries, setOpenFrameGalleries] = useState({});
   const [frameGalleries, setFrameGalleries] = useState({});
@@ -32,6 +26,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
   const [openingFrameKey, setOpeningFrameKey] = useState("");
   const [frameViewer, setFrameViewer] = useState(null);
   const jobsRef = useRef(jobs);
+  const { downloads, startDownload } = useDownloads();
 
   useEffect(() => { jobsRef.current = jobs; }, [jobs]);
 
@@ -41,15 +36,6 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
       setSelectedJobId(null);
     }
   }, [jobs, selectedJobId]);
-
-  const setDownloadResults = useCallback((updater) => {
-    _setDownloadResults((prev) => {
-      const next = typeof updater === "function" ? updater(prev) : updater;
-      Object.keys(_downloadResultsStore).forEach((k) => delete _downloadResultsStore[k]);
-      Object.assign(_downloadResultsStore, next);
-      return next;
-    });
-  }, []);
 
   // Auth token — refresh every 10 minutes
   useEffect(() => {
@@ -67,78 +53,14 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
     return () => { cancelled = true; clearInterval(timer); };
   }, []);
 
-  const handleDownload = async (id, fetchOutputs, jobFilename) => {
-    setDownloadResults((prev) => ({
-      ...prev,
-      [id]: { status: "loading", path: "", error: "", progress: "", summary: "" },
-    }));
-    setDownloadingId(id);
-    try {
-      const jobFolder = buildDownloadFolderName(jobFilename, id);
-      const data = await fetchOutputs();
-      const files = Array.isArray(data?.files) ? data.files : [];
-      if (files.length === 0) throw new Error("No output files found");
-
-      let lastPath = "";
-      const stats = { downloaded: 0, skipped: 0, failed: 0 };
-      for (let i = 0; i < files.length; i++) {
-        const { filename, url: fileUrl, size_bytes: sizeBytes } = files[i];
-        setDownloadResults((prev) => ({
-          ...prev,
-          [id]: {
-            status: "loading",
-            path: "",
-            error: "",
-            progress: `${i + 1} / ${files.length}`,
-            summary: summarizeDownloadActions(stats),
-          },
-        }));
-        try {
-          const result = await downloadJobOutputToDownloads(fileUrl, {
-            jobFolder,
-            preferredFilename: filename,
-            expectedSizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
-            overwriteExisting: false,
-          });
-          const action = String(result?.action || "downloaded");
-          if (action === "skipped") stats.skipped += 1;
-          else stats.downloaded += 1;
-          if (result?.path) lastPath = result.path.replace(/[^\\/]+$/, "");
-        } catch {
-          stats.failed += 1;
-        }
-      }
-      setDownloadResults((prev) => ({
-        ...prev,
-        [id]: {
-          status: "done",
-          path: lastPath || "Downloads",
-          error: "",
-          progress: "",
-          summary: summarizeDownloadActions(stats),
-        },
-      }));
-    } catch (error) {
-      setDownloadResults((prev) => ({
-        ...prev,
-        [id]: { status: "error", path: "", error: error.message || "Download failed.", progress: "", summary: "" },
-      }));
-    } finally {
-      setDownloadingId(null);
-    }
-  };
-
   const handleCancelRenderGroup = async (groupId) => {
     if (!groupId || cancelingGroupIds[groupId]) return;
     setCancelingGroupIds((prev) => ({ ...prev, [groupId]: true }));
     try {
       await cancelRenderGroup(backendUrl, groupId);
       markRenderGroupCancelled?.(groupId);
-    } catch (error) {
-      setDownloadResults((prev) => ({
-        ...prev,
-        [groupId]: { status: "error", path: "", error: error?.message || "Failed to cancel", progress: "" },
-      }));
+    } catch {
+      // cancel error is shown inline via cancelingGroupIds state
     } finally {
       setCancelingGroupIds((prev) => {
         const next = { ...prev };
@@ -246,12 +168,19 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
     const id = jobKey(job);
     const displayName = resolveJobFilename(job);
     return {
-      onDownload: () =>
-        handleDownload(
+      onDownload: () => {
+        const dl = downloads[id];
+        if (dl?.status === "loading") {
+          onNavigate?.("downloads");
+          return;
+        }
+        startDownload(
           id,
-          () => job.group_id ? getRenderGroupOutputs(backendUrl, id) : getJobOutputs(backendUrl, id),
-          displayName
-        ),
+          displayName,
+          () => job.group_id ? getRenderGroupOutputs(backendUrl, id) : getJobOutputs(backendUrl, id)
+        );
+        onNavigate?.("downloads");
+      },
       onCancel: () => { void handleCancelRenderGroup(id); },
       onToggleGallery: () => handleToggleFrameGallery(job),
       onOpenFrame: (file) => { void handleOpenFrame(job, file); },
@@ -300,21 +229,35 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
         />
       )}
 
-      {selectedJob && (
-        <JobDetailView
-          job={selectedJob}
-          backendUrl={backendUrl}
-          authToken={authToken}
-          downloadState={downloadResults[selectedJobId]}
-          downloadingId={downloadingId}
-          canceling={!!cancelingGroupIds[selectedJobId]}
-          galleryOpen={!!openFrameGalleries[selectedJobId]}
-          galleryState={frameGalleries[selectedJobId]}
-          openingFrameKey={openingFrameKey}
-          onBack={handleBack}
-          {...getHandlers(selectedJob)}
-        />
-      )}
+      {selectedJob && (() => {
+        const dlState = downloads[selectedJobId];
+        const contextDownloadState = dlState ? {
+          status: dlState.status === "loading" ? "loading" : dlState.status,
+          path: dlState.path || "",
+          error: dlState.error || "",
+          progress: dlState.totalFiles > 0 ? `${dlState.completedFiles} / ${dlState.totalFiles}` : "",
+          summary: [
+            dlState.downloaded > 0 ? `${dlState.downloaded} downloaded` : "",
+            dlState.skipped > 0 ? `${dlState.skipped} skipped` : "",
+            dlState.failed > 0 ? `${dlState.failed} failed` : "",
+          ].filter(Boolean).join(", "),
+        } : undefined;
+        return (
+          <JobDetailView
+            job={selectedJob}
+            backendUrl={backendUrl}
+            authToken={authToken}
+            downloadState={contextDownloadState}
+            downloadingId={dlState?.status === "loading" ? selectedJobId : null}
+            canceling={!!cancelingGroupIds[selectedJobId]}
+            galleryOpen={!!openFrameGalleries[selectedJobId]}
+            galleryState={frameGalleries[selectedJobId]}
+            openingFrameKey={openingFrameKey}
+            onBack={handleBack}
+            {...getHandlers(selectedJob)}
+          />
+        );
+      })()}
 
       {frameViewer && (
         <FrameViewerModal viewer={frameViewer} onClose={() => setFrameViewer(null)} />

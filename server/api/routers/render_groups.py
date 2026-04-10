@@ -167,6 +167,10 @@ def _check_failover(group_id: str, tasks_raw: list[dict[str, Any]]) -> list[str]
         machine = machines_map.get(task["machine_id"])
         if not machine:
             continue
+        # Serverless providers (Vast, RunPod, Modal) manage their own lifecycle
+        # via polling threads — they don't heartbeat, so last_seen_at is always stale.
+        if is_serverless(machine.get("machine_type", "")):
+            continue
         if (machine.get("last_seen_at") or "") >= cutoff:
             continue
 

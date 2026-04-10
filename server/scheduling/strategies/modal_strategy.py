@@ -10,8 +10,8 @@ class ModalStrategy:
         return "modal_serverless"
 
     def is_enabled(self) -> bool:
-        from services import modal_dispatch
-        return modal_dispatch.is_enabled()
+        from services import modal
+        return modal.is_enabled()
 
     def dispatch(
         self,
@@ -25,9 +25,9 @@ class ModalStrategy:
         render_overrides_b64: str,
         group_id: str,
     ) -> None:
-        from services import modal_dispatch
+        from services import modal
 
-        modal_job_id = modal_dispatch.dispatch_and_save(
+        modal_job_id = modal.dispatch_and_save(
             job_id=job_id,
             blend_url=blend_url,
             frame_start=frame_start,
@@ -36,7 +36,7 @@ class ModalStrategy:
             render_overrides_b64=render_overrides_b64,
             machine_id=machine_id,
         )
-        modal_dispatch.start_monitoring_thread(
+        modal.start_monitoring_thread(
             job_id=job_id,
             provider_job_id=modal_job_id,
             machine_id=machine_id,
@@ -46,13 +46,13 @@ class ModalStrategy:
         )
 
     def cancel(self, provider_job_id: str, machine_id: str) -> None:
-        from services import modal_dispatch
-        modal_dispatch.cancel_job(provider_job_id, machine_id)
+        from services import modal
+        modal.cancel_job(provider_job_id, machine_id)
 
     @property
     def workers_per_endpoint(self) -> int:
-        from services import modal_dispatch
-        return modal_dispatch.MODAL_WORKERS_PER_ENDPOINT
+        from services import modal
+        return modal.MODAL_WORKERS_PER_ENDPOINT
 
     @property
     def min_frames_per_instance(self) -> int:

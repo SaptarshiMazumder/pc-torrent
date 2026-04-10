@@ -54,6 +54,7 @@ fn main() {
             commands::analyze_blend_with_blender,
             commands::get_frame_cache_path,
             commands::write_frame_cache,
+            commands::cache_viewer_frame,
         ])
         .setup(move |app| {
             match persistence::load_agent_state(&app.handle()) {

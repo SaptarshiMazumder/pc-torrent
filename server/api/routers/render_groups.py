@@ -279,11 +279,20 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
     ]
 
     statuses = [j["status"] for j in jobs]
-    total_rendered = sum(t["rendered_frames"] or 0 for t in tasks)
     total_frames = group["total_frames"] or 0
+    # Only count rendered_frames from non-failed jobs.  Failed jobs' frames are
+    # accounted for in their failover successor's frame_start, so summing them
+    # too causes double-counting when multiple failover hops each render partials.
+    total_rendered = min(
+        total_frames,
+        sum(t["rendered_frames"] or 0 for t in tasks if t["status"] != "failed"),
+    )
     no_active = not any(s in ("pending", "running") for s in statuses)
 
-    if all(s == "done" for s in statuses) or (
+    # Cancelled/failed group status is authoritative — don't let running sub-jobs override it
+    if group["status"] in ("cancelled", "failed") and not any(s == "done" for s in statuses):
+        overall_status = group["status"]
+    elif all(s == "done" for s in statuses) or (
         no_active
         and any(s == "done" for s in statuses)
         and total_frames > 0
@@ -335,7 +344,10 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
         "analysis_warnings": analysis_warnings,
         "overall_rendered_frames": total_rendered,
         "overall_progress_pct": overall_pct,
-        "available_output_files_count": sum(t.get("output_files_count") or 0 for t in tasks),
+        "available_output_files_count": min(
+            total_frames,
+            sum(t.get("output_files_count") or 0 for t in tasks),
+        ),
         "latest_output_file": latest_output_filename(latest_candidates) if latest_candidates else None,
         "tasks": tasks,
     }
@@ -1024,40 +1036,46 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Render group not found")
 
     cancelled_at = now_iso()
-    execute(
-        "UPDATE render_groups SET status = 'cancelled', completed_at = %s WHERE id = %s",
-        (cancelled_at, group_id),
-    )
 
     jobs = query_all(
         "SELECT * FROM jobs WHERE group_id = %s AND status IN ('pending', 'running')",
         (group_id,),
     )
-    cancelled_count = 0
-    for job in jobs:
-        rp_job_id = job.get("runpod_job_id")
-        job_machine_type = _machine_type_of(job["machine_id"])
-        if rp_job_id:
-            strategy = get_strategy(job_machine_type)
-            if strategy.is_enabled():
-                try:
-                    strategy.cancel(rp_job_id, job["machine_id"])
-                except Exception as exc:
-                    log.warning(f"Failed to cancel job {rp_job_id}: {exc}")
 
+    # Mark group and all active jobs cancelled in DB immediately so:
+    # 1. The response returns fast (no blocking on provider API calls)
+    # 2. The polling threads see 'cancelled' on their next cycle and stop
+    execute(
+        "UPDATE render_groups SET status = 'cancelled', completed_at = %s WHERE id = %s",
+        (cancelled_at, group_id),
+    )
+    for job in jobs:
         execute(
             "UPDATE jobs SET status = 'cancelled', completed_at = %s, error = 'Cancelled by user' WHERE id = %s",
             (now_iso(), job["id"]),
         )
+        job_machine_type = _machine_type_of(job["machine_id"])
         if not is_serverless(job_machine_type):
             execute(
                 "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
                 (now_iso(), job["machine_id"]),
             )
-        cancelled_count += 1
 
-    execute(
-        "UPDATE render_groups SET status = 'cancelled', completed_at = %s WHERE id = %s",
-        (cancelled_at, group_id),
-    )
-    return {"success": True, "cancelled_jobs": cancelled_count}
+    # Destroy provider instances in a background thread — fire-and-forget.
+    # The DB update above is what actually stops the work; this is cleanup.
+    def _cancel_providers() -> None:
+        for job in jobs:
+            rp_job_id = job.get("runpod_job_id")
+            if not rp_job_id:
+                continue
+            job_machine_type = _machine_type_of(job["machine_id"])
+            strategy = get_strategy(job_machine_type)
+            if strategy.is_enabled():
+                try:
+                    strategy.cancel(rp_job_id, job["machine_id"])
+                except Exception as exc:
+                    log.warning(f"Failed to cancel provider job {rp_job_id}: {exc}")
+
+    threading.Thread(target=_cancel_providers, daemon=True, name=f"cancel-{group_id[:8]}").start()
+
+    return {"success": True, "cancelled_jobs": len(jobs)}

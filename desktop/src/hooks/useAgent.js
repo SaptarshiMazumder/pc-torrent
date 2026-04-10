@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { clearLogs as clearLogsCommand, getAgentState, runPreflight } from "../lib/sidecar";
+import { clearLogs as clearLogsCommand, getAgentState, runPreflight } from "../services/sidecar";
 
 const INITIAL_RUNTIME_INFO = {
   preflight_complete: false,

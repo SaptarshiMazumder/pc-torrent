@@ -10,7 +10,7 @@ import {
   renameInputFile,
   deleteInputFile,
   getFirebaseToken,
-} from "../lib/api";
+} from "../services/api";
 import {
   parseFrameRange,
   countFrames,
@@ -27,7 +27,7 @@ import {
   setCachedAnalysis,
   saveGroupAnalysis,
   getGroupAnalysis,
-} from "../lib/blendAnalysis";
+} from "../utils/blendAnalysis";
 
 // ─── Flow stages ────────────────────────────────────────────
 // IDLE          → user picks a file / saved input

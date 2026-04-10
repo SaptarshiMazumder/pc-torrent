@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
-import { getMachines } from "../lib/api";
+import { getMachines } from "../services/api";
 
 function machineTypeLabel(machine) {
   if (machine?.machine_type === "runpod_serverless") return "RunPod Farm";

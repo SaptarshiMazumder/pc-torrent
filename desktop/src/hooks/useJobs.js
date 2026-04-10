@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { listJobs, listRenderGroups, getJob, getRenderGroup, deleteJob, deleteRenderGroup } from "../lib/api";
+import { listJobs, listRenderGroups, getJob, getRenderGroup, deleteJob, deleteRenderGroup } from "../services/api";
 
 const POLL_INTERVAL = 3000;
 

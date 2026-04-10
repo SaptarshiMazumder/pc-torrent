@@ -2813,3 +2813,283 @@ body {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* ============================================================
+   Job Grid (My Jobs page)
+   ============================================================ */
+
+.job-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+  padding: 4px 0 20px;
+}
+
+.job-grid-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+  transition: border-color 0.15s, transform 0.12s, box-shadow 0.15s;
+}
+
+.job-grid-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(108, 99, 255, 0.15);
+}
+
+.job-grid-card:active {
+  transform: translateY(0);
+}
+
+/* Thumbnail container — fixed 16:9 aspect ratio */
+.job-grid-thumb-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #111;
+  overflow: hidden;
+}
+
+.job-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.job-thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: linear-gradient(135deg, #141414 0%, #1c1c1c 100%);
+}
+
+/* Overlay layer sits on top of thumbnail */
+.job-grid-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 8px;
+  pointer-events: none;
+}
+
+.job-grid-overlay-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+/* Delete button — top left, visible on card hover */
+.job-grid-delete-btn {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.15s, transform 0.15s, background 0.15s, color 0.15s;
+}
+
+.job-grid-card:hover .job-grid-delete-btn {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.job-grid-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.85);
+  color: #fff;
+}
+
+.job-grid-delete-btn.removing {
+  opacity: 1;
+  transform: scale(1);
+  background: rgba(239, 68, 68, 0.6);
+  color: #fff;
+  pointer-events: none;
+}
+
+/* Status pill — top right */
+.job-grid-status-pill {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  backdrop-filter: blur(6px);
+}
+
+/* Status colors reuse existing variables */
+.job-grid-status-pill.status-pending  { background: rgba(245,158,11,0.25); color: var(--warning); }
+.job-grid-status-pill.status-uploading { background: rgba(108,99,255,0.25); color: var(--accent); }
+.job-grid-status-pill.status-running  { background: rgba(59,130,246,0.25); color: var(--blue); }
+.job-grid-status-pill.status-done     { background: rgba(132,204,22,0.25); color: var(--success); }
+.job-grid-status-pill.status-failed   { background: rgba(239,68,68,0.25); color: var(--danger); }
+.job-grid-status-pill.status-cancelled{ background: rgba(107,114,128,0.25); color: var(--text-muted); }
+
+/* Filename gradient at the bottom of the thumbnail */
+.job-grid-name-gradient {
+  width: 100%;
+  padding: 20px 8px 4px;
+  background: linear-gradient(to top, rgba(0,0,0,0.78) 0%, transparent 100%);
+}
+
+.job-grid-name-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  max-width: 100%;
+}
+
+/* Below-thumbnail row */
+.job-grid-footer {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  gap: 8px;
+}
+
+.job-grid-footer-status {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.job-grid-footer-status.status-pending   { color: var(--warning); }
+.job-grid-footer-status.status-uploading { color: var(--accent); }
+.job-grid-footer-status.status-running   { color: var(--blue); }
+.job-grid-footer-status.status-done      { color: var(--success); }
+.job-grid-footer-status.status-failed    { color: var(--danger); }
+.job-grid-footer-status.status-cancelled { color: var(--text-muted); }
+
+.job-grid-duration {
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--text-secondary, var(--text-muted));
+}
+
+.job-grid-date {
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* ============================================================
+   Job Detail View
+   ============================================================ */
+
+.job-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.job-detail-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  flex-shrink: 0;
+}
+
+.job-detail-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+  width: fit-content;
+  transition: color 0.15s;
+}
+
+.job-detail-back:hover {
+  color: var(--text-primary);
+}
+
+.job-detail-title h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+.job-detail-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.job-detail-id {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+}
+
+.job-detail-date {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.job-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1;
+}
+
+.job-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.job-detail-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.job-detail-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}

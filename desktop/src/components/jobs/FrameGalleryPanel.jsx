@@ -20,7 +20,7 @@ export default function FrameGalleryPanel({ id, files, loading, error, openingFr
           setVisibleCount((n) => Math.min(n + FRAME_BATCH_SIZE, files.length));
         }
       },
-      { rootMargin: "100px" }
+      { rootMargin: "200px" }
     );
     observer.observe(el);
     return () => observer.disconnect();
@@ -32,7 +32,7 @@ export default function FrameGalleryPanel({ id, files, loading, error, openingFr
   return (
     <div className="job-frame-gallery">
       <div className="job-frame-gallery-head">
-        <span>Frames</span>
+        <span>Rendered Frames</span>
         <span className="muted">{files.length} available</span>
       </div>
 
@@ -40,10 +40,10 @@ export default function FrameGalleryPanel({ id, files, loading, error, openingFr
         <div className="job-frame-gallery-empty">Loading frames...</div>
       )}
       {!loading && !error && files.length === 0 && (
-        <div className="job-frame-gallery-empty">No frames available yet.</div>
+        <div className="job-frame-gallery-empty">No frames rendered yet — they'll appear here as machines complete them.</div>
       )}
       {error && (
-        <div className="rentee-job-error job-frame-gallery-error">{error}</div>
+        <div className="inst-error" style={{ margin: 0 }}>{error}</div>
       )}
 
       {visibleFiles.length > 0 && (

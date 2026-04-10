@@ -420,6 +420,35 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
         "SELECT * FROM jobs WHERE group_id = %s ORDER BY frame_start ASC", (group_id,)
     )
 
+    # Force-terminate orphaned non-terminal jobs in cancelled/failed groups.
+    # This catches race conditions where a job was missed by the cancel handler
+    # or where a poller exited without marking the job terminal.
+    if group["status"] in ("cancelled", "failed"):
+        orphaned = [j for j in jobs if j["status"] in ("pending", "running")]
+        if orphaned:
+            for j in orphaned:
+                rendered = j.get("rendered_frames") or 0
+                total = j.get("total_frames") or 0
+                if total > 0 and rendered >= total:
+                    execute(
+                        "UPDATE jobs SET status = 'done', completed_at = %s, "
+                        "rendered_frames = %s WHERE id = %s",
+                        (now_iso(), total, j["id"]),
+                    )
+                    log.info(f"Orphaned job {j['id']} had all frames rendered — marked done")
+                else:
+                    execute(
+                        "UPDATE jobs SET status = %s, completed_at = %s, "
+                        "error = %s WHERE id = %s",
+                        (group["status"], now_iso(),
+                         f"Group was {group['status']}", j["id"]),
+                    )
+                    log.info(f"Orphaned job {j['id']} force-{group['status']}")
+            jobs = query_all(
+                "SELECT * FROM jobs WHERE group_id = %s ORDER BY frame_start ASC",
+                (group_id,),
+            )
+
     if group["status"] in ("pending", "running"):
         _check_failover(group_id, jobs)
         jobs = query_all(
@@ -444,9 +473,23 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
     )
     no_active = not any(s in ("pending", "running") for s in statuses)
 
-    # Cancelled/failed group status is authoritative — don't let running sub-jobs override it
-    if group["status"] in ("cancelled", "failed") and not any(s == "done" for s in statuses):
-        overall_status = group["status"]
+    # Cancelled/failed group: if all frames were rendered, treat as "done";
+    # otherwise the group's terminal status is authoritative.
+    if group["status"] in ("cancelled", "failed"):
+        if (
+            no_active
+            and any(s == "done" for s in statuses)
+            and total_frames > 0
+            and total_rendered >= total_frames
+        ):
+            overall_status = "done"
+            if group["status"] != "done":
+                execute(
+                    "UPDATE render_groups SET status = 'done', completed_at = %s WHERE id = %s",
+                    (now_iso(), group_id),
+                )
+        else:
+            overall_status = group["status"]
     elif all(s == "done" for s in statuses) or (
         no_active
         and any(s == "done" for s in statuses)

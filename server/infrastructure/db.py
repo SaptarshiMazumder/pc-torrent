@@ -232,6 +232,9 @@ def init_db():
                 ALTER TABLE jobs
                 ADD COLUMN IF NOT EXISTS heartbeat_phase TEXT;
 
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS heartbeat_phase_started_at TEXT;
+
                 CREATE INDEX IF NOT EXISTS idx_jobs_machine_pending_priority
                 ON jobs(machine_id, status, priority DESC, submitted_at ASC);
 

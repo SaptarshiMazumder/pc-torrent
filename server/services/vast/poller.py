@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 
 from domain.value_objects import now_iso
 from infrastructure.db import execute, query_one
@@ -24,7 +25,8 @@ log = logging.getLogger(__name__)
 _JOB_QUERY = """
     SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
            rendered_frames, total_frames, input_filename, render_overrides_json,
-           chunk_index, chunk_size_frames, priority, error
+           chunk_index, chunk_size_frames, priority, error,
+           last_heartbeat_at, heartbeat_phase, heartbeat_phase_started_at
     FROM jobs WHERE id = %s
 """
 
@@ -156,6 +158,12 @@ class InstancePoller:
 
         if actual_status == "running":
             self._on_became_running(job)
+            heartbeat_error = self._heartbeat_failure(job)
+            if heartbeat_error:
+                return self._on_worker_stalled(job, heartbeat_error)
+            phase_timeout_error = self._phase_timeout_error(job)
+            if phase_timeout_error:
+                return self._on_worker_stalled(job, phase_timeout_error)
             if self._is_stale(job):
                 return self._on_stale(job)
 
@@ -255,6 +263,20 @@ class InstancePoller:
             f"Vast.ai instance {self._instance_id} stuck in '{actual_status}' "
             f"for {elapsed:.0f}s — timing out"
         )
+        log.warning(f"Job {self._job_id}: {err}")
+        self._registry.set(self._job_id, {"error": err})
+        self._client.destroy_instance(self._instance_id)
+        self._failover.handle(
+            job_id=self._job_id, job=job, error=err,
+            blend_url=self._blend_url,
+            render_overrides_b64=self._render_overrides_b64,
+            failed_machine_id=self._machine_id,
+            group_id=self._group_id,
+        )
+        self._registry.remove(self._job_id)
+        return True
+
+    def _on_worker_stalled(self, job: dict, err: str) -> bool:
         log.warning(f"Job {self._job_id}: {err}")
         self._registry.set(self._job_id, {"error": err})
         self._client.destroy_instance(self._instance_id)
@@ -368,6 +390,61 @@ class InstancePoller:
         total = job.get("total_frames") or 0
         return total > 0 and rendered >= total
 
+    def _heartbeat_failure(self, job: dict) -> str | None:
+        if self._became_running_at is None:
+            return None
+
+        phase = job.get("heartbeat_phase") or "unknown"
+        hb_age = _age_seconds(job.get("last_heartbeat_at"))
+        if hb_age is None:
+            running_age = time.monotonic() - self._became_running_at
+            if running_age > self._cfg.worker_boot_timeout_sec:
+                return (
+                    f"Vast.ai worker never reported a heartbeat within "
+                    f"{self._cfg.worker_boot_timeout_sec:.0f}s after the instance entered running"
+                )
+            return None
+
+        if hb_age > self._cfg.heartbeat_timeout_sec:
+            return (
+                f"Vast.ai worker heartbeat stopped for {hb_age:.0f}s "
+                f"(phase={phase})"
+            )
+        return None
+
+    def _phase_timeout_error(self, job: dict) -> str | None:
+        phase_raw = str(job.get("heartbeat_phase") or "").strip()
+        phase = phase_raw.split(":", 1)[0].strip().lower()
+        if not phase:
+            return None
+
+        phase_age = _age_seconds(job.get("heartbeat_phase_started_at"))
+        if phase_age is None:
+            return None
+
+        rendered = job.get("rendered_frames") or 0
+        limits = {
+            "booting": self._cfg.worker_boot_timeout_sec,
+            "downloading": self._cfg.download_timeout_sec,
+            "extracting": self._cfg.extract_timeout_sec,
+            "starting_blender": self._cfg.blender_start_timeout_sec,
+            "running": self._cfg.worker_boot_timeout_sec,
+            "uploading": self._cfg.upload_timeout_sec,
+        }
+        timeout = limits.get(phase)
+        if timeout is not None and phase_age > timeout:
+            return (
+                f"Vast.ai worker stuck in phase '{phase}' for {phase_age:.0f}s "
+                f"(limit={timeout:.0f}s)"
+            )
+
+        if phase == "rendering" and rendered == 0 and phase_age > self._cfg.first_frame_timeout_sec:
+            return (
+                f"Vast.ai worker reached rendering but produced no frames for "
+                f"{phase_age:.0f}s (limit={self._cfg.first_frame_timeout_sec:.0f}s)"
+            )
+        return None
+
     def _is_stale(self, job: dict) -> bool:
         if job["status"] != "running":
             return False
@@ -384,6 +461,9 @@ class InstancePoller:
         logs = ""
         if actual_status != "running" or self._poll_count % LOG_FETCH_EVERY == 0:
             logs = self._client.get_logs(self._instance_id)
+
+        heartbeat_age = _age_seconds(job.get("last_heartbeat_at"))
+        phase_age = _age_seconds(job.get("heartbeat_phase_started_at"))
 
         if actual_status != self._prev_actual_status:
             self._registry.append_history(
@@ -405,6 +485,16 @@ class InstancePoller:
             "elapsed_sec": int(elapsed),
             "last_poll_at": now_iso(),
             "status_msg": inst.get("status_msg") or "",
+            "last_heartbeat_at": job.get("last_heartbeat_at"),
+            "heartbeat_phase": job.get("heartbeat_phase"),
+            "heartbeat_phase_started_at": job.get("heartbeat_phase_started_at"),
+            "heartbeat_age_sec": int(heartbeat_age) if heartbeat_age is not None else None,
+            "heartbeat_phase_age_sec": int(phase_age) if phase_age is not None else None,
+            "worker_alive": (
+                None
+                if heartbeat_age is None
+                else heartbeat_age <= self._cfg.heartbeat_timeout_sec
+            ),
             "error": job.get("error") if local_status == "failed" else None,
         }
         if logs:
@@ -430,3 +520,19 @@ class InstancePoller:
                 f"waiting for callback..."
             )
         return local_status
+
+
+def _parse_iso8601(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _age_seconds(raw: str | None) -> float | None:
+    dt = _parse_iso8601(raw)
+    if dt is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())

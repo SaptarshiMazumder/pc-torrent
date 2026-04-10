@@ -24,6 +24,7 @@ from api.schemas.job import (
     MultipartInitPayload,
     MultipartPartUrlsPayload,
     RequestUploadPayload,
+    UpdateJobHeartbeatPayload,
     UpdateJobProgressPayload,
     UpdateJobStatusPayload,
 )
@@ -500,6 +501,52 @@ def update_job_progress(
     return {"success": True}
 
 
+@router.put("/jobs/{job_id}/heartbeat")
+def update_job_heartbeat(
+    job_id: str, payload: UpdateJobHeartbeatPayload
+) -> dict[str, bool]:
+    job = query_one(
+        """
+        SELECT id, status, heartbeat_phase, heartbeat_phase_started_at
+        FROM jobs WHERE id = %s
+        """,
+        (job_id,),
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["status"] in ("done", "failed", "cancelled"):
+        return {"success": False}
+
+    phase_name = payload.phase.strip()
+    if not phase_name:
+        raise HTTPException(status_code=400, detail="phase cannot be empty")
+
+    phase = phase_name
+    if payload.detail:
+        phase = f"{phase}: {payload.detail.strip()[:160]}"
+
+    heartbeat_at = now_iso()
+    current_phase_name = (job.get("heartbeat_phase") or "").split(":", 1)[0].strip()
+    phase_started_at = (
+        heartbeat_at
+        if phase_name != current_phase_name
+        else job.get("heartbeat_phase_started_at") or heartbeat_at
+    )
+
+    execute(
+        """
+        UPDATE jobs
+        SET last_heartbeat_at = %s,
+            heartbeat_phase = %s,
+            heartbeat_phase_started_at = %s
+        WHERE id = %s
+        """,
+        (heartbeat_at, phase[:200], phase_started_at, job_id),
+    )
+    return {"success": True}
+
+
 @router.put("/jobs/{job_id}/status")
 def update_job_status(
     job_id: str, payload: UpdateJobStatusPayload
@@ -533,15 +580,28 @@ def update_job_status(
     if payload.output_files is not None:
         output_files_json = json.dumps(payload.output_files)
 
+    heartbeat_at = job.get("last_heartbeat_at")
+    heartbeat_phase = job.get("heartbeat_phase")
+    heartbeat_phase_started_at = job.get("heartbeat_phase_started_at")
+    if payload.status == "running":
+        now = now_iso()
+        heartbeat_at = heartbeat_at or now
+        heartbeat_phase = heartbeat_phase or "running"
+        heartbeat_phase_started_at = heartbeat_phase_started_at or now
+
     execute(
         """
         UPDATE jobs
         SET status = %s, completed_at = %s, error = %s,
-            output_files = %s, rendered_frames = %s
+            output_files = %s, rendered_frames = %s,
+            last_heartbeat_at = %s, heartbeat_phase = %s,
+            heartbeat_phase_started_at = %s
         WHERE id = %s
         """,
         (payload.status, completed_at, payload.error,
-         output_files_json, rendered_frames, job_id),
+         output_files_json, rendered_frames,
+         heartbeat_at, heartbeat_phase, heartbeat_phase_started_at,
+         job_id),
     )
 
     retry_job_id = None

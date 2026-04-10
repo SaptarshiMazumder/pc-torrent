@@ -79,6 +79,7 @@ class VastApiClient:
             "FRAME_STEP": str(frame_step),
             "RENDER_OVERRIDES_B64": render_overrides_b64,
             "BACKEND_URL": self._cfg.public_backend_url,
+            "HEARTBEAT_INTERVAL": str(self._cfg.heartbeat_interval_sec),
         }
 
         resp = httpx.put(

@@ -38,6 +38,7 @@ RENDER_DRIVER_SCRIPT = os.getenv("RENDER_DRIVER_SCRIPT", "/scripts/render_driver
 
 PROGRESS_PUSH_INTERVAL = float(os.getenv("PROGRESS_PUSH_INTERVAL", "2"))
 OUTPUT_SCAN_INTERVAL = float(os.getenv("OUTPUT_SCAN_INTERVAL", "1.0"))
+HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "10"))
 RENDER_FATAL_PATTERNS = (
     "[RENDER_DRIVER] ERROR:",
     "RuntimeError: Error: Cannot render, no camera",
@@ -102,6 +103,61 @@ def _push_progress(backend_url: str, job_id: str, rendered_frames: int, total_fr
         requests.put(f"{backend_url}/jobs/{job_id}/progress", json={"rendered_frames": rendered_frames, "total_frames": total_frames}, timeout=15)
     except Exception as e:
         log.warning(f"Failed to push progress: {e}")
+
+
+class WorkerHeartbeat:
+    def __init__(self, backend_url: str, job_id: str):
+        self.backend_url = backend_url.rstrip("/")
+        self.job_id = job_id
+        self._phase = "booting"
+        self._detail = ""
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"heartbeat-{self.job_id[:8]}",
+        )
+        self._thread.start()
+        self._push()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def set_phase(self, phase: str, detail: str = ""):
+        with self._lock:
+            self._phase = phase
+            self._detail = detail
+        self._push()
+
+    def _payload(self) -> dict:
+        with self._lock:
+            payload = {"phase": self._phase}
+            if self._detail:
+                payload["detail"] = self._detail
+            return payload
+
+    def _push(self):
+        try:
+            requests.put(
+                f"{self.backend_url}/jobs/{self.job_id}/heartbeat",
+                json=self._payload(),
+                timeout=15,
+            ).raise_for_status()
+        except Exception as e:
+            log.warning(f"Heartbeat push failed for {self.job_id}: {e}")
+
+    def _run(self):
+        while not self._stop.is_set():
+            self._push()
+            self._stop.wait(HEARTBEAT_INTERVAL)
 
 
 def _upload_outputs(backend_url: str, job_id: str, output_dir: str, filenames: list[str] | None = None) -> list[str]:
@@ -290,168 +346,178 @@ def main() -> int:
         return 1
 
     log.info(f"Job {job_id}: frames {frame_start}-{frame_end} step {frame_step}")
+    heartbeat = WorkerHeartbeat(backend_url, job_id)
+    heartbeat.start()
 
-    with tempfile.TemporaryDirectory() as workdir:
-        input_dir = os.path.join(workdir, "input")
-        output_dir = os.path.join(workdir, "output")
-        os.makedirs(input_dir)
-        os.makedirs(output_dir)
+    try:
+        with tempfile.TemporaryDirectory() as workdir:
+            input_dir = os.path.join(workdir, "input")
+            output_dir = os.path.join(workdir, "output")
+            os.makedirs(input_dir)
+            os.makedirs(output_dir)
 
-        # 1. Mark running
-        _mark_running(backend_url, job_id)
+            # 1. Mark running
+            _mark_running(backend_url, job_id)
+            heartbeat.set_phase("downloading")
 
-        # 2. Download .blend
-        log.info(f"Downloading blend from {blend_url}")
-        try:
-            r = requests.get(blend_url, timeout=300, allow_redirects=True, stream=True)
-            r.raise_for_status()
-        except Exception as e:
-            err = f"Failed to download blend file: {e}"
-            log.error(err)
-            _mark_failed(backend_url, job_id, err)
-            return 1
-
-        filename = blend_url.rstrip("/").split("/")[-1]
-        raw_path = os.path.join(input_dir, filename)
-        downloaded_bytes = 0
-        with open(raw_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
-                f.write(chunk)
-                downloaded_bytes += len(chunk)
-        log.info(f"File saved: {filename} ({downloaded_bytes / 1024 / 1024:.1f} MB)")
-
-        if filename.lower().endswith(".zip"):
-            import zipfile as _zf
-            log.info("Extracting zip archive...")
-            with _zf.ZipFile(raw_path, "r") as zf:
-                zf.extractall(input_dir)
-            os.remove(raw_path)
-            log.info(f"Extracted contents: {os.listdir(input_dir)}")
-
-        blend_files = _find_blend_files(input_dir)
-        if not blend_files:
-            err = "No .blend file found in uploaded input bundle"
-            log.error(err)
-            _mark_failed(backend_url, job_id, err)
-            return 1
-
-        blend_path, selected_from_root = _choose_render_target_blend(filename, input_dir, blend_files)
-        chosen_rel = os.path.relpath(blend_path, input_dir).replace("\\", "/")
-        if len(blend_files) > 1:
-            candidates = sorted((os.path.relpath(p, input_dir).replace("\\", "/") for p in blend_files), key=lambda rel: (rel.count("/"), len(rel), rel.lower()))
-            preview = ", ".join(candidates[:4])
-            extra = "" if len(candidates) <= 4 else ", ..."
-            selection_mode = "root-level priority" if selected_from_root else "fallback (no root-level .blend found)"
-            log.warning(f"Found {len(blend_files)} .blend files in bundle. Selected '{chosen_rel}' ({selection_mode}). Candidates: {preview}{extra}")
-        else:
-            log.info(f"Selected render target: {chosen_rel}")
-
-        # 3. Decode render overrides
-        render_overrides: dict = {}
-        if render_overrides_b64:
+            # 2. Download .blend
+            log.info(f"Downloading blend from {blend_url}")
             try:
-                render_overrides = json.loads(base64.b64decode(render_overrides_b64).decode())
+                r = requests.get(blend_url, timeout=300, allow_redirects=True, stream=True)
+                r.raise_for_status()
             except Exception as e:
-                log.warning(f"Failed to decode render_overrides_b64: {e}")
-
-        device_policy = render_overrides.get("render", {}).get("device_policy", "AUTO").upper()
-
-        # 4. Run render.sh
-        env = {
-            **os.environ,
-            "BLENDER_BIN": BLENDER_BIN,
-            "INPUT_DIR": input_dir,
-            "OUTPUT_DIR": output_dir,
-            "BLEND_FILE": blend_path,
-            "FRAME_START": str(frame_start),
-            "FRAME_END": str(frame_end),
-            "FRAME_STEP": str(frame_step),
-            "DEVICE_POLICY": device_policy,
-            "RENDER_OVERRIDES_B64": render_overrides_b64,
-            "PROGRESS_SCRIPT": PROGRESS_SCRIPT,
-            "RENDER_DRIVER_SCRIPT": RENDER_DRIVER_SCRIPT,
-        }
-
-        log.info(f"Starting render: {RENDER_SH}")
-        proc = subprocess.Popen(["bash", RENDER_SH], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        uploader = IncrementalOutputUploader(backend_url, job_id, output_dir)
-        uploader.start()
-
-        # 5. Stream progress
-        total_frames = (frame_end - frame_start) // frame_step + 1
-        rendered_frames = 0
-        last_push = 0.0
-        fatal_render_error = ""
-
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line:
-                log.info(line)
-                if not fatal_render_error:
-                    for pattern in RENDER_FATAL_PATTERNS:
-                        if pattern in line:
-                            fatal_render_error = line
-                            break
-
-            if "PCR_PROGRESS" in line:
-                try:
-                    payload = json.loads(line.split("PCR_PROGRESS", 1)[1].strip())
-                    if payload.get("kind") == "frame":
-                        rendered_frames = max(rendered_frames, int(payload.get("rendered_frames", 0)))
-                        total_frames = max(total_frames, int(payload.get("total_frames", total_frames)))
-                    elif payload.get("kind") == "meta":
-                        total_frames = max(total_frames, int(payload.get("total_frames", total_frames)))
-                except Exception:
-                    pass
-
-                now = time.monotonic()
-                if now - last_push >= PROGRESS_PUSH_INTERVAL:
-                    _push_progress(backend_url, job_id, rendered_frames, total_frames)
-                    last_push = now
-
-        proc.wait()
-        uploader.stop()
-        try:
-            uploader.flush_final()
-        except Exception as exc:
-            log.warning(f"Final incremental output flush failed: {exc}")
-        uploaded = uploader.uploaded
-
-        if proc.returncode != 0 or fatal_render_error:
-            if fatal_render_error:
-                err = f"Render runtime error detected: {fatal_render_error}"
-            else:
-                err = f"render.sh exited with code {proc.returncode}"
-            if uploaded:
-                err = f"{err}. {len(uploaded)} frame(s) already uploaded and recoverable."
-            log.error(err)
-            _mark_failed(backend_url, job_id, err)
-            return 1
-
-        # 6. Catch up any files not incrementally uploaded
-        local_files = sorted(f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f)))
-        missing_files = [f for f in local_files if f not in uploaded]
-        if missing_files:
-            log.info(f"Uploading remaining {len(missing_files)} output file(s)")
-            try:
-                catch_up = _upload_outputs(backend_url, job_id, output_dir, filenames=missing_files)
-                uploaded += [f for f in catch_up if f not in uploaded]
-            except Exception as e:
-                err = f"Output catch-up upload failed: {e}"
+                err = f"Failed to download blend file: {e}"
                 log.error(err)
                 _mark_failed(backend_url, job_id, err)
                 return 1
 
-        if not uploaded:
-            err = "Render produced no output files"
-            log.error(err)
-            _mark_failed(backend_url, job_id, err)
-            return 1
+            filename = blend_url.rstrip("/").split("/")[-1]
+            raw_path = os.path.join(input_dir, filename)
+            downloaded_bytes = 0
+            with open(raw_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+            log.info(f"File saved: {filename} ({downloaded_bytes / 1024 / 1024:.1f} MB)")
 
-        # 7. Mark done
-        _mark_done(backend_url, job_id, uploaded)
-        log.info(f"Job {job_id} done - {len(uploaded)} files uploaded")
-        return 0
+            if filename.lower().endswith(".zip"):
+                import zipfile as _zf
+                heartbeat.set_phase("extracting")
+                log.info("Extracting zip archive...")
+                with _zf.ZipFile(raw_path, "r") as zf:
+                    zf.extractall(input_dir)
+                os.remove(raw_path)
+                log.info(f"Extracted contents: {os.listdir(input_dir)}")
+
+            blend_files = _find_blend_files(input_dir)
+            if not blend_files:
+                err = "No .blend file found in uploaded input bundle"
+                log.error(err)
+                _mark_failed(backend_url, job_id, err)
+                return 1
+
+            blend_path, selected_from_root = _choose_render_target_blend(filename, input_dir, blend_files)
+            chosen_rel = os.path.relpath(blend_path, input_dir).replace("\\", "/")
+            if len(blend_files) > 1:
+                candidates = sorted((os.path.relpath(p, input_dir).replace("\\", "/") for p in blend_files), key=lambda rel: (rel.count("/"), len(rel), rel.lower()))
+                preview = ", ".join(candidates[:4])
+                extra = "" if len(candidates) <= 4 else ", ..."
+                selection_mode = "root-level priority" if selected_from_root else "fallback (no root-level .blend found)"
+                log.warning(f"Found {len(blend_files)} .blend files in bundle. Selected '{chosen_rel}' ({selection_mode}). Candidates: {preview}{extra}")
+            else:
+                log.info(f"Selected render target: {chosen_rel}")
+
+            # 3. Decode render overrides
+            render_overrides: dict = {}
+            if render_overrides_b64:
+                try:
+                    render_overrides = json.loads(base64.b64decode(render_overrides_b64).decode())
+                except Exception as e:
+                    log.warning(f"Failed to decode render_overrides_b64: {e}")
+
+            device_policy = render_overrides.get("render", {}).get("device_policy", "AUTO").upper()
+
+            # 4. Run render.sh
+            env = {
+                **os.environ,
+                "BLENDER_BIN": BLENDER_BIN,
+                "INPUT_DIR": input_dir,
+                "OUTPUT_DIR": output_dir,
+                "BLEND_FILE": blend_path,
+                "FRAME_START": str(frame_start),
+                "FRAME_END": str(frame_end),
+                "FRAME_STEP": str(frame_step),
+                "DEVICE_POLICY": device_policy,
+                "RENDER_OVERRIDES_B64": render_overrides_b64,
+                "PROGRESS_SCRIPT": PROGRESS_SCRIPT,
+                "RENDER_DRIVER_SCRIPT": RENDER_DRIVER_SCRIPT,
+            }
+
+            heartbeat.set_phase("starting_blender")
+            log.info(f"Starting render: {RENDER_SH}")
+            proc = subprocess.Popen(["bash", RENDER_SH], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            uploader = IncrementalOutputUploader(backend_url, job_id, output_dir)
+            uploader.start()
+            heartbeat.set_phase("rendering")
+
+            # 5. Stream progress
+            total_frames = (frame_end - frame_start) // frame_step + 1
+            rendered_frames = 0
+            last_push = 0.0
+            fatal_render_error = ""
+
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    log.info(line)
+                    if not fatal_render_error:
+                        for pattern in RENDER_FATAL_PATTERNS:
+                            if pattern in line:
+                                fatal_render_error = line
+                                break
+
+                if "PCR_PROGRESS" in line:
+                    try:
+                        payload = json.loads(line.split("PCR_PROGRESS", 1)[1].strip())
+                        if payload.get("kind") == "frame":
+                            rendered_frames = max(rendered_frames, int(payload.get("rendered_frames", 0)))
+                            total_frames = max(total_frames, int(payload.get("total_frames", total_frames)))
+                        elif payload.get("kind") == "meta":
+                            total_frames = max(total_frames, int(payload.get("total_frames", total_frames)))
+                    except Exception:
+                        pass
+
+                    now = time.monotonic()
+                    if now - last_push >= PROGRESS_PUSH_INTERVAL:
+                        _push_progress(backend_url, job_id, rendered_frames, total_frames)
+                        last_push = now
+
+            proc.wait()
+            uploader.stop()
+            heartbeat.set_phase("uploading")
+            try:
+                uploader.flush_final()
+            except Exception as exc:
+                log.warning(f"Final incremental output flush failed: {exc}")
+            uploaded = uploader.uploaded
+
+            if proc.returncode != 0 or fatal_render_error:
+                if fatal_render_error:
+                    err = f"Render runtime error detected: {fatal_render_error}"
+                else:
+                    err = f"render.sh exited with code {proc.returncode}"
+                if uploaded:
+                    err = f"{err}. {len(uploaded)} frame(s) already uploaded and recoverable."
+                log.error(err)
+                _mark_failed(backend_url, job_id, err)
+                return 1
+
+            # 6. Catch up any files not incrementally uploaded
+            local_files = sorted(f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f)))
+            missing_files = [f for f in local_files if f not in uploaded]
+            if missing_files:
+                log.info(f"Uploading remaining {len(missing_files)} output file(s)")
+                try:
+                    catch_up = _upload_outputs(backend_url, job_id, output_dir, filenames=missing_files)
+                    uploaded += [f for f in catch_up if f not in uploaded]
+                except Exception as e:
+                    err = f"Output catch-up upload failed: {e}"
+                    log.error(err)
+                    _mark_failed(backend_url, job_id, err)
+                    return 1
+
+            if not uploaded:
+                err = "Render produced no output files"
+                log.error(err)
+                _mark_failed(backend_url, job_id, err)
+                return 1
+
+            # 7. Mark done
+            _mark_done(backend_url, job_id, uploaded)
+            log.info(f"Job {job_id} done - {len(uploaded)} files uploaded")
+            return 0
+    finally:
+        heartbeat.stop()
 
 
 if __name__ == "__main__":

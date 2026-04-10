@@ -41,6 +41,13 @@ class VastConfig:
     public_backend_url: str
     workers_per_endpoint: int
     heartbeat_interval_sec: int
+    heartbeat_timeout_sec: float
+    worker_boot_timeout_sec: float
+    download_timeout_sec: float
+    extract_timeout_sec: float
+    blender_start_timeout_sec: float
+    first_frame_timeout_sec: float
+    upload_timeout_sec: float
     endpoints: tuple[VastEndpoint, ...] = field(default_factory=tuple)
 
     api_base: str = "https://console.vast.ai/api/v0"
@@ -63,7 +70,14 @@ class VastConfig:
             in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 90 * 60),
             public_backend_url=os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             workers_per_endpoint=_env_int("VAST_WORKERS_PER_ENDPOINT", 2),
-            heartbeat_interval_sec=10,
+            heartbeat_interval_sec=_env_int("VAST_HEARTBEAT_INTERVAL_SEC", 10),
+            heartbeat_timeout_sec=_env_float("VAST_HEARTBEAT_TIMEOUT_SEC", 45.0),
+            worker_boot_timeout_sec=_env_float("VAST_WORKER_BOOT_TIMEOUT_SEC", 90.0),
+            download_timeout_sec=_env_float("VAST_DOWNLOAD_TIMEOUT_SEC", 20 * 60),
+            extract_timeout_sec=_env_float("VAST_EXTRACT_TIMEOUT_SEC", 10 * 60),
+            blender_start_timeout_sec=_env_float("VAST_BLENDER_START_TIMEOUT_SEC", 5 * 60),
+            first_frame_timeout_sec=_env_float("VAST_FIRST_FRAME_TIMEOUT_SEC", 10 * 60),
+            upload_timeout_sec=_env_float("VAST_UPLOAD_TIMEOUT_SEC", 20 * 60),
             endpoints=tuple(endpoints),
         )
 

@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py ./
 COPY firebase_auth.py ./
+COPY config.json ./
 COPY infrastructure/ ./infrastructure/
 COPY services/ ./services/
 COPY domain/ ./domain/

@@ -42,6 +42,8 @@ class VastConfig:
     public_backend_url: str
     workers_per_endpoint: int
     heartbeat_interval_sec: int
+    heartbeat_timeout_sec: float
+    heartbeat_grace_sec: float
     endpoints: tuple[VastEndpoint, ...] = field(default_factory=tuple)
 
     api_base: str = "https://console.vast.ai/api/v0"
@@ -65,6 +67,8 @@ class VastConfig:
             public_backend_url=os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             workers_per_endpoint=_env_int("VAST_WORKERS_PER_ENDPOINT", 2),
             heartbeat_interval_sec=10,
+            heartbeat_timeout_sec=_env_float("VAST_HEARTBEAT_TIMEOUT_SEC", 45.0),
+            heartbeat_grace_sec=_env_float("VAST_HEARTBEAT_GRACE_SEC", 90.0),
             endpoints=tuple(endpoints),
         )
 

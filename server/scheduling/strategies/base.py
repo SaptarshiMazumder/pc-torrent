@@ -41,3 +41,9 @@ class ProvisionStrategy(Protocol):
     def workers_per_endpoint(self) -> int:
         """How many parallel workers to expand each assignment into."""
         ...
+
+    @property
+    def min_frames_per_instance(self) -> int:
+        """Minimum frames that justify spinning up one instance of this provider.
+        Higher values mean fewer instances are provisioned for small jobs."""
+        ...

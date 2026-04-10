@@ -5,8 +5,9 @@ Responsibilities:
 - Register/maintain a virtual "vast_serverless" machine per GPU type profile
 - Keep heartbeats alive so they stay visible in the available machines list
 - Dispatch render jobs by renting a Vast.ai instance per job
-- Poll the instance until it exits, then clean up and delegate
-  retry/failover to DispatchCoordinator
+- Poll the instance until it exits, then clean up and handle failover
+- On failure: immediately move to a different machine (no same-host retry),
+  trying all available candidates until one accepts the dispatch.
 
 Each dispatch creates a new Vast.ai instance with job parameters passed as
 env vars. The instance runs the handler, calls back to the backend, then
@@ -18,7 +19,7 @@ Env var format:
   VAST_API_KEY=your_key
   VAST_DOCKER_IMAGE=yourrepo/pc-rent-vast:latest
   VAST_DISK_GB=20          (default: 20)
-  VAST_MAX_PRICE_PER_GPU=0.50   ($/hr cap, default: 0.50)
+  VAST_MAX_PRICE_PER_GPU=1.00   ($/hr cap, default: 1.00)
 """
 
 from __future__ import annotations
@@ -32,8 +33,8 @@ from uuid import uuid4
 
 import httpx
 
-from domain.value_objects import now_iso
-from infrastructure.db import execute, query_one
+from domain.value_objects import SERVERLESS_TYPES, now_iso
+from infrastructure.db import execute, query_all, query_one
 
 log = logging.getLogger(__name__)
 
@@ -73,11 +74,10 @@ def _env_int(name: str, default: int) -> int:
 VAST_API_KEY = os.getenv("VAST_API_KEY", "")
 VAST_DOCKER_IMAGE = os.getenv("VAST_DOCKER_IMAGE") or os.getenv("MODAL_WORKER_IMAGE", "")
 
-VAST_GPU_VRAM_GB = _env_float("VAST_GPU_VRAM_GB", 24.0)
 VAST_CPU_CORES = _env_int("VAST_CPU_CORES", 8)
 VAST_RAM_GB = _env_float("VAST_RAM_GB", 32.0)
 VAST_DISK_GB = _env_float("VAST_DISK_GB", 20.0)
-VAST_MAX_PRICE_PER_GPU = _env_float("VAST_MAX_PRICE_PER_GPU", 0.50)
+VAST_MAX_PRICE_PER_GPU = _env_float("VAST_MAX_PRICE_PER_GPU", 1.00)
 
 PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000")
 
@@ -101,7 +101,13 @@ _CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.
 
 
 def _parse_endpoints() -> list[dict]:
-    """Load Vast.ai GPU endpoints from config.json -> vast_instances[]."""
+    """Load Vast.ai GPU endpoints from config.json -> vast_instances[].
+
+    Each entry may include:
+      gpu_name  (required) — the Vast.ai GPU name used for offer search
+      label     (optional) — human-readable display name
+      vram_gb   (optional) — GPU VRAM; used for power-score registration
+    """
     try:
         with open(_CONFIG_PATH, "r") as f:
             cfg = json.load(f)
@@ -112,9 +118,11 @@ def _parse_endpoints() -> list[dict]:
     endpoints = []
     for entry in cfg.get("vast_instances", []):
         gpu_name = entry.get("gpu_name", "").strip()
+        if not gpu_name:
+            continue
         label = entry.get("label", "").strip() or f"Vast {gpu_name}"
-        if gpu_name:
-            endpoints.append({"id": gpu_name, "label": label})
+        vram_gb = float(entry.get("vram_gb", 24))
+        endpoints.append({"id": gpu_name, "label": label, "vram_gb": vram_gb})
     return endpoints
 
 
@@ -170,6 +178,7 @@ def register_virtual_machines() -> list[str]:
     for ep in ENDPOINTS:
         gpu_name = ep["id"]
         label = ep["label"]
+        vram_gb = ep["vram_gb"]
         machine_key = f"vast-serverless-{gpu_name.replace(' ', '_').lower()}"
         active_machine_keys.append(machine_key)
 
@@ -184,10 +193,10 @@ def register_virtual_machines() -> list[str]:
                     status = 'available', last_seen_at = %s
                 WHERE id = %s
                 """,
-                (label, VAST_GPU_VRAM_GB, VAST_CPU_CORES, VAST_RAM_GB,
+                (label, vram_gb, VAST_CPU_CORES, VAST_RAM_GB,
                  "Linux", "vast_serverless", now, machine_id),
             )
-            log.info(f"Vast.ai endpoint '{gpu_name}' updated: {machine_id} ({label})")
+            log.info(f"Vast.ai endpoint '{gpu_name}' updated: {machine_id} ({label}, {vram_gb}GB)")
         else:
             machine_id = str(uuid4())
             execute(
@@ -199,10 +208,10 @@ def register_virtual_machines() -> list[str]:
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'available', %s, %s)
                 """,
                 (machine_id, machine_key,
-                 label, VAST_GPU_VRAM_GB, VAST_CPU_CORES, VAST_RAM_GB,
+                 label, vram_gb, VAST_CPU_CORES, VAST_RAM_GB,
                  "Linux", "vast_serverless", now, now),
             )
-            log.info(f"Vast.ai endpoint '{gpu_name}' registered: {machine_id} ({label})")
+            log.info(f"Vast.ai endpoint '{gpu_name}' registered: {machine_id} ({label}, {vram_gb}GB)")
 
         _machine_endpoint_map[machine_id] = gpu_name
         machine_ids.append(machine_id)
@@ -255,7 +264,11 @@ def _gpu_name_for_machine(machine_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _search_offers_query(gpu_name: str, *, verified_only: bool) -> list[dict]:
-    """Run a single Vast.ai offer search."""
+    """Run a single Vast.ai offer search for a specific GPU type.
+
+    No price cap is applied — offers are returned sorted cheapest-first so the
+    caller can pick the most economical available instance.
+    """
     filters: dict = {
         "gpu_name": {"eq": gpu_name},
         "num_gpus": {"eq": 1},
@@ -264,7 +277,7 @@ def _search_offers_query(gpu_name: str, *, verified_only: bool) -> list[dict]:
         "cuda_max_good": {"gte": 12.0},
         "dph_total": {"lte": VAST_MAX_PRICE_PER_GPU},
         "disk_space": {"gte": VAST_DISK_GB},
-        "order": [["reliability2", "desc"], ["dph_total", "asc"]],
+        "order": [["dph_total", "asc"], ["reliability2", "desc"]],
         "limit": 10,
     }
     if verified_only:
@@ -287,6 +300,7 @@ def search_offers(gpu_name: str) -> list[dict]:
         return offers
     log.info(f"Vast.ai: no verified offers for {gpu_name}, trying unverified")
     return _search_offers_query(gpu_name, verified_only=False)
+
 
 
 def create_instance(
@@ -372,41 +386,59 @@ def dispatch_job(
     render_overrides_b64: str,
     machine_id: str = "",
 ) -> int:
-    """Find a cheap offer and rent it. Returns the Vast.ai instance ID."""
-    gpu_name = _gpu_name_for_machine(machine_id)
-    offers = search_offers(gpu_name)
-    if not offers:
-        raise RuntimeError(
-            f"No Vast.ai offers found for gpu_name='{gpu_name}' "
-            f"under ${VAST_MAX_PRICE_PER_GPU}/hr with {VAST_DISK_GB}GB disk"
-        )
+    """Find a cheap offer and rent it. Returns the Vast.ai instance ID.
 
-    # Try offers in price order until one succeeds
+    Tries the GPU type assigned to machine_id first.  If no offers are found
+    under the price cap (${VAST_MAX_PRICE_PER_GPU}/hr), falls back through
+    every other configured GPU type in order until one succeeds.
+    """
+    primary_gpu = _gpu_name_for_machine(machine_id)
+    all_gpu_names = [ep["id"] for ep in ENDPOINTS]
+
+    # Build priority list: primary GPU first, then all others in config order
+    gpu_order = [primary_gpu] + [g for g in all_gpu_names if g != primary_gpu]
+
     last_err: Exception | None = None
-    for offer in offers:
-        offer_id = offer.get("id")
-        dph = offer.get("dph_total", "?")
-        try:
-            instance_id = create_instance(
-                offer_id=offer_id,
-                job_id=job_id,
-                blend_url=blend_url,
-                frame_start=frame_start,
-                frame_end=frame_end,
-                frame_step=frame_step,
-                render_overrides_b64=render_overrides_b64,
-            )
+    for gpu_name in gpu_order:
+        offers = search_offers(gpu_name)
+        if not offers:
             log.info(
-                f"Dispatched job {job_id} -> Vast.ai offer {offer_id} "
-                f"(${dph}/hr) -> instance {instance_id}"
+                f"Vast.ai: no offers for '{gpu_name}' "
+                f"under ${VAST_MAX_PRICE_PER_GPU}/hr — trying next GPU type"
             )
-            return instance_id
-        except Exception as e:
-            log.warning(f"Failed to rent Vast.ai offer {offer_id}: {e}")
-            last_err = e
+            continue
+
+        # Try each offer for this GPU type in price order
+        for offer in offers:
+            offer_id = offer.get("id")
+            dph = offer.get("dph_total", "?")
+            try:
+                instance_id = create_instance(
+                    offer_id=offer_id,
+                    job_id=job_id,
+                    blend_url=blend_url,
+                    frame_start=frame_start,
+                    frame_end=frame_end,
+                    frame_step=frame_step,
+                    render_overrides_b64=render_overrides_b64,
+                )
+                if gpu_name != primary_gpu:
+                    log.info(
+                        f"Job {job_id}: rented fallback GPU '{gpu_name}' "
+                        f"(primary '{primary_gpu}' had no offers)"
+                    )
+                log.info(
+                    f"Dispatched job {job_id} -> Vast.ai offer {offer_id} "
+                    f"({gpu_name}, ${dph}/hr) -> instance {instance_id}"
+                )
+                return instance_id
+            except Exception as e:
+                log.warning(f"Failed to rent Vast.ai offer {offer_id} ({gpu_name}): {e}")
+                last_err = e
 
     raise RuntimeError(
-        f"All Vast.ai offers for '{gpu_name}' failed. Last error: {last_err}"
+        f"No Vast.ai offers available across all {len(gpu_order)} GPU types "
+        f"under ${VAST_MAX_PRICE_PER_GPU}/hr. Last error: {last_err}"
     )
 
 
@@ -442,6 +474,126 @@ def dispatch_and_save(
     return str(instance_id)
 
 
+def handle_vast_failure(
+    job_id: str,
+    job: dict,
+    error: str,
+    blend_url: str,
+    render_overrides_b64: str,
+    failed_machine_id: str,
+    group_id: str,
+) -> str | None:
+    """
+    Vast-specific failure handler — does NOT retry on the same host.
+
+    Marks the original job failed, then walks all available machines in
+    VRAM-ranked order (serverless first) until a dispatch succeeds.  Each
+    candidate gets one attempt; if it fails we log, mark that job failed,
+    and move to the next one.  Only gives up when every candidate is
+    exhausted.
+
+    Returns the new job_id of the successful failover, or None if all fail.
+    """
+    from scheduling.dispatch_coordinator import coordinator
+    from scheduling.frame_distributor import filter_enabled_machines
+
+    rendered = max(0, job.get("rendered_frames") or 0)
+    step = job.get("frame_step") or 1
+    remaining_start = job["frame_start"] + rendered * step
+    remaining_end = job["frame_end"]
+
+    if not blend_url or remaining_start > remaining_end:
+        execute(
+            "UPDATE jobs SET status = 'failed', completed_at = %s, error = %s WHERE id = %s",
+            (now_iso(), error, job_id),
+        )
+        log.error(f"Vast job {job_id} failed with no frames left to migrate: {error}")
+        return None
+
+    # Mark original job failed before creating the replacement
+    execute(
+        "UPDATE jobs SET status = 'failed', completed_at = %s, error = %s WHERE id = %s",
+        (now_iso(), f"Failed, migrating remaining frames ({error})", job_id),
+    )
+
+    # All available machines except the one that just failed, best VRAM first
+    rows = query_all(
+        "SELECT * FROM machines WHERE status = 'available' AND id != %s ORDER BY gpu_vram_gb DESC",
+        (failed_machine_id,),
+    )
+    rows = filter_enabled_machines(rows)
+    if not rows:
+        log.error(f"Vast job {job_id}: no available machines for failover, frames lost")
+        return None
+
+    # Serverless (Vast/RunPod/Modal) before community desktops
+    candidates = (
+        [r for r in rows if r.get("machine_type") in SERVERLESS_TYPES]
+        + [r for r in rows if r.get("machine_type") not in SERVERLESS_TYPES]
+    )
+
+    new_total = ((remaining_end - remaining_start) // step) + 1
+
+    for candidate in candidates:
+        new_job_id = str(uuid4())
+        execute(
+            """
+            INSERT INTO jobs (
+                id, machine_id, group_id, input_filename, status,
+                total_frames, rendered_frames, output_files,
+                frame_start, frame_end, frame_step,
+                render_overrides_json, attempt, max_retries, priority,
+                chunk_index, chunk_size_frames, submitted_at
+            )
+            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, 0, %s, %s, %s, %s, %s)
+            """,
+            (
+                new_job_id, candidate["id"], group_id, job.get("input_filename"),
+                new_total, remaining_start, remaining_end, step,
+                job.get("render_overrides_json") or "{}",
+                job.get("max_retries") or 0,
+                job.get("priority") or 0,
+                job.get("chunk_index"),
+                job.get("chunk_size_frames"),
+                now_iso(),
+            ),
+        )
+
+        gpu_label = candidate.get("gpu_model", "?")
+        machine_type = candidate.get("machine_type", "windows")
+        log.info(
+            f"Vast job {job_id} → failover attempt: new job {new_job_id} "
+            f"on {gpu_label} ({machine_type})"
+        )
+
+        try:
+            coordinator.dispatch(
+                job_id=new_job_id,
+                machine_id=candidate["id"],
+                machine_type=machine_type,
+                blend_url=blend_url,
+                frame_start=remaining_start,
+                frame_end=remaining_end,
+                frame_step=step,
+                render_overrides_b64=render_overrides_b64,
+                group_id=group_id,
+            )
+            log.info(f"Vast failover succeeded: job {new_job_id} on {gpu_label}")
+            return new_job_id
+        except Exception as exc:
+            log.warning(
+                f"Vast failover dispatch failed for {new_job_id} on {gpu_label}: {exc} "
+                f"— trying next candidate"
+            )
+            execute(
+                "UPDATE jobs SET status = 'failed', completed_at = %s, error = %s WHERE id = %s",
+                (now_iso(), f"Failover dispatch failed: {exc}", new_job_id),
+            )
+
+    log.error(f"Vast job {job_id}: all failover candidates exhausted, frames lost")
+    return None
+
+
 def start_polling_thread(
     job_id: str,
     instance_id: str,
@@ -452,14 +604,19 @@ def start_polling_thread(
 ) -> None:
     """
     Start a background thread that polls the Vast.ai instance status until
-    it exits, then delegates retry/failover to DispatchCoordinator and
-    destroys the instance.
+    it exits, then handles failover via handle_vast_failure and destroys
+    the instance.
     """
     vast_instance_id = int(instance_id)
 
-    def _poll():
-        from scheduling.dispatch_coordinator import coordinator
+    _JOB_QUERY = """
+        SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
+               rendered_frames, input_filename, render_overrides_json,
+               chunk_index, chunk_size_frames, priority
+        FROM jobs WHERE id = %s
+    """
 
+    def _poll():
         started_at = time.monotonic()
         last_rendered_frames = None
         last_frame_change_at = time.monotonic()
@@ -470,23 +627,19 @@ def start_polling_thread(
             try:
                 inst = get_instance(vast_instance_id)
                 if inst is None:
-                    job = query_one(
-                        """
-                        SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
-                               rendered_frames, input_filename, render_overrides_json,
-                               chunk_index, chunk_size_frames, priority
-                        FROM jobs WHERE id = %s
-                        """,
-                        (job_id,),
-                    )
+                    job = query_one(_JOB_QUERY, (job_id,))
                     local_status = job["status"] if job else "unknown"
                     if local_status in ("done", "failed", "cancelled"):
                         log.info(f"Vast.ai instance {vast_instance_id} gone; job {job_id} is {local_status}")
                     else:
-                        log.warning(f"Vast.ai instance {vast_instance_id} not found; job {job_id}={local_status}, marking failed")
+                        log.warning(
+                            f"Vast.ai instance {vast_instance_id} not found; "
+                            f"job {job_id}={local_status}, failing over"
+                        )
                         if job:
-                            coordinator.handle_failure(
-                                job_id=job_id, job=job, error="Vast.ai instance disappeared unexpectedly",
+                            handle_vast_failure(
+                                job_id=job_id, job=job,
+                                error="Vast.ai instance disappeared unexpectedly",
                                 blend_url=blend_url, render_overrides_b64=render_overrides_b64,
                                 failed_machine_id=machine_id, group_id=group_id,
                             )
@@ -495,15 +648,7 @@ def start_polling_thread(
                 actual_status: str = str(inst.get("actual_status") or "").lower()
                 elapsed = time.monotonic() - started_at
 
-                job = query_one(
-                    """
-                    SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
-                           rendered_frames, input_filename, render_overrides_json,
-                           chunk_index, chunk_size_frames, priority
-                    FROM jobs WHERE id = %s
-                    """,
-                    (job_id,),
-                )
+                job = query_one(_JOB_QUERY, (job_id,))
                 if not job:
                     log.warning(f"Poll: job {job_id} not found in DB, stopping")
                     destroy_instance(vast_instance_id)
@@ -525,7 +670,7 @@ def start_polling_thread(
                     )
                     log.warning(f"Job {job_id}: {startup_err}")
                     destroy_instance(vast_instance_id)
-                    coordinator.handle_failure(
+                    handle_vast_failure(
                         job_id=job_id, job=job, error=startup_err,
                         blend_url=blend_url, render_overrides_b64=render_overrides_b64,
                         failed_machine_id=machine_id, group_id=group_id,
@@ -550,7 +695,7 @@ def start_polling_thread(
                         )
                         log.warning(f"Job {job_id}: {stale_err}")
                         destroy_instance(vast_instance_id)
-                        coordinator.handle_failure(
+                        handle_vast_failure(
                             job_id=job_id, job=job, error=stale_err,
                             blend_url=blend_url, render_overrides_b64=render_overrides_b64,
                             failed_machine_id=machine_id, group_id=group_id,
@@ -567,15 +712,7 @@ def start_polling_thread(
                     destroy_instance(vast_instance_id)
 
                     time.sleep(5)
-                    job = query_one(
-                        """
-                        SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
-                               rendered_frames, input_filename, render_overrides_json,
-                               chunk_index, chunk_size_frames, priority
-                        FROM jobs WHERE id = %s
-                        """,
-                        (job_id,),
-                    )
+                    job = query_one(_JOB_QUERY, (job_id,))
                     local_status = job["status"] if job else "unknown"
 
                     if local_status in ("done", "failed", "cancelled"):
@@ -587,7 +724,7 @@ def start_polling_thread(
                         )
                         log.warning(f"Job {job_id}: {err}")
                         if job:
-                            coordinator.handle_failure(
+                            handle_vast_failure(
                                 job_id=job_id, job=job, error=err,
                                 blend_url=blend_url, render_overrides_b64=render_overrides_b64,
                                 failed_machine_id=machine_id, group_id=group_id,

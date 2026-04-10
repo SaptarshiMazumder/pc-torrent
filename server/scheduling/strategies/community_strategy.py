@@ -35,3 +35,7 @@ class CommunityStrategy:
     @property
     def workers_per_endpoint(self) -> int:
         return 1
+
+    @property
+    def min_frames_per_instance(self) -> int:
+        return 2

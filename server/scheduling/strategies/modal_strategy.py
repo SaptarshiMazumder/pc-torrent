@@ -53,3 +53,7 @@ class ModalStrategy:
     def workers_per_endpoint(self) -> int:
         from services import modal_dispatch
         return modal_dispatch.MODAL_WORKERS_PER_ENDPOINT
+
+    @property
+    def min_frames_per_instance(self) -> int:
+        return 10

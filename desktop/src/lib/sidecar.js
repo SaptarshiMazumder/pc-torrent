@@ -59,3 +59,11 @@ export async function downloadJobOutputToDownloads(url, options = {}) {
     overwriteExisting,
   });
 }
+
+/**
+ * Cache a full-res frame to the app cache dir (frames-full/).
+ * Returns the local file path. Skips download if already cached with matching size.
+ */
+export async function cacheViewerFrame(url, cacheKey, expectedSizeBytes = null) {
+  return invoke("cache_viewer_frame", { url, cacheKey, expectedSizeBytes });
+}

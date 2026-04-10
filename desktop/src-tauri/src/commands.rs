@@ -1954,3 +1954,74 @@ pub fn write_frame_cache(app: AppHandle, cache_key: String, data: Vec<u8>) -> Re
     fs::write(&path, &data).map_err(|e| format!("Failed to write frame cache: {e}"))?;
     Ok(path.to_string_lossy().into_owned())
 }
+
+/// Download a full-resolution frame from a presigned URL into the app viewer cache.
+///
+/// Returns the local file path (use convertFileSrc on the JS side).
+/// Skips the download entirely if a file with the expected size already exists —
+/// so clicking the same frame a second time is instant.
+#[tauri::command]
+pub async fn cache_viewer_frame(
+    app: AppHandle,
+    url: String,
+    cache_key: String,
+    expected_size_bytes: Option<u64>,
+) -> Result<String, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("Failed to get app cache dir: {e}"))?
+        .join("frames-full");
+    fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create viewer cache dir: {e}"))?;
+
+    // Flatten cache_key (may contain slashes) and preserve original extension
+    let safe_key = cache_key.replace(['/', '\\', ':'], "_");
+    let ext = std::path::Path::new(&cache_key)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_lowercase();
+    let file_path = cache_dir.join(format!("{safe_key}.{ext}"));
+
+    // Return cached copy if size matches (or if no size to verify)
+    if file_path.exists() {
+        let matches = match expected_size_bytes {
+            Some(expected) => fs::metadata(&file_path)
+                .map(|m| m.len() == expected)
+                .unwrap_or(false),
+            None => true,
+        };
+        if matches {
+            return Ok(file_path.to_string_lossy().into_owned());
+        }
+    }
+
+    // Download from presigned URL (no auth headers needed — presigned URL is self-contained)
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Frame download failed: {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await.unwrap_or_default();
+        return Err(if detail.trim().is_empty() {
+            format!("Frame download failed with status {status}")
+        } else {
+            format!("Frame download failed ({status}): {detail}")
+        });
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read frame response: {e}"))?;
+
+    fs::write(&file_path, &bytes)
+        .map_err(|e| format!("Failed to write viewer cache: {e}"))?;
+
+    Ok(file_path.to_string_lossy().into_owned())
+}

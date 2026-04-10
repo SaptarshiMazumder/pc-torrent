@@ -86,25 +86,3 @@ def run_render_a10g(input_data: dict):
 @_WEB_ENDPOINT(method="POST")
 def render_a10g(data: dict):
     return _spawn_call(run_render_a10g, data)
-
-
-@app.function(image=worker_image, gpu="L4", timeout=86400, memory=65536, cpu=16)
-def run_render_l4(input_data: dict):
-    return _run_handler(input_data)
-
-
-@app.function(image=worker_image, timeout=60, cpu=1)
-@_WEB_ENDPOINT(method="POST")
-def render_l4(data: dict):
-    return _spawn_call(run_render_l4, data)
-
-
-@app.function(image=worker_image, gpu="A100", timeout=86400, memory=65536, cpu=16)
-def run_render_a100(input_data: dict):
-    return _run_handler(input_data)
-
-
-@app.function(image=worker_image, timeout=60, cpu=1)
-@_WEB_ENDPOINT(method="POST")
-def render_a100(data: dict):
-    return _spawn_call(run_render_a100, data)

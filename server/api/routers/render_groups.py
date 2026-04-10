@@ -142,15 +142,20 @@ def _build_render_group_output_entries(group_id: str) -> list[dict[str, Any]]:
 # Failover helper (stale desktop detection)
 # ---------------------------------------------------------------------------
 
+SERVERLESS_PENDING_TIMEOUT_SEC = 300  # 5 min without a poller → orphaned
+
 def _check_failover(group_id: str, tasks_raw: list[dict[str, Any]]) -> list[str]:
     """
-    Detect stale physical desktop machines and reassign their in-progress tasks.
+    Detect stale machines (desktop or serverless) and reassign their tasks.
     Returns list of newly created job IDs.
     """
     from datetime import datetime, timedelta, timezone
 
     cutoff = (
         datetime.now(timezone.utc) - timedelta(seconds=FAILOVER_STALE_SECONDS)
+    ).isoformat()
+    serverless_cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=SERVERLESS_PENDING_TIMEOUT_SEC)
     ).isoformat()
     new_job_ids: list[str] = []
 
@@ -162,14 +167,50 @@ def _check_failover(group_id: str, tasks_raw: list[dict[str, Any]]) -> list[str]
         if m
     }
 
+    # Detect orphaned serverless jobs: "pending" for too long means dispatch
+    # failed without marking the job, or the poller thread never started.
+    for task in tasks_raw:
+        if task["status"] not in ("pending", "running"):
+            continue
+        machine = machines_map.get(task["machine_id"])
+        if not machine or not is_serverless(machine.get("machine_type", "")):
+            continue
+
+        # Serverless "running" job with all frames rendered → mark done
+        total = task.get("total_frames") or 0
+        rendered = task.get("rendered_frames") or 0
+        if task["status"] == "running" and total > 0 and rendered >= total:
+            log.info(
+                f"Serverless job {task['id']} has {rendered}/{total} frames "
+                f"rendered but still 'running' — marking done"
+            )
+            execute(
+                "UPDATE jobs SET status = 'done', completed_at = %s, "
+                "rendered_frames = %s WHERE id = %s",
+                (now_iso(), total, task["id"]),
+            )
+            continue
+
+        # Serverless "pending" for too long → dispatch failed silently
+        if task["status"] == "pending":
+            submitted = task.get("submitted_at") or ""
+            if not submitted or submitted >= serverless_cutoff:
+                continue
+            log.warning(
+                f"Serverless job {task['id']} stuck in 'pending' since {submitted} — "
+                f"marking failed (dispatch likely failed silently)"
+            )
+            execute(
+                "UPDATE jobs SET status = 'failed', error = %s, completed_at = %s WHERE id = %s",
+                ("Dispatch timed out — no instance was created", now_iso(), task["id"]),
+            )
+
     for task in tasks_raw:
         if task["status"] != "running":
             continue
         machine = machines_map.get(task["machine_id"])
         if not machine:
             continue
-        # Serverless providers (Vast, RunPod, Modal) manage their own lifecycle
-        # via polling threads — they don't heartbeat, so last_seen_at is always stale.
         if is_serverless(machine.get("machine_type", "")):
             continue
         if (machine.get("last_seen_at") or "") >= cutoff:
@@ -247,6 +288,115 @@ def _check_failover(group_id: str, tasks_raw: list[dict[str, Any]]) -> list[str]
                     )
                 except Exception as exc:
                     log.error(f"Failover dispatch failed for {new_job_id}: {exc}")
+
+    # Retry failed serverless jobs that still have unrendered frames.
+    # Build a set of frame ranges already covered by non-failed jobs so we
+    # don't create duplicate retries, and count failures per range to cap retries.
+    SERVERLESS_MAX_RETRIES = 5
+
+    covered_ranges: set[tuple[int, int]] = set()
+    failed_range_counts: dict[tuple[int, int], int] = {}
+    for t in tasks_raw:
+        rng = (t["frame_start"], t["frame_end"])
+        if t["status"] == "failed":
+            failed_range_counts[rng] = failed_range_counts.get(rng, 0) + 1
+        else:
+            covered_ranges.add(rng)
+
+    group_row = None  # lazy-loaded if needed
+
+    for task in tasks_raw:
+        if task["status"] != "failed":
+            continue
+        machine = machines_map.get(task["machine_id"])
+        if not machine or not is_serverless(machine.get("machine_type", "")):
+            continue
+
+        rendered = max(0, task.get("rendered_frames") or 0)
+        step = task.get("frame_step") or 1
+        new_start = task["frame_start"] + rendered * step
+        new_end = task["frame_end"]
+        if new_start > new_end:
+            continue
+
+        if (new_start, new_end) in covered_ranges:
+            continue
+
+        rng = (task["frame_start"], task["frame_end"])
+        if failed_range_counts.get(rng, 0) >= SERVERLESS_MAX_RETRIES:
+            continue
+
+        best_machine_id = choose_retry_machine(group_id, task["machine_id"])
+        if not best_machine_id:
+            continue
+        best_machine = query_one("SELECT * FROM machines WHERE id = %s", (best_machine_id,))
+        if not best_machine:
+            continue
+
+        new_job_id = str(uuid4())
+        new_total = ((new_end - new_start) // step) + 1
+        execute(
+            """
+            INSERT INTO jobs (
+                id, machine_id, group_id, input_filename, status,
+                total_frames, rendered_frames, output_files,
+                frame_start, frame_end, frame_step,
+                render_overrides_json, attempt, max_retries, priority,
+                chunk_index, chunk_size_frames, submitted_at
+            )
+            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                new_job_id, best_machine["id"], group_id,
+                task["input_filename"], new_total,
+                new_start, new_end, step,
+                task.get("render_overrides_json") or "{}",
+                (task.get("attempt") or 0) + 1, task.get("max_retries") or 0,
+                task.get("priority") or 0,
+                task.get("chunk_index"), task.get("chunk_size_frames"),
+                now_iso(),
+            ),
+        )
+        new_job_ids.append(new_job_id)
+        covered_ranges.add((new_start, new_end))
+
+        best_machine_type = best_machine.get("machine_type", "windows")
+        if is_serverless(best_machine_type):
+            if group_row is None:
+                group_row = query_one(
+                    "SELECT * FROM render_groups WHERE id = %s", (group_id,)
+                )
+            if group_row:
+                from services import runpod_dispatch
+                blend_url = (
+                    f"{runpod_dispatch.PUBLIC_BACKEND_URL}"
+                    f"/render-groups/{group_id}/input/{group_row['input_filename']}"
+                )
+                overrides_b64 = base64.b64encode(
+                    (task.get("render_overrides_json") or "{}").encode()
+                ).decode()
+                try:
+                    coordinator.dispatch(
+                        job_id=new_job_id,
+                        machine_id=best_machine["id"],
+                        machine_type=best_machine_type,
+                        blend_url=blend_url,
+                        frame_start=new_start,
+                        frame_end=new_end,
+                        frame_step=step,
+                        render_overrides_b64=overrides_b64,
+                        group_id=group_id,
+                    )
+                except Exception as exc:
+                    log.error(f"Serverless retry dispatch failed for {new_job_id}: {exc}")
+                    execute(
+                        "UPDATE jobs SET status = 'failed', error = %s, completed_at = %s WHERE id = %s",
+                        (f"Retry dispatch failed: {exc}", now_iso(), new_job_id),
+                    )
+        log.info(
+            f"Created serverless retry job {new_job_id} for failed {task['id']} "
+            f"(frames {new_start}-{new_end} on {best_machine.get('gpu_model', '?')})"
+        )
 
     return new_job_ids
 
@@ -862,6 +1012,10 @@ def confirm_render_group_upload(
                 )
             except Exception as exc:
                 log.error(f"Failed to dispatch job {task['job_id']} to Modal: {exc}")
+                execute(
+                    "UPDATE jobs SET status = 'failed', error = %s, completed_at = %s WHERE id = %s",
+                    (f"Dispatch failed: {exc}", now_iso(), task["job_id"]),
+                )
 
         for i, task in enumerate(modal_tasks):
             if i > 0:
@@ -899,16 +1053,21 @@ def confirm_render_group_upload(
                 )
             except Exception as exc:
                 log.error(f"Failed to dispatch job {task['job_id']} to Vast.ai: {exc}")
+                execute(
+                    "UPDATE jobs SET status = 'failed', error = %s, completed_at = %s WHERE id = %s",
+                    (f"Dispatch failed: {exc}", now_iso(), task["job_id"]),
+                )
 
-        for i, task in enumerate(vast_tasks):
-            if i > 0:
-                time.sleep(0.05)
-            threading.Thread(
-                target=_dispatch_vast,
-                args=(task,),
-                daemon=True,
-                name=f"vast-dispatch-{task['job_id'][:8]}",
-            ).start()
+        def _dispatch_vast_sequential():
+            for task in vast_tasks:
+                _dispatch_vast(task)
+                time.sleep(2)
+
+        threading.Thread(
+            target=_dispatch_vast_sequential,
+            daemon=True,
+            name=f"vast-dispatch-group-{group_id[:8]}",
+        ).start()
 
     try:
         write_render_group_record(current_user["uid"], group_id, {

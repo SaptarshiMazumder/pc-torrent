@@ -610,6 +610,25 @@ def update_job_progress(
     return {"success": True}
 
 
+@router.put("/jobs/{job_id}/heartbeat")
+def job_heartbeat(job_id: str, body: dict = Body(...)) -> dict[str, bool]:
+    """Accept a liveness heartbeat from a worker process.
+
+    Workers call this every ~10 s with ``{"phase": "<current_phase>"}``.
+    The server stores the timestamp so the Vast poller can detect workers
+    that have silently stalled (container running but process dead).
+    """
+    job = query_one("SELECT id, status FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    phase = str(body.get("phase", "unknown"))[:64]
+    execute(
+        "UPDATE jobs SET last_heartbeat_at = %s, heartbeat_phase = %s WHERE id = %s",
+        (now_iso(), phase, job_id),
+    )
+    return {"success": True}
+
+
 @router.put("/jobs/{job_id}/status")
 def update_job_status(
     job_id: str, payload: UpdateJobStatusPayload

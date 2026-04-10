@@ -434,3 +434,7 @@ export async function getJobOutputs(baseUrl, jobId) {
 export async function cancelRenderGroup(baseUrl, groupId) {
   return apiFetch(baseUrl, `/render-groups/${groupId}/cancel`, { method: "POST" });
 }
+
+export async function getVastInstances(baseUrl) {
+  return apiFetch(baseUrl, "/vast/instances");
+}

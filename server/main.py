@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from infrastructure.db import init_db, query_all
 from services import runpod_autoscaler, runpod_dispatch, modal_dispatch, vast_dispatch
-from api.routers import health, logs, machines, jobs, render_groups, assets, docker
+from api.routers import health, logs, machines, jobs, render_groups, assets, docker, vast
 from api.routers.logs import setup_log_broadcast
 
 app = FastAPI(title="PC Rent Server")
@@ -37,6 +37,7 @@ def _startup():
     modal_dispatch.start_heartbeat_thread()
     vast_dispatch.register_virtual_machines()
     vast_dispatch.start_heartbeat_thread()
+    vast_dispatch.recover_polling_threads()
 
     # Autoscaler: configure, start cold (min_workers=0), then run safety sweep
     endpoint_ids = [ep["id"] for ep in runpod_dispatch.ENDPOINTS]
@@ -56,3 +57,4 @@ app.include_router(jobs.router)
 app.include_router(render_groups.router)
 app.include_router(assets.router)
 app.include_router(docker.router)
+app.include_router(vast.router)

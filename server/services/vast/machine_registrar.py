@@ -56,29 +56,36 @@ class MachineRegistrar:
                     """
                     UPDATE machines
                     SET gpu_model = %s, gpu_vram_gb = %s, cpu_cores = %s, ram_gb = %s,
-                        os_version = %s, machine_type = %s,
+                        os_version = %s, machine_type = %s, render_speed = %s,
                         status = 'available', last_seen_at = %s
                     WHERE id = %s
                     """,
                     (ep.label, ep.vram_gb, self._cfg.cpu_cores, self._cfg.ram_gb,
-                     "Linux", "vast_serverless", now, machine_id),
+                     "Linux", "vast_serverless", ep.render_speed, now, machine_id),
                 )
-                log.info(f"Vast.ai endpoint '{ep.gpu_name}' updated: {machine_id} ({ep.label}, {ep.vram_gb}GB)")
+                log.info(
+                    f"Vast.ai endpoint '{ep.gpu_name}' updated: {machine_id} "
+                    f"({ep.label}, {ep.vram_gb}GB, speed={ep.render_speed})"
+                )
             else:
                 machine_id = str(uuid4())
                 execute(
                     """
                     INSERT INTO machines (
                         id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb,
-                        os_version, machine_type, status, registered_at, last_seen_at
+                        os_version, machine_type, render_speed,
+                        status, registered_at, last_seen_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'available', %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'available', %s, %s)
                     """,
                     (machine_id, machine_key,
                      ep.label, ep.vram_gb, self._cfg.cpu_cores, self._cfg.ram_gb,
-                     "Linux", "vast_serverless", now, now),
+                     "Linux", "vast_serverless", ep.render_speed, now, now),
                 )
-                log.info(f"Vast.ai endpoint '{ep.gpu_name}' registered: {machine_id} ({ep.label}, {ep.vram_gb}GB)")
+                log.info(
+                    f"Vast.ai endpoint '{ep.gpu_name}' registered: {machine_id} "
+                    f"({ep.label}, {ep.vram_gb}GB, speed={ep.render_speed})"
+                )
 
             self._machine_endpoint_map[machine_id] = ep.gpu_name
             machine_ids.append(machine_id)

@@ -43,7 +43,10 @@ function InstanceCard({ task, live }) {
   }, [live?.logs, showLogs]);
 
   // What we always know from the task (DB data via group status API)
-  const gpuLabel   = task.machine_gpu || "Vast GPU";
+  const liveVram = live?.gpu_vram_gb ? `${Math.round(live.gpu_vram_gb)}GB` : "";
+  const gpuLabel = live?.gpu_model
+    ? `Vast ${live.gpu_model} ${liveVram}`.trim()
+    : (task.machine_gpu || "Vast GPU");
   const jobStatus  = task.status;
   const frameStart = task.frame_start;
   const frameEnd   = task.frame_end;

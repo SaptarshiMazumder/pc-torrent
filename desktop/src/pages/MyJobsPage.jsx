@@ -5,6 +5,7 @@ import {
   getFirebaseToken,
   getRenderGroupOutputs,
   getJobOutputs,
+  rerenderGroup,
 } from "../lib/api";
 import { downloadJobOutputToDownloads, cacheViewerFrame } from "../lib/sidecar";
 import SegmentedProgressBar from "../components/SegmentedProgressBar";
@@ -89,9 +90,10 @@ function summarizeDownloadActions(actions) {
 // Persists download results across page navigations (component unmounts/remounts)
 const _downloadResultsStore = {};
 
-export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh }) {
+export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onReRenderSubmitted }) {
   const [downloadingId, setDownloadingId] = useState(null);
   const [downloadResults, _setDownloadResults] = useState(() => ({ ..._downloadResultsStore }));
+  const [reRenderTarget, setReRenderTarget] = useState(null);
 
   // Wrap setter to also write through to the module-level store
   const setDownloadResults = useCallback((updater) => {
@@ -414,6 +416,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
                     void handleOpenFrame(job, file);
                   }}
                   onRemove={() => removeJob(id)}
+                  onReRender={() => setReRenderTarget(job)}
                 />
               );
             }
@@ -452,6 +455,25 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
           onClose={() => setFrameViewer(null)}
         />
       )}
+
+      {reRenderTarget && (
+        <ReRenderModal
+          job={reRenderTarget}
+          backendUrl={backendUrl}
+          onClose={() => setReRenderTarget(null)}
+          onSubmitted={(result) => {
+            setReRenderTarget(null);
+            if (onReRenderSubmitted && result) {
+              onReRenderSubmitted(
+                result.group_id,
+                result.input_filename,
+                result.tasks,
+                result.total_frames,
+              );
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -471,6 +493,7 @@ function RenderGroupCard({
   onToggleGallery,
   onOpenFrame,
   onRemove,
+  onReRender,
 }) {
   const id = job.group_id;
   const isTerminal = isTerminalStatus(job.status);
@@ -635,6 +658,9 @@ function RenderGroupCard({
                 : "Download Available"}
             </button>
           )}
+          <button className="btn btn-secondary" onClick={onReRender}>
+            Re-render
+          </button>
           <button className="btn btn-secondary" onClick={onRemove}>
             Remove
           </button>
@@ -904,6 +930,131 @@ function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenF
     </div>
   );
 }
+
+function ReRenderModal({ job, backendUrl, onClose, onSubmitted }) {
+  const [frameStart, setFrameStart] = useState(job.frame_start ?? 1);
+  const [frameEnd, setFrameEnd] = useState(job.frame_end ?? 100);
+  const [frameStep, setFrameStep] = useState(job.frame_step ?? 1);
+  const [camera, setCamera] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async () => {
+    if (frameStart > frameEnd) {
+      setError("Frame start must be ≤ frame end");
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      const result = await rerenderGroup(backendUrl, job.group_id, {
+        frameStart,
+        frameEnd,
+        frameStep: Math.max(1, frameStep),
+        camera: camera.trim() || null,
+      });
+      onSubmitted(result);
+    } catch (err) {
+      setError(err?.message || "Re-render failed");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const totalFrames = frameEnd >= frameStart
+    ? Math.floor((frameEnd - frameStart) / Math.max(1, frameStep)) + 1
+    : 0;
+
+  return (
+    <div className="frame-viewer-modal" onClick={onClose}>
+      <div
+        className="frame-viewer-card"
+        style={{ maxWidth: 480, width: "90%" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="frame-viewer-head">
+          <strong>Re-render: {resolveJobFilename(job)}</strong>
+          <button className="btn btn-secondary" type="button" onClick={onClose}>Close</button>
+        </div>
+
+        <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", gap: 12 }}>
+            <label style={{ flex: 1 }}>
+              <span style={{ fontSize: 12, color: "#9ca3af", display: "block", marginBottom: 4 }}>Frame Start</span>
+              <input
+                type="number"
+                className="input"
+                value={frameStart}
+                onChange={(e) => setFrameStart(Number(e.target.value))}
+                style={{ width: "100%" }}
+              />
+            </label>
+            <label style={{ flex: 1 }}>
+              <span style={{ fontSize: 12, color: "#9ca3af", display: "block", marginBottom: 4 }}>Frame End</span>
+              <input
+                type="number"
+                className="input"
+                value={frameEnd}
+                onChange={(e) => setFrameEnd(Number(e.target.value))}
+                style={{ width: "100%" }}
+              />
+            </label>
+            <label style={{ flex: 0.6 }}>
+              <span style={{ fontSize: 12, color: "#9ca3af", display: "block", marginBottom: 4 }}>Step</span>
+              <input
+                type="number"
+                className="input"
+                value={frameStep}
+                min={1}
+                onChange={(e) => setFrameStep(Number(e.target.value))}
+                style={{ width: "100%" }}
+              />
+            </label>
+          </div>
+
+          <label>
+            <span style={{ fontSize: 12, color: "#9ca3af", display: "block", marginBottom: 4 }}>
+              Camera (optional — leave blank for scene default)
+            </span>
+            <input
+              type="text"
+              className="input"
+              value={camera}
+              onChange={(e) => setCamera(e.target.value)}
+              placeholder="e.g. Camera.002"
+              style={{ width: "100%" }}
+            />
+          </label>
+
+          <div style={{ fontSize: 12, color: "#6b7280" }}>
+            {totalFrames > 0
+              ? `${totalFrames} frame${totalFrames !== 1 ? "s" : ""} will be rendered`
+              : "Invalid frame range"}
+          </div>
+
+          {error && (
+            <div className="rentee-job-error" style={{ margin: 0 }}>{error}</div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button className="btn btn-secondary" type="button" onClick={onClose} disabled={submitting}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              type="button"
+              onClick={handleSubmit}
+              disabled={submitting || totalFrames <= 0}
+            >
+              {submitting ? "Submitting..." : "Start Re-render"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function FrameViewerModal({ viewer, onClose }) {
   const [scale, setScale] = useState(1);

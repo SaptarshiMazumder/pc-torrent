@@ -393,10 +393,13 @@ class InstancePoller:
             self._prev_actual_status = actual_status
 
         local_status = job["status"]
+        gpu_ram_mb = inst.get("gpu_ram") or 0
+        gpu_vram_gb = round(gpu_ram_mb / 1024, 1) if gpu_ram_mb > 100 else gpu_ram_mb
         update: dict = {
             "actual_status": actual_status,
             "job_status": local_status,
             "gpu_model": inst.get("gpu_name") or inst.get("gpu_display_model"),
+            "gpu_vram_gb": gpu_vram_gb,
             "dph_total": inst.get("dph_total"),
             "rendered_frames": job.get("rendered_frames") or 0,
             "total_frames": job.get("total_frames"),

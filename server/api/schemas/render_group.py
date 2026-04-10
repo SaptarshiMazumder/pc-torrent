@@ -19,6 +19,14 @@ class ConfirmRenderGroupPayload(BaseModel):
     analysis_snapshot: dict[str, Any] | None = None
 
 
+class ReRenderPayload(BaseModel):
+    frame_start: int
+    frame_end: int
+    frame_step: int = 1
+    camera: str | None = None
+    render_overrides: dict[str, Any] | None = None
+
+
 class UpdateInputFilePayload(BaseModel):
     display_name: str
 

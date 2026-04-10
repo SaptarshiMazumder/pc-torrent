@@ -9,6 +9,7 @@ import {
 import { downloadJobOutputToDownloads, cacheViewerFrame } from "../lib/sidecar";
 import SegmentedProgressBar from "../components/SegmentedProgressBar";
 import FrameThumb from "../components/FrameThumb";
+import VastInstancePanel from "../components/VastInstancePanel";
 
 const STATUS_LABELS = {
   pending: "Pending",
@@ -632,6 +633,9 @@ function RenderGroupCard({
           </button>
         </div>
       </div>
+
+      {/* Vast.ai live instance monitoring */}
+      <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
 
       {galleryOpen && (
         <FrameGalleryPanel

@@ -26,11 +26,14 @@ function gpuShortName(name) {
 export default function SegmentedProgressBar({ tasks, totalFrames }) {
   if (!tasks || tasks.length === 0 || !totalFrames) return null;
 
+  const activeTasks = tasks.filter((t) => t.status !== "failed");
+  if (activeTasks.length === 0) return null;
+
   return (
     <div className="segmented-progress-wrap">
       {/* The bar itself */}
       <div className="segmented-progress-track">
-        {tasks.map((task, i) => {
+        {activeTasks.map((task, i) => {
           const segWidth =
             totalFrames > 0 ? (task.total_frames / totalFrames) * 100 : 0;
           const fillPct =
@@ -69,7 +72,7 @@ export default function SegmentedProgressBar({ tasks, totalFrames }) {
 
       {/* Per-machine labels */}
       <div className="segmented-progress-labels">
-        {tasks.map((task, i) => {
+        {activeTasks.map((task, i) => {
           const color = SEGMENT_COLORS[i % SEGMENT_COLORS.length];
           const pct =
             task.status === "done"

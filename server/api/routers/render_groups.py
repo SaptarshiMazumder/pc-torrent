@@ -97,6 +97,7 @@ def _serialize_render_group_task(
         "job_id": job["id"],
         "runpod_job_id": job.get("runpod_job_id"),
         "machine_id": job["machine_id"],
+        "machine_type": machine.get("machine_type", "windows") if machine else "windows",
         "machine_gpu": machine["gpu_model"] if machine else "Unknown",
         "machine_vram": machine.get("gpu_vram_gb", 0) if machine else 0,
         "frame_start": job.get("frame_start"),

@@ -1,8 +1,8 @@
-import GpuInfoCard from "../components/GpuInfoCard";
-import ConnectButton from "../components/ConnectButton";
-import StatusIndicator from "../components/StatusIndicator";
-import JobCard from "../components/JobCard";
-import RuntimeCard from "../components/RuntimeCard";
+import GpuInfoCard from "../components/dashboard/GpuInfoCard";
+import ConnectButton from "../components/dashboard/ConnectButton";
+import StatusIndicator from "../components/common/StatusIndicator";
+import JobCard from "../components/dashboard/JobCard";
+import RuntimeCard from "../components/dashboard/RuntimeCard";
 
 export default function DashboardPage({
   status,

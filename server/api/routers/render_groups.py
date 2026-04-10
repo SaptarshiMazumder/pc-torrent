@@ -804,7 +804,8 @@ def confirm_render_group_upload(
         })
 
     # Dispatch serverless tasks
-    from services import runpod_dispatch, modal_dispatch, vast_dispatch
+    from services import runpod_dispatch, modal_dispatch
+    from services import vast as vast_dispatch
 
     overrides_b64 = base64.b64encode(overrides_json.encode()).decode()
     blend_url_base = (

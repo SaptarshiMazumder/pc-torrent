@@ -79,7 +79,11 @@ function buildAuthenticatedUrl(baseUrl, path, token, cacheBuster = null) {
 }
 
 function summarizeDownloadActions(actions) {
-  return `${actions.downloaded || 0} new, ${actions.overwritten || 0} updated, ${actions.skipped || 0} skipped`;
+  const parts = [];
+  if (actions.downloaded) parts.push(`${actions.downloaded} downloaded`);
+  if (actions.skipped) parts.push(`${actions.skipped} already had`);
+  if (actions.failed) parts.push(`${actions.failed} failed`);
+  return parts.join(", ") || "done";
 }
 
 // Persists download results across page navigations (component unmounts/remounts)
@@ -153,7 +157,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
       if (files.length === 0) throw new Error("No output files found");
 
       let lastPath = "";
-      const stats = { downloaded: 0, overwritten: 0, skipped: 0 };
+      const stats = { downloaded: 0, skipped: 0, failed: 0 };
       for (let i = 0; i < files.length; i++) {
         const { filename, url: fileUrl, size_bytes: sizeBytes } = files[i];
         setDownloadResults((prev) => ({
@@ -166,17 +170,20 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
             summary: summarizeDownloadActions(stats),
           },
         }));
-        const result = await downloadJobOutputToDownloads(fileUrl, {
-          jobFolder,
-          preferredFilename: filename,
-          expectedSizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
-          overwriteExisting: true,
-        });
-        const action = String(result?.action || "downloaded");
-        if (action === "overwritten") stats.overwritten += 1;
-        else if (action === "skipped") stats.skipped += 1;
-        else stats.downloaded += 1;
-        lastPath = result.path.replace(/[^\\/]+$/, ""); // folder path
+        try {
+          const result = await downloadJobOutputToDownloads(fileUrl, {
+            jobFolder,
+            preferredFilename: filename,
+            expectedSizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
+            overwriteExisting: false, // skip if already downloaded with matching size
+          });
+          const action = String(result?.action || "downloaded");
+          if (action === "skipped") stats.skipped += 1;
+          else stats.downloaded += 1;
+          if (result?.path) lastPath = result.path.replace(/[^\\/]+$/, "");
+        } catch {
+          stats.failed += 1;
+        }
       }
 
       setDownloadResults((prev) => ({

@@ -10,8 +10,8 @@ class VastStrategy:
         return "vast_serverless"
 
     def is_enabled(self) -> bool:
-        from services import vast_dispatch
-        return vast_dispatch.is_enabled()
+        from services import vast
+        return vast.is_enabled()
 
     def dispatch(
         self,
@@ -25,9 +25,9 @@ class VastStrategy:
         render_overrides_b64: str,
         group_id: str,
     ) -> None:
-        from services import vast_dispatch
+        from services import vast
 
-        instance_id = vast_dispatch.dispatch_and_save(
+        instance_id = vast.dispatch_and_save(
             job_id=job_id,
             blend_url=blend_url,
             frame_start=frame_start,
@@ -36,7 +36,7 @@ class VastStrategy:
             render_overrides_b64=render_overrides_b64,
             machine_id=machine_id,
         )
-        vast_dispatch.start_polling_thread(
+        vast.start_polling_thread(
             job_id=job_id,
             instance_id=instance_id,
             machine_id=machine_id,
@@ -46,13 +46,13 @@ class VastStrategy:
         )
 
     def cancel(self, provider_job_id: str, machine_id: str) -> None:
-        from services import vast_dispatch
-        vast_dispatch.cancel_job(provider_job_id, machine_id)
+        from services import vast
+        vast.cancel_job(provider_job_id, machine_id)
 
     @property
     def workers_per_endpoint(self) -> int:
-        from services import vast_dispatch
-        return vast_dispatch.VAST_WORKERS_PER_ENDPOINT
+        from services import vast
+        return vast.VAST_WORKERS_PER_ENDPOINT
 
     @property
     def min_frames_per_instance(self) -> int:

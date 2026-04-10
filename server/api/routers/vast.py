@@ -19,5 +19,5 @@ def list_vast_instances() -> list[dict]:
     total_frames, frame_start, frame_end, elapsed_sec, started_at,
     last_poll_at, logs, error, status_history.
     """
-    from services.vast_dispatch import get_instance_states
+    from services.vast import get_instance_states
     return get_instance_states()

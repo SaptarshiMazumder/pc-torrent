@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { listJobs, listRenderGroups, getJob, getRenderGroup } from "../lib/api";
+import { listJobs, listRenderGroups, getJob, getRenderGroup, deleteJob, deleteRenderGroup } from "../lib/api";
 
 const POLL_INTERVAL = 3000;
 
@@ -174,7 +174,19 @@ export function useJobs(backendUrl) {
     ]);
   }, []);
 
-  const removeJob = useCallback((id) => {
+  const removeJob = useCallback(async (id) => {
+    const url = backendUrlRef.current;
+    const job = jobsRef.current.find((j) => (j.group_id || j.job_id) === id);
+    try {
+      if (job?.group_id) {
+        await deleteRenderGroup(url, job.group_id);
+      } else if (job?.job_id) {
+        await deleteJob(url, job.job_id);
+      }
+    } catch {
+      // If the backend rejects (e.g. job still active), don't remove from UI
+      return;
+    }
     setJobs((prev) => prev.filter((j) => (j.group_id || j.job_id) !== id));
   }, []);
 

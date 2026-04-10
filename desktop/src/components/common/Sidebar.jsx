@@ -4,10 +4,10 @@ const STATUS_COLORS = {
   paused: "#f59e0b",
   error: "#ef4444",
   disconnected: "#6b7280",
-  checking_requirements: "#a78bfa",
-  setting_up_docker: "#a78bfa",
-  downloading_image: "#a78bfa",
-  registering: "#a78bfa",
+  checking_requirements: "#f5a623",
+  setting_up_docker: "#f5a623",
+  downloading_image: "#f5a623",
+  registering: "#f5a623",
   needs_reboot: "#f59e0b",
 };
 
@@ -19,13 +19,14 @@ const RENTER_PAGES = [
 const RENTEE_PAGES = [
   { id: "create", label: "Create Render", icon: "\u25CE" },
   { id: "myjobs", label: "My Jobs", icon: "\u25A4" },
+  { id: "downloads", label: "Downloads", icon: "\u2913" },
   { id: "available", label: "Available Machines", icon: "\u2394" },
   { id: "logs", label: "Logs", icon: "\u2630" },
 ];
 
 import { useAuth } from "../../contexts/AuthContext";
 
-export default function Sidebar({ activePage, onNavigate, status, mode, onModeChange }) {
+export default function Sidebar({ activePage, onNavigate, status, mode, onModeChange, activeDownloadCount = 0 }) {
   const { user, signOut } = useAuth();
   const pages = mode === "renter" ? RENTER_PAGES : RENTEE_PAGES;
   const dotColor = STATUS_COLORS[status] || "#6b7280";
@@ -57,6 +58,9 @@ export default function Sidebar({ activePage, onNavigate, status, mode, onModeCh
           >
             <span className="nav-icon">{page.icon}</span>
             <span className="nav-label">{page.label}</span>
+            {page.id === "downloads" && activeDownloadCount > 0 && (
+              <span className="nav-badge">{activeDownloadCount}</span>
+            )}
           </button>
         ))}
 

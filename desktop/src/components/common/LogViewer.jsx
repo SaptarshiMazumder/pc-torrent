@@ -7,9 +7,9 @@ const LEVEL_COLORS = {
 };
 
 const SOURCE_COLORS = {
-  agent: "#6c63ff",
+  agent: "#e8724a",
   container: "#22c55e",
-  setup: "#a78bfa",
+  setup: "#f5a623",
   app: "#3b82f6",
 };
 

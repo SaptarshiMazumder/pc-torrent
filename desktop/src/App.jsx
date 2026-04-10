@@ -5,11 +5,13 @@ import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 import CreateRenderPage from "./pages/CreateRenderPage";
 import MyJobsPage from "./pages/MyJobsPage";
+import DownloadsPage from "./pages/DownloadsPage";
 import AvailableMachinesPage from "./pages/AvailableMachinesPage";
 import LoginPage from "./components/common/LoginPage";
 import { useAgent } from "./hooks/useAgent";
 import { useJobs } from "./hooks/useJobs";
 import { useAuth } from "./contexts/AuthContext";
+import { useDownloads } from "./contexts/DownloadContext";
 
 const DEFAULT_PAGES = { renter: "dashboard", rentee: "create" };
 
@@ -26,6 +28,8 @@ export default function App() {
 
   const agent = useAgent(user && mode === "renter" ? backendUrl : null);
   const jobsHook = useJobs(user ? backendUrl : null);
+  const { downloads } = useDownloads();
+  const activeDownloadCount = Object.values(downloads).filter((d) => d.status === "loading").length;
 
   const handleModeChange = useCallback(
     (newMode) => {
@@ -56,6 +60,7 @@ export default function App() {
         status={agent.status}
         mode={mode}
         onModeChange={handleModeChange}
+        activeDownloadCount={activeDownloadCount}
       />
       <main className="main-content">
         {/* Renter pages */}
@@ -95,7 +100,11 @@ export default function App() {
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
             onRefresh={jobsHook.refresh}
             onReRender={(job) => { setReRenderSource(job); setPage("create"); }}
+            onNavigate={setPage}
           />
+        )}
+        {page === "downloads" && (
+          <DownloadsPage />
         )}
         {page === "available" && (
           <AvailableMachinesPage backendUrl={backendUrl} />

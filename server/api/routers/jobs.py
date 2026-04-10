@@ -471,6 +471,11 @@ def update_job_progress(
     )
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] == "pending":
+        # Worker sent progress before the 'running' status callback arrived (or it was dropped).
+        # Auto-transition so we don't lose the frame counts.
+        execute("UPDATE jobs SET status = 'running' WHERE id = %s", (job_id,))
+        job = {**job, "status": "running"}
     if job["status"] != "running":
         raise HTTPException(status_code=409, detail="Job is not running")
 

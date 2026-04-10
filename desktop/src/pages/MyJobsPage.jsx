@@ -6,7 +6,7 @@ import {
   getRenderGroupOutputs,
   getJobOutputs,
 } from "../lib/api";
-import { downloadJobOutputToDownloads } from "../lib/sidecar";
+import { downloadJobOutputToDownloads, cacheViewerFrame } from "../lib/sidecar";
 import SegmentedProgressBar from "../components/SegmentedProgressBar";
 import FrameThumb from "../components/FrameThumb";
 
@@ -81,9 +81,23 @@ function summarizeDownloadActions(actions) {
   return `${actions.downloaded || 0} new, ${actions.overwritten || 0} updated, ${actions.skipped || 0} skipped`;
 }
 
+// Persists download results across page navigations (component unmounts/remounts)
+const _downloadResultsStore = {};
+
 export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh }) {
   const [downloadingId, setDownloadingId] = useState(null);
-  const [downloadResults, setDownloadResults] = useState({});
+  const [downloadResults, _setDownloadResults] = useState(() => ({ ..._downloadResultsStore }));
+
+  // Wrap setter to also write through to the module-level store
+  const setDownloadResults = useCallback((updater) => {
+    _setDownloadResults((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      // Sync to persistent store
+      Object.keys(_downloadResultsStore).forEach((k) => delete _downloadResultsStore[k]);
+      Object.assign(_downloadResultsStore, next);
+      return next;
+    });
+  }, []);
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [openFrameGalleries, setOpenFrameGalleries] = useState({});
   const [frameGalleries, setFrameGalleries] = useState({});
@@ -257,7 +271,8 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
     const id = jobKey(job);
     if (!id || !file?.url || !file?.filename) return;
     const fileKey = `${id}:${file.job_id || ""}:${file.filename}`;
-    const jobFolder = buildDownloadFolderName(resolveJobFilename(job), id);
+    // Cache key scoped to job so same filename across jobs doesn't collide
+    const cacheKey = `${id}_${file.job_id || ""}_${file.filename}`;
     setOpeningFrameKey(fileKey);
     setFrameViewer({
       title: file.filename,
@@ -268,19 +283,18 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
       action: "",
     });
     try {
-      const result = await downloadJobOutputToDownloads(file.url, {
-        jobFolder,
-        preferredFilename: file.filename,
-        expectedSizeBytes: Number.isFinite(file.size_bytes) ? file.size_bytes : null,
-        overwriteExisting: true,
-      });
+      const localPath = await cacheViewerFrame(
+        file.url,
+        cacheKey,
+        Number.isFinite(file.size_bytes) ? file.size_bytes : null,
+      );
       setFrameViewer({
         title: file.filename,
         loading: false,
         error: "",
-        imageSrc: convertFileSrc(result.path),
-        localPath: result.path,
-        action: result?.action || "downloaded",
+        imageSrc: convertFileSrc(localPath),
+        localPath,
+        action: "cached",
       });
     } catch (error) {
       setFrameViewer({

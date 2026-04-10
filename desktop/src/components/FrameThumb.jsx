@@ -24,7 +24,9 @@ export default function FrameThumb({ file, backendUrl, className }) {
     let cancelled = false;
 
     async function load() {
-      try {
+      const cacheKey = `${file.job_id || "unknown"}/${file.filename}`;
+
+      async function attempt() {
         const token = await getFirebaseToken();
         if (cancelled) return;
 
@@ -36,11 +38,22 @@ export default function FrameThumb({ file, backendUrl, className }) {
         // cache-bust by size so stale caches get replaced when the file changes
         if (file.size_bytes != null) url.searchParams.set("v", String(file.size_bytes));
 
-        const cacheKey = `${file.job_id || "unknown"}/${file.filename}`;
-        const localUrl = await getCachedFramePreview(url.toString(), cacheKey);
+        return getCachedFramePreview(url.toString(), cacheKey);
+      }
+
+      try {
+        const localUrl = await attempt();
         if (!cancelled && mountedRef.current) setSrc(localUrl);
       } catch {
-        // Silently leave the tile blank — don't crash the gallery
+        // One retry after a short delay — handles transient server drops
+        await new Promise((r) => setTimeout(r, 1500));
+        if (cancelled) return;
+        try {
+          const localUrl = await attempt();
+          if (!cancelled && mountedRef.current) setSrc(localUrl);
+        } catch {
+          // Give up silently — leave the tile blank
+        }
       }
     }
 

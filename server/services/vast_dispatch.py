@@ -702,7 +702,10 @@ def start_polling_thread(
                         )
                         break
 
-                # Instance exited — worker should have called back already
+                # Instance exited — wait for the worker's final callback to land
+                # before declaring failure.  The callback travels over the network
+                # and may arrive seconds after the instance status flips to "exited",
+                # so we poll the DB for up to EXIT_CALLBACK_WAIT_SEC before giving up.
                 if actual_status in ("exited", "stopped", "offline"):
                     exit_code = inst.get("exit_code")
                     log.info(
@@ -711,16 +714,28 @@ def start_polling_thread(
                     )
                     destroy_instance(vast_instance_id)
 
-                    time.sleep(5)
-                    job = query_one(_JOB_QUERY, (job_id,))
-                    local_status = job["status"] if job else "unknown"
+                    EXIT_CALLBACK_WAIT_SEC = 60
+                    EXIT_POLL_SEC = 5
+                    local_status = "unknown"
+                    job = None
+                    for _ in range(max(1, EXIT_CALLBACK_WAIT_SEC // EXIT_POLL_SEC)):
+                        time.sleep(EXIT_POLL_SEC)
+                        job = query_one(_JOB_QUERY, (job_id,))
+                        local_status = job["status"] if job else "unknown"
+                        if local_status in ("done", "failed", "cancelled"):
+                            break
+                        log.debug(
+                            f"Job {job_id} still '{local_status}' after instance exit, "
+                            f"waiting for callback..."
+                        )
 
                     if local_status in ("done", "failed", "cancelled"):
-                        log.info(f"Job {job_id} already {local_status} after instance exit — OK")
+                        log.info(f"Job {job_id} is {local_status} after instance exit — OK")
                     else:
                         err = (
                             f"Vast.ai instance exited (status={actual_status}, "
-                            f"exit_code={exit_code}) but job not completed"
+                            f"exit_code={exit_code}) — callback did not arrive within "
+                            f"{EXIT_CALLBACK_WAIT_SEC}s"
                         )
                         log.warning(f"Job {job_id}: {err}")
                         if job:

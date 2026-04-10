@@ -91,6 +91,7 @@ export default function App() {
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
             onRefresh={jobsHook.refresh}
+            onReRenderSubmitted={handleJobSubmitted}
           />
         )}
         {page === "available" && (

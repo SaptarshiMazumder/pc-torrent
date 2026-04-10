@@ -34,7 +34,11 @@ from api.schemas.job import (
     MultipartInitPayload,
     MultipartPartUrlsPayload,
 )
-from api.schemas.render_group import ConfirmRenderGroupPayload, CreateRenderGroupPayload
+from api.schemas.render_group import (
+    ConfirmRenderGroupPayload,
+    CreateRenderGroupPayload,
+    ReRenderPayload,
+)
 from scheduling.frame_distributor import (
     choose_retry_machine,
     distribute_frames,
@@ -93,13 +97,24 @@ def _serialize_render_group_task(
         rendered_frames = min(rendered_frames, total_frames)
     output_files = parse_output_files(job.get("output_files"))
 
+    actual_gpu = job.get("actual_gpu_name")
+    actual_vram = job.get("actual_gpu_vram_gb")
+
+    if actual_gpu:
+        vram_suffix = f" {int(actual_vram)}GB" if actual_vram else ""
+        display_gpu = f"Vast {actual_gpu}{vram_suffix}"
+        display_vram = actual_vram or (machine.get("gpu_vram_gb", 0) if machine else 0)
+    else:
+        display_gpu = machine["gpu_model"] if machine else "Unknown"
+        display_vram = machine.get("gpu_vram_gb", 0) if machine else 0
+
     return {
         "job_id": job["id"],
         "runpod_job_id": job.get("runpod_job_id"),
         "machine_id": job["machine_id"],
         "machine_type": machine.get("machine_type", "windows") if machine else "windows",
-        "machine_gpu": machine["gpu_model"] if machine else "Unknown",
-        "machine_vram": machine.get("gpu_vram_gb", 0) if machine else 0,
+        "machine_gpu": display_gpu,
+        "machine_vram": display_vram,
         "frame_start": job.get("frame_start"),
         "frame_end": job.get("frame_end"),
         "frame_step": job.get("frame_step") or 1,
@@ -1288,3 +1303,201 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
     threading.Thread(target=_cancel_providers, daemon=True, name=f"cancel-{group_id[:8]}").start()
 
     return {"success": True, "cancelled_jobs": len(jobs)}
+
+
+# ---------------------------------------------------------------------------
+# Routes — re-render
+# ---------------------------------------------------------------------------
+
+@router.post("/render-groups/{group_id}/rerender")
+def rerender_group(
+    group_id: str,
+    payload: ReRenderPayload,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Create a new render group from an existing one with a custom frame range."""
+    original = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
+    if not original:
+        raise HTTPException(status_code=404, detail="Render group not found")
+    _ensure_owner(original, current_user)
+
+    r2_key = original["r2_input_key"]
+    if not storage.file_exists(r2_key):
+        raise HTTPException(status_code=400, detail="Original input file is no longer in storage")
+
+    frame_start = payload.frame_start
+    frame_end = payload.frame_end
+    frame_step = max(1, payload.frame_step)
+    total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
+    if total_frames <= 0:
+        raise HTTPException(status_code=400, detail="Invalid frame range")
+
+    base_overrides = parse_json_object(original.get("render_overrides_json"), {})
+    if payload.render_overrides:
+        base_overrides.update(payload.render_overrides)
+    if payload.camera:
+        base_overrides.setdefault("scene", {})["camera"] = payload.camera
+
+    render_overrides = normalize_render_overrides(base_overrides)
+    scheduling = normalize_scheduling(parse_json_object(original.get("scheduling_json"), {}))
+    analysis_snapshot = parse_json_object(original.get("analysis_snapshot_json"), {})
+    analysis_warnings = parse_json_list(original.get("analysis_warnings_json"), [])
+
+    new_group_id = str(uuid4())
+    now = now_iso()
+
+    execute(
+        """
+        INSERT INTO render_groups (
+            id, input_filename, r2_input_key, total_frames,
+            frame_start, frame_end, frame_step,
+            render_overrides_json, scheduling_json,
+            analysis_snapshot_json, analysis_warnings_json,
+            status, submitted_at, user_id, source_asset_id
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+        """,
+        (
+            new_group_id, original["input_filename"], r2_key,
+            total_frames, frame_start, frame_end, frame_step,
+            json.dumps(render_overrides), json.dumps(scheduling),
+            json.dumps(analysis_snapshot), json.dumps(analysis_warnings),
+            now, current_user["uid"], original.get("source_asset_id"),
+        ),
+    )
+
+    machines = get_available_machines()
+    if not machines:
+        raise HTTPException(
+            status_code=400, detail="No available machines right now. Try again shortly."
+        )
+
+    chunk_size_frames = scheduling.get("chunk_size_frames")
+    if chunk_size_frames:
+        assignments = distribute_frames_by_chunk_size(
+            frame_start=frame_start, frame_end=frame_end, frame_step=frame_step,
+            machines=machines, chunk_size_frames=chunk_size_frames,
+        )
+    else:
+        assignments = distribute_frames(total_frames, frame_start, frame_end, frame_step, machines)
+        for i, a in enumerate(assignments):
+            a["chunk_index"] = i
+            a["chunk_size_frames"] = None
+
+    assignments = expand_serverless_assignments(assignments)
+    for i, a in enumerate(assignments):
+        a["chunk_index"] = i
+
+    max_retries = scheduling.get("max_retries_per_chunk", 0)
+    priority = scheduling.get("priority", 0)
+    overrides_json = json.dumps(render_overrides)
+    tasks = []
+
+    for a in assignments:
+        job_id = str(uuid4())
+        execute(
+            """
+            INSERT INTO jobs (
+                id, machine_id, group_id, input_filename, status,
+                total_frames, rendered_frames, output_files,
+                frame_start, frame_end, frame_step,
+                render_overrides_json, attempt, max_retries, priority,
+                chunk_index, chunk_size_frames, submitted_at, user_id
+            )
+            VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]',
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                job_id, a["machine_id"], new_group_id, original["input_filename"],
+                a["total_frames"], a["frame_start"], a["frame_end"], a["frame_step"],
+                overrides_json, 0, max_retries, priority,
+                a.get("chunk_index"), a.get("chunk_size_frames"),
+                now, current_user["uid"],
+            ),
+        )
+        tasks.append({
+            "job_id": job_id,
+            "machine_id": a["machine_id"],
+            "machine_gpu": a["gpu_model"],
+            "machine_vram": a["gpu_vram_gb"],
+            "frame_start": a["frame_start"],
+            "frame_end": a["frame_end"],
+            "frame_step": a["frame_step"],
+            "total_frames": a["total_frames"],
+            "rendered_frames": 0,
+            "status": "pending",
+        })
+
+    # Dispatch serverless tasks in background
+    from services import vast as vast_dispatch
+    from services import runpod_dispatch
+
+    overrides_b64 = base64.b64encode(overrides_json.encode()).decode()
+    blend_url_base = (
+        f"{runpod_dispatch.PUBLIC_BACKEND_URL}"
+        f"/render-groups/{new_group_id}/input/{original['input_filename']}"
+    )
+
+    vast_strategy = get_strategy("vast_serverless")
+    if vast_strategy.is_enabled():
+        vast_blend_url = (
+            f"{vast_dispatch.PUBLIC_BACKEND_URL}"
+            f"/render-groups/{new_group_id}/input/{original['input_filename']}"
+        )
+        vast_tasks = [
+            t for t in tasks if _machine_type_of(t["machine_id"]) == "vast_serverless"
+        ]
+
+        def _dispatch_vast(task: dict):
+            try:
+                coordinator.dispatch(
+                    job_id=task["job_id"], machine_id=task["machine_id"],
+                    machine_type="vast_serverless", blend_url=vast_blend_url,
+                    frame_start=task["frame_start"], frame_end=task["frame_end"],
+                    frame_step=task["frame_step"],
+                    render_overrides_b64=overrides_b64, group_id=new_group_id,
+                )
+            except Exception as exc:
+                log.error(f"Re-render dispatch failed for job {task['job_id']}: {exc}")
+                execute(
+                    "UPDATE jobs SET status = 'failed', error = %s, completed_at = %s WHERE id = %s",
+                    (f"Dispatch failed: {exc}", now_iso(), task["job_id"]),
+                )
+
+        def _dispatch_vast_sequential():
+            for task in vast_tasks:
+                _dispatch_vast(task)
+                time.sleep(2)
+
+        if vast_tasks:
+            threading.Thread(
+                target=_dispatch_vast_sequential, daemon=True,
+                name=f"vast-rerender-{new_group_id[:8]}",
+            ).start()
+
+    try:
+        write_render_group_record(current_user["uid"], new_group_id, {
+            "group_id": new_group_id,
+            "filename": original["input_filename"],
+            "status": "pending",
+            "total_frames": total_frames,
+            "frame_start": frame_start,
+            "frame_end": frame_end,
+            "submitted_at": now,
+            "machine_count": len(tasks),
+        })
+    except Exception:
+        pass
+
+    return {
+        "group_id": new_group_id,
+        "status": "pending",
+        "input_filename": original["input_filename"],
+        "total_frames": total_frames,
+        "frame_start": frame_start,
+        "frame_end": frame_end,
+        "frame_step": frame_step,
+        "submitted_at": now,
+        "tasks": tasks,
+    }

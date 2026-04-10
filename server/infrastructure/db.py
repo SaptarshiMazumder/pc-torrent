@@ -278,5 +278,14 @@ def init_db():
 
                 ALTER TABLE render_groups
                 ADD COLUMN IF NOT EXISTS allowed_machine_types_json TEXT;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS actual_gpu_name TEXT;
+
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS actual_gpu_vram_gb REAL;
+
+                ALTER TABLE machines
+                ADD COLUMN IF NOT EXISTS render_speed REAL NOT NULL DEFAULT 1.0;
                 """
             )

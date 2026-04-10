@@ -11,6 +11,10 @@ python -m venv venv
 pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+Bash
+cd server/
+source venv/Scripts/activate
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ## Notes
 

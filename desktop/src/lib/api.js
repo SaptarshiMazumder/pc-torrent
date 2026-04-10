@@ -450,6 +450,14 @@ export async function rerenderGroup(baseUrl, groupId, { frameStart, frameEnd, fr
   });
 }
 
+export async function deleteJob(baseUrl, jobId) {
+  return apiFetch(baseUrl, `/jobs/${jobId}`, { method: "DELETE" });
+}
+
+export async function deleteRenderGroup(baseUrl, groupId) {
+  return apiFetch(baseUrl, `/render-groups/${groupId}`, { method: "DELETE" });
+}
+
 export async function getVastInstances(baseUrl) {
   return apiFetch(baseUrl, "/vast/instances");
 }

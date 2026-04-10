@@ -943,6 +943,24 @@ def list_job_outputs(
     return {"job_id": job_id, "status": job.get("status"), "files": entries, "count": len(entries)}
 
 
+@router.delete("/jobs/{job_id}")
+def delete_job(
+    job_id: str, current_user: dict = Depends(get_current_user)
+) -> dict[str, Any]:
+    job = query_one("SELECT * FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") and job["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if job["status"] not in ("done", "failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail="Only completed, failed, or cancelled jobs can be removed",
+        )
+    execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+    return {"success": True, "job_id": job_id}
+
+
 @router.get("/jobs/{job_id}/download")
 def download_job_output_archive(
     job_id: str, current_user: dict = Depends(get_current_user)

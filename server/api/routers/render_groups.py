@@ -1185,6 +1185,25 @@ def get_render_group(
         return _get_render_group_inner(group_id)
 
 
+@router.delete("/render-groups/{group_id}")
+def delete_render_group(
+    group_id: str, current_user: dict = Depends(get_current_user)
+) -> dict[str, Any]:
+    group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+    if group.get("user_id") and group["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if group["status"] not in ("done", "failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail="Only completed, failed, or cancelled render groups can be removed",
+        )
+    execute("DELETE FROM jobs WHERE group_id = %s", (group_id,))
+    execute("DELETE FROM render_groups WHERE id = %s", (group_id,))
+    return {"success": True, "group_id": group_id}
+
+
 @router.get("/render-groups/{group_id}/input/{filename}")
 def download_render_group_input_file(group_id: str, filename: str):
     group = query_one(

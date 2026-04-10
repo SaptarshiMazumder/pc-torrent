@@ -1,12 +1,12 @@
 import { useState, useCallback } from "react";
-import Sidebar from "./components/Sidebar";
+import Sidebar from "./components/common/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 import CreateRenderPage from "./pages/CreateRenderPage";
 import MyJobsPage from "./pages/MyJobsPage";
 import AvailableMachinesPage from "./pages/AvailableMachinesPage";
-import LoginPage from "./components/LoginPage";
+import LoginPage from "./components/common/LoginPage";
 import { useAgent } from "./hooks/useAgent";
 import { useJobs } from "./hooks/useJobs";
 import { useAuth } from "./contexts/AuthContext";

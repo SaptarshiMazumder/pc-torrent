@@ -1,6 +1,8 @@
 {
   "vast_instances": [
-    { "gpu_name": "RTX 4090", "label": "Vast RTX 4090 24GB" },
-    { "gpu_name": "RTX 3090", "label": "Vast RTX 3090 24GB" }
+    { "gpu_name": "A6000",     "label": "Vast RTX A6000 48GB",  "vram_gb": 48 },
+    { "gpu_name": "RTX A5000", "label": "Vast RTX A5000 24GB",  "vram_gb": 24 },
+    { "gpu_name": "RTX 4090",  "label": "Vast RTX 4090 24GB",   "vram_gb": 24 },
+    { "gpu_name": "RTX 3090",  "label": "Vast RTX 3090 24GB",   "vram_gb": 24 }
   ]
 }

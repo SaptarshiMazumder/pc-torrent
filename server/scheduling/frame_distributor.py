@@ -53,27 +53,54 @@ def filter_enabled_machines(machines: list[dict[str, Any]]) -> list[dict[str, An
 # Worker budget capping
 # ---------------------------------------------------------------------------
 
-def max_workers_for_frame_budget(total_frames: int, requested_workers: int) -> int:
-    """Cap workers so each gets at least MIN_FRAMES_PER_WORKER frames."""
+def max_workers_for_frame_budget(
+    total_frames: int,
+    requested_workers: int,
+    min_frames: int = MIN_FRAMES_PER_WORKER,
+) -> int:
+    """Cap workers so each gets at least min_frames frames."""
     if requested_workers <= 1:
         return 1
     if total_frames <= 0:
         return 1
-    return max(1, min(requested_workers, total_frames // MIN_FRAMES_PER_WORKER))
+    return max(1, min(requested_workers, total_frames // min_frames))
+
+
+def _min_frames_for_machine(machine: dict[str, Any]) -> int:
+    """Return the strategy's min_frames_per_instance for this machine."""
+    from scheduling.strategies import get_strategy
+    machine_type = machine.get("machine_type", "windows")
+    strategy = get_strategy(machine_type)
+    return getattr(strategy, "min_frames_per_instance", MIN_FRAMES_PER_WORKER)
 
 
 def limit_machines_for_frame_budget(
     machines: list[dict[str, Any]],
     total_frames: int,
 ) -> list[dict[str, Any]]:
-    """Keep only as many machines as the frame budget can justify."""
+    """Keep only as many machines as the frame budget can justify.
+
+    Each machine type declares its own min_frames_per_instance so that
+    paid cloud providers (Vast, RunPod) are not provisioned for tiny jobs.
+    Machines are ranked by power score; the highest-scoring ones are kept.
+    """
     if not machines:
         return []
-    allowed = max_workers_for_frame_budget(total_frames, len(machines))
-    if allowed >= len(machines):
-        return machines
+
     ranked = sorted(machines, key=compute_power_score, reverse=True)
-    return ranked[:allowed]
+
+    # Greedily add machines as long as the remaining frame budget supports them
+    kept: list[dict[str, Any]] = []
+    remaining = total_frames
+    for machine in ranked:
+        min_frames = _min_frames_for_machine(machine)
+        if remaining >= min_frames:
+            kept.append(machine)
+            remaining -= min_frames
+        # If we can't justify this machine, skip it (don't break — a cheaper
+        # machine later in the list might have a lower min_frames threshold)
+
+    return kept if kept else ranked[:1]  # always keep at least one
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +255,9 @@ def expand_serverless_assignments(
             expanded.append(a)
             continue
 
-        worker_count = max_workers_for_frame_budget(total_frames, effective_workers)
+        strategy = get_strategy(mt)
+        min_frames = getattr(strategy, "min_frames_per_instance", MIN_FRAMES_PER_WORKER)
+        worker_count = max_workers_for_frame_budget(total_frames, effective_workers, min_frames)
         if worker_count <= 1:
             expanded.append(a)
             continue

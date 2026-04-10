@@ -37,6 +37,10 @@ class ProvisionStrategy(Protocol):
         """Cancel a running job on this provider."""
         ...
 
+    def provider_job_id_from_job(self, job: dict[str, Any]) -> str | None:
+        """Return this provider's stored provider-job identifier for a DB job row."""
+        ...
+
     @property
     def workers_per_endpoint(self) -> int:
         """How many parallel workers to expand each assignment into."""

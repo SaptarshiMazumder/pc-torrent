@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import math
+import threading
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -29,6 +30,7 @@ from api.schemas.job import (
 )
 from scheduling.frame_distributor import choose_retry_machine
 from scheduling.dispatch_coordinator import coordinator
+from scheduling.strategies import get_strategy
 from domain.value_objects import (
     MAX_UPLOAD_BYTES,
     MULTIPART_DEFAULT_PART_SIZE_BYTES,
@@ -205,6 +207,114 @@ def _group_blocks_new_jobs(group_id: str) -> bool:
     if not row:
         return True
     return row["status"] in {"cancelled", "failed", "done"}
+
+
+def _cancel_superseded_jobs_async(
+    completed_job: dict[str, Any],
+    completed_at: str,
+    reason: str,
+) -> None:
+    group_id = completed_job.get("group_id")
+    if not group_id:
+        return
+
+    superseded = query_all(
+        """
+        SELECT * FROM jobs
+        WHERE group_id = %s
+          AND id != %s
+          AND status IN ('pending', 'running')
+          AND frame_start >= %s
+          AND frame_end <= %s
+        ORDER BY submitted_at ASC
+        """,
+        (
+            group_id,
+            completed_job["id"],
+            completed_job.get("frame_start"),
+            completed_job.get("frame_end"),
+        ),
+    )
+    if not superseded:
+        return
+
+    for job in superseded:
+        execute(
+            """
+            UPDATE jobs
+            SET status = 'cancelled', completed_at = %s, error = %s
+            WHERE id = %s AND status IN ('pending', 'running')
+            """,
+            (completed_at, reason, job["id"]),
+        )
+
+    def _cancel_provider_jobs() -> None:
+        for job in superseded:
+            try:
+                machine_type = _machine_type_of(job["machine_id"])
+                strategy = get_strategy(machine_type)
+                provider_job_id = strategy.provider_job_id_from_job(job)
+                if provider_job_id and strategy.is_enabled():
+                    strategy.cancel(provider_job_id, job["machine_id"])
+            except Exception as exc:
+                log.warning(
+                    "Failed to cancel superseded job %s after completion recovery: %s",
+                    job["id"],
+                    exc,
+                )
+
+    threading.Thread(
+        target=_cancel_provider_jobs,
+        daemon=True,
+        name=f"supersede-{completed_job['id'][:8]}",
+    ).start()
+
+
+def _mark_job_done_from_completion_evidence(
+    job: dict[str, Any],
+    merged_output_files: list[str] | None = None,
+    *,
+    reason: str,
+) -> bool:
+    total_frames = job.get("total_frames") or 0
+    if total_frames <= 0:
+        return False
+    if job.get("status") == "cancelled":
+        return False
+
+    merged = (
+        merged_output_files
+        if merged_output_files is not None
+        else parse_output_files(job.get("output_files"))
+    )
+    rendered_frames = max(
+        job.get("rendered_frames") or 0,
+        min(total_frames, len(merged)),
+    )
+    if rendered_frames < total_frames:
+        return False
+
+    completed_at = job.get("completed_at") or now_iso()
+    execute(
+        """
+        UPDATE jobs
+        SET status = 'done', completed_at = %s, error = NULL,
+            output_files = %s, rendered_frames = %s
+        WHERE id = %s
+        """,
+        (completed_at, json.dumps(merged), total_frames, job["id"]),
+    )
+    log.info(
+        "Recovered job %s to done from completion evidence: %s",
+        job["id"],
+        reason,
+    )
+    _cancel_superseded_jobs_async(
+        completed_job={**job, "status": "done"},
+        completed_at=completed_at,
+        reason="Superseded: original chunk completed successfully",
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +619,17 @@ def update_job_status(
         raise HTTPException(status_code=404, detail="Job not found")
 
     if job["status"] in ("done", "failed", "cancelled"):
+        merged_output_files = parse_output_files(job.get("output_files"))
+        if payload.output_files is not None:
+            merged_output_files = list(
+                dict.fromkeys(merged_output_files + payload.output_files)
+            )
+        if payload.status == "done" and _mark_job_done_from_completion_evidence(
+            {**job, "output_files": json.dumps(merged_output_files)},
+            merged_output_files,
+            reason="late done callback after terminal transition",
+        ):
+            return {"success": True, "recovered": True}
         log.info(
             f"Rejecting status update for job {job_id}: already '{job['status']}', "
             f"ignoring late '{payload.status}' callback"
@@ -668,8 +789,24 @@ async def register_outputs(
     safe_names = [_sanitize_filename(f) for f in filenames]
     existing = parse_output_files(job["output_files"])
     merged = list(dict.fromkeys(existing + safe_names))
+    total_frames = job.get("total_frames") or 0
+    rendered_frames = max(
+        job.get("rendered_frames") or 0,
+        min(total_frames, len(merged)) if total_frames > 0 else 0,
+    )
+    if _mark_job_done_from_completion_evidence(
+        {**job, "output_files": json.dumps(merged), "rendered_frames": rendered_frames},
+        merged,
+        reason="all expected outputs registered",
+    ):
+        return {
+            "success": True,
+            "registered": len(safe_names),
+            "completed": True,
+        }
     execute(
-        "UPDATE jobs SET output_files = %s WHERE id = %s", (json.dumps(merged), job_id)
+        "UPDATE jobs SET output_files = %s, rendered_frames = %s WHERE id = %s",
+        (json.dumps(merged), rendered_frames, job_id),
     )
     return {"success": True, "registered": len(safe_names)}
 

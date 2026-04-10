@@ -32,6 +32,9 @@ class CommunityStrategy:
     def cancel(self, provider_job_id: str, machine_id: str) -> None:
         pass
 
+    def provider_job_id_from_job(self, job: dict) -> str | None:
+        return None
+
     @property
     def workers_per_endpoint(self) -> int:
         return 1

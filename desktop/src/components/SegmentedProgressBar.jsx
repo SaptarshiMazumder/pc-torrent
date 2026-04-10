@@ -26,7 +26,10 @@ function gpuShortName(name) {
 export default function SegmentedProgressBar({ tasks, totalFrames }) {
   if (!tasks || tasks.length === 0 || !totalFrames) return null;
 
-  const activeTasks = tasks.filter((t) => t.status !== "failed");
+  // Show all tasks including failed ones so the bar doesn't vanish mid-failover.
+  // Failed segments render with a red striped pattern; if there's a successor
+  // job covering the same frames, both will be visible during the transition.
+  const activeTasks = tasks;
   if (activeTasks.length === 0) return null;
 
   return (

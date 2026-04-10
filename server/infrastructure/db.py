@@ -227,6 +227,9 @@ def init_db():
                 ADD COLUMN IF NOT EXISTS runpod_job_id TEXT;
 
                 ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS modal_function_call_id TEXT;
+
+                ALTER TABLE jobs
                 ADD COLUMN IF NOT EXISTS last_heartbeat_at TEXT;
 
                 ALTER TABLE jobs

@@ -453,3 +453,7 @@ export async function rerenderGroup(baseUrl, groupId, { frameStart, frameEnd, fr
 export async function getVastInstances(baseUrl) {
   return apiFetch(baseUrl, "/vast/instances");
 }
+
+export async function getModalInstances(baseUrl) {
+  return apiFetch(baseUrl, "/modal/instances");
+}

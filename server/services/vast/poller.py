@@ -149,7 +149,9 @@ class InstancePoller:
         if self._all_frames_done(job, actual_status, local_status):
             return self._on_proactive_complete(job)
 
-        if actual_status not in ("running",) and elapsed > self._cfg.startup_timeout_sec:
+        if (self._became_running_at is None
+                and actual_status not in ("running",)
+                and elapsed > self._cfg.startup_timeout_sec):
             return self._on_startup_timeout(actual_status, elapsed, job)
 
         if actual_status == "running":
@@ -177,6 +179,16 @@ class InstancePoller:
         })
         if local_status in ("done", "failed", "cancelled"):
             log.info(f"Vast.ai instance {self._instance_id} gone; job {self._job_id} is {local_status}")
+        elif job and (job.get("total_frames") or 0) > 0 and (job.get("rendered_frames") or 0) >= (job.get("total_frames") or 0):
+            log.info(
+                f"Vast.ai instance {self._instance_id} gone but all "
+                f"{job['total_frames']} frames rendered — marking done"
+            )
+            execute(
+                "UPDATE jobs SET status = 'done', completed_at = %s, "
+                "rendered_frames = %s WHERE id = %s",
+                (now_iso(), job["total_frames"], self._job_id),
+            )
         else:
             log.warning(
                 f"Vast.ai instance {self._instance_id} not found; "
@@ -299,6 +311,21 @@ class InstancePoller:
         })
         self._client.destroy_instance(self._instance_id)
 
+        rendered = job.get("rendered_frames") or 0
+        total = job.get("total_frames") or 0
+        if total > 0 and rendered >= total:
+            log.info(
+                f"Job {self._job_id}: all {total} frames rendered before exit, "
+                f"marking done (no callback needed)"
+            )
+            execute(
+                "UPDATE jobs SET status = 'done', completed_at = %s, "
+                "rendered_frames = %s WHERE id = %s",
+                (now_iso(), total, self._job_id),
+            )
+            self._registry.remove(self._job_id)
+            return True
+
         local_status = self._wait_for_callback()
 
         if local_status in ("done", "failed", "cancelled"):
@@ -335,7 +362,7 @@ class InstancePoller:
         )
 
     def _all_frames_done(self, job: dict, actual_status: str, local_status: str) -> bool:
-        if actual_status != "running" or local_status != "running":
+        if local_status != "running":
             return False
         rendered = job.get("rendered_frames") or 0
         total = job.get("total_frames") or 0

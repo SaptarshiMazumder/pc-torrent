@@ -100,6 +100,11 @@ export function useJobs(backendUrl) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
   const backendUrlRef = useRef(backendUrl);
+  const jobsRef = useRef(jobs);
+
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
 
   useEffect(() => {
     backendUrlRef.current = backendUrl;
@@ -190,59 +195,68 @@ export function useJobs(backendUrl) {
 
   // Poll active jobs
   useEffect(() => {
+    let polling = false;
+
     const poll = async () => {
+      if (polling) return;
       const url = backendUrlRef.current;
       if (!url) return;
 
-      setJobs((prev) => {
-        const active = prev.filter(
-          (j) => canonicalJobKey(j) && !["done", "failed", "cancelled"].includes(j.status)
-        );
-        if (active.length === 0) return prev;
+      const current = jobsRef.current;
+      const active = current.filter(
+        (j) => canonicalJobKey(j) && !["done", "failed", "cancelled"].includes(j.status)
+      );
+      if (active.length === 0) return;
 
-        active.forEach(async (job) => {
-          try {
-            if (job.group_id) {
-              const updated = normalizeRenderGroup(await getRenderGroup(url, job.group_id));
+      polling = true;
+      try {
+        await Promise.all(
+          active.map(async (job) => {
+            try {
+              if (job.group_id) {
+                const updated = normalizeRenderGroup(
+                  await getRenderGroup(url, job.group_id)
+                );
+                if (!updated) return;
+
+                setJobs((cur) =>
+                  cur.map((existing) =>
+                    canonicalJobKey(existing) === `group:${job.group_id}`
+                      ? {
+                          ...existing,
+                          ...updated,
+                          tasks:
+                            updated.tasks?.length > 0
+                              ? updated.tasks
+                              : Array.isArray(existing.tasks)
+                              ? existing.tasks
+                              : [],
+                        }
+                      : existing
+                  )
+                );
+                return;
+              }
+
+              if (!job.job_id) return;
+              const updated = normalizeSingleJob(await getJob(url, job.job_id));
               if (!updated) return;
 
               setJobs((cur) =>
                 cur.map((existing) =>
-                  canonicalJobKey(existing) === `group:${job.group_id}`
-                    ? {
-                        ...existing,
-                        ...updated,
-                        tasks:
-                          updated.tasks?.length > 0
-                            ? updated.tasks
-                            : Array.isArray(existing.tasks)
-                            ? existing.tasks
-                            : [],
-                      }
+                  canonicalJobKey(existing) === `job:${job.job_id}`
+                    ? { ...existing, ...updated }
                     : existing
                 )
               );
-              return;
+            } catch {
+              // Polling failures should not break history rendering.
             }
-
-            if (!job.job_id) return;
-            const updated = normalizeSingleJob(await getJob(url, job.job_id));
-            if (!updated) return;
-
-            setJobs((cur) =>
-              cur.map((existing) =>
-                canonicalJobKey(existing) === `job:${job.job_id}`
-                  ? { ...existing, ...updated }
-                  : existing
-              )
-            );
-          } catch {
-            // Polling failures should not break history rendering.
-          }
-        });
-
-        return prev;
-      });
+          })
+        );
+      } finally {
+        polling = false;
+      }
     };
 
     const id = setInterval(poll, POLL_INTERVAL);

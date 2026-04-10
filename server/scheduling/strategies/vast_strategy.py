@@ -56,4 +56,4 @@ class VastStrategy:
 
     @property
     def min_frames_per_instance(self) -> int:
-        return 25
+        return 10

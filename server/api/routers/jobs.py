@@ -508,6 +508,13 @@ def update_job_status(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    if job["status"] in ("done", "failed", "cancelled"):
+        log.info(
+            f"Rejecting status update for job {job_id}: already '{job['status']}', "
+            f"ignoring late '{payload.status}' callback"
+        )
+        return {"success": False, "reason": f"Job is already {job['status']}"}
+
     completed_at = job.get("completed_at")
     total_frames = job.get("total_frames")
     rendered_frames = max(0, job.get("rendered_frames") or 0)

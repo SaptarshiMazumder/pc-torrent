@@ -61,4 +61,4 @@ class ModalStrategy:
 
     @property
     def min_frames_per_instance(self) -> int:
-        return 10
+        return 5

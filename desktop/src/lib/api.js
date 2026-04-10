@@ -435,6 +435,21 @@ export async function cancelRenderGroup(baseUrl, groupId) {
   return apiFetch(baseUrl, `/render-groups/${groupId}/cancel`, { method: "POST" });
 }
 
+export async function rerenderGroup(baseUrl, groupId, { frameStart, frameEnd, frameStep = 1, camera = null, renderOverrides = null } = {}) {
+  const body = {
+    frame_start: frameStart,
+    frame_end: frameEnd,
+    frame_step: frameStep,
+  };
+  if (camera) body.camera = camera;
+  if (renderOverrides) body.render_overrides = renderOverrides;
+  return apiFetch(baseUrl, `/render-groups/${groupId}/rerender`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function getVastInstances(baseUrl) {
   return apiFetch(baseUrl, "/vast/instances");
 }

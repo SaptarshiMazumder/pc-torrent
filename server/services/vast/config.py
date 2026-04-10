@@ -25,6 +25,7 @@ class VastEndpoint:
     gpu_name: str
     label: str
     vram_gb: float
+    render_speed: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ def _parse_endpoints() -> list[VastEndpoint]:
             gpu_name=gpu_name,
             label=entry.get("label", "").strip() or f"Vast {gpu_name}",
             vram_gb=float(entry.get("vram_gb", 24)),
+            render_speed=float(entry.get("render_speed", 1.0)),
         ))
     return results
 

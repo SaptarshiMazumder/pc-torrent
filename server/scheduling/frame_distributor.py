@@ -30,11 +30,19 @@ except ValueError:
 # ---------------------------------------------------------------------------
 
 def compute_power_score(machine: dict[str, Any]) -> float:
-    """GPU-weighted rendering power score."""
+    """Rendering power score, driven by render_speed when available.
+
+    render_speed is a per-GPU multiplier (e.g. RTX 4090 = 1.5, A5000 = 1.0)
+    set in config.json and stored on the machine row.  When present it is
+    the dominant factor so frame distribution reflects actual Blender
+    throughput rather than raw VRAM capacity.
+    """
+    speed = machine.get("render_speed") or 1.0
     vram = machine.get("gpu_vram_gb") or 0
     cores = machine.get("cpu_cores") or 0
     ram = machine.get("ram_gb") or 0
-    return (vram * 4) + (cores * 1) + (ram * 0.3)
+    base = (vram * 2) + (cores * 0.5) + (ram * 0.2)
+    return base * speed
 
 
 def filter_enabled_machines(machines: list[dict[str, Any]]) -> list[dict[str, Any]]:

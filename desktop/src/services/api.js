@@ -4,9 +4,9 @@ function normalizeBaseUrl(baseUrl) {
   return String(baseUrl || "").trim().replace(/\/+$/, "");
 }
 
-async function authHeaders() {
+async function authHeaders(forceRefresh = false) {
   try {
-    const token = await auth.currentUser?.getIdToken();
+    const token = await auth.currentUser?.getIdToken(forceRefresh);
     return token ? { Authorization: `Bearer ${token}` } : {};
   } catch (error) {
     const detail = error?.message || String(error);
@@ -36,7 +36,7 @@ async function readErrorDetail(response, fallbackMessage) {
   return fallbackMessage;
 }
 
-async function apiFetch(baseUrl, path, options = {}) {
+async function apiFetch(baseUrl, path, options = {}, _retry = false) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   if (!normalizedBase) {
     throw new Error("Backend URL is not configured");
@@ -44,7 +44,7 @@ async function apiFetch(baseUrl, path, options = {}) {
 
   const headers = {
     ...(options.headers || {}),
-    ...(await authHeaders()),
+    ...(await authHeaders(_retry)),
   };
 
   let response;
@@ -54,6 +54,12 @@ async function apiFetch(baseUrl, path, options = {}) {
     const detail = error?.message || String(error);
     throw new Error(`Network error reaching ${normalizedBase}${path}: ${detail}`);
   }
+
+  // On first 401, force-refresh the Firebase token and retry once.
+  if (response.status === 401 && !_retry) {
+    return apiFetch(baseUrl, path, options, true);
+  }
+
   if (!response.ok) {
     const detail = await readErrorDetail(response, `Request failed (${response.status})`);
     throw new Error(detail);

@@ -28,9 +28,12 @@ _JOB_QUERY = """
     SELECT status, attempt, max_retries, frame_start, frame_end,
            frame_step, rendered_frames, total_frames, output_files, input_filename,
            render_overrides_json, chunk_index, chunk_size_frames, priority,
-           modal_function_call_id
+           modal_function_call_id, last_heartbeat_at
     FROM jobs WHERE id = %s
 """
+
+_HEARTBEAT_GRACE_SEC = 90    # time after job starts before heartbeat is required
+_HEARTBEAT_TIMEOUT_SEC = 45  # max age of last heartbeat before considered dead
 
 _TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 _MIN_PROVIDER_FAILURE_GRACE_SEC = 30
@@ -233,6 +236,19 @@ class JobMonitor:
                 _registry.remove(self._job_id)
                 return True
 
+        if local_status == "running" and self._is_heartbeat_dead(job):
+            error = (
+                f"Modal job heartbeat dead (no ping for >{_HEARTBEAT_TIMEOUT_SEC}s) - "
+                "container likely cancelled or crashed"
+            )
+            failure_applied = self._handle_failure(job, error)
+            if failure_applied:
+                self._reg_update({"monitor_action": "heartbeat_dead", "error": error})
+            else:
+                self._reg_update({"monitor_action": "completion_before_heartbeat_dead"})
+            _registry.remove(self._job_id)
+            return True
+
         if local_status == "running" and self._is_stale():
             error = (
                 "Modal job running but no new frames or outputs for "
@@ -330,6 +346,29 @@ class JobMonitor:
         action = updates.get("monitor_action")
         if action:
             _registry.append_history(self._job_id, {"status": action, "at": now_iso()})
+
+    def _is_heartbeat_dead(self, job: dict) -> bool:
+        """Return True if the container has stopped sending heartbeats.
+
+        Mirrors the Vast poller's logic: ignore until the grace period has
+        elapsed, then require a heartbeat no older than _HEARTBEAT_TIMEOUT_SEC.
+        """
+        elapsed = time.monotonic() - self._started_at
+        if elapsed < _HEARTBEAT_GRACE_SEC:
+            return False  # still within cold-start window
+
+        last_hb = job.get("last_heartbeat_at")
+        if last_hb is None:
+            # Never sent a heartbeat after the grace period — container is dead.
+            return True
+
+        try:
+            from datetime import datetime, timezone
+            hb_time = datetime.fromisoformat(str(last_hb).replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - hb_time).total_seconds()
+            return age > _HEARTBEAT_TIMEOUT_SEC
+        except Exception:
+            return False
 
     def _is_stale(self) -> bool:
         return (time.monotonic() - self._last_activity_at) > self._cfg.in_progress_stale_sec

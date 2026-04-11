@@ -1,9 +1,9 @@
 """
 Modal application for PC Rent GPU rendering.
 
-Deploys web endpoints for each GPU type. Each endpoint receives render jobs
-via HTTP POST and executes Blender renders using the same handler logic as
-the RunPod worker.
+Deploys a single A10G web endpoint. The endpoint receives render jobs via
+HTTP POST and executes Blender renders using the same handler logic as the
+RunPod worker.
 
 Deploy:
     pip install modal
@@ -54,31 +54,12 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# One function per GPU type.  Add/remove entries here to match
-# MODAL_ENDPOINTS in the backend .env.
+# Single A10G endpoint. Keep backend MODAL_ENDPOINTS aligned to "a10g".
 # ---------------------------------------------------------------------------
 
 @app.function(image=worker_image, gpu="A10G", timeout=86400, memory=65536, cpu=16)
 @_WEB_ENDPOINT(method="POST")
 def render_a10g(data: dict):
-    import sys
-    sys.path.insert(0, "/")
-    from modal_handler import handler
-    return handler({"input": data.get("input", data)})
-
-
-@app.function(image=worker_image, gpu="L4", timeout=86400, memory=65536, cpu=16)
-@_WEB_ENDPOINT(method="POST")
-def render_l4(data: dict):
-    import sys
-    sys.path.insert(0, "/")
-    from modal_handler import handler
-    return handler({"input": data.get("input", data)})
-
-
-@app.function(image=worker_image, gpu="A100", timeout=86400, memory=65536, cpu=16)
-@_WEB_ENDPOINT(method="POST")
-def render_a100(data: dict):
     import sys
     sys.path.insert(0, "/")
     from modal_handler import handler

@@ -106,7 +106,7 @@ def generate_presigned_upload_part_url(
     key: str,
     upload_id: str,
     part_number: int,
-    expires_in: int = 3600,
+    expires_in: int = 43200,
 ) -> str:
     """Generate a presigned URL for uploading one multipart part."""
     return _get_client().generate_presigned_url(

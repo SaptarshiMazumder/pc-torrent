@@ -1,0 +1,58 @@
+import { connectAgent, disconnectAgent } from "../../services/sidecar";
+import { getFirebaseToken } from "../../services/api";
+
+export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
+  const isConnected = ["connected", "rendering", "paused"].includes(status);
+  const preflightRunning =
+    status === "checking_requirements" ||
+    status === "setting_up_docker";
+  const connectRunning =
+    status === "downloading_image" ||
+    status === "installing_image" ||
+    status === "registering";
+  const removingImage = status === "removing_image";
+  const isLoading =
+    preflightRunning ||
+    connectRunning ||
+    removingImage;
+  const preflightComplete = runtimeInfo?.preflight_complete === true;
+  const disabled = isConnected ? connectRunning : isLoading || !preflightComplete;
+
+  const handleClick = async () => {
+    try {
+      if (isConnected) {
+        await disconnectAgent();
+      } else {
+        const token = await getFirebaseToken();
+        await connectAgent(backendUrl, token || "");
+      }
+    } catch (err) {
+      console.error("Agent command failed:", err);
+      alert("Failed: " + err);
+    }
+  };
+
+  return (
+    <button
+      className={`connect-btn ${isConnected ? "connected" : ""} ${isLoading ? "loading" : ""}`}
+      onClick={handleClick}
+      disabled={disabled}
+    >
+      {preflightRunning ? (
+        <>
+          <span className="spinner" />
+          Checking...
+        </>
+      ) : connectRunning ? (
+        <>
+          <span className="spinner" />
+          Connecting...
+        </>
+      ) : isConnected ? (
+        "Disconnect"
+      ) : (
+        "Connect"
+      )}
+    </button>
+  );
+}

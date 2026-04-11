@@ -43,6 +43,12 @@ RENDER_FATAL_PATTERNS = (
     "[RENDER_DRIVER] ERROR:",
     "RuntimeError: Error: Cannot render, no camera",
     "Error: Cannot render, no camera",
+    # EEVEE requires an EGL display context which Modal headless containers
+    # cannot provide. These errors mean the render will produce no output.
+    "EGL_BAD_MATCH",
+    "EGL_BAD_DISPLAY",
+    "EGL_NOT_INITIALIZED",
+    "Failed to create OpenGL context",
 )
 
 
@@ -126,6 +132,45 @@ def _mark_running(backend_url: str, job_id: str):
         )
     except Exception as e:
         log.warning(f"Failed to mark job running: {e}")
+
+
+class ModalHeartbeat:
+    """Sends periodic heartbeats to the server so the monitor can detect
+    dead/cancelled containers quickly instead of waiting for the 90-min stale timeout."""
+
+    INTERVAL = 10  # seconds between heartbeats
+
+    def __init__(self, backend_url: str, job_id: str):
+        self._backend_url = backend_url.rstrip("/")
+        self._job_id = job_id
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self, phase: str = "starting"):
+        self._phase = phase
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name=f"modal-hb-{self._job_id[:8]}"
+        )
+        self._thread.start()
+
+    def set_phase(self, phase: str):
+        self._phase = phase
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _run(self):
+        while not self._stop.wait(self.INTERVAL):
+            try:
+                requests.put(
+                    f"{self._backend_url}/jobs/{self._job_id}/heartbeat",
+                    json={"phase": self._phase},
+                    timeout=10,
+                )
+            except Exception as exc:
+                log.warning(f"Heartbeat failed for job {self._job_id}: {exc}")
 
 
 def _push_progress(backend_url: str, job_id: str, rendered_frames: int, total_frames: int):
@@ -341,11 +386,21 @@ def _put_status(backend_url: str, job_id: str, payload: dict, deadline: float = 
     while True:
         attempt += 1
         try:
-            requests.put(
+            resp = requests.put(
                 f"{backend_url}/jobs/{job_id}/status",
                 json=payload,
                 timeout=60,
-            ).raise_for_status()
+            )
+            resp.raise_for_status()
+            try:
+                body = resp.json()
+            except ValueError:
+                body = None
+            if isinstance(body, dict) and body.get("success") is False:
+                reason = str(body.get("reason") or "backend rejected status update").strip()
+                raise RuntimeError(
+                    f"Backend rejected status update for job {job_id}: {reason}"
+                )
             return
         except Exception as e:
             last_exc = e
@@ -392,8 +447,10 @@ def handler(job: dict) -> dict:
         os.makedirs(input_dir)
         os.makedirs(output_dir)
 
-        # 1. Mark running
+        # 1. Mark running + start heartbeat
         _mark_running(backend_url, job_id)
+        heartbeat = ModalHeartbeat(backend_url, job_id)
+        heartbeat.start(phase="downloading")
 
         # 2. Download .blend (follow redirects — server URL redirects to R2)
         log.info(f"Downloading blend from {blend_url}")
@@ -403,6 +460,7 @@ def handler(job: dict) -> dict:
         except Exception as e:
             err = f"Failed to download blend file: {e}"
             log.error(err)
+            heartbeat.stop()
             _mark_failed(backend_url, job_id, err)
             return {"status": "failed", "error": err}
 
@@ -424,10 +482,12 @@ def handler(job: dict) -> dict:
             os.remove(raw_path)
             log.info(f"Extracted contents: {os.listdir(input_dir)}")
 
+        heartbeat.set_phase("rendering")
         blend_files = _find_blend_files(input_dir)
         if not blend_files:
             err = "No .blend file found in uploaded input bundle"
             log.error(err)
+            heartbeat.stop()
             _mark_failed(backend_url, job_id, err)
             return {"status": "failed", "error": err}
 
@@ -501,6 +561,13 @@ def handler(job: dict) -> dict:
                     for pattern in RENDER_FATAL_PATTERNS:
                         if pattern in line:
                             fatal_render_error = line
+                            log.error(
+                                "Fatal render pattern detected, killing process: %s", line
+                            )
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
                             break
 
             if "PCR_PROGRESS" in line:
@@ -520,6 +587,7 @@ def handler(job: dict) -> dict:
                     last_push = now
 
         proc.wait()
+        heartbeat.set_phase("uploading")
         uploader.stop()
         try:
             uploader.flush_final()
@@ -535,6 +603,7 @@ def handler(job: dict) -> dict:
             if uploaded:
                 err = f"{err}. {len(uploaded)} frame(s) already uploaded and recoverable."
             log.error(err)
+            heartbeat.stop()
             _mark_failed(backend_url, job_id, err)
             return {"status": "failed", "error": err, "output_files": uploaded}
 
@@ -557,15 +626,30 @@ def handler(job: dict) -> dict:
             except Exception as e:
                 err = f"Output catch-up upload failed: {e}"
                 log.error(err)
+                heartbeat.stop()
                 _mark_failed(backend_url, job_id, err)
                 return {"status": "failed", "error": err, "output_files": uploaded}
         if not uploaded:
             err = "Render produced no output files"
             log.error(err)
+            heartbeat.stop()
             _mark_failed(backend_url, job_id, err)
             return {"status": "failed", "error": err}
 
+        # Push a final progress snapshot based on the outputs that actually made
+        # it to storage so the backend can reconcile the chunk before `done`.
+        try:
+            _push_progress(
+                backend_url,
+                job_id,
+                max(rendered_frames, len(uploaded)),
+                total_frames,
+            )
+        except Exception:
+            pass
+
         # 7. Mark done
+        heartbeat.stop()
         _mark_done(backend_url, job_id, uploaded)
         log.info(f"Job {job_id} done - {len(uploaded)} files uploaded")
         return {"status": "done", "output_files": uploaded}

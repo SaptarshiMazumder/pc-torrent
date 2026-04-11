@@ -49,6 +49,11 @@ class ModalStrategy:
         from services import modal
         modal.cancel_job(provider_job_id, machine_id)
 
+    def provider_job_id_from_job(self, job: dict) -> str | None:
+        from services.modal.job_state import function_call_id_from_job
+
+        return function_call_id_from_job(job)
+
     @property
     def workers_per_endpoint(self) -> int:
         from services import modal
@@ -56,4 +61,4 @@ class ModalStrategy:
 
     @property
     def min_frames_per_instance(self) -> int:
-        return 10
+        return 5

@@ -83,7 +83,31 @@
       "Bash(gcloud logging:*)",
       "WebFetch(domain:modal.com)",
       "Bash(curl -s \"https://console.vast.ai/api/v0/bundles/?q=%7B%22gpu_name%22%3A%7B%22eq%22%3A%22RTX+4090%22%7D%2C%22num_gpus%22%3A%7B%22eq%22%3A1%7D%2C%22rentable%22%3A%7B%22eq%22%3Atrue%7D%2C%22dph_total%22%3A%7B%22lte%22%3A0.50%7D%2C%22disk_space%22%3A%7B%22gte%22%3A20%7D%2C%22order%22%3A%5B%5B%22dph_total%22%2C%22asc%22%5D%5D%2C%22limit%22%3A3%7D\" -H \"Authorization: Bearer e57f35ee0b4d10e91b2c37b71a25e04e8c6b6da572f87e9e2800bdf07602b725\")",
-      "Bash(curl -s -X GET 'https://pcrent-server-930713698987.asia-northeast1.run.app/machines' -H 'accept: application/json')"
+      "Bash(curl -s -X GET 'https://pcrent-server-930713698987.asia-northeast1.run.app/machines' -H 'accept: application/json')",
+      "Bash(cp lib/api.js services/api.js)",
+      "Bash(cp lib/sidecar.js services/sidecar.js)",
+      "Bash(cp lib/frameCache.js services/frameCache.js)",
+      "Bash(cp lib/blendAnalysis.js utils/blendAnalysis.js)",
+      "Bash(cp \"lib/blend-parser.js\" utils/blendParser.js)",
+      "Bash(cp components/Sidebar.jsx components/common/Sidebar.jsx)",
+      "Bash(cp components/LoginPage.jsx components/common/LoginPage.jsx)",
+      "Bash(cp components/LogViewer.jsx components/common/LogViewer.jsx)",
+      "Bash(cp components/StatusIndicator.jsx components/common/StatusIndicator.jsx)",
+      "Bash(cp components/GpuInfoCard.jsx components/dashboard/GpuInfoCard.jsx)",
+      "Bash(cp components/ConnectButton.jsx components/dashboard/ConnectButton.jsx)",
+      "Bash(cp components/JobCard.jsx components/dashboard/JobCard.jsx)",
+      "Bash(cp components/RuntimeCard.jsx components/dashboard/RuntimeCard.jsx)",
+      "Bash(cp components/PreflightChecklist.jsx components/dashboard/PreflightChecklist.jsx)",
+      "Bash(cp components/SegmentedProgressBar.jsx components/jobs/SegmentedProgressBar.jsx)",
+      "Bash(cp components/FrameThumb.jsx components/jobs/FrameThumb.jsx)",
+      "Bash(cp components/VastInstancePanel.jsx components/jobs/VastInstancePanel.jsx)",
+      "Bash(sed -i 's|from \"\\\\.\\\\./lib/api\"|from \"../../services/api\"|g' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/components/jobs/FrameThumb.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/components/jobs/VastInstancePanel.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/components/dashboard/ConnectButton.jsx)",
+      "Bash(sed -i 's|from \"\\\\.\\\\./lib/frameCache\"|from \"../../services/frameCache\"|g' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/components/jobs/FrameThumb.jsx)",
+      "Bash(sed -i 's|from \"\\\\.\\\\./lib/sidecar\"|from \"../../services/sidecar\"|g' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/components/dashboard/ConnectButton.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/components/dashboard/JobCard.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/components/dashboard/RuntimeCard.jsx)",
+      "Bash(sed -i -e 's|from \"\\\\.\\\\./lib/api\"|from \"../services/api\"|g' -e 's|from \"\\\\.\\\\./lib/sidecar\"|from \"../services/sidecar\"|g' -e 's|from \"\\\\.\\\\./lib/blendAnalysis\"|from \"../utils/blendAnalysis\"|g' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/MyJobsPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/CreateRenderPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/AvailableMachinesPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/DashboardPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/SettingsPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/LogsPage.jsx)",
+      "Bash(sed -i -e 's|from \"\\\\.\\\\./components/SegmentedProgressBar\"|from \"../components/jobs/SegmentedProgressBar\"|g' -e 's|from \"\\\\.\\\\./components/FrameThumb\"|from \"../components/jobs/FrameThumb\"|g' -e 's|from \"\\\\.\\\\./components/VastInstancePanel\"|from \"../components/jobs/VastInstancePanel\"|g' -e 's|from \"\\\\.\\\\./components/GpuInfoCard\"|from \"../components/dashboard/GpuInfoCard\"|g' -e 's|from \"\\\\.\\\\./components/ConnectButton\"|from \"../components/dashboard/ConnectButton\"|g' -e 's|from \"\\\\.\\\\./components/JobCard\"|from \"../components/dashboard/JobCard\"|g' -e 's|from \"\\\\.\\\\./components/RuntimeCard\"|from \"../components/dashboard/RuntimeCard\"|g' -e 's|from \"\\\\.\\\\./components/PreflightChecklist\"|from \"../components/dashboard/PreflightChecklist\"|g' -e 's|from \"\\\\.\\\\./components/StatusIndicator\"|from \"../components/common/StatusIndicator\"|g' -e 's|from \"\\\\.\\\\./components/LogViewer\"|from \"../components/common/LogViewer\"|g' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/MyJobsPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/CreateRenderPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/AvailableMachinesPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/DashboardPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/SettingsPage.jsx c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/LogsPage.jsx)",
+      "Bash(sed -i -e 's|from \"\\\\./components/Sidebar\"|from \"./components/common/Sidebar\"|g' -e 's|from \"\\\\./components/LoginPage\"|from \"./components/common/LoginPage\"|g' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/App.jsx)",
+      "Bash(sed -i -e 's|from \"\\\\.\\\\./lib/api\"|from \"../services/api\"|g' -e 's|from \"\\\\.\\\\./lib/sidecar\"|from \"../services/sidecar\"|g' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/hooks/useJobs.js c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/hooks/useAgent.js)"
     ]
   }
 }

@@ -6,6 +6,7 @@ import {
 } from "../../utils/jobUtils";
 import SegmentedProgressBar from "./SegmentedProgressBar";
 import VastInstancePanel from "./VastInstancePanel";
+import ModalInstancePanel from "../ModalInstancePanel";
 import FrameGalleryPanel from "./FrameGalleryPanel";
 
 function BigGauge({ pct, color, label }) {
@@ -26,7 +27,7 @@ function BigGauge({ pct, color, label }) {
         />
         <text x="50%" y="46%" textAnchor="middle" dominantBaseline="central"
           fill="#eeedf5" fontSize="22" fontWeight="800" fontFamily="Inter,sans-serif">
-          {pct != null ? pct : "—"}
+          {pct != null ? `${pct}%` : "—"}
         </text>
         <text x="50%" y="66%" textAnchor="middle" dominantBaseline="central"
           fill="#6e6893" fontSize="10" fontWeight="600">
@@ -110,6 +111,7 @@ function RenderGroupDetail({
 
       {/* GPU Instances */}
       <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
+      <ModalInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
 
       {/* Frames — collapsible, below GPU instances */}
       {canViewFrames && (

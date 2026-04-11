@@ -347,10 +347,19 @@ def choose_retry_machine(
 ) -> str | None:
     """
     Pick the best available machine from the pool, excluding the one that failed.
-    Prefers serverless endpoints (instant spin-up).
+
+    Provider routing rules (mirrors dispatch_coordinator._find_failover_machine):
+    - Modal failure → prefer Vast, then any non-Modal serverless
+    - Vast failure  → prefer another Vast machine
+    - Other         → any serverless, then any machine
     Falls back to the failed machine itself if nothing else is available.
     """
-    from infrastructure.db import query_all
+    from infrastructure.db import query_all, query_one
+
+    failed_machine = query_one(
+        "SELECT machine_type FROM machines WHERE id = %s", (failed_machine_id,)
+    )
+    failed_type = (failed_machine or {}).get("machine_type", "")
 
     rows = query_all(
         "SELECT * FROM machines WHERE status = 'available' AND id != %s ORDER BY gpu_vram_gb DESC",
@@ -359,5 +368,20 @@ def choose_retry_machine(
     rows = filter_enabled_machines(rows)
     if not rows:
         return failed_machine_id
+
     serverless = [r for r in rows if r.get("machine_type") in SERVERLESS_TYPES]
+
+    if failed_type == "modal_serverless":
+        vast = [r for r in serverless if r.get("machine_type") == "vast_serverless"]
+        if vast:
+            return vast[0]["id"]
+        non_modal = [r for r in serverless if r.get("machine_type") != "modal_serverless"]
+        if non_modal:
+            return non_modal[0]["id"]
+
+    elif failed_type == "vast_serverless":
+        other_vast = [r for r in serverless if r.get("machine_type") == "vast_serverless"]
+        if other_vast:
+            return other_vast[0]["id"]
+
     return serverless[0]["id"] if serverless else rows[0]["id"]

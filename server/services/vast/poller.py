@@ -24,7 +24,8 @@ log = logging.getLogger(__name__)
 _JOB_QUERY = """
     SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
            rendered_frames, total_frames, input_filename, render_overrides_json,
-           chunk_index, chunk_size_frames, priority, error
+           chunk_index, chunk_size_frames, priority, error,
+           last_heartbeat_at, heartbeat_phase
     FROM jobs WHERE id = %s
 """
 
@@ -158,6 +159,8 @@ class InstancePoller:
             self._on_became_running(job)
             if self._is_stale(job):
                 return self._on_stale(job)
+            if self._is_heartbeat_dead(job):
+                return self._on_heartbeat_dead(job)
 
         if actual_status in ("exited", "stopped", "offline"):
             return self._on_exited(inst, actual_status, job)
@@ -298,6 +301,27 @@ class InstancePoller:
         self._registry.remove(self._job_id)
         return True
 
+    def _on_heartbeat_dead(self, job: dict) -> bool:
+        phase = job.get("heartbeat_phase") or "unknown"
+        hb_at = job.get("last_heartbeat_at") or "never"
+        err = (
+            f"Worker heartbeat stopped (last={hb_at}, phase={phase}) "
+            f"while Vast instance {self._instance_id} shows running — "
+            f"killing and failing over to different GPU"
+        )
+        log.warning(f"Job {self._job_id}: {err}")
+        self._registry.set(self._job_id, {"error": err})
+        self._client.destroy_instance(self._instance_id)
+        self._failover.handle(
+            job_id=self._job_id, job=job, error=err,
+            blend_url=self._blend_url,
+            render_overrides_b64=self._render_overrides_b64,
+            failed_machine_id=self._machine_id,
+            group_id=self._group_id,
+        )
+        self._registry.remove(self._job_id)
+        return True
+
     def _on_exited(self, inst: dict, actual_status: str, job: dict) -> bool:
         exit_code = inst.get("exit_code")
         log.info(
@@ -377,6 +401,45 @@ class InstancePoller:
             self._last_frame_change_at = time.monotonic()
             return False
         return time.monotonic() - self._last_frame_change_at > self._cfg.in_progress_stale_sec
+
+    def _is_heartbeat_dead(self, job: dict) -> bool:
+        """True when the worker process has silently stalled.
+
+        Conditions (all must be true):
+        1. Instance has been running for at least `heartbeat_grace_sec` (90 s)
+           to allow cold start time.
+        2. Worker either never sent a heartbeat (last_heartbeat_at is NULL)
+           or the last heartbeat is older than `heartbeat_timeout_sec` (45 s).
+        """
+        if self._became_running_at is None:
+            return False
+        running_for = time.monotonic() - self._became_running_at
+        if running_for < self._cfg.heartbeat_grace_sec:
+            return False
+
+        hb_at = job.get("last_heartbeat_at")
+        if not hb_at:
+            # Worker never sent a heartbeat after grace period — stalled
+            log.debug(
+                f"Job {self._job_id}: no heartbeat received after "
+                f"{running_for:.0f}s running"
+            )
+            return True
+
+        from datetime import datetime, timezone
+        try:
+            hb_time = datetime.fromisoformat(hb_at.replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - hb_time).total_seconds()
+        except (ValueError, AttributeError):
+            return True  # unparseable timestamp, assume dead
+
+        if age > self._cfg.heartbeat_timeout_sec:
+            log.debug(
+                f"Job {self._job_id}: heartbeat age {age:.0f}s "
+                f"> timeout {self._cfg.heartbeat_timeout_sec:.0f}s"
+            )
+            return True
+        return False
 
     def _update_registry(
         self, inst: dict, job: dict, actual_status: str, elapsed: float,

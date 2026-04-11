@@ -1,15 +1,17 @@
 import { useState, useCallback } from "react";
-import Sidebar from "./components/Sidebar";
+import Sidebar from "./components/common/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 import CreateRenderPage from "./pages/CreateRenderPage";
 import MyJobsPage from "./pages/MyJobsPage";
+import DownloadsPage from "./pages/DownloadsPage";
 import AvailableMachinesPage from "./pages/AvailableMachinesPage";
-import LoginPage from "./components/LoginPage";
+import LoginPage from "./components/common/LoginPage";
 import { useAgent } from "./hooks/useAgent";
 import { useJobs } from "./hooks/useJobs";
 import { useAuth } from "./contexts/AuthContext";
+import { useDownloads } from "./contexts/DownloadContext";
 
 const DEFAULT_PAGES = { renter: "dashboard", rentee: "create" };
 
@@ -22,9 +24,12 @@ export default function App() {
   const [backendUrl, setBackendUrl] = useState(
     "https://pcrent-server-930713698987.asia-northeast1.run.app"
   );
+  const [reRenderSource, setReRenderSource] = useState(null);
 
   const agent = useAgent(user && mode === "renter" ? backendUrl : null);
   const jobsHook = useJobs(user ? backendUrl : null);
+  const { downloads } = useDownloads();
+  const activeDownloadCount = Object.values(downloads).filter((d) => d.status === "loading").length;
 
   const handleModeChange = useCallback(
     (newMode) => {
@@ -38,6 +43,7 @@ export default function App() {
   const handleJobSubmitted = useCallback(
     (groupId, filename, tasks, totalFrames) => {
       jobsHook.addRenderGroup(groupId, filename, tasks, totalFrames);
+      setReRenderSource(null);
       setPage("myjobs");
     },
     [jobsHook.addRenderGroup]
@@ -54,6 +60,7 @@ export default function App() {
         status={agent.status}
         mode={mode}
         onModeChange={handleModeChange}
+        activeDownloadCount={activeDownloadCount}
       />
       <main className="main-content">
         {/* Renter pages */}
@@ -81,6 +88,7 @@ export default function App() {
           <CreateRenderPage
             backendUrl={backendUrl}
             onJobSubmitted={handleJobSubmitted}
+            reRenderSource={reRenderSource}
           />
         </div>
         {page === "myjobs" && (
@@ -91,8 +99,12 @@ export default function App() {
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
             onRefresh={jobsHook.refresh}
-            onReRenderSubmitted={handleJobSubmitted}
+            onReRender={(job) => { setReRenderSource(job); setPage("create"); }}
+            onNavigate={setPage}
           />
+        )}
+        {page === "downloads" && (
+          <DownloadsPage />
         )}
         {page === "available" && (
           <AvailableMachinesPage backendUrl={backendUrl} />

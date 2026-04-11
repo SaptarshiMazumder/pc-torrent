@@ -132,6 +132,7 @@ class DispatchCoordinator:
             log.error(f"Job {job_id} failed, no failover possible: {error}")
             return None
 
+        failed_machine_type = self._machine_type_of(failed_machine_id)
         return self._do_failover(
             job_id=job_id,
             job=job,
@@ -142,6 +143,7 @@ class DispatchCoordinator:
             blend_url=blend_url,
             render_overrides_b64=render_overrides_b64,
             failed_machine_id=failed_machine_id,
+            failed_machine_type=failed_machine_type,
             group_id=group_id,
         )
 
@@ -160,7 +162,8 @@ class DispatchCoordinator:
         blend_url: str,
         render_overrides_b64: str,
         failed_machine_id: str,
-        group_id: str,
+        failed_machine_type: str | None = None,
+        group_id: str = "",
     ) -> str | None:
         """Mark original job failed and create a new job on the best available machine."""
         execute(
@@ -172,7 +175,7 @@ class DispatchCoordinator:
             (now_iso(), f"Failed, migrating remaining frames ({error})", job_id),
         )
 
-        failover_machine = self._find_failover_machine(failed_machine_id)
+        failover_machine = self._find_failover_machine(failed_machine_id, failed_machine_type)
         if not failover_machine:
             log.error(f"Job {job_id}: no available machines for failover")
             return None
@@ -235,9 +238,16 @@ class DispatchCoordinator:
         return new_job_id
 
     def _find_failover_machine(
-        self, failed_machine_id: str
+        self,
+        failed_machine_id: str,
+        failed_machine_type: str | None = None,
     ) -> dict[str, Any] | None:
-        """Return the best available machine excluding the one that failed."""
+        """Return the best available machine excluding the one that failed.
+
+        When the failing machine is Modal, Vast is strongly preferred so that
+        the workload moves to a different provider rather than another Modal
+        container that may have the same underlying issue.
+        """
         from scheduling.frame_distributor import filter_enabled_machines
 
         rows = query_all(
@@ -251,7 +261,52 @@ class DispatchCoordinator:
         rows = filter_enabled_machines(rows)
         if not rows:
             return None
+
         serverless = [r for r in rows if r.get("machine_type") in SERVERLESS_TYPES]
+
+        if failed_machine_type == "modal_serverless":
+            # Prefer Vast when Modal fails — move workload to a different provider.
+            vast = [r for r in serverless if r.get("machine_type") == "vast_serverless"]
+            if vast:
+                log.info("Modal failover: routing to Vast (%s)", vast[0].get("id"))
+                return vast[0]
+            # No Vast available; try any non-Modal serverless machine.
+            non_modal = [r for r in serverless if r.get("machine_type") != "modal_serverless"]
+            if non_modal:
+                log.info(
+                    "Modal failover: no Vast available, routing to %s (%s)",
+                    non_modal[0].get("machine_type"),
+                    non_modal[0].get("id"),
+                )
+                return non_modal[0]
+            # Last resort: community machines.
+            non_serverless = [r for r in rows if r.get("machine_type") not in SERVERLESS_TYPES]
+            if non_serverless:
+                log.warning(
+                    "Modal failover: no serverless alternative, routing to community machine %s",
+                    non_serverless[0].get("id"),
+                )
+                return non_serverless[0]
+            log.error("Modal failover: no machines available, job will be marked failed")
+            return None
+
+        if failed_machine_type == "vast_serverless":
+            # Stay on Vast when a Vast job fails — pick a different Vast machine.
+            other_vast = [r for r in serverless if r.get("machine_type") == "vast_serverless"]
+            if other_vast:
+                log.info("Vast failover: routing to another Vast machine (%s)", other_vast[0].get("id"))
+                return other_vast[0]
+            # No other Vast available; community machines as last resort.
+            non_serverless = [r for r in rows if r.get("machine_type") not in SERVERLESS_TYPES]
+            if non_serverless:
+                log.warning(
+                    "Vast failover: no other Vast machines available, routing to community machine %s",
+                    non_serverless[0].get("id"),
+                )
+                return non_serverless[0]
+            log.error("Vast failover: no machines available, job will be marked failed")
+            return None
+
         return serverless[0] if serverless else rows[0]
 
     def _machine_type_of(self, machine_id: str) -> str:

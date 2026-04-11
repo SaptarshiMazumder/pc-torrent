@@ -1,4 +1,4 @@
-import LogViewer from "../components/LogViewer";
+import LogViewer from "../components/common/LogViewer";
 
 export default function LogsPage({ logs, onClearLogs }) {
   return (

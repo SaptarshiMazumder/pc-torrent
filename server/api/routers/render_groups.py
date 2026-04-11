@@ -430,6 +430,7 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
     )
     scheduling = normalize_scheduling(parse_json_object(group.get("scheduling_json"), {}))
     analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
+    analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 
     jobs = query_all(
         "SELECT * FROM jobs WHERE group_id = %s ORDER BY frame_start ASC", (group_id,)
@@ -554,6 +555,7 @@ def _get_render_group_inner(group_id: str) -> dict[str, Any]:
         "error": group.get("error"),
         "resolved_render_settings": resolved_render_settings,
         "scheduling": scheduling,
+        "analysis_snapshot": analysis_snapshot,
         "analysis_warnings": analysis_warnings,
         "overall_rendered_frames": total_rendered,
         "overall_progress_pct": overall_pct,
@@ -722,7 +724,7 @@ def render_group_multipart_part_urls(
     numbers = _normalize_part_numbers(payload.part_numbers)
     urls = {
         str(n): storage.generate_presigned_upload_part_url(
-            r2_key, payload.upload_id, n, expires_in=3600
+            r2_key, payload.upload_id, n
         )
         for n in numbers
     }
@@ -1185,6 +1187,25 @@ def get_render_group(
         return _get_render_group_inner(group_id)
 
 
+@router.delete("/render-groups/{group_id}")
+def delete_render_group(
+    group_id: str, current_user: dict = Depends(get_current_user)
+) -> dict[str, Any]:
+    group = query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
+    if not group:
+        raise HTTPException(status_code=404, detail="Render group not found")
+    if group.get("user_id") and group["user_id"] != current_user["uid"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if group["status"] not in ("done", "failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail="Only completed, failed, or cancelled render groups can be removed",
+        )
+    execute("DELETE FROM jobs WHERE group_id = %s", (group_id,))
+    execute("DELETE FROM render_groups WHERE id = %s", (group_id,))
+    return {"success": True, "group_id": group_id}
+
+
 @router.get("/render-groups/{group_id}/input/{filename}")
 def download_render_group_input_file(group_id: str, filename: str):
     group = query_one(
@@ -1289,16 +1310,16 @@ def cancel_render_group(group_id: str) -> dict[str, Any]:
     # The DB update above is what actually stops the work; this is cleanup.
     def _cancel_providers() -> None:
         for job in jobs:
-            rp_job_id = job.get("runpod_job_id")
-            if not rp_job_id:
-                continue
             job_machine_type = _machine_type_of(job["machine_id"])
             strategy = get_strategy(job_machine_type)
+            provider_job_id = strategy.provider_job_id_from_job(job)
+            if not provider_job_id:
+                continue
             if strategy.is_enabled():
                 try:
-                    strategy.cancel(rp_job_id, job["machine_id"])
+                    strategy.cancel(provider_job_id, job["machine_id"])
                 except Exception as exc:
-                    log.warning(f"Failed to cancel provider job {rp_job_id}: {exc}")
+                    log.warning(f"Failed to cancel provider job {provider_job_id}: {exc}")
 
     threading.Thread(target=_cancel_providers, daemon=True, name=f"cancel-{group_id[:8]}").start()
 

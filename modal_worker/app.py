@@ -26,7 +26,7 @@ _HANDLER_PATH = str(_HERE / "handler.py")
 _WEB_ENDPOINT = modal.fastapi_endpoint if hasattr(modal, "fastapi_endpoint") else modal.web_endpoint
 WORKER_IMAGE_REF = os.getenv(
     "MODAL_WORKER_IMAGE",
-    "ghcr.io/saptarshimazumder/pcrent-worker:2.02",
+    "ghcr.io/saptarshimazumder/pcrent-worker:2.08",
 ).strip()
 if not WORKER_IMAGE_REF:
     raise RuntimeError("MODAL_WORKER_IMAGE is empty")
@@ -53,11 +53,35 @@ else:
     worker_image = worker_image.add_local_file(_HANDLER_PATH, "/modal_handler.py")
 
 
+def _run_handler(input_data: dict):
+    import sys
+    sys.path.insert(0, "/")
+    from modal_handler import handler
+
+    return handler({"input": input_data})
+
+
+def _spawn_call(fn, data: dict) -> dict:
+    input_data = data.get("input", data)
+    call = fn.spawn(input_data)
+    try:
+        call_id = call.object_id
+    except Exception:
+        call.hydrate()
+        call_id = call.object_id
+    return {"status": "submitted", "function_call_id": call_id}
+
+
 # ---------------------------------------------------------------------------
 # Single A10G endpoint. Keep backend MODAL_ENDPOINTS aligned to "a10g".
 # ---------------------------------------------------------------------------
 
 @app.function(image=worker_image, gpu="A10G", timeout=86400, memory=65536, cpu=16)
+def run_render_a10g(input_data: dict):
+    return _run_handler(input_data)
+
+
+@app.function(image=worker_image, timeout=60, cpu=1)
 @_WEB_ENDPOINT(method="POST")
 def render_a10g(data: dict):
     import sys

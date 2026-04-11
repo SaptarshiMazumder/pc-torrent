@@ -39,12 +39,6 @@ RENDER_DRIVER_SCRIPT = os.getenv("RENDER_DRIVER_SCRIPT", "/scripts/render_driver
 # Push a progress update to backend at most every N seconds
 PROGRESS_PUSH_INTERVAL = float(os.getenv("PROGRESS_PUSH_INTERVAL", "2"))
 OUTPUT_SCAN_INTERVAL = float(os.getenv("OUTPUT_SCAN_INTERVAL", "1.0"))
-FORCE_CUDA_ON_A100 = os.getenv("FORCE_CUDA_ON_A100", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
 RENDER_FATAL_PATTERNS = (
     "[RENDER_DRIVER] ERROR:",
     "RuntimeError: Error: Cannot render, no camera",
@@ -72,19 +66,6 @@ def _find_blend_files(root_dir: str) -> list[str]:
             blend_files.append(full_path)
     blend_files.sort()
     return blend_files
-
-
-def _gpu_names() -> list[str]:
-    try:
-        output = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=5,
-        )
-    except Exception:
-        return []
-    return [line.strip() for line in output.splitlines() if line.strip()]
 
 
 def _choose_render_target_blend(
@@ -478,15 +459,6 @@ def handler(job: dict) -> dict:
         device_policy = (
             render_overrides.get("render", {}).get("device_policy", "AUTO").upper()
         )
-        if device_policy in ("", "AUTO") and FORCE_CUDA_ON_A100:
-            gpu_names = _gpu_names()
-            if any("A100" in name.upper() for name in gpu_names):
-                # A100 often stalls on first OptiX frame in this pipeline.
-                # Force CUDA to avoid long "meta-only" hangs.
-                log.warning(
-                    "A100 detected with AUTO policy; overriding DEVICE_POLICY to CUDA"
-                )
-                device_policy = "CUDA"
 
         # 4. Run render.sh
         env = {

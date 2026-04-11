@@ -4,12 +4,13 @@ import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import {
   createDistributedRenderGroup,
   confirmDistributedJob,
+  rerenderGroup,
   cancelRenderGroup,
   listInputFiles,
   renameInputFile,
   deleteInputFile,
   getFirebaseToken,
-} from "../lib/api";
+} from "../services/api";
 import {
   parseFrameRange,
   countFrames,
@@ -24,7 +25,9 @@ import {
   resolveTimestamp,
   getCachedAnalysis,
   setCachedAnalysis,
-} from "../lib/blendAnalysis";
+  saveGroupAnalysis,
+  getGroupAnalysis,
+} from "../utils/blendAnalysis";
 
 // ─── Flow stages ────────────────────────────────────────────
 // IDLE          → user picks a file / saved input
@@ -63,6 +66,9 @@ const INITIAL_STATE = {
   file: null, // { name, path, size }
   savedInputId: "",
   savedInputAsset: null,
+  // Re-render mode
+  reRenderGroupId: "", // set when re-rendering an existing group
+  reRenderFilename: "",
   // Analysis
   analysis: null, // parsed JSON from headless Blender
   prepResult: null, // { prepared_path, filename, warnings, errors, ... }
@@ -143,6 +149,17 @@ function reducer(state, action) {
     case "ERROR":
       return { ...state, stage: action.returnTo || state.stage, error: action.message };
 
+    case "LOAD_RERENDER":
+      return {
+        ...INITIAL_STATE,
+        stage: STAGE.CONFIGURING,
+        reRenderGroupId: action.groupId,
+        reRenderFilename: action.filename,
+        groupId: action.groupId, // makes canStart truthy
+        analysis: action.analysis,
+        ...action.settings,
+      };
+
     case "RESET":
       return { ...INITIAL_STATE };
 
@@ -153,10 +170,11 @@ function reducer(state, action) {
 
 // ─── Component ──────────────────────────────────────────────
 
-export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
+export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderSource }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const {
     stage, file, savedInputId, savedInputAsset,
+    reRenderGroupId, reRenderFilename,
     analysis, prepResult,
     frameStart, frameEnd, frameStep,
     sceneName, cameraMode, forceCameraName, viewLayerName, cameraRanges, renderEngine,
@@ -189,6 +207,39 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       .then((bin) => { blenderBinRef.current = bin || null; })
       .catch(() => { blenderBinRef.current = null; });
   }, []);
+
+  // ── Re-render mode: pre-populate from existing job ──────
+  useEffect(() => {
+    if (!reRenderSource) return;
+    const local = getGroupAnalysis(reRenderSource.group_id);
+    const raw = local || reRenderSource.analysis_snapshot;
+    const snap = (raw && typeof raw === "object" && Array.isArray(raw.scenes) && raw.scenes.length > 0) ? raw : null;
+    const overrides = reRenderSource.resolved_render_settings || {};
+    const settings = snap ? applyAnalysis(snap) : {};
+
+    // Override with the saved render settings from the original job
+    if (typeof overrides.scene_name === "string") settings.sceneName = overrides.scene_name;
+    if (typeof overrides.camera_mode === "string") settings.cameraMode = overrides.camera_mode || "auto_markers";
+    if (typeof overrides.camera_name === "string") settings.forceCameraName = overrides.camera_name;
+    if (typeof overrides.view_layer === "string") settings.viewLayerName = overrides.view_layer;
+    if (typeof overrides.render?.engine === "string") settings.renderEngine = overrides.render.engine || "scene_default";
+    if (overrides.camera_mode === "camera_ranges" && Array.isArray(overrides.camera_ranges)) {
+      settings.cameraRanges = parseCameraRangeRows(overrides.camera_ranges);
+    }
+    // Use original frame range
+    settings.frameStart = String(reRenderSource.frame_start ?? "");
+    settings.frameEnd = String(reRenderSource.frame_end ?? "");
+    settings.frameStep = String(reRenderSource.frame_step || 1);
+
+    dispatch({
+      type: "LOAD_RERENDER",
+      groupId: reRenderSource.group_id,
+      filename: reRenderSource.input_filename || reRenderSource.filename || "input.blend",
+      analysis: snap,
+      settings,
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reRenderSource]);
 
   // ── Load saved inputs ───────────────────────────────────
   const loadSavedInputs = useCallback(async () => {
@@ -258,7 +309,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
   const isBusy = stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING;
   const hasSource = Boolean(file) || Boolean(savedInputId);
-  const sourceLabel = file ? file.name : resolvedSavedAsset ? (resolvedSavedAsset.display_name || resolvedSavedAsset.input_filename) : "";
+  const sourceLabel = reRenderFilename || (file ? file.name : resolvedSavedAsset ? (resolvedSavedAsset.display_name || resolvedSavedAsset.input_filename) : "");
   const canStart = stage === STAGE.CONFIGURING && groupId && (cameraMode !== "camera_ranges" || cameraValidation.ok);
   const needsUpload = stage === STAGE.CONFIGURING && !groupId && Boolean(file);
 
@@ -534,28 +585,38 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const overrides = {
+      scene_name: sceneName || null,
+      camera_mode: cameraMode,
+      camera_name: forceCameraName || null,
+      view_layer: viewLayerName || null,
+      camera_ranges: cameraMode === "camera_ranges"
+        ? cameraValidation.rows?.map((r) => ({ camera_name: r.camera_name, frame_start: r.frame_start, frame_end: r.frame_end, frame_step: r.frame_step, enabled: r.enabled !== false }))
+        : [],
+      timeline: frameRange ? { frame_start: frameRange.frame_start, frame_end: frameRange.frame_end, frame_step: frameRange.frame_step } : {},
+      render: { engine: renderEngine !== "scene_default" ? renderEngine : null },
+    };
+
     try {
-      const overrides = {
-        scene_name: sceneName || null,
-        camera_mode: cameraMode,
-        camera_name: forceCameraName || null,
-        view_layer: viewLayerName || null,
-        camera_ranges: cameraMode === "camera_ranges"
-          ? cameraValidation.rows?.map((r) => ({ camera_name: r.camera_name, frame_start: r.frame_start, frame_end: r.frame_end, frame_step: r.frame_step, enabled: r.enabled !== false }))
-          : [],
-        timeline: frameRange ? { frame_start: frameRange.frame_start, frame_end: frameRange.frame_end, frame_step: frameRange.frame_step } : {},
-        render: { engine: renderEngine !== "scene_default" ? renderEngine : null },
-      };
-
-      const result = await confirmDistributedJob(backendUrl, groupId, null, frameRange, overrides, null, analysis, controller.signal);
-
-      if (result.needs_frame_input) {
-        dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
-        return;
+      let result;
+      if (reRenderGroupId) {
+        result = await rerenderGroup(backendUrl, reRenderGroupId, {
+          frameStart: frameRange?.frame_start,
+          frameEnd: frameRange?.frame_end,
+          frameStep: frameRange?.frame_step || 1,
+          renderOverrides: overrides,
+        });
+      } else {
+        result = await confirmDistributedJob(backendUrl, groupId, null, frameRange, overrides, null, analysis, controller.signal);
+        if (result.needs_frame_input) {
+          dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
+          return;
+        }
       }
 
       dispatch({ type: "CONFIRMED" });
-      onJobSubmitted(result.group_id, file?.name || result.input_filename || "input.blend", result.tasks || [], result.total_frames);
+      if (analysis && result.group_id) saveGroupAnalysis(result.group_id, analysis);
+      onJobSubmitted(result.group_id, reRenderFilename || file?.name || result.input_filename || "input.blend", result.tasks || [], result.total_frames);
       void loadSavedInputs();
     } catch (err) {
       dispatch({ type: "ERROR", message: err?.name === "AbortError" ? "Cancelled" : (err?.message || "Failed to start render"), returnTo: STAGE.CONFIGURING });
@@ -628,7 +689,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const stageLabel = {
     [STAGE.IDLE]: "Select a file",
     [STAGE.ANALYZING]: "Analyzing...",
-    [STAGE.CONFIGURING]: groupId ? "Ready to render" : "Configure & upload",
+    [STAGE.CONFIGURING]: reRenderGroupId ? "Re-render — adjust settings" : groupId ? "Ready to render" : "Configure & upload",
     [STAGE.UPLOADING]: `Uploading... ${Math.min(100, uploadProgress).toFixed(0)}%`,
     [STAGE.CONFIRMING]: "Starting render...",
     [STAGE.DONE]: "Submitted",
@@ -639,295 +700,289 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const fileKind = file ? fileKindFromName(file.name) : "file";
 
   // ── Render ──────────────────────────────────────────────
+  const totalFrameCount = frameRange ? countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step) : null;
+
   return (
-    <div className="page">
-      <h2>Create Render</h2>
-      <div className="card submit-panel">
-
-        {/* ── Source picker ── */}
-        {showSourcePicker && (
-          <div className="upload-source-panel">
-            <div className="upload-source-topbar">
-              <div className="selected-source-inline-subtle">
-                {sourceLabel
-                  ? <><span className="selected-source-subtle-label">Selected:</span> <span className="selected-source-subtle-name">{sourceLabel}</span></>
-                  : <span className="selected-source-subtle-empty">No file selected</span>}
-              </div>
-              <button className="btn btn-primary upload-source-analyze-btn" type="button" onClick={handleAnalyze} disabled={!hasSource}>
-                Analyze
+    <div className="page cr-page">
+      <div className="cr-header">
+        <h2>Create Render</h2>
+        {showSettings && (
+          <div className="cr-header-actions">
+            {needsUpload && (
+              <button className="btn btn-primary cr-start-btn" type="button" onClick={handleUpload} disabled={isBusy}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
+                Upload
               </button>
-            </div>
-
-            <div className="upload-source-actions">
-              <button
-                type="button"
-                className={`upload-plus-btn ${file ? "local-file-selected" : ""}`}
-                onClick={handlePickFile}
-                onDragOver={(e) => { e.preventDefault(); }}
-                onDrop={handleDrop}
-              >
-                {file && (
-                  <button type="button" className="upload-plus-clear-btn" aria-label="Clear" onClick={(e) => { e.stopPropagation(); dispatch({ type: "CLEAR_SOURCE" }); }}>
-                    x
-                  </button>
-                )}
-                <span className={`upload-plus-icon ${file ? `file-kind ${fileKind}` : ""}`} aria-hidden="true">
-                  {file ? <FileKindIcon kind={fileKind} /> : "+"}
-                </span>
-                <span className="upload-plus-title">{file ? file.name : "New File"}</span>
-                <span className="upload-plus-subtitle">{file ? formatSizeMb(file.size) : "Drop .blend/.zip here or click"}</span>
+            )}
+            {canStart && (
+              <button className="btn btn-primary cr-start-btn" type="button" onClick={handleStartRender}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                Start Rendering
               </button>
-            </div>
-
-            {/* Saved files list */}
-            <div className="saved-picker-panel">
-              <div className="saved-picker-head">
-                <strong>Recent Files</strong>
-                <div className="saved-picker-tools">
-                  <input type="text" className="saved-picker-search" placeholder="Search" value={savedSearch} onChange={(e) => setSavedSearch(e.target.value)} />
-                  <button className="btn btn-secondary" type="button" onClick={loadSavedInputs} disabled={savedInputs.loading}>
-                    {savedInputs.loading ? "..." : "Refresh"}
-                  </button>
-                </div>
-              </div>
-              <div className="saved-picker-body">
-                <div className="saved-picker-columns"><span>Name</span><span>Date</span><span>Type</span><span>Size</span></div>
-                {savedInputs.error && <p className="error-text">{savedInputs.error}</p>}
-                {savedInputs.loading && <p className="muted">Loading...</p>}
-                {!savedInputs.loading && filteredSaved.length === 0 && (
-                  <p className="saved-picker-empty">{savedInputs.items.length === 0 ? "No saved files yet." : "No matches."}</p>
-                )}
-                {savedSections.map((section) => (
-                  <div key={section.key} className="saved-picker-section">
-                    <div className="saved-picker-section-label">{section.label}</div>
-                    {section.items.map(({ asset, timestamp }) => {
-                      const kind = fileKindFromName(asset.input_filename);
-                      const display = asset.display_name || asset.input_filename;
-                      return (
-                        <div
-                          key={asset.id}
-                          className={`saved-picker-row ${savedInputId === asset.id ? "selected" : ""}`}
-                          role="button" tabIndex={0}
-                          onClick={() => handleSelectSaved(asset)}
-                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSelectSaved(asset); } }}
-                        >
-                          <div className="saved-picker-row-main">
-                            <span className={`saved-file-icon ${kind}`}><FileKindIcon kind={kind} /></span>
-                            <span className="saved-picker-name-wrap">
-                              <span className="saved-picker-display-name">{display}</span>
-                              {display !== asset.input_filename && <span className="saved-picker-original-name">{asset.input_filename}</span>}
-                            </span>
-                          </div>
-                          <span className="saved-picker-date">{formatTimestamp(timestamp)}</span>
-                          <span className="saved-picker-type">{kind === "blend" ? "Blend" : kind === "zip" ? "Zip" : "File"}</span>
-                          <span className="saved-picker-size">{formatSizeMb(asset?.size_bytes)}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── Active source + stage indicator ── */}
-        {!showSourcePicker && (
-          <div className="submit-file-row">
-            <div className="submit-file-main">
-              <div className="submit-file-name">{sourceLabel || "No file selected"}</div>
-              <div className="submit-file-meta">{stageLabel}</div>
-            </div>
-            <button type="button" className="btn btn-secondary" onClick={handleReset} disabled={isBusy}>
-              Choose Different File
-            </button>
-          </div>
-        )}
-
-        {/* ── Progress bar ── */}
-        {(stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING) && (
-          <div className="runtime-progress-wrap">
-            <div className={`runtime-progress-track ${stage !== STAGE.UPLOADING ? "indeterminate" : ""}`}>
-              <div className="runtime-progress-fill" style={{ width: stage === STAGE.UPLOADING ? `${uploadProgress}%` : "40%" }} />
-            </div>
-            <div className="runtime-progress-meta">
-              <span>{stage === STAGE.ANALYZING ? "Analyzing" : stage === STAGE.UPLOADING ? "Uploading" : "Starting"}</span>
-              <span>{stage === STAGE.UPLOADING ? `${Math.min(100, uploadProgress).toFixed(1)}%` : "Working..."}</span>
-            </div>
-          </div>
-        )}
-
-        {/* ── Action buttons ── */}
-        <div className="submit-action-row">
-          {needsUpload && (
-            <button className="btn btn-primary submit-primary-btn" type="button" onClick={handleUpload} disabled={isBusy}>
-              Upload
-            </button>
-          )}
-          {canStart && (
-            <button className="btn btn-primary submit-primary-btn" type="button" onClick={handleStartRender}>
-              Start Rendering
-            </button>
-          )}
-          {isBusy && (
-            <button className="btn btn-danger submit-primary-btn" type="button" onClick={handleStop}>
-              Stop
-            </button>
-          )}
-        </div>
-
-        {/* ── Warnings / notes ── */}
-        {analysisNote && !error && <p className="muted" style={{ margin: "8px 0 0" }}>{analysisNote}</p>}
-        {error && <p className="error-text">{error}</p>}
-
-        {/* ── Render settings panel ── */}
-        {showSettings && analysis && (
-          <div className="analysis-tabs-wrap">
-            <div className="analysis-tab-panel">
-              <div className="manual-range-panel">
-                <div className="manual-range-title">Render Settings</div>
-                <div className="manual-range-grid">
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">Scene</span>
-                    <select value={sceneName} onChange={(e) => handleSceneChange(e.target.value)} className="manual-range-input">
-                      {(scenes.length ? scenes : [{ name: "" }]).map((s) => (
-                        <option key={s.name || "default"} value={s.name || ""}>{s.name || "Default Scene"}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">Camera Mode</span>
-                    <select value={cameraMode} onChange={(e) => dispatch({ type: "SET_FIELD", field: "cameraMode", value: e.target.value })} className="manual-range-input">
-                      {CAMERA_MODES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </label>
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">Force Camera</span>
-                    <select value={forceCameraName} onChange={(e) => dispatch({ type: "SET_FIELD", field: "forceCameraName", value: e.target.value })} className="manual-range-input" disabled={cameraMode !== "force_camera" || cameras.length === 0}>
-                      {cameras.length > 0
-                        ? cameras.map((c) => <option key={c} value={c}>{c}</option>)
-                        : <option value="">No cameras</option>}
-                    </select>
-                  </label>
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">View Layer</span>
-                    <select value={viewLayerName} onChange={(e) => dispatch({ type: "SET_FIELD", field: "viewLayerName", value: e.target.value })} className="manual-range-input">
-                      {viewLayers.length > 0
-                        ? viewLayers.map((l) => <option key={l} value={l}>{l}</option>)
-                        : <option value="">Default</option>}
-                    </select>
-                  </label>
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">Render Engine</span>
-                    <select value={renderEngine} onChange={(e) => dispatch({ type: "SET_FIELD", field: "renderEngine", value: e.target.value })} className="manual-range-input">
-                      <option value="scene_default">Scene Default</option>
-                      <option value="BLENDER_EEVEE">EEVEE</option>
-                      <option value="CYCLES">Cycles</option>
-                      <option value="BLENDER_WORKBENCH">Workbench</option>
-                    </select>
-                  </label>
-                </div>
-
-                {cameraMode === "camera_ranges" && (
-                  <div className="camera-ranges-panel">
-                    <div className="camera-ranges-head">
-                      <div className="manual-range-subtitle camera-ranges-subtitle">Edit camera-to-frame mappings.</div>
-                      <div className="camera-ranges-actions">
-                        <button type="button" className="btn btn-secondary" onClick={autoFillRanges}>Use Marker Cuts</button>
-                        <button type="button" className="btn btn-secondary" onClick={addRange}>Add Range</button>
-                      </div>
-                    </div>
-                    <div className="camera-ranges-table-wrap">
-                      <table className="camera-ranges-table">
-                        <thead><tr><th>Use</th><th>Camera</th><th>Start</th><th>End</th><th>Step</th><th>Frames</th><th /></tr></thead>
-                        <tbody>
-                          {cameraRanges.map((row) => (
-                            <tr key={row.id}>
-                              <td><input type="checkbox" checked={row.enabled !== false} onChange={(e) => updateRange(row.id, { enabled: e.target.checked })} /></td>
-                              <td>
-                                <select value={row.camera_name || ""} onChange={(e) => updateRange(row.id, { camera_name: e.target.value })} className="manual-range-input camera-ranges-input">
-                                  {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
-                                </select>
-                              </td>
-                              <td><input type="number" min="1" value={row.frame_start ?? ""} onChange={(e) => updateRange(row.id, { frame_start: e.target.value })} className="manual-range-input camera-ranges-input" /></td>
-                              <td><input type="number" min="1" value={row.frame_end ?? ""} onChange={(e) => updateRange(row.id, { frame_end: e.target.value })} className="manual-range-input camera-ranges-input" /></td>
-                              <td><input type="number" min="1" value={row.frame_step ?? 1} onChange={(e) => updateRange(row.id, { frame_step: e.target.value })} className="manual-range-input camera-ranges-input" /></td>
-                              <td><span className="camera-ranges-count">{rangeCounts.get(row.id) || 0}</span></td>
-                              <td><button type="button" className="btn btn-secondary camera-ranges-remove" onClick={() => removeRange(row.id)}>Remove</button></td>
-                            </tr>
-                          ))}
-                          {cameraRanges.length === 0 && <tr><td colSpan={7} className="camera-ranges-empty">No ranges. Add one to continue.</td></tr>}
-                        </tbody>
-                      </table>
-                    </div>
-                    {frameRange && <div className="manual-range-subtitle camera-ranges-subtitle">{countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step)} frames after step filtering.</div>}
-                    {!cameraValidation.ok && <p className="error-text camera-ranges-error">{cameraValidation.error}</p>}
-                  </div>
-                )}
-              </div>
-
-              <div className="manual-range-panel">
-                <div className="manual-range-title">Frame Range</div>
-                <div className="manual-range-subtitle">
-                  {analysis ? "Auto-filled from analysis. Edit before starting." : "Set the frame range for this render."}
-                </div>
-                <div className="manual-range-grid">
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">Start</span>
-                    <input type="number" min="1" value={frameStart} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStart", value: e.target.value })} className="manual-range-input" />
-                  </label>
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">End</span>
-                    <input type="number" min="1" value={frameEnd} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameEnd", value: e.target.value })} className="manual-range-input" />
-                  </label>
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">Step</span>
-                    <input type="number" min="1" value={frameStep} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStep", value: e.target.value })} className="manual-range-input" />
-                  </label>
-                </div>
-              </div>
-
-              {/* Analysis report (warnings/errors) */}
-              {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (
-                <div className="prep-results-panel">
-                  {[...(prepResult.analysis_errors || []), ...(prepResult.prepare_errors || [])].map((msg, i) => (
-                    <div key={`err-${i}`} className="prep-result-item prep-result-error"><span className="prep-result-tag">[ERROR]</span> {msg}</div>
-                  ))}
-                  {[...(prepResult.analysis_warnings || []), ...(prepResult.prepare_warnings || [])].map((msg, i) => (
-                    <div key={`warn-${i}`} className="prep-result-item prep-result-warning"><span className="prep-result-tag">[WARNING]</span> {msg}</div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Settings when no analysis (manual entry only) */}
-        {showSettings && !analysis && (
-          <div className="analysis-tabs-wrap">
-            <div className="analysis-tab-panel">
-              <div className="manual-range-panel">
-                <div className="manual-range-title">Frame Range</div>
-                <div className="manual-range-subtitle">No analysis data available. Enter the frame range manually.</div>
-                <div className="manual-range-grid">
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">Start</span>
-                    <input type="number" min="1" value={frameStart} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStart", value: e.target.value })} className="manual-range-input" />
-                  </label>
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">End</span>
-                    <input type="number" min="1" value={frameEnd} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameEnd", value: e.target.value })} className="manual-range-input" />
-                  </label>
-                  <label className="manual-range-field">
-                    <span className="manual-range-label">Step</span>
-                    <input type="number" min="1" value={frameStep} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStep", value: e.target.value })} className="manual-range-input" />
-                  </label>
-                </div>
-              </div>
-            </div>
+            )}
+            {isBusy && (
+              <button className="btn btn-danger cr-start-btn" type="button" onClick={handleStop}>Stop</button>
+            )}
           </div>
         )}
       </div>
+
+      {/* ── Source picker (IDLE stage) ── */}
+      {showSourcePicker && (
+        <div className="cr-source-section">
+          {/* File drop zone */}
+          <div className="cr-source-top">
+            <button
+              type="button"
+              className={`cr-drop-zone ${file ? "cr-drop-zone--has-file" : ""}`}
+              onClick={handlePickFile}
+              onDragOver={(e) => { e.preventDefault(); }}
+              onDrop={handleDrop}
+            >
+              {file && (
+                <button type="button" className="cr-drop-clear" aria-label="Clear" onClick={(e) => { e.stopPropagation(); dispatch({ type: "CLEAR_SOURCE" }); }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                </button>
+              )}
+              <span className={`cr-drop-icon ${file ? `file-kind ${fileKind}` : ""}`}>
+                {file ? <FileKindIcon kind={fileKind} /> : (
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
+                )}
+              </span>
+              <span className="cr-drop-label">{file ? file.name : "Choose or drop file"}</span>
+              <span className="cr-drop-hint">{file ? formatSizeMb(file.size) : ".blend or .zip"}</span>
+            </button>
+
+            <button className="btn btn-primary cr-analyze-btn" type="button" onClick={handleAnalyze} disabled={!hasSource}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
+              Analyze &amp; Continue
+            </button>
+          </div>
+
+          {/* Saved files */}
+          <div className="saved-picker-panel">
+            <div className="saved-picker-head">
+              <strong>Recent Files</strong>
+              <div className="saved-picker-tools">
+                <input type="text" className="saved-picker-search" placeholder="Search files..." value={savedSearch} onChange={(e) => setSavedSearch(e.target.value)} />
+                <button className="btn btn-secondary" type="button" onClick={loadSavedInputs} disabled={savedInputs.loading}>
+                  {savedInputs.loading ? "..." : "Refresh"}
+                </button>
+              </div>
+            </div>
+            <div className="saved-picker-body">
+              <div className="saved-picker-columns"><span>Name</span><span>Date</span><span>Type</span><span>Size</span></div>
+              {savedInputs.error && <p className="error-text">{savedInputs.error}</p>}
+              {savedInputs.loading && <p className="muted">Loading...</p>}
+              {!savedInputs.loading && filteredSaved.length === 0 && (
+                <p className="saved-picker-empty">{savedInputs.items.length === 0 ? "No saved files yet." : "No matches."}</p>
+              )}
+              {savedSections.map((section) => (
+                <div key={section.key} className="saved-picker-section">
+                  <div className="saved-picker-section-label">{section.label}</div>
+                  {section.items.map(({ asset, timestamp }) => {
+                    const kind = fileKindFromName(asset.input_filename);
+                    const display = asset.display_name || asset.input_filename;
+                    return (
+                      <div
+                        key={asset.id}
+                        className={`saved-picker-row ${savedInputId === asset.id ? "selected" : ""}`}
+                        role="button" tabIndex={0}
+                        onClick={() => handleSelectSaved(asset)}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSelectSaved(asset); } }}
+                      >
+                        <div className="saved-picker-row-main">
+                          <span className={`saved-file-icon ${kind}`}><FileKindIcon kind={kind} /></span>
+                          <span className="saved-picker-name-wrap">
+                            <span className="saved-picker-display-name">{display}</span>
+                            {display !== asset.input_filename && <span className="saved-picker-original-name">{asset.input_filename}</span>}
+                          </span>
+                        </div>
+                        <span className="saved-picker-date">{formatTimestamp(timestamp)}</span>
+                        <span className="saved-picker-type">{kind === "blend" ? "Blend" : kind === "zip" ? "Zip" : "File"}</span>
+                        <span className="saved-picker-size">{formatSizeMb(asset?.size_bytes)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Active file bar (when configuring) ── */}
+      {!showSourcePicker && (
+        <div className="cr-file-bar">
+          <div className="cr-file-bar-icon">
+            <FileKindIcon kind={file ? fileKindFromName(file.name) : "blend"} />
+          </div>
+          <div className="cr-file-bar-info">
+            <span className="cr-file-bar-name">{sourceLabel || "No file selected"}</span>
+            <span className="cr-file-bar-status">{stageLabel}</span>
+          </div>
+          <button type="button" className="btn btn-secondary" onClick={handleReset} disabled={isBusy}>
+            {reRenderGroupId ? "Cancel" : "Change File"}
+          </button>
+        </div>
+      )}
+
+      {/* ── Progress bar ── */}
+      {(stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING) && (
+        <div className="cr-progress-wrap">
+          <div className={`cr-progress-track ${stage !== STAGE.UPLOADING ? "indeterminate" : ""}`}>
+            <div className="cr-progress-fill" style={{ width: stage === STAGE.UPLOADING ? `${uploadProgress}%` : "40%" }} />
+          </div>
+          <div className="cr-progress-meta">
+            <span>{stage === STAGE.ANALYZING ? "Analyzing" : stage === STAGE.UPLOADING ? "Uploading" : "Starting"}</span>
+            <span>{stage === STAGE.UPLOADING ? `${Math.min(100, uploadProgress).toFixed(1)}%` : "Working..."}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ── Warnings / notes ── */}
+      {analysisNote && !error && <p className="cr-note">{analysisNote}</p>}
+      {error && <p className="error-text">{error}</p>}
+
+      {/* ── Settings grid ── */}
+      {showSettings && (
+        <div className="cr-settings-grid">
+          {/* Left: Render Settings */}
+          {analysis && (
+            <div className="cr-card">
+              <div className="cr-card-header">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                <span>Render Settings</span>
+              </div>
+              <div className="cr-settings-form">
+                <label className="cr-field">
+                  <span className="cr-field-label">Scene</span>
+                  <select value={sceneName} onChange={(e) => handleSceneChange(e.target.value)} className="cr-input">
+                    {(scenes.length ? scenes : [{ name: "" }]).map((s) => (
+                      <option key={s.name || "default"} value={s.name || ""}>{s.name || "Default Scene"}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="cr-field">
+                  <span className="cr-field-label">Camera Mode</span>
+                  <select value={cameraMode} onChange={(e) => dispatch({ type: "SET_FIELD", field: "cameraMode", value: e.target.value })} className="cr-input">
+                    {CAMERA_MODES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </label>
+                <div className="cr-field-row">
+                  <label className="cr-field">
+                    <span className="cr-field-label">Force Camera</span>
+                    <select value={forceCameraName} onChange={(e) => dispatch({ type: "SET_FIELD", field: "forceCameraName", value: e.target.value })} className="cr-input" disabled={cameraMode !== "force_camera" || cameras.length === 0}>
+                      {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
+                    </select>
+                  </label>
+                  <label className="cr-field">
+                    <span className="cr-field-label">View Layer</span>
+                    <select value={viewLayerName} onChange={(e) => dispatch({ type: "SET_FIELD", field: "viewLayerName", value: e.target.value })} className="cr-input">
+                      {viewLayers.length > 0 ? viewLayers.map((l) => <option key={l} value={l}>{l}</option>) : <option value="">Default</option>}
+                    </select>
+                  </label>
+                </div>
+                <label className="cr-field">
+                  <span className="cr-field-label">Render Engine</span>
+                  <select value={renderEngine} onChange={(e) => dispatch({ type: "SET_FIELD", field: "renderEngine", value: e.target.value })} className="cr-input">
+                    <option value="scene_default">Scene Default</option>
+                    <option value="BLENDER_EEVEE">EEVEE</option>
+                    <option value="CYCLES">Cycles</option>
+                    <option value="BLENDER_WORKBENCH">Workbench</option>
+                  </select>
+                </label>
+              </div>
+
+              {cameraMode === "camera_ranges" && (
+                <div className="camera-ranges-panel">
+                  <div className="camera-ranges-head">
+                    <div className="manual-range-subtitle camera-ranges-subtitle">Edit camera-to-frame mappings.</div>
+                    <div className="camera-ranges-actions">
+                      <button type="button" className="btn btn-secondary" onClick={autoFillRanges}>Use Marker Cuts</button>
+                      <button type="button" className="btn btn-secondary" onClick={addRange}>Add Range</button>
+                    </div>
+                  </div>
+                  <div className="camera-ranges-table-wrap">
+                    <table className="camera-ranges-table">
+                      <thead><tr><th>Use</th><th>Camera</th><th>Start</th><th>End</th><th>Step</th><th>Frames</th><th /></tr></thead>
+                      <tbody>
+                        {cameraRanges.map((row) => (
+                          <tr key={row.id}>
+                            <td><input type="checkbox" checked={row.enabled !== false} onChange={(e) => updateRange(row.id, { enabled: e.target.checked })} /></td>
+                            <td>
+                              <select value={row.camera_name || ""} onChange={(e) => updateRange(row.id, { camera_name: e.target.value })} className="cr-input camera-ranges-input">
+                                {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
+                              </select>
+                            </td>
+                            <td><input type="number" min="1" value={row.frame_start ?? ""} onChange={(e) => updateRange(row.id, { frame_start: e.target.value })} className="cr-input camera-ranges-input" /></td>
+                            <td><input type="number" min="1" value={row.frame_end ?? ""} onChange={(e) => updateRange(row.id, { frame_end: e.target.value })} className="cr-input camera-ranges-input" /></td>
+                            <td><input type="number" min="1" value={row.frame_step ?? 1} onChange={(e) => updateRange(row.id, { frame_step: e.target.value })} className="cr-input camera-ranges-input" /></td>
+                            <td><span className="camera-ranges-count">{rangeCounts.get(row.id) || 0}</span></td>
+                            <td><button type="button" className="btn btn-secondary camera-ranges-remove" onClick={() => removeRange(row.id)}>Remove</button></td>
+                          </tr>
+                        ))}
+                        {cameraRanges.length === 0 && <tr><td colSpan={7} className="camera-ranges-empty">No ranges. Add one to continue.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                  {frameRange && <div className="manual-range-subtitle camera-ranges-subtitle">{countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step)} frames after step filtering.</div>}
+                  {!cameraValidation.ok && <p className="error-text camera-ranges-error">{cameraValidation.error}</p>}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Right: Frame Range */}
+          <div className="cr-card">
+            <div className="cr-card-header">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><rect x="2" y="2" width="20" height="20" rx="2.18" /><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5" /></svg>
+              <span>Frame Range</span>
+              {totalFrameCount != null && <span className="cr-card-badge">{totalFrameCount} frames</span>}
+            </div>
+            <div className="cr-card-hint">{analysis ? "Auto-filled from analysis. Edit before starting." : "Enter the frame range manually."}</div>
+            <div className="cr-frame-fields">
+              <label className="cr-field">
+                <span className="cr-field-label">Start</span>
+                <input type="number" min="1" value={frameStart} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStart", value: e.target.value })} className="cr-input" />
+              </label>
+              <label className="cr-field">
+                <span className="cr-field-label">End</span>
+                <input type="number" min="1" value={frameEnd} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameEnd", value: e.target.value })} className="cr-input" />
+              </label>
+              <label className="cr-field">
+                <span className="cr-field-label">Step</span>
+                <input type="number" min="1" value={frameStep} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStep", value: e.target.value })} className="cr-input" />
+              </label>
+            </div>
+          </div>
+
+          {/* Prep warnings/errors */}
+          {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (
+            <div className="cr-card cr-card-warnings">
+              <div className="cr-card-header">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+                <span>Analysis Report</span>
+              </div>
+              {[...(prepResult.analysis_errors || []), ...(prepResult.prepare_errors || [])].map((msg, i) => (
+                <div key={`err-${i}`} className="prep-result-item prep-result-error"><span className="prep-result-tag">[ERROR]</span> {msg}</div>
+              ))}
+              {[...(prepResult.analysis_warnings || []), ...(prepResult.prepare_warnings || [])].map((msg, i) => (
+                <div key={`warn-${i}`} className="prep-result-item prep-result-warning"><span className="prep-result-tag">[WARNING]</span> {msg}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Action row when in source picker */}
+      {showSourcePicker && (
+        <div className="submit-action-row">
+          {needsUpload && (
+            <button className="btn btn-primary submit-primary-btn" type="button" onClick={handleUpload} disabled={isBusy}>Upload</button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

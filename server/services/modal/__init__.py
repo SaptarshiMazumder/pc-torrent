@@ -13,6 +13,7 @@ from services.modal.client import ModalApiClient
 from services.modal.machine_registrar import MachineRegistrar
 from services.modal.dispatcher import ModalDispatcher
 from services.modal.monitor import JobMonitor
+from services.modal.recovery import StartupRecovery
 
 # ---------------------------------------------------------------------------
 # Singleton wiring
@@ -93,3 +94,12 @@ def start_monitoring_thread(
 
 def cancel_job(provider_job_id: str, machine_id: str = "") -> None:
     _dispatcher.cancel(provider_job_id)
+
+
+def get_instance_states() -> list[dict]:
+    from services.modal.instance_registry import registry
+    return registry.get_all()
+
+
+def recover_polling_threads() -> None:
+    StartupRecovery(_config).recover()

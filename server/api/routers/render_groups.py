@@ -724,7 +724,7 @@ def render_group_multipart_part_urls(
     numbers = _normalize_part_numbers(payload.part_numbers)
     urls = {
         str(n): storage.generate_presigned_upload_part_url(
-            r2_key, payload.upload_id, n, expires_in=3600
+            r2_key, payload.upload_id, n
         )
         for n in numbers
     }

@@ -43,7 +43,7 @@ class ModalConfig:
 
     @classmethod
     def from_env(cls) -> ModalConfig:
-        disabled = _env_csv_set("MODAL_DISABLED_GPU_TYPES", "a100")
+        disabled = _env_csv_set("MODAL_DISABLED_GPU_TYPES", "")
         provisioning_enabled = _env_bool("MODAL_PROVISIONING_ENABLED", True)
         raw_timeout = _env_float("MODAL_DISPATCH_TIMEOUT_SEC", 6 * 60 * 60)
 
@@ -105,27 +105,57 @@ def _parse_endpoints(disabled: set[str]) -> list[ModalEndpoint]:
         return []
 
     results: list[ModalEndpoint] = []
+    seen_gpu_types: set[str] = set()
     for part in raw.split(","):
         part = part.strip()
         if not part:
             continue
         if ":" in part:
             gpu_type, label = part.split(":", 1)
-            gpu_type = gpu_type.strip()
-            if gpu_type.lower() in disabled:
+            raw_gpu_type = gpu_type.strip()
+            gpu_type = _normalize_gpu_type(raw_gpu_type)
+            if not gpu_type:
+                log.warning(
+                    f"Skipping unsupported Modal endpoint gpu_type={raw_gpu_type} "
+                    "(only a10/a10g is allowed)"
+                )
+                continue
+            if gpu_type in disabled:
                 log.warning(f"Skipping disabled Modal endpoint gpu_type={gpu_type}")
                 continue
+            if gpu_type in seen_gpu_types:
+                log.warning(f"Skipping duplicate Modal endpoint gpu_type={gpu_type}")
+                continue
             results.append(ModalEndpoint(gpu_type=gpu_type, label=label.strip()))
+            seen_gpu_types.add(gpu_type)
         else:
-            gpu_type = part.strip()
-            if gpu_type.lower() in disabled:
+            raw_gpu_type = part.strip()
+            gpu_type = _normalize_gpu_type(raw_gpu_type)
+            if not gpu_type:
+                log.warning(
+                    f"Skipping unsupported Modal endpoint gpu_type={raw_gpu_type} "
+                    "(only a10/a10g is allowed)"
+                )
+                continue
+            if gpu_type in disabled:
                 log.warning(f"Skipping disabled Modal endpoint gpu_type={gpu_type}")
+                continue
+            if gpu_type in seen_gpu_types:
+                log.warning(f"Skipping duplicate Modal endpoint gpu_type={gpu_type}")
                 continue
             results.append(ModalEndpoint(
                 gpu_type=gpu_type,
                 label=f"Modal {gpu_type.upper()}",
             ))
+            seen_gpu_types.add(gpu_type)
     return results
+
+
+def _normalize_gpu_type(gpu_type: str) -> str | None:
+    value = gpu_type.strip().lower()
+    if value in {"a10", "a10g"}:
+        return "a10g"
+    return None
 
 
 def _env_float(name: str, default: float) -> float:

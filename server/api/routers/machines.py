@@ -3,8 +3,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.schemas.machine import RegisterMachinePayload
-from scheduling.frame_distributor import get_available_machines
-from domain.value_objects import now_iso
+from scheduling.fleet import fleet
+from models.value_objects import now_iso
 from firebase_auth import get_current_user
 from infrastructure.db import execute, query_one
 
@@ -105,4 +105,4 @@ def heartbeat_machine(machine_id: str) -> dict[str, bool]:
 
 @router.get("/machines")
 def list_available_machines() -> list[dict[str, Any]]:
-    return get_available_machines()
+    return fleet.get_available_machines()

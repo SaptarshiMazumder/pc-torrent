@@ -14,7 +14,7 @@ import threading
 import time
 from uuid import uuid4
 
-from domain.value_objects import now_iso
+from models.value_objects import now_iso
 from infrastructure.db import execute, query_one
 from services.vast.config import VastConfig
 

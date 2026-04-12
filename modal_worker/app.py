@@ -84,7 +84,4 @@ def run_render_a10g(input_data: dict):
 @app.function(image=worker_image, timeout=60, cpu=1)
 @_WEB_ENDPOINT(method="POST")
 def render_a10g(data: dict):
-    import sys
-    sys.path.insert(0, "/")
-    from modal_handler import handler
-    return handler({"input": data.get("input", data)})
+    return _spawn_call(run_render_a10g, data)

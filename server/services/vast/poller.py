@@ -12,11 +12,11 @@ import logging
 import threading
 import time
 
-from domain.value_objects import now_iso
+from models.value_objects import now_iso
 from infrastructure.db import execute, query_one
 from services.vast.client import VastApiClient
 from services.vast.config import VastConfig
-from services.vast.failover import FailoverHandler
+from scheduling.orchestrator import orchestrator as _orchestrator
 from services.vast.instance_registry import InstanceRegistry, MAX_LOG_LINES
 
 log = logging.getLogger(__name__)
@@ -56,7 +56,6 @@ class InstancePoller:
         group_id: str,
         client: VastApiClient,
         registry: InstanceRegistry,
-        failover: FailoverHandler,
         config: VastConfig,
     ) -> None:
         self._job_id = job_id
@@ -67,7 +66,6 @@ class InstancePoller:
         self._group_id = group_id
         self._client = client
         self._registry = registry
-        self._failover = failover
         self._cfg = config
 
         self._started_at = time.monotonic()
@@ -198,12 +196,9 @@ class InstancePoller:
                 f"job {self._job_id}={local_status}, failing over"
             )
             if job:
-                self._failover.handle(
-                    job_id=self._job_id, job=job,
+                _orchestrator.handle_failure(
+                    job=job,
                     error="Vast.ai instance disappeared unexpectedly",
-                    blend_url=self._blend_url,
-                    render_overrides_b64=self._render_overrides_b64,
-                    failed_machine_id=self._machine_id,
                     group_id=self._group_id,
                 )
         self._registry.remove(self._job_id)
@@ -220,12 +215,8 @@ class InstancePoller:
         self._client.destroy_instance(self._instance_id)
         job = query_one(_JOB_QUERY, (self._job_id,))
         if job:
-            self._failover.handle(
-                job_id=self._job_id, job=job, error=fatal_err,
-                blend_url=self._blend_url,
-                render_overrides_b64=self._render_overrides_b64,
-                failed_machine_id=self._machine_id,
-                group_id=self._group_id,
+            _orchestrator.handle_failure(
+                job=job, error=fatal_err, group_id=self._group_id,
             )
         self._registry.remove(self._job_id)
         return True
@@ -261,12 +252,8 @@ class InstancePoller:
         log.warning(f"Job {self._job_id}: {err}")
         self._registry.set(self._job_id, {"error": err})
         self._client.destroy_instance(self._instance_id)
-        self._failover.handle(
-            job_id=self._job_id, job=job, error=err,
-            blend_url=self._blend_url,
-            render_overrides_b64=self._render_overrides_b64,
-            failed_machine_id=self._machine_id,
-            group_id=self._group_id,
+        _orchestrator.handle_failure(
+            job=job, error=err, group_id=self._group_id,
         )
         self._registry.remove(self._job_id)
         return True
@@ -291,12 +278,8 @@ class InstancePoller:
         log.warning(f"Job {self._job_id}: {err}")
         self._registry.set(self._job_id, {"error": err})
         self._client.destroy_instance(self._instance_id)
-        self._failover.handle(
-            job_id=self._job_id, job=job, error=err,
-            blend_url=self._blend_url,
-            render_overrides_b64=self._render_overrides_b64,
-            failed_machine_id=self._machine_id,
-            group_id=self._group_id,
+        _orchestrator.handle_failure(
+            job=job, error=err, group_id=self._group_id,
         )
         self._registry.remove(self._job_id)
         return True
@@ -312,12 +295,8 @@ class InstancePoller:
         log.warning(f"Job {self._job_id}: {err}")
         self._registry.set(self._job_id, {"error": err})
         self._client.destroy_instance(self._instance_id)
-        self._failover.handle(
-            job_id=self._job_id, job=job, error=err,
-            blend_url=self._blend_url,
-            render_overrides_b64=self._render_overrides_b64,
-            failed_machine_id=self._machine_id,
-            group_id=self._group_id,
+        _orchestrator.handle_failure(
+            job=job, error=err, group_id=self._group_id,
         )
         self._registry.remove(self._job_id)
         return True
@@ -364,12 +343,8 @@ class InstancePoller:
             self._registry.set(self._job_id, {"error": err})
             job_now = query_one(_JOB_QUERY, (self._job_id,))
             if job_now:
-                self._failover.handle(
-                    job_id=self._job_id, job=job_now, error=err,
-                    blend_url=self._blend_url,
-                    render_overrides_b64=self._render_overrides_b64,
-                    failed_machine_id=self._machine_id,
-                    group_id=self._group_id,
+                _orchestrator.handle_failure(
+                    job=job_now, error=err, group_id=self._group_id,
                 )
 
         self._registry.remove(self._job_id)

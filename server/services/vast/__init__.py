@@ -19,7 +19,6 @@ from services.vast.client import VastApiClient
 from services.vast.instance_registry import InstanceRegistry
 from services.vast.machine_registrar import MachineRegistrar
 from services.vast.dispatcher import VastDispatcher
-from services.vast.failover import FailoverHandler
 from services.vast.poller import InstancePoller
 from services.vast.recovery import StartupRecovery
 
@@ -32,8 +31,6 @@ _client = VastApiClient(_config)
 _registry = InstanceRegistry()
 _registrar = MachineRegistrar(_config)
 _dispatcher = VastDispatcher(_config, _client, _registrar)
-_failover = FailoverHandler(_config)
-
 # ---------------------------------------------------------------------------
 # Backward-compatible public constants
 # ---------------------------------------------------------------------------
@@ -103,7 +100,6 @@ def start_polling_thread(
         group_id=group_id,
         client=_client,
         registry=_registry,
-        failover=_failover,
         config=_config,
     )
     poller.start()
@@ -114,4 +110,4 @@ def cancel_job(provider_job_id: str, machine_id: str = "") -> None:
 
 
 def recover_polling_threads() -> None:
-    StartupRecovery(_config, _client, _registry, _failover).recover()
+    StartupRecovery(_config, _client, _registry).recover()

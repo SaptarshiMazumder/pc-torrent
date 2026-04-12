@@ -11,7 +11,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.schemas.render_group import UpdateInputFilePayload, UpdateProfilePayload
-from domain.value_objects import (
+from models.value_objects import (
     now_iso,
     normalize_render_overrides,
     normalize_scheduling,

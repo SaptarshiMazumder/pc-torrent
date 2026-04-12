@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from infrastructure.db import init_db, query_all
-from services import runpod_autoscaler, runpod_dispatch
+from scheduling.failover_scanner import scanner as failover_scanner
 from services import modal as modal_dispatch
 from services import vast as vast_dispatch
 from api.routers import (
@@ -43,8 +43,6 @@ app.add_middleware(
 def _startup():
     setup_log_broadcast()
     init_db()
-    runpod_dispatch.register_virtual_machines()
-    runpod_dispatch.start_heartbeat_thread()
     modal_dispatch.register_virtual_machines()
     modal_dispatch.start_heartbeat_thread()
     modal_dispatch.recover_polling_threads()
@@ -52,15 +50,7 @@ def _startup():
     vast_dispatch.start_heartbeat_thread()
     vast_dispatch.recover_polling_threads()
 
-    # Autoscaler: configure, start cold (min_workers=0), then run safety sweep
-    endpoint_ids = [ep["id"] for ep in runpod_dispatch.ENDPOINTS]
-    print(f"[autoscaler] RunPod endpoints found: {endpoint_ids}")
-    if endpoint_ids:
-        runpod_autoscaler.configure(endpoint_ids, query_all)
-        runpod_autoscaler.scale_down_all()
-        runpod_autoscaler.start_safety_sweep()
-    else:
-        print("[autoscaler] WARNING: no endpoints configured — check RUNPOD_ENDPOINT_ID or RUNPOD_ENDPOINTS in .env")
+    failover_scanner.start()
 
 
 app.include_router(health.router)

@@ -21,6 +21,7 @@ import base64
 import json
 import logging
 import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -177,6 +178,33 @@ class ModalHeartbeat:
                 log.warning(f"Heartbeat failed for job {self._job_id}: {exc}")
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the bash process and every descendant (Blender, render_driver, ...).
+
+    `proc.kill()` only signals bash itself, leaving grandchildren alive and
+    holding the stdout pipe open, which wedges the handler's read loop.
+    Popen was created with `start_new_session=True` so `proc.pid` is the
+    process-group id we can target with killpg.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        log.warning(f"Could not resolve process group for pid {proc.pid}: {exc}")
+        pgid = None
+
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            log.warning(f"killpg({pgid}, SIGKILL) failed: {exc}; falling back to proc.kill()")
+
+    try:
+        proc.kill()
+    except Exception as exc:
+        log.warning(f"proc.kill() fallback failed: {exc}")
+
+
 class EGLWatchdog:
     """Kill Blender only if EGL/OpenGL errors persist without render progress.
 
@@ -248,15 +276,12 @@ class EGLWatchdog:
                 line = self._first_error_line
             log.error(
                 "EGL watchdog firing: no render progress for %.0fs after '%s', "
-                "killing Blender",
+                "killing Blender process group",
                 elapsed,
                 line,
             )
             self._fired = True
-            try:
-                self._proc.kill()
-            except Exception:
-                pass
+            _kill_process_group(self._proc)
             return
 
 
@@ -630,6 +655,7 @@ def handler(job: dict) -> dict:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         uploader = IncrementalOutputUploader(backend_url, job_id, output_dir)
         uploader.start()

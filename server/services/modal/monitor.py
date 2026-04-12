@@ -11,7 +11,7 @@ import logging
 import threading
 import time
 
-from domain.value_objects import now_iso, parse_output_files
+from models.value_objects import now_iso, parse_output_files
 from infrastructure.db import execute, query_one
 from services.modal.config import ModalConfig
 from services.modal.instance_registry import MAX_LOG_LINES
@@ -383,7 +383,7 @@ class JobMonitor:
         return (time.monotonic() - self._last_progress_at) < grace_sec
 
     def _handle_failure(self, job: dict, error: str) -> bool:
-        from scheduling.dispatch_coordinator import coordinator
+        from scheduling.orchestrator import orchestrator
         from services import modal
 
         output_count = self._output_count(job)
@@ -407,13 +407,9 @@ class JobMonitor:
                     provider_job_id,
                     exc,
                 )
-        coordinator.handle_failure(
-            job_id=self._job_id,
+        orchestrator.handle_failure(
             job=job,
             error=error,
-            blend_url=self._blend_url,
-            render_overrides_b64=self._render_overrides_b64,
-            failed_machine_id=self._machine_id,
             group_id=self._group_id,
         )
         return True

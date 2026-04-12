@@ -138,7 +138,7 @@ def endpoint_failure_rate(endpoint_id: str, window_minutes: int = 5) -> float:
         WHERE m.machine_key = %s
           AND j.submitted_at >= %s
         """,
-        (f"runpod-serverless-{endpoint_id}", window_start),
+        (endpoint_id, window_start),
     ) or {"total_count": 0}
 
     failures = int(failure_row.get("failure_count") or 0)

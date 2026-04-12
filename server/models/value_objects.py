@@ -1,10 +1,5 @@
 """
-Pure domain helpers — no I/O, no HTTP, no DB.
-
-All functions here are stateless and have no side effects.
-They encode rendering-domain rules (frame normalization, render
-override validation, progress calculation) that belong to the
-problem domain, not to any infrastructure layer.
+Shared constants, helpers, and normalization logic — no I/O, no DB.
 """
 
 from __future__ import annotations
@@ -19,7 +14,7 @@ from typing import Any
 # Constants
 # ---------------------------------------------------------------------------
 
-SERVERLESS_TYPES: frozenset[str] = frozenset({"runpod_serverless", "modal_serverless", "vast_serverless"})
+SERVERLESS_TYPES: frozenset[str] = frozenset({"modal_serverless", "vast_serverless"})
 
 DEFAULT_DEVICE_POLICY = "AUTO"
 ALLOWED_DEVICE_POLICIES = {"AUTO", "OPTIX", "CUDA", "CPU"}

@@ -11,11 +11,10 @@ from __future__ import annotations
 import base64
 import logging
 
-from domain.value_objects import now_iso
+from models.value_objects import now_iso
 from infrastructure.db import execute, query_all, query_one
 from services.vast.client import VastApiClient
 from services.vast.config import VastConfig
-from services.vast.failover import FailoverHandler
 from services.vast.instance_registry import InstanceRegistry
 from services.vast.poller import InstancePoller
 
@@ -28,12 +27,10 @@ class StartupRecovery:
         config: VastConfig,
         client: VastApiClient,
         registry: InstanceRegistry,
-        failover: FailoverHandler,
     ) -> None:
         self._cfg = config
         self._client = client
         self._registry = registry
-        self._failover = failover
 
     def recover(self) -> None:
         if not self._cfg.is_enabled():
@@ -117,7 +114,6 @@ class StartupRecovery:
                 group_id=group_id,
                 client=self._client,
                 registry=self._registry,
-                failover=self._failover,
                 config=self._cfg,
             )
             poller.start()
@@ -141,16 +137,10 @@ class StartupRecovery:
             (job_id,),
         )
         if job and blend_url:
-            execute(
-                "UPDATE jobs SET status = 'failed', error = %s, completed_at = %s WHERE id = %s",
-                ("Instance gone after server restart", now_iso(), job_id),
-            )
-            self._failover.handle(
-                job_id=job_id, job=job,
+            from scheduling.orchestrator import orchestrator
+            orchestrator.handle_failure(
+                job=job,
                 error="Instance gone after server restart",
-                blend_url=blend_url,
-                render_overrides_b64=render_overrides_b64,
-                failed_machine_id=machine_id,
                 group_id=group_id,
             )
         else:

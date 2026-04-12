@@ -1,23 +1,18 @@
 """
-Frame distributor — pure scheduling policy, no I/O.
+Frame distribution — scoring, budgeting, splitting, and serverless expansion.
 
-Responsibilities:
-- Score machines by GPU power
-- Cap worker count to match the frame budget
-- Distribute frame ranges across machines (proportional or fixed-chunk)
-- Expand serverless assignments into parallel sub-jobs
-
-These functions take plain dicts and return plain dicts so they are
-fully testable without a database or network.
+These functions need access to scheduling.strategies (to check is_enabled,
+min_frames_per_instance, workers_per_endpoint) so they live in the scheduling
+layer, not domain.
 """
 
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from domain.value_objects import MIN_FRAMES_PER_WORKER, SERVERLESS_TYPES, MACHINE_STALE_SECONDS
+from models.value_objects import MIN_FRAMES_PER_WORKER, SERVERLESS_TYPES
+from scheduling.strategies import get_strategy
 
 try:
     WORKERS_PER_SERVERLESS = max(1, int(os.getenv("WORKERS_PER_SERVERLESS", "3")))
@@ -30,13 +25,6 @@ except ValueError:
 # ---------------------------------------------------------------------------
 
 def compute_power_score(machine: dict[str, Any]) -> float:
-    """Rendering power score, driven by render_speed when available.
-
-    render_speed is a per-GPU multiplier (e.g. RTX 4090 = 1.5, A5000 = 1.0)
-    set in config.json and stored on the machine row.  When present it is
-    the dominant factor so frame distribution reflects actual Blender
-    throughput rather than raw VRAM capacity.
-    """
     speed = machine.get("render_speed") or 1.0
     vram = machine.get("gpu_vram_gb") or 0
     cores = machine.get("cpu_cores") or 0
@@ -47,14 +35,7 @@ def compute_power_score(machine: dict[str, Any]) -> float:
 
 def filter_enabled_machines(machines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop machines whose provision strategy is currently disabled."""
-    from scheduling.strategies import get_strategy
-
-    enabled: list[dict[str, Any]] = []
-    for machine in machines:
-        machine_type = machine.get("machine_type", "windows")
-        if get_strategy(machine_type).is_enabled():
-            enabled.append(machine)
-    return enabled
+    return [m for m in machines if get_strategy(m.get("machine_type", "windows")).is_enabled()]
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +47,6 @@ def max_workers_for_frame_budget(
     requested_workers: int,
     min_frames: int = MIN_FRAMES_PER_WORKER,
 ) -> int:
-    """Cap workers so each gets at least min_frames frames."""
     if requested_workers <= 1:
         return 1
     if total_frames <= 0:
@@ -75,10 +55,7 @@ def max_workers_for_frame_budget(
 
 
 def _min_frames_for_machine(machine: dict[str, Any]) -> int:
-    """Return the strategy's min_frames_per_instance for this machine."""
-    from scheduling.strategies import get_strategy
-    machine_type = machine.get("machine_type", "windows")
-    strategy = get_strategy(machine_type)
+    strategy = get_strategy(machine.get("machine_type", "windows"))
     return getattr(strategy, "min_frames_per_instance", MIN_FRAMES_PER_WORKER)
 
 
@@ -86,18 +63,10 @@ def limit_machines_for_frame_budget(
     machines: list[dict[str, Any]],
     total_frames: int,
 ) -> list[dict[str, Any]]:
-    """Keep only as many machines as the frame budget can justify.
-
-    Each machine type declares its own min_frames_per_instance so that
-    paid cloud providers (Vast, RunPod) are not provisioned for tiny jobs.
-    Machines are ranked by power score; the highest-scoring ones are kept.
-    """
+    """Keep only as many machines as the frame budget can justify."""
     if not machines:
         return []
-
     ranked = sorted(machines, key=compute_power_score, reverse=True)
-
-    # Greedily add machines as long as the remaining frame budget supports them
     kept: list[dict[str, Any]] = []
     remaining = total_frames
     for machine in ranked:
@@ -105,14 +74,11 @@ def limit_machines_for_frame_budget(
         if remaining >= min_frames:
             kept.append(machine)
             remaining -= min_frames
-        # If we can't justify this machine, skip it (don't break — a cheaper
-        # machine later in the list might have a lower min_frames threshold)
-
-    return kept if kept else ranked[:1]  # always keep at least one
+    return kept if kept else ranked[:1]
 
 
 # ---------------------------------------------------------------------------
-# Frame distribution strategies
+# Frame distribution
 # ---------------------------------------------------------------------------
 
 def distribute_frames(
@@ -244,8 +210,6 @@ def expand_serverless_assignments(
     workers_per_endpoint: int = WORKERS_PER_SERVERLESS,
 ) -> list[dict[str, Any]]:
     """Split each serverless assignment into parallel sub-assignments."""
-    from scheduling.strategies import get_strategy
-
     expanded: list[dict[str, Any]] = []
     for a in assignments:
         mt = a.get("machine_type", "")
@@ -253,7 +217,8 @@ def expand_serverless_assignments(
             expanded.append(a)
             continue
 
-        effective_workers = get_strategy(mt).workers_per_endpoint
+        strategy = get_strategy(mt)
+        effective_workers = strategy.workers_per_endpoint
         if effective_workers <= 1:
             expanded.append(a)
             continue
@@ -263,7 +228,6 @@ def expand_serverless_assignments(
             expanded.append(a)
             continue
 
-        strategy = get_strategy(mt)
         min_frames = getattr(strategy, "min_frames_per_instance", MIN_FRAMES_PER_WORKER)
         worker_count = max_workers_for_frame_budget(total_frames, effective_workers, min_frames)
         if worker_count <= 1:
@@ -298,90 +262,3 @@ def expand_serverless_assignments(
             current = sub_end + frame_step
 
     return expanded
-
-
-# ---------------------------------------------------------------------------
-# Available machine query
-# ---------------------------------------------------------------------------
-
-def get_available_machines() -> list[dict[str, Any]]:
-    """
-    Return all currently available machines, marking stale physical desktops
-    as idle first. This is the single authoritative place that applies the
-    heartbeat timeout rule.
-    """
-    from infrastructure.db import execute, query_all
-
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(seconds=MACHINE_STALE_SECONDS)
-    ).isoformat()
-
-    execute(
-        """
-        UPDATE machines
-        SET status = 'idle'
-        WHERE status = 'available'
-          AND machine_type NOT IN ('runpod_serverless', 'modal_serverless', 'vast_serverless')
-          AND (last_seen_at IS NULL OR last_seen_at < %s)
-        """,
-        (cutoff,),
-    )
-    rows = query_all(
-        """
-        SELECT * FROM machines
-        WHERE status = 'available'
-          AND (
-            machine_type IN ('runpod_serverless', 'modal_serverless', 'vast_serverless')
-            OR last_seen_at >= %s
-          )
-        ORDER BY gpu_vram_gb DESC
-        """,
-        (cutoff,),
-    )
-    return filter_enabled_machines(rows)
-
-
-def choose_retry_machine(
-    group_id: str,
-    failed_machine_id: str,
-) -> str | None:
-    """
-    Pick the best available machine from the pool, excluding the one that failed.
-
-    Provider routing rules (mirrors dispatch_coordinator._find_failover_machine):
-    - Modal failure → prefer Vast, then any non-Modal serverless
-    - Vast failure  → prefer another Vast machine
-    - Other         → any serverless, then any machine
-    Falls back to the failed machine itself if nothing else is available.
-    """
-    from infrastructure.db import query_all, query_one
-
-    failed_machine = query_one(
-        "SELECT machine_type FROM machines WHERE id = %s", (failed_machine_id,)
-    )
-    failed_type = (failed_machine or {}).get("machine_type", "")
-
-    rows = query_all(
-        "SELECT * FROM machines WHERE status = 'available' AND id != %s ORDER BY gpu_vram_gb DESC",
-        (failed_machine_id,),
-    )
-    rows = filter_enabled_machines(rows)
-    if not rows:
-        return failed_machine_id
-
-    serverless = [r for r in rows if r.get("machine_type") in SERVERLESS_TYPES]
-
-    if failed_type == "modal_serverless":
-        vast = [r for r in serverless if r.get("machine_type") == "vast_serverless"]
-        if vast:
-            return vast[0]["id"]
-        non_modal = [r for r in serverless if r.get("machine_type") != "modal_serverless"]
-        if non_modal:
-            return non_modal[0]["id"]
-
-    elif failed_type == "vast_serverless":
-        other_vast = [r for r in serverless if r.get("machine_type") == "vast_serverless"]
-        if other_vast:
-            return other_vast[0]["id"]
-
-    return serverless[0]["id"] if serverless else rows[0]["id"]

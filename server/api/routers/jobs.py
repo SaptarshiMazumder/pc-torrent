@@ -28,10 +28,9 @@ from api.schemas.job import (
     UpdateJobProgressPayload,
     UpdateJobStatusPayload,
 )
-from scheduling.frame_distributor import choose_retry_machine
-from scheduling.dispatch_coordinator import coordinator
+from scheduling.orchestrator import orchestrator
 from scheduling.strategies import get_strategy
-from domain.value_objects import (
+from models.value_objects import (
     MAX_UPLOAD_BYTES,
     MULTIPART_DEFAULT_PART_SIZE_BYTES,
     MULTIPART_MAX_PARTS,
@@ -695,83 +694,19 @@ def update_job_status(
 
 
 def _schedule_retry(job: dict[str, Any], rendered_frames: int) -> str | None:
-    """Create a retry job for a failed group task and dispatch if serverless."""
+    """Delegate to the orchestrator for retry/failover on a failed job."""
     if _group_blocks_new_jobs(job["group_id"]):
         log.info(
-            "Skipping retry creation for job %s because group %s is terminal",
-            job["id"],
-            job["group_id"],
+            "Skipping retry for job %s because group %s is terminal",
+            job["id"], job["group_id"],
         )
         return None
 
-    step = job.get("frame_step") or 1
-    remaining_start = job["frame_start"] + rendered_frames * step
-    remaining_end = job["frame_end"]
-
-    if remaining_start > remaining_end:
-        return None
-
-    retry_machine_id = (
-        choose_retry_machine(job["group_id"], job["machine_id"])
-        or job["machine_id"]
+    return orchestrator.handle_failure(
+        job=job,
+        error=job.get("error") or "Job reported failure",
+        group_id=job["group_id"],
     )
-    retry_job_id = str(uuid4())
-    remaining_total = ((remaining_end - remaining_start) // step) + 1
-    next_attempt = (job.get("attempt") or 0) + 1
-
-    execute(
-        """
-        INSERT INTO jobs (
-            id, machine_id, group_id, input_filename, status,
-            total_frames, rendered_frames, output_files,
-            frame_start, frame_end, frame_step,
-            render_overrides_json, attempt, max_retries, priority,
-            chunk_index, chunk_size_frames, submitted_at
-        )
-        VALUES (%s, %s, %s, %s, 'pending', %s, 0, '[]', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
-        (
-            retry_job_id, retry_machine_id, job["group_id"],
-            job["input_filename"], remaining_total,
-            remaining_start, remaining_end, step,
-            job.get("render_overrides_json") or "{}",
-            next_attempt, job.get("max_retries") or 0,
-            job.get("priority") or 0,
-            job.get("chunk_index"), job.get("chunk_size_frames"),
-            now_iso(),
-        ),
-    )
-
-    retry_machine_type = _machine_type_of(retry_machine_id)
-    if is_serverless(retry_machine_type):
-        group = query_one(
-            "SELECT * FROM render_groups WHERE id = %s", (job["group_id"],)
-        )
-        if group:
-            from services import runpod_dispatch
-            blend_url = (
-                f"{runpod_dispatch.PUBLIC_BACKEND_URL}"
-                f"/render-groups/{job['group_id']}/input/{group['input_filename']}"
-            )
-            overrides_b64 = base64.b64encode(
-                (job.get("render_overrides_json") or "{}").encode()
-            ).decode()
-            try:
-                coordinator.dispatch(
-                    job_id=retry_job_id,
-                    machine_id=retry_machine_id,
-                    machine_type=retry_machine_type,
-                    blend_url=blend_url,
-                    frame_start=remaining_start,
-                    frame_end=remaining_end,
-                    frame_step=step,
-                    render_overrides_b64=overrides_b64,
-                    group_id=job["group_id"],
-                )
-            except Exception as exc:
-                log.error(f"Retry dispatch failed for {retry_job_id}: {exc}")
-
-    return retry_job_id
 
 
 # ---------------------------------------------------------------------------

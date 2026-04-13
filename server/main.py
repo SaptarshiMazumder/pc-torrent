@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from infrastructure.db import init_db, query_all
+from infrastructure.db import init_db, query_all, try_acquire_leader_lock
 from scheduling.failover_scanner import scanner as failover_scanner
 from services import modal as modal_dispatch
 from services import vast as vast_dispatch
@@ -43,14 +43,23 @@ app.add_middleware(
 def _startup():
     setup_log_broadcast()
     init_db()
-    modal_dispatch.register_virtual_machines()
-    modal_dispatch.start_heartbeat_thread()
-    modal_dispatch.recover_polling_threads()
-    vast_dispatch.register_virtual_machines()
-    vast_dispatch.start_heartbeat_thread()
-    vast_dispatch.recover_polling_threads()
 
-    failover_scanner.start()
+    # Register virtual machines on every instance (idempotent upserts).
+    modal_dispatch.register_virtual_machines()
+    vast_dispatch.register_virtual_machines()
+
+    # Background daemons must only run on ONE instance. We use a PostgreSQL
+    # session-level advisory lock as a lightweight leader election: whichever
+    # Cloud Run instance acquires the lock first becomes the leader and runs
+    # the heartbeat/recovery threads and FailoverScanner. The rest skip them.
+    # When the leader is killed (scale-down, deploy, crash), Postgres releases
+    # the lock automatically and the next startup wins it.
+    if try_acquire_leader_lock():
+        modal_dispatch.start_heartbeat_thread()
+        modal_dispatch.recover_polling_threads()
+        vast_dispatch.start_heartbeat_thread()
+        vast_dispatch.recover_polling_threads()
+        failover_scanner.start()
 
 
 app.include_router(health.router)

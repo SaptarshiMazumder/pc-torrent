@@ -46,7 +46,7 @@ from models.value_objects import (
     parse_output_files,
 )
 from firebase_auth import get_current_user, write_job_record
-from infrastructure.db import execute, query_one, query_all
+from infrastructure.db import execute, execute_returning, query_one, query_all
 import infrastructure.storage as storage
 
 log = logging.getLogger(__name__)
@@ -510,26 +510,23 @@ def get_next_job_for_machine(
     execute(
         "UPDATE machines SET last_seen_at = %s WHERE id = %s", (now_iso(), machine_id)
     )
-    try:
-        job = query_one(
-            """
-            SELECT * FROM jobs
+    # Atomically claim the job: UPDATE...RETURNING with FOR UPDATE SKIP LOCKED
+    # ensures two concurrent polls for the same machine_id never hand out the
+    # same job, even across multiple Cloud Run instances.
+    job = execute_returning(
+        """
+        UPDATE jobs SET status = 'running'
+        WHERE id = (
+            SELECT id FROM jobs
             WHERE machine_id = %s AND status = 'pending'
             ORDER BY priority DESC, submitted_at ASC
             LIMIT 1
-            """,
-            (machine_id,),
+            FOR UPDATE SKIP LOCKED
         )
-    except Exception:
-        job = query_one(
-            """
-            SELECT * FROM jobs
-            WHERE machine_id = %s AND status = 'pending'
-            ORDER BY submitted_at ASC
-            LIMIT 1
-            """,
-            (machine_id,),
-        )
+        RETURNING *
+        """,
+        (machine_id,),
+    )
     if not job:
         return None
 

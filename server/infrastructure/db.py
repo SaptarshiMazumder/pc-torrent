@@ -116,6 +116,56 @@ def execute(sql, params=None):
             cur.execute(sql, params)
 
 
+def execute_returning(sql, params=None):
+    """Execute an UPDATE/INSERT ... RETURNING and return one row as a dict, or None."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Leader election (Cloud Run multi-instance safety)
+# ---------------------------------------------------------------------------
+
+_LEADER_LOCK_KEY = 7_391_823  # arbitrary unique int for this service
+_leader_conn = None  # kept alive to hold the advisory lock for process lifetime
+
+
+def try_acquire_leader_lock() -> bool:
+    """
+    Attempt to acquire a PostgreSQL session-level advisory lock.
+    Returns True if this instance is now the leader.
+
+    The lock is held for the lifetime of _leader_conn (i.e. this process).
+    When the process exits (or Cloud Run kills the container), Postgres
+    releases the lock automatically, allowing another instance to take over.
+    """
+    global _leader_conn
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        pool = _get_pool()
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (_LEADER_LOCK_KEY,))
+            row = cur.fetchone()
+            acquired = bool(row and row[0])
+        conn.commit()
+        if acquired:
+            _leader_conn = conn  # never return this to the pool; lock lives with it
+            log.info("Leader election: this instance is the leader")
+        else:
+            pool.putconn(conn)
+            log.info("Leader election: another instance holds the lock — skipping background daemons")
+        return acquired
+    except Exception:
+        import logging as _log
+        _log.getLogger(__name__).exception("Leader election failed — defaulting to leader")
+        return True  # fail open so daemons always run if election itself breaks
+
+
 def init_db():
     """Create tables if they don't exist."""
     with get_conn() as conn:

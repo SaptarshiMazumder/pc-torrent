@@ -136,6 +136,9 @@ class _InstancePoller:
 
         if local_status in ("done", "failed", "cancelled"):
             self._client.instances.destroy(self._instance_id)
+            if local_status == "failed":
+                error = str(job.get("error") or "Worker reported failure")
+                self._on_failure(self._job_id, error)
             self._remove_snapshot()
             return True
 

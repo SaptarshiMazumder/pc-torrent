@@ -115,6 +115,9 @@ class _JobMonitor:
         if local_status in ("done", "failed", "cancelled"):
             if local_status == "cancelled":
                 self._client.cancel_job(self._provider_job_id)
+            elif local_status == "failed":
+                error = str(job.get("error") or "Worker reported failure")
+                self._on_failure(self._job_id, error)
             self._remove_snapshot()
             return True
 

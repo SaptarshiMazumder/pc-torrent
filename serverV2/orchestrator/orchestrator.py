@@ -24,6 +24,7 @@ from serverV2.core.models import (
     PlannedTask,
     RenderJob,
 )
+from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.orchestrator.dispatch_queue import (
     DispatchQueueManager,
@@ -33,6 +34,8 @@ from serverV2.orchestrator.dispatch_queue import (
 from serverV2.orchestrator.dispatcher import Dispatcher
 from serverV2.orchestrator.frame_allocator import FrameAllocator
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +49,9 @@ class RenderOrchestrator:
         callback_router: CallbackRouter,
         blend_url_resolver: BlendUrlResolver,
         job_repo: JobRepository,
+        group_repo: RenderGroupRepository,
+        machine_repo: MachineRepository,
+        fleet_registry: FleetRegistry,
         queue_manager: DispatchQueueManager,
         machine_picker: Callable[[], list[Machine]],
     ) -> None:
@@ -54,6 +60,9 @@ class RenderOrchestrator:
         self._callbacks = callback_router
         self._blend_url = blend_url_resolver
         self._job_repo = job_repo
+        self._group_repo = group_repo
+        self._machine_repo = machine_repo
+        self._fleet = fleet_registry
         self._queue_mgr = queue_manager
         self._machine_picker = machine_picker
         self._requeued_jobs: set[str] = set()
@@ -143,8 +152,7 @@ class RenderOrchestrator:
         if rj.status not in ("failed",):
             return
 
-        from serverV2.infrastructure.db import query_one
-        grp = query_one("SELECT status FROM render_groups WHERE id = %s", (group_id,))
+        grp = self._group_repo.get_by_id(group_id)
         if grp and grp.get("status") in ("cancelled", "done"):
             log.info("Group %s is %s — not requeuing job %s", group_id, grp["status"], job_id)
             return
@@ -209,14 +217,40 @@ class RenderOrchestrator:
     # 5. Cancellation
     # ------------------------------------------------------------------
 
-    def cancel_group(self, group_id: str) -> None:
-        """Drain the dispatch queue so no more retries happen."""
+    def cancel_group(self, group_id: str) -> dict[str, Any]:
+        """Full cancel: mark DB, drain queue, kill fleet containers."""
+        # 1. Mark group cancelled in DB FIRST — blocks all requeues immediately
+        self._group_repo.update_status(group_id, "cancelled")
+
+        # 2. Mark all active jobs cancelled
+        jobs = self._job_repo.get_active_by_group(group_id)
+        for job in jobs:
+            self._job_repo.update_status(job["id"], "cancelled", error="Cancelled by user")
+
+        # 3. Drain dispatch queue
         queue = self._queue_mgr.get(group_id)
         if queue:
             drained = queue.drain()
             if drained:
                 log.info("Group %s: drained %d items from dispatch queue", group_id, len(drained))
             self._queue_mgr.remove(group_id)
+
+        # 4. Cancel provider jobs on each fleet
+        for job in jobs:
+            mt = self._machine_repo.get_type(job["machine_id"])
+            strategy = self._fleet.get(mt)
+            if not strategy or not strategy.is_enabled():
+                continue
+            pid = strategy.provider_job_id_from_job(job)
+            if not pid:
+                continue
+            try:
+                strategy.cancel(pid, job["machine_id"])
+            except Exception as exc:
+                log.warning("Failed to cancel provider job %s: %s", pid, exc)
+
+        log.info("Group %s: cancelled %d jobs", group_id, len(jobs))
+        return {"cancelled_jobs": len(jobs)}
 
     # ------------------------------------------------------------------
     # Internal: flush queue and pick machines
@@ -229,6 +263,11 @@ class RenderOrchestrator:
         initial_tasks: list[PlannedTask] | None = None,
     ) -> list[DispatchResult]:
         """Dequeue all items, assign machines, dispatch."""
+        grp = self._group_repo.get_by_id(context.group_id)
+        if grp and grp.get("status") in ("cancelled", "done"):
+            log.info("Group %s is %s — refusing to dispatch", context.group_id, grp["status"])
+            return []
+
         results: list[DispatchResult] = []
         idx = 0
 

@@ -188,6 +188,9 @@ def build(config: AppConfig | None = None) -> Container:
         callback_router=callback_router,
         blend_url_resolver=blend_resolver,
         job_repo=job_repo,
+        group_repo=group_repo,
+        machine_repo=machine_repo,
+        fleet_registry=registry,
         queue_manager=queue_manager,
         machine_picker=_machine_picker,
     )

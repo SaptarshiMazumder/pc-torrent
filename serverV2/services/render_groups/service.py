@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 from typing import Any
 from uuid import uuid4
 
@@ -16,7 +15,6 @@ from serverV2.core.value_objects import (
     MAX_UPLOAD_BYTES,
     SINGLE_PUT_MAX_BYTES,
     extract_analysis_warnings,
-    is_serverless,
     latest_output_filename,
     normalize_render_overrides,
     normalize_scheduling,
@@ -131,12 +129,10 @@ class RenderGroupService:
     # confirm_upload
     # ------------------------------------------------------------------
 
-    def confirm_upload(self, group_id: str, payload: Any, user: dict[str, Any]) -> dict[str, Any]:
+    def confirm_upload(self, group_id: str, payload: Any) -> dict[str, Any]:
         group = self._groups.get_by_id(group_id)
         if not group:
             raise RenderGroupServiceError(404, "Render group not found")
-        if not group.get("user_id") or group["user_id"] != user["uid"]:
-            raise RenderGroupServiceError(403, "Access denied")
 
         self._jobs.cancel_active_by_group(group_id)
 
@@ -232,19 +228,21 @@ class RenderGroupService:
             for pt, dr in zip(planned, dispatch_results)
         ]
 
-        try:
-            write_render_group_record(user["uid"], group_id, {
-                "group_id": group_id,
-                "filename": group["input_filename"],
-                "status": "pending",
-                "total_frames": plan.total_frames,
-                "frame_start": plan.frame_start,
-                "frame_end": plan.frame_end,
-                "submitted_at": group.get("submitted_at"),
-                "machine_count": len(tasks),
-            })
-        except Exception:
-            pass
+        uid = group.get("user_id")
+        if uid:
+            try:
+                write_render_group_record(uid, group_id, {
+                    "group_id": group_id,
+                    "filename": group["input_filename"],
+                    "status": "pending",
+                    "total_frames": plan.total_frames,
+                    "frame_start": plan.frame_start,
+                    "frame_end": plan.frame_end,
+                    "submitted_at": group.get("submitted_at"),
+                    "machine_count": len(tasks),
+                })
+            except Exception:
+                pass
 
         return {
             "group_id": group_id,
@@ -268,34 +266,8 @@ class RenderGroupService:
         group = self._groups.get_by_id(group_id)
         if not group:
             raise RenderGroupServiceError(404, "Render group not found")
-
-        jobs = self._jobs.get_active_by_group(group_id)
-
-        self._orchestrator.cancel_group(group_id)
-        self._groups.update_status(group_id, "cancelled")
-        for job in jobs:
-            self._jobs.update_status(job["id"], "cancelled", error="Cancelled by user")
-            mt = self._machines.get_type(job["machine_id"])
-            if not is_serverless(mt):
-                self._machines.set_available(job["machine_id"])
-
-        def _cancel_providers():
-            for job in jobs:
-                mt = self._machines.get_type(job["machine_id"])
-                strategy = self._fleet.get(mt)
-                if not strategy:
-                    continue
-                pid = strategy.provider_job_id_from_job(job)
-                if not pid:
-                    continue
-                if strategy.is_enabled():
-                    try:
-                        strategy.cancel(pid, job["machine_id"])
-                    except Exception as exc:
-                        log.warning("Failed to cancel provider job %s: %s", pid, exc)
-
-        threading.Thread(target=_cancel_providers, daemon=True, name=f"cancel-{group_id[:8]}").start()
-        return {"success": True, "cancelled_jobs": len(jobs)}
+        result = self._orchestrator.cancel_group(group_id)
+        return {"success": True, **result}
 
     # ------------------------------------------------------------------
     # rerender

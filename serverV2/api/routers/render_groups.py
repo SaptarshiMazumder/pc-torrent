@@ -74,9 +74,9 @@ def create(payload: CreateRenderGroupPayload, user: dict = Depends(get_current_u
 
 
 @router.post("/render-groups/{group_id}/confirm-upload")
-def confirm_upload(group_id: str, payload: ConfirmRenderGroupPayload, user: dict = Depends(get_current_user)):
+def confirm_upload(group_id: str, payload: ConfirmRenderGroupPayload):
     try:
-        return _get().confirm_upload(group_id, payload, user)
+        return _get().confirm_upload(group_id, payload)
     except RenderGroupServiceError as e:
         raise HTTPException(e.status, e.message)
 

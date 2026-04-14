@@ -76,7 +76,7 @@ def _spawn_call(fn, data: dict) -> dict:
 # Single A10G endpoint. Keep backend MODAL_ENDPOINTS aligned to "a10g".
 # ---------------------------------------------------------------------------
 
-@app.function(image=worker_image, gpu="A10G", timeout=86400, memory=65536, cpu=16)
+@app.function(image=worker_image, gpu="A10G", timeout=86400, memory=65536, cpu=16, retries=0)
 def run_render_a10g(input_data: dict):
     return _run_handler(input_data)
 

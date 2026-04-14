@@ -1,13 +1,12 @@
-"""CallbackRouter — routes worker callbacks to the correct handler.
+"""CallbackRouter — single gateway for all outcome notifications.
 
-Workers report progress / success / failure via HTTP.  This router decides
-which handler to invoke based on the outcome.
+Fleet monitors and the failover scanner funnel through here.
+Delegates to SuccessHandler and FailureHandler symmetrically.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from serverV2.callbacks.failure_handler import FailureHandler
 from serverV2.callbacks.success_handler import SuccessHandler
@@ -44,21 +43,21 @@ class CallbackRouter:
             log.warning("Callback for unknown job %s", job_id)
             return
 
+        current = str(job.get("status") or "")
+        if current in ("cancelled", "done"):
+            log.info("Job %s already %s — ignoring %s callback", job_id, current, outcome.value)
+            return
+
         group_id = job.get("group_id", "")
 
         if outcome == CallbackOutcome.SUCCESS:
             self._success.handle(job_id, group_id)
 
         elif outcome == CallbackOutcome.FAILURE:
-            self._failure.handle(job, error or "Unknown failure", group_id)
+            self._failure.handle(job_id, error or "Unknown failure")
 
         elif outcome == CallbackOutcome.PROGRESS:
             if rendered_frames is not None and total_frames is not None:
                 self._job_repo.update_progress(job_id, rendered_frames, total_frames)
-                if job["status"] == "pending":
+                if current == "pending":
                     self._job_repo.update_status(job_id, "running")
-
-    def handle_failure_from_monitor(
-        self, job: dict[str, Any], error: str, group_id: str,
-    ) -> str | None:
-        return self._failure.handle(job, error, group_id)

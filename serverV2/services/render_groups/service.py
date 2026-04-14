@@ -271,6 +271,7 @@ class RenderGroupService:
 
         jobs = self._jobs.get_active_by_group(group_id)
 
+        self._orchestrator.cancel_group(group_id)
         self._groups.update_status(group_id, "cancelled")
         for job in jobs:
             self._jobs.update_status(job["id"], "cancelled", error="Cancelled by user")

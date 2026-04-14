@@ -1,6 +1,7 @@
 """JobService — standalone job lifecycle (upload, confirm, status, outputs, download).
 
-Composes: job_repo, machine_repo, storage, upload_coordinator, orchestrator.
+Composes: job_repo, machine_repo, storage, upload_coordinator.
+Pure DB operations — zero orchestration calls.
 """
 
 from __future__ import annotations
@@ -35,10 +36,9 @@ class JobServiceError(Exception):
 
 class JobService:
 
-    def __init__(self, *, job_repo, machine_repo, orchestrator) -> None:
+    def __init__(self, *, job_repo, machine_repo) -> None:
         self._jobs = job_repo
         self._machines = machine_repo
-        self._orchestrator = orchestrator
 
     # ---- upload request ----
 
@@ -87,18 +87,19 @@ class JobService:
 
     # ---- status callbacks (from workers) ----
 
+    _TERMINAL_STATUSES = frozenset({"cancelled", "done"})
+
     def update_status(self, job_id: str, status: str, error: str | None = None) -> dict[str, Any]:
         job = self._jobs.get_raw_by_id(job_id)
         if not job:
             raise JobServiceError(404, "Job not found")
 
+        current = str(job.get("status") or "")
+        if current in self._TERMINAL_STATUSES:
+            log.info("Rejecting status update %s→%s for job %s (terminal)", current, status, job_id)
+            return {"job_id": job_id, "status": current, "success": False, "reason": "job already terminal"}
+
         self._jobs.update_status(job_id, status, error=error)
-
-        if status == "done":
-            self._orchestrator.on_job_success(job_id)
-        elif status == "failed":
-            self._orchestrator.on_job_failure(job_id, error or "Unknown error")
-
         return {"job_id": job_id, "status": status}
 
     def update_progress(self, job_id: str, rendered_frames: int, total_frames: int) -> dict[str, Any]:
@@ -106,7 +107,6 @@ class JobService:
         if not job:
             raise JobServiceError(404, "Job not found")
         self._jobs.update_progress(job_id, rendered_frames, total_frames)
-        self._orchestrator.on_job_progress(job_id, rendered_frames, total_frames)
         return {"job_id": job_id, "rendered_frames": rendered_frames, "total_frames": total_frames}
 
     def heartbeat(self, job_id: str, phase: str | None = None) -> dict[str, Any]:

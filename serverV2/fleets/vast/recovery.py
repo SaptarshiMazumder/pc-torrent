@@ -13,11 +13,10 @@ log = logging.getLogger(__name__)
 
 class VastRecovery:
 
-    def __init__(self, *, config, client, callback_handler, registry) -> None:
+    def __init__(self, *, config, client, callback_handler) -> None:
         self._cfg = config
         self._client = client
         self._callback_handler = callback_handler
-        self._registry = registry
 
     def recover(self) -> None:
         if not self._cfg.is_enabled():

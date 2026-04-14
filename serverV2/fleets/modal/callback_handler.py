@@ -1,6 +1,8 @@
 """ModalCallbackHandler — background monitor for Modal jobs.
 
 Detects completion / failure / staleness and reports via injected callables.
+On failure: cancels the Modal job and notifies via _on_failure(job_id, error).
+Zero retry logic — that belongs to the orchestrator.
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from serverV2.config import ModalConfig
+from serverV2.core.models import InstanceSnapshot
+from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.repositories.job_repository import JobRepository
 
@@ -28,12 +32,14 @@ class ModalCallbackHandler:
         config: ModalConfig,
         client: ModalClient,
         job_repo: JobRepository,
-        on_failure: Callable[[dict[str, Any], str, str], None],
+        on_failure: Callable[[str, str], None],
+        registry: InstanceRegistry | None = None,
     ) -> None:
         self._cfg = config
         self._client = client
         self._job_repo = job_repo
         self._on_failure = on_failure
+        self._registry = registry
 
     def start_monitoring(
         self,
@@ -48,12 +54,11 @@ class ModalCallbackHandler:
         monitor = _JobMonitor(
             job_id=job_id,
             provider_job_id=provider_job_id,
-            machine_id=machine_id,
-            group_id=group_id,
             config=self._cfg,
             client=self._client,
             job_repo=self._job_repo,
             on_failure=self._on_failure,
+            registry=self._registry,
         )
         t = threading.Thread(
             target=monitor.run, daemon=True,
@@ -63,27 +68,24 @@ class ModalCallbackHandler:
 
 
 class _JobMonitor:
-    """Encapsulates the state machine for one Modal job monitor loop."""
 
     def __init__(
         self,
         job_id: str,
         provider_job_id: str,
-        machine_id: str,
-        group_id: str,
         config: ModalConfig,
         client: ModalClient,
         job_repo: JobRepository,
-        on_failure: Callable[[dict[str, Any], str, str], None],
+        on_failure: Callable[[str, str], None],
+        registry: InstanceRegistry | None = None,
     ) -> None:
         self._job_id = job_id
         self._provider_job_id = provider_job_id
-        self._machine_id = machine_id
-        self._group_id = group_id
         self._cfg = config
         self._client = client
         self._job_repo = job_repo
         self._on_failure = on_failure
+        self._registry = registry
 
         self._started_at = time.monotonic()
         self._last_activity_at = time.monotonic()
@@ -103,45 +105,46 @@ class _JobMonitor:
         elapsed = time.monotonic() - self._started_at
 
         if not job:
+            self._remove_snapshot()
             return True
 
         local_status = str(job.get("status") or "")
         self._update_activity(job)
+        self._write_snapshot(job, elapsed)
 
         if local_status in ("done", "failed", "cancelled"):
+            if local_status == "cancelled":
+                self._client.cancel_job(self._provider_job_id)
+            self._remove_snapshot()
             return True
 
         if self._is_complete(job):
             self._job_repo.mark_done(self._job_id)
+            self._remove_snapshot()
             return True
 
         if local_status == "pending" and elapsed > self._cfg.in_queue_timeout_sec:
-            err = f"Modal job stuck in pending for {elapsed:.0f}s"
             if self._is_complete(job):
                 self._job_repo.mark_done(self._job_id)
                 return True
-            self._handle_failure(job, err)
+            self._handle_failure(f"Modal job stuck in pending for {elapsed:.0f}s")
             return True
 
         if local_status == "running" and self._is_heartbeat_dead(job):
-            err = f"Modal job heartbeat dead (no ping for >{_HEARTBEAT_TIMEOUT_SEC}s)"
             if self._is_complete(job):
                 self._job_repo.mark_done(self._job_id)
                 return True
-            self._handle_failure(job, err)
+            self._handle_failure(f"Modal job heartbeat dead (no ping for >{_HEARTBEAT_TIMEOUT_SEC}s)")
             return True
 
         if local_status == "running" and self._is_stale():
-            err = f"Modal job stale — no new frames for {self._cfg.in_progress_stale_sec / 60:.0f} min"
             if self._is_complete(job):
                 self._job_repo.mark_done(self._job_id)
                 return True
-            self._handle_failure(job, err)
+            self._handle_failure(f"Modal job stale — no new frames for {self._cfg.in_progress_stale_sec / 60:.0f} min")
             return True
 
         return False
-
-    # ---- helpers ----
 
     def _update_activity(self, job: dict[str, Any]) -> None:
         marker = (job.get("rendered_frames") or 0, self._output_count(job))
@@ -172,10 +175,29 @@ class _JobMonitor:
         except Exception:
             return False
 
-    def _handle_failure(self, job: dict[str, Any], error: str) -> None:
+    def _write_snapshot(self, job: dict[str, Any], elapsed: float) -> None:
+        if not self._registry:
+            return
+        self._registry.update(self._job_id, InstanceSnapshot(
+            job_id=self._job_id,
+            fleet_type="modal_serverless",
+            provider_status=str(job.get("status") or "pending"),
+            gpu_label=str(job.get("gpu_model") or "Modal GPU"),
+            rendered_frames=job.get("rendered_frames") or 0,
+            total_frames=job.get("total_frames") or 0,
+            elapsed_sec=round(elapsed),
+            error=job.get("error"),
+        ))
+
+    def _remove_snapshot(self) -> None:
+        if self._registry:
+            self._registry.remove(self._job_id)
+
+    def _handle_failure(self, error: str) -> None:
         log.warning("Job %s: %s", self._job_id, error)
         self._client.cancel_job(self._provider_job_id)
-        self._on_failure(job, error, self._group_id)
+        self._remove_snapshot()
+        self._on_failure(self._job_id, error)
 
     @staticmethod
     def _output_count(job: dict[str, Any]) -> int:

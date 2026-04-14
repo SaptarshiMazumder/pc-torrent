@@ -60,7 +60,7 @@ class ModalApiClient:
                 headers=self._headers(),
                 json=payload,
                 timeout=self._cfg.dispatch_timeout_sec,
-                follow_redirects=False,
+                follow_redirects=True,
             )
         except httpx.TimeoutException as exc:
             raise RuntimeError(

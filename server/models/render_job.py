@@ -36,7 +36,6 @@ class RenderJob:
     input_filename: str
     render_overrides_json: str | None
     chunk_index: int | None
-    chunk_size_frames: int | None
     priority: int
 
     @classmethod
@@ -62,7 +61,6 @@ class RenderJob:
             input_filename=row.get("input_filename", ""),
             render_overrides_json=row.get("render_overrides_json"),
             chunk_index=row.get("chunk_index"),
-            chunk_size_frames=row.get("chunk_size_frames"),
             priority=row.get("priority") or 0,
         )
 

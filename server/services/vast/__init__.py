@@ -109,5 +109,10 @@ def cancel_job(provider_job_id: str, machine_id: str = "") -> None:
     _dispatcher.cancel(provider_job_id)
 
 
+def remove_instance(job_id: str) -> None:
+    """Remove a job from the in-memory registry immediately (e.g. on cancel)."""
+    _registry.remove(job_id)
+
+
 def recover_polling_threads() -> None:
     StartupRecovery(_config, _client, _registry).recover()

@@ -132,7 +132,7 @@ class StartupRecovery:
         )
         job = query_one(
             "SELECT status, frame_start, frame_end, frame_step, rendered_frames, "
-            "input_filename, render_overrides_json, chunk_index, chunk_size_frames, priority "
+            "input_filename, render_overrides_json, chunk_index, priority "
             "FROM jobs WHERE id = %s",
             (job_id,),
         )

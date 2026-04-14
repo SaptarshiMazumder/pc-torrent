@@ -47,7 +47,6 @@ class PlannedTask:
     total_frames: int
     power_score: float
     chunk_index: int | None = None
-    chunk_size_frames: int | None = None
 
 
 @dataclass(frozen=True)
@@ -168,15 +167,15 @@ class FleetManager:
                     total_frames, rendered_frames, output_files,
                     frame_start, frame_end, frame_step,
                     render_overrides_json, attempt, max_retries, priority,
-                    chunk_index, chunk_size_frames, submitted_at
+                    chunk_index, submitted_at
                 )
-                VALUES (%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     job_id, task.machine_id, group_id, input_filename,
                     task.total_frames, task.frame_start, task.frame_end, task.frame_step,
                     render_overrides_json, 0, max_retries, priority,
-                    task.chunk_index, task.chunk_size_frames, now_iso(),
+                    task.chunk_index, now_iso(),
                 ),
             )
             if not is_serverless(task.machine_type):
@@ -248,16 +247,16 @@ class FleetManager:
                 total_frames, rendered_frames, output_files,
                 frame_start, frame_end, frame_step,
                 render_overrides_json, attempt, max_retries, priority,
-                chunk_index, chunk_size_frames, submitted_at
+                chunk_index, submitted_at
             )
-            VALUES (%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,0,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,0,%s,%s,%s,%s)
             """,
             (
                 new_job_id, failover_machine["id"], group_id, raw_job.get("input_filename"),
                 new_total, remaining_start, remaining_end, step,
                 raw_job.get("render_overrides_json") or "{}",
                 raw_job.get("max_retries") or 0, raw_job.get("priority") or 0,
-                raw_job.get("chunk_index"), raw_job.get("chunk_size_frames"), now_iso(),
+                raw_job.get("chunk_index"), now_iso(),
             ),
         )
         log.info(

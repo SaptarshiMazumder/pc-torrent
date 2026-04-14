@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+boto3
+firebase-admin
+httpx
+python-dotenv
+sse-starlette
+Pillow
+pydantic
+zstandard

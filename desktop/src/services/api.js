@@ -441,6 +441,10 @@ export async function cancelRenderGroup(baseUrl, groupId) {
   return apiFetch(baseUrl, `/render-groups/${groupId}/cancel`, { method: "POST" });
 }
 
+export async function cancelAllRenderGroups(baseUrl) {
+  return apiFetch(baseUrl, "/render-groups/cancel-all", { method: "POST" });
+}
+
 export async function rerenderGroup(baseUrl, groupId, { frameStart, frameEnd, frameStep = 1, camera = null, renderOverrides = null } = {}) {
   const body = {
     frame_start: frameStart,

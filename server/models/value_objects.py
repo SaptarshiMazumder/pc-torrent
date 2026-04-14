@@ -238,7 +238,6 @@ def normalize_render_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
 def normalize_scheduling(raw: dict[str, Any] | None) -> dict[str, Any]:
     src = raw if isinstance(raw, dict) else {}
     return {
-        "chunk_size_frames": _coerce_int(src.get("chunk_size_frames"), minimum=1),
         "max_retries_per_chunk": (
             _coerce_int(src.get("max_retries_per_chunk"), minimum=0, maximum=10)
             if src.get("max_retries_per_chunk") is not None

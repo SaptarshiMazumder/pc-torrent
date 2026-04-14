@@ -270,7 +270,6 @@ class RenderGroupService:
             frame_step=plan.frame_step,
             total_frames=plan.total_frames,
             machines=machines,
-            scheduling=scheduling,
         )
 
         overrides_json = json.dumps(render_overrides)
@@ -292,7 +291,6 @@ class RenderGroupService:
                 "frame_end": pt.frame_end,
                 "frame_step": pt.frame_step,
                 "chunk_index": pt.chunk_index,
-                "chunk_size_frames": pt.chunk_size_frames,
                 "total_frames": pt.total_frames,
                 "rendered_frames": 0,
                 "progress_pct": None,
@@ -386,19 +384,36 @@ class RenderGroupService:
                 )
 
         import threading
+        from services import vast as _vast
+        from services import modal as _modal
 
         def _cancel_providers() -> None:
             for job in jobs:
                 mt = self._machine_type_of(job["machine_id"])
+                log.info(f"[CANCEL DEBUG] job={job['id']} machine_type={mt}")
+
+                # Remove from in-memory registry immediately so the UI reflects
+                # the cancellation without waiting for the next poll tick.
+                if mt == "vast_serverless":
+                    _vast.remove_instance(job["id"])
+                elif mt == "modal_serverless":
+                    _modal.remove_instance(job["id"])
+
                 strategy = _get_strategy(mt)
                 pid = strategy.provider_job_id_from_job(job)
+                log.info(f"[CANCEL DEBUG] job={job['id']} provider_job_id={pid!r}")
                 if not pid:
+                    log.warning(f"[CANCEL DEBUG] job={job['id']} has no provider_job_id — skipping cancel")
                     continue
                 if strategy.is_enabled():
                     try:
+                        log.info(f"[CANCEL DEBUG] calling strategy.cancel(pid={pid!r})")
                         strategy.cancel(pid, job["machine_id"])
+                        log.info(f"[CANCEL DEBUG] strategy.cancel returned for pid={pid!r}")
                     except Exception as exc:
                         log.warning(f"Failed to cancel provider job {pid}: {exc}")
+                else:
+                    log.warning(f"[CANCEL DEBUG] strategy for {mt} is not enabled — skipping cancel")
 
         threading.Thread(target=_cancel_providers, daemon=True, name=f"cancel-{group_id[:8]}").start()
         return {"success": True, "cancelled_jobs": len(jobs)}
@@ -469,7 +484,6 @@ class RenderGroupService:
             frame_step=frame_step,
             total_frames=total_frames,
             machines=machines,
-            scheduling=scheduling,
         )
 
         overrides_json = json.dumps(render_overrides)
@@ -664,7 +678,6 @@ class RenderGroupService:
             "frame_end": job.get("frame_end"),
             "frame_step": job.get("frame_step") or 1,
             "chunk_index": job.get("chunk_index"),
-            "chunk_size_frames": job.get("chunk_size_frames"),
             "total_frames": total_frames,
             "rendered_frames": rendered_frames,
             "progress_pct": compute_progress_pct(

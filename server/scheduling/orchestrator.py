@@ -17,11 +17,7 @@ from typing import Any
 
 from models.render_job import RenderJob
 from scheduling.fleet import PlannedTask, DispatchResult, fleet
-from scheduling.frame_distribution import (
-    distribute_frames,
-    distribute_frames_by_chunk_size,
-    expand_serverless_assignments,
-)
+from scheduling.frame_distribution import distribute_frames, expand_serverless_assignments
 
 log = logging.getLogger(__name__)
 
@@ -40,22 +36,8 @@ class Orchestrator:
         frame_step: int,
         total_frames: int,
         machines: list[dict[str, Any]],
-        scheduling: dict[str, Any],
     ) -> list[PlannedTask]:
-        chunk_size = scheduling.get("chunk_size_frames")
-
-        if chunk_size:
-            raw = distribute_frames_by_chunk_size(
-                frame_start=frame_start, frame_end=frame_end,
-                frame_step=frame_step, machines=machines,
-                chunk_size_frames=chunk_size,
-            )
-        else:
-            raw = distribute_frames(total_frames, frame_start, frame_end, frame_step, machines)
-            for i, a in enumerate(raw):
-                a["chunk_index"] = i
-                a["chunk_size_frames"] = None
-
+        raw = distribute_frames(total_frames, frame_start, frame_end, frame_step, machines)
         raw = expand_serverless_assignments(raw)
         for i, a in enumerate(raw):
             a["chunk_index"] = i
@@ -72,7 +54,6 @@ class Orchestrator:
                 total_frames=a["total_frames"],
                 power_score=a.get("power_score", 0),
                 chunk_index=a.get("chunk_index"),
-                chunk_size_frames=a.get("chunk_size_frames"),
             )
             for a in raw
         ]

@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 _JOB_QUERY = """
     SELECT status, attempt, max_retries, frame_start, frame_end, frame_step,
            rendered_frames, total_frames, input_filename, render_overrides_json,
-           chunk_index, chunk_size_frames, priority, error,
+           chunk_index, priority, error,
            last_heartbeat_at, heartbeat_phase
     FROM jobs WHERE id = %s
 """

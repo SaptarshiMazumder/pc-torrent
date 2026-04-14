@@ -1,30 +1,41 @@
-"""Debug/monitoring endpoints — instance state inspection."""
+"""Instance status endpoints — live fleet monitoring for the frontend.
+
+Reads from InstanceStatusAggregator (which collects all fleet providers).
+Replaces the old debug-only registry endpoints.
+"""
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
-router = APIRouter(tags=["debug"])
+from serverV2.fleets.status_aggregator import InstanceStatusAggregator
 
-_vast_registry = None
-_modal_registry = None
+router = APIRouter(tags=["instances"])
+
+_aggregator: InstanceStatusAggregator | None = None
 
 
-def init(vast_registry=None, modal_registry=None) -> None:
-    global _vast_registry, _modal_registry
-    _vast_registry = vast_registry
-    _modal_registry = modal_registry
+def init(aggregator: InstanceStatusAggregator) -> None:
+    global _aggregator
+    _aggregator = aggregator
+
+
+@router.get("/instances")
+def all_instances():
+    if _aggregator is None:
+        return {}
+    return _aggregator.get_all()
 
 
 @router.get("/vast/instances")
 def vast_instances():
-    if _vast_registry is None:
+    if _aggregator is None:
         return []
-    return _vast_registry.get_all()
+    return _aggregator.get_by_fleet("vast_serverless")
 
 
 @router.get("/modal/instances")
 def modal_instances():
-    if _modal_registry is None:
+    if _aggregator is None:
         return []
-    return _modal_registry.get_all()
+    return _aggregator.get_by_fleet("modal_serverless")

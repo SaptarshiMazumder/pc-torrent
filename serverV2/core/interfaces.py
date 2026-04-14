@@ -8,6 +8,7 @@ from serverV2.core.models import (
     CreateJobParams,
     DispatchContext,
     DispatchResult,
+    InstanceSnapshot,
     Machine,
     PlannedTask,
     RenderJob,
@@ -126,6 +127,21 @@ class IUserInputFileRepository(Protocol):
     def get_by_id(self, asset_id: str, user_id: str) -> dict[str, Any] | None: ...
     def rename(self, asset_id: str, display_name: str) -> None: ...
     def delete(self, asset_id: str, user_id: str) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Instance Status Provider (per-fleet live status)
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class IInstanceStatusProvider(Protocol):
+
+    @property
+    def fleet_type(self) -> str: ...
+
+    def get_all(self) -> list[InstanceSnapshot]: ...
+
+    def get_by_job(self, job_id: str) -> InstanceSnapshot | None: ...
 
 
 # ---------------------------------------------------------------------------

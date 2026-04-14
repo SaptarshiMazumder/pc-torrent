@@ -83,10 +83,7 @@ def _wire_routers(c: Container) -> None:
     jobs.init(c.job_service, c.upload_coordinator)
     render_groups.init(c.render_group_service, c.upload_coordinator)
     assets.init(c.asset_service)
-    debug.init(
-        vast_registry=c.vast_instance_registry,
-        modal_registry=c.modal_instance_registry,
-    )
+    debug.init(aggregator=c.status_aggregator)
 
     app.include_router(health.router)
     app.include_router(machines.router)

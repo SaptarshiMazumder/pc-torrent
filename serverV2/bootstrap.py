@@ -10,21 +10,24 @@ from serverV2.callbacks.failure_handler import FailureHandler
 from serverV2.callbacks.router import CallbackRouter
 from serverV2.callbacks.success_handler import SuccessHandler
 from serverV2.config import AppConfig
+from serverV2.core.enums import CallbackOutcome
 from serverV2.fleets.community.strategy import CommunityStrategy
+from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.modal.callback_handler import ModalCallbackHandler
 from serverV2.fleets.modal.client import ModalClient
-from serverV2.fleets.modal.instance_registry import ModalInstanceRegistry
 from serverV2.fleets.modal.machine_registrar import ModalMachineRegistrar
 from serverV2.fleets.modal.recovery import ModalRecovery
 from serverV2.fleets.modal.strategy import ModalFleetStrategy
 from serverV2.fleets.registry import FleetRegistry
+from serverV2.fleets.status_aggregator import InstanceStatusAggregator
+from serverV2.fleets.status_provider import ModalStatusProvider, VastStatusProvider
 from serverV2.fleets.vast.callback_handler import VastCallbackHandler
 from serverV2.fleets.vast.client import VastClient
-from serverV2.fleets.vast.instance_registry import VastInstanceRegistry
 from serverV2.fleets.vast.machine_registrar import VastMachineRegistrar
 from serverV2.fleets.vast.recovery import VastRecovery
 from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
+from serverV2.orchestrator.dispatch_queue import DispatchQueueManager
 from serverV2.orchestrator.dispatcher import Dispatcher
 from serverV2.orchestrator.frame_allocator import FrameAllocator
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -62,8 +65,7 @@ class Container:
         modal_registrar: ModalMachineRegistrar,
         vast_recovery: VastRecovery,
         modal_recovery: ModalRecovery,
-        vast_instance_registry: VastInstanceRegistry,
-        modal_instance_registry: ModalInstanceRegistry,
+        status_aggregator: InstanceStatusAggregator,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -82,8 +84,7 @@ class Container:
         self.modal_registrar = modal_registrar
         self.vast_recovery = vast_recovery
         self.modal_recovery = modal_recovery
-        self.vast_instance_registry = vast_instance_registry
-        self.modal_instance_registry = modal_instance_registry
+        self.status_aggregator = status_aggregator
 
 
 def build(config: AppConfig | None = None) -> Container:
@@ -103,20 +104,27 @@ def build(config: AppConfig | None = None) -> Container:
     # -- blend URL resolver --
     blend_resolver = BlendUrlResolver(cfg)
 
-    # Forward reference for circular callback
-    orchestrator_ref: list[RenderOrchestrator | None] = [None]
+    # -- instance registries (one per fleet, shared InstanceRegistry class) --
+    modal_instance_registry = InstanceRegistry()
+    vast_instance_registry = InstanceRegistry()
 
-    def _on_failure(job: dict, error: str, group_id: str) -> str | None:
-        if orchestrator_ref[0]:
-            return orchestrator_ref[0].handle_failure(job=job, error=error, group_id=group_id)
-        return None
+    # -- _on_failure: fleet monitors -> CallbackRouter (late-bound) --
+    router_ref: list[CallbackRouter | None] = [None]
+
+    def _on_failure(job_id: str, error: str) -> None:
+        if router_ref[0]:
+            router_ref[0].route(
+                job_id=job_id,
+                outcome=CallbackOutcome.FAILURE,
+                error=error,
+            )
 
     # -- vast fleet --
     vast_client = VastClient(cfg.vast)
-    vast_instance_registry = VastInstanceRegistry()
     vast_callback = VastCallbackHandler(
         config=cfg.vast, client=vast_client,
         job_repo=job_repo, on_failure=_on_failure,
+        registry=vast_instance_registry,
     )
     vast_strategy = VastFleetStrategy(
         config=cfg.vast, client=vast_client,
@@ -125,16 +133,16 @@ def build(config: AppConfig | None = None) -> Container:
     vast_registrar = VastMachineRegistrar(cfg.vast)
     vast_recovery = VastRecovery(
         config=cfg.vast, client=vast_client,
-        callback_handler=vast_callback, registry=vast_instance_registry,
+        callback_handler=vast_callback,
     )
     registry.register(vast_strategy)
 
     # -- modal fleet --
     modal_client = ModalClient(cfg.modal)
-    modal_instance_registry = ModalInstanceRegistry()
     modal_callback = ModalCallbackHandler(
         config=cfg.modal, client=modal_client,
         job_repo=job_repo, on_failure=_on_failure,
+        registry=modal_instance_registry,
     )
     modal_strategy = ModalFleetStrategy(
         config=cfg.modal, client=modal_client,
@@ -154,18 +162,24 @@ def build(config: AppConfig | None = None) -> Container:
     allocator = FrameAllocator(registry)
     dispatcher = Dispatcher(registry)
 
-    # -- callbacks --
-    def _dispatch_fn(task, context):
-        return dispatcher.dispatch_one(task, context)
+    # -- dispatch queue manager --
+    queue_manager = DispatchQueueManager()
 
+    # -- machine picker: returns available machines filtered to enabled fleets --
+    enabled_types = registry.enabled_types
+
+    def _machine_picker():
+        machines = machine_repo.get_available()
+        active = enabled_types()
+        if active:
+            machines = [m for m in machines if m.machine_type in active]
+        return machines
+
+    # -- callbacks --
+    failure_handler = FailureHandler(job_repo)
     success_handler = SuccessHandler(job_repo, group_repo)
-    failure_handler = FailureHandler(
-        job_repo=job_repo,
-        machine_repo=machine_repo,
-        dispatch_fn=_dispatch_fn,
-        blend_url_fn=blend_resolver.resolve,
-    )
     callback_router = CallbackRouter(job_repo, success_handler, failure_handler)
+    router_ref[0] = callback_router
 
     # -- orchestrator (facade) --
     orchestrator = RenderOrchestrator(
@@ -174,16 +188,25 @@ def build(config: AppConfig | None = None) -> Container:
         callback_router=callback_router,
         blend_url_resolver=blend_resolver,
         job_repo=job_repo,
+        queue_manager=queue_manager,
+        machine_picker=_machine_picker,
     )
-    orchestrator_ref[0] = orchestrator
+    failure_handler.set_orchestrator(orchestrator)
 
     # -- failover scanner --
     scanner = FailoverScanner(
         job_repo=job_repo,
         group_repo=group_repo,
-        orchestrator=orchestrator,
+        callback_router=callback_router,
         failover_stale_seconds=cfg.failover_stale_seconds,
     )
+
+    # -- status providers + aggregator --
+    modal_status_provider = ModalStatusProvider(modal_instance_registry)
+    vast_status_provider = VastStatusProvider(vast_instance_registry)
+    status_aggregator = InstanceStatusAggregator()
+    status_aggregator.register(modal_status_provider)
+    status_aggregator.register(vast_status_provider)
 
     # -- application services --
     upload_coordinator = UploadCoordinator()
@@ -200,7 +223,6 @@ def build(config: AppConfig | None = None) -> Container:
     job_service = JobService(
         job_repo=job_repo,
         machine_repo=machine_repo,
-        orchestrator=orchestrator,
     )
 
     machine_service = MachineService(vast_config=cfg.vast, modal_config=cfg.modal)
@@ -225,6 +247,5 @@ def build(config: AppConfig | None = None) -> Container:
         modal_registrar=modal_registrar,
         vast_recovery=vast_recovery,
         modal_recovery=modal_recovery,
-        vast_instance_registry=vast_instance_registry,
-        modal_instance_registry=modal_instance_registry,
+        status_aggregator=status_aggregator,
     )

@@ -1,6 +1,7 @@
 """FailoverScanner — background daemon that detects stale/orphaned jobs.
 
-Uses repositories and orchestrator, not raw SQL.
+Pure failure detector.  Marks jobs failed and funnels through CallbackRouter
+so the orchestrator can decide whether to requeue.  Zero retry logic here.
 """
 
 from __future__ import annotations
@@ -11,18 +12,17 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
-from serverV2.core.enums import SERVERLESS_TYPE_VALUES
+from serverV2.core.enums import CallbackOutcome, SERVERLESS_TYPE_VALUES
 from serverV2.core.models import RenderJob
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 if TYPE_CHECKING:
-    from serverV2.orchestrator.orchestrator import RenderOrchestrator
+    from serverV2.callbacks.router import CallbackRouter
 
 log = logging.getLogger(__name__)
 
 _SERVERLESS_PENDING_TIMEOUT_SEC = 300
-_SERVERLESS_MAX_RETRIES = 5
 
 
 class FailoverScanner:
@@ -31,13 +31,13 @@ class FailoverScanner:
         self,
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
-        orchestrator: RenderOrchestrator,
+        callback_router: CallbackRouter,
         failover_stale_seconds: int = 30,
         interval_sec: int = 10,
     ) -> None:
         self._job_repo = job_repo
         self._group_repo = group_repo
-        self._orchestrator = orchestrator
+        self._router = callback_router
         self._failover_stale_sec = failover_stale_seconds
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
@@ -65,7 +65,6 @@ class FailoverScanner:
                 jobs = self._job_repo.get_by_group(group["id"])
                 self._scan_orphans(group, jobs)
                 self._scan_stale_desktop(group, jobs)
-                self._scan_serverless_retries(group, jobs)
             except Exception:
                 log.exception("FailoverScanner error for group %s", group["id"])
 
@@ -74,8 +73,6 @@ class FailoverScanner:
                 self._scan_terminal_orphans(group)
             except Exception:
                 log.exception("FailoverScanner terminal error for group %s", group["id"])
-
-    # ---- scanning methods ----
 
     def _scan_orphans(self, group: dict[str, Any], jobs: list[RenderJob]) -> None:
         cutoff = (
@@ -93,7 +90,11 @@ class FailoverScanner:
                 continue
 
             if job.status == "pending" and job.submitted_at and job.submitted_at < cutoff:
-                self._job_repo.mark_failed(job.job_id, "Dispatch timed out")
+                self._router.route(
+                    job_id=job.job_id,
+                    outcome=CallbackOutcome.FAILURE,
+                    error="Dispatch timed out",
+                )
 
     def _scan_stale_desktop(self, group: dict[str, Any], jobs: list[RenderJob]) -> None:
         cutoff = (
@@ -111,40 +112,12 @@ class FailoverScanner:
             if (machine.last_seen_at or "") >= cutoff:
                 continue
 
-            self._job_repo.mark_failed(job.job_id, "Machine went offline")
             if job.remaining_frames() is not None:
-                self._orchestrator.handle_failure(
-                    job=job, error="Machine went offline", group_id=group["id"],
+                self._router.route(
+                    job_id=job.job_id,
+                    outcome=CallbackOutcome.FAILURE,
+                    error="Machine went offline",
                 )
-
-    def _scan_serverless_retries(self, group: dict[str, Any], jobs: list[RenderJob]) -> None:
-        covered: set[tuple[int, int]] = set()
-        fail_counts: dict[tuple[int, int], int] = {}
-
-        for j in jobs:
-            rng = (j.frame_start, j.frame_end)
-            if j.status == "failed":
-                fail_counts[rng] = fail_counts.get(rng, 0) + 1
-            else:
-                covered.add(rng)
-
-        for job in jobs:
-            if job.status != "failed" or not job.is_serverless:
-                continue
-            remaining = job.remaining_frames()
-            if remaining is None:
-                continue
-            new_start, new_end = remaining
-            if (new_start, new_end) in covered:
-                continue
-            if fail_counts.get((job.frame_start, job.frame_end), 0) >= _SERVERLESS_MAX_RETRIES:
-                continue
-
-            result = self._orchestrator.handle_failure(
-                job=job, error=f"Retry after failure (attempt {job.attempt})", group_id=group["id"],
-            )
-            if result:
-                covered.add((new_start, new_end))
 
     def _scan_terminal_orphans(self, group: dict[str, Any]) -> None:
         active = self._job_repo.get_active_by_group(group["id"])

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -308,3 +308,37 @@ class FramePlanResult:
     frame_end: int
     frame_step: int
     total_frames: int
+
+
+# ---------------------------------------------------------------------------
+# Instance Snapshot (live status from fleet monitors)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InstanceSnapshot:
+    job_id: str
+    fleet_type: str
+    provider_status: str = ""
+    gpu_label: str = ""
+    rendered_frames: int = 0
+    total_frames: int = 0
+    elapsed_sec: float | None = None
+    cost: str | None = None
+    error: str | None = None
+    logs: str | None = None
+    status_history: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "fleet_type": self.fleet_type,
+            "provider_status": self.provider_status,
+            "gpu_label": self.gpu_label,
+            "rendered_frames": self.rendered_frames,
+            "total_frames": self.total_frames,
+            "elapsed_sec": self.elapsed_sec,
+            "cost": self.cost,
+            "error": self.error,
+            "logs": self.logs,
+            "status_history": self.status_history,
+        }

@@ -1,8 +1,8 @@
 """VastCallbackHandler — background poller for Vast instances.
 
 Monitors a rented instance, detects completion / failure / staleness,
-and reports outcomes via the on_success / on_failure callables injected
-at construction time (composition, not inheritance).
+and reports via _on_failure(job_id, error).  Zero retry logic — that
+belongs to the orchestrator.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from serverV2.config import VastConfig
+from serverV2.core.models import InstanceSnapshot
+from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.vast.client import VastClient
 from serverV2.repositories.job_repository import JobRepository
 
@@ -40,12 +42,14 @@ class VastCallbackHandler:
         config: VastConfig,
         client: VastClient,
         job_repo: JobRepository,
-        on_failure: Callable[[dict[str, Any], str, str], None],
+        on_failure: Callable[[str, str], None],
+        registry: InstanceRegistry | None = None,
     ) -> None:
         self._cfg = config
         self._client = client
         self._job_repo = job_repo
         self._on_failure = on_failure
+        self._registry = registry
 
     def start_monitoring(
         self,
@@ -61,11 +65,11 @@ class VastCallbackHandler:
         poller = _InstancePoller(
             job_id=job_id,
             instance_id=instance_id,
-            group_id=group_id,
             config=self._cfg,
             client=self._client,
             job_repo=self._job_repo,
             on_failure=self._on_failure,
+            registry=self._registry,
         )
         t = threading.Thread(
             target=poller.run, daemon=True,
@@ -75,25 +79,24 @@ class VastCallbackHandler:
 
 
 class _InstancePoller:
-    """Encapsulates the state machine for one Vast instance poll loop."""
 
     def __init__(
         self,
         job_id: str,
         instance_id: int,
-        group_id: str,
         config: VastConfig,
         client: VastClient,
         job_repo: JobRepository,
-        on_failure: Callable[[dict[str, Any], str, str], None],
+        on_failure: Callable[[str, str], None],
+        registry: InstanceRegistry | None = None,
     ) -> None:
         self._job_id = job_id
         self._instance_id = instance_id
-        self._group_id = group_id
         self._cfg = config
         self._client = client
         self._job_repo = job_repo
         self._on_failure = on_failure
+        self._registry = registry
 
         self._started_at = time.monotonic()
         self._became_running_at: float | None = None
@@ -125,23 +128,27 @@ class _InstancePoller:
         job = self._job_repo.get_raw_by_id(self._job_id)
         if not job:
             self._client.instances.destroy(self._instance_id)
+            self._remove_snapshot()
             return True
 
         local_status = job["status"]
+        self._write_snapshot(job, actual_status, elapsed)
 
         if local_status in ("done", "failed", "cancelled"):
             self._client.instances.destroy(self._instance_id)
+            self._remove_snapshot()
             return True
 
         if self._all_frames_done(job) and local_status == "running":
             self._job_repo.mark_done(self._job_id)
             self._client.instances.destroy(self._instance_id)
+            self._remove_snapshot()
             return True
 
         if (self._became_running_at is None
                 and actual_status != "running"
                 and elapsed > self._cfg.startup_timeout_sec):
-            return self._on_startup_timeout(actual_status, elapsed, job)
+            return self._on_startup_timeout(actual_status, elapsed)
 
         if actual_status == "running":
             if self._became_running_at is None:
@@ -149,65 +156,92 @@ class _InstancePoller:
                 if job["status"] == "pending":
                     self._job_repo.update_status(self._job_id, "running")
             if self._is_stale(job):
-                return self._on_stale(job)
+                return self._on_stale()
             if self._is_heartbeat_dead(job):
-                return self._on_heartbeat_dead(job)
+                return self._on_heartbeat_dead()
 
         if actual_status in ("exited", "stopped", "offline"):
-            return self._on_exited(actual_status, job)
+            return self._on_exited(actual_status)
 
         return False
 
     # ---- state handlers ----
 
     def _on_instance_gone(self) -> bool:
+        self._remove_snapshot()
         job = self._job_repo.get_raw_by_id(self._job_id)
         if not job or job["status"] in ("done", "failed", "cancelled"):
             return True
         if self._all_frames_done(job):
             self._job_repo.mark_done(self._job_id)
             return True
-        self._on_failure(job, "Vast.ai instance disappeared unexpectedly", self._group_id)
+        self._on_failure(self._job_id, "Vast.ai instance disappeared unexpectedly")
         return True
 
     def _on_fatal(self, inst: dict[str, Any]) -> bool:
         err = f"Vast.ai fatal startup error (status={inst.get('actual_status')}): {str(inst.get('status_msg', ''))[:200]}"
         self._client.instances.destroy(self._instance_id)
-        job = self._job_repo.get_raw_by_id(self._job_id)
-        if job:
-            self._on_failure(job, err, self._group_id)
+        self._remove_snapshot()
+        self._on_failure(self._job_id, err)
         return True
 
-    def _on_startup_timeout(self, actual_status: str, elapsed: float, job: dict[str, Any]) -> bool:
+    def _on_startup_timeout(self, actual_status: str, elapsed: float) -> bool:
         err = f"Vast.ai instance stuck in '{actual_status}' for {elapsed:.0f}s"
         self._client.instances.destroy(self._instance_id)
-        self._on_failure(job, err, self._group_id)
+        self._remove_snapshot()
+        self._on_failure(self._job_id, err)
         return True
 
-    def _on_stale(self, job: dict[str, Any]) -> bool:
+    def _on_stale(self) -> bool:
         err = f"Vast.ai job running but no new frames for {self._cfg.in_progress_stale_sec / 60:.0f} min"
         self._client.instances.destroy(self._instance_id)
-        self._on_failure(job, err, self._group_id)
+        self._remove_snapshot()
+        self._on_failure(self._job_id, err)
         return True
 
-    def _on_heartbeat_dead(self, job: dict[str, Any]) -> bool:
+    def _on_heartbeat_dead(self) -> bool:
         err = "Worker heartbeat stopped while Vast instance shows running"
         self._client.instances.destroy(self._instance_id)
-        self._on_failure(job, err, self._group_id)
+        self._remove_snapshot()
+        self._on_failure(self._job_id, err)
         return True
 
-    def _on_exited(self, actual_status: str, job: dict[str, Any]) -> bool:
+    def _on_exited(self, actual_status: str) -> bool:
         self._client.instances.destroy(self._instance_id)
+        job = self._job_repo.get_raw_by_id(self._job_id)
+        if not job:
+            self._remove_snapshot()
+            return True
         if self._all_frames_done(job):
             self._job_repo.mark_done(self._job_id)
+            self._remove_snapshot()
             return True
         final_status = self._wait_for_callback()
         if final_status not in ("done", "failed", "cancelled"):
             err = f"Vast.ai instance exited ({actual_status}) — callback did not arrive"
-            job_now = self._job_repo.get_raw_by_id(self._job_id)
-            if job_now:
-                self._on_failure(job_now, err, self._group_id)
+            self._on_failure(self._job_id, err)
+        self._remove_snapshot()
         return True
+
+    # ---- snapshot ----
+
+    def _write_snapshot(self, job: dict[str, Any], provider_status: str, elapsed: float) -> None:
+        if not self._registry:
+            return
+        self._registry.update(self._job_id, InstanceSnapshot(
+            job_id=self._job_id,
+            fleet_type="vast_serverless",
+            provider_status=provider_status,
+            gpu_label=str(job.get("gpu_model") or "Vast GPU"),
+            rendered_frames=job.get("rendered_frames") or 0,
+            total_frames=job.get("total_frames") or 0,
+            elapsed_sec=round(elapsed),
+            error=job.get("error"),
+        ))
+
+    def _remove_snapshot(self) -> None:
+        if self._registry:
+            self._registry.remove(self._job_id)
 
     # ---- helpers ----
 

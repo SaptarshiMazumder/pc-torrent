@@ -22,6 +22,9 @@ venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 # Runs on http://localhost:8000
+
+
+python -m uvicorn serverV2.main:app
 ```
 
 ### 2. Start frontend

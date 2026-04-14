@@ -1,0 +1,310 @@
+"""Domain models — immutable dataclasses with zero I/O."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+from serverV2.core.enums import JobStatus, SERVERLESS_TYPE_VALUES
+
+
+# ---------------------------------------------------------------------------
+# Machine
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Machine:
+    id: str
+    machine_type: str
+    gpu_model: str
+    gpu_vram_gb: float
+    cpu_cores: int
+    ram_gb: float
+    status: str
+    render_speed: float = 1.0
+    last_seen_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> Machine:
+        return cls(
+            id=row["id"],
+            machine_type=row.get("machine_type", "windows"),
+            gpu_model=row.get("gpu_model", "Unknown"),
+            gpu_vram_gb=row.get("gpu_vram_gb") or 0,
+            cpu_cores=row.get("cpu_cores") or 0,
+            ram_gb=row.get("ram_gb") or 0,
+            status=row.get("status", "idle"),
+            render_speed=row.get("render_speed") or 1.0,
+            last_seen_at=row.get("last_seen_at"),
+        )
+
+    @property
+    def is_serverless(self) -> bool:
+        return self.machine_type in SERVERLESS_TYPE_VALUES
+
+
+# ---------------------------------------------------------------------------
+# Render Job
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RenderJob:
+    job_id: str
+    group_id: str
+    machine_id: str
+    machine_type: str
+    status: str
+    frame_start: int
+    frame_end: int
+    frame_step: int
+    rendered_frames: int
+    total_frames: int
+    attempt: int
+    max_retries: int
+    submitted_at: str
+    last_heartbeat_at: str | None
+    input_filename: str
+    render_overrides_json: str | None
+    chunk_index: int | None
+    priority: int
+    output_files: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> RenderJob:
+        return cls(
+            job_id=row["id"],
+            group_id=row.get("group_id", ""),
+            machine_id=row.get("machine_id", ""),
+            machine_type=row.get("machine_type") or "windows",
+            status=row.get("status", "pending"),
+            frame_start=row.get("frame_start") or 0,
+            frame_end=row.get("frame_end") or 0,
+            frame_step=row.get("frame_step") or 1,
+            rendered_frames=max(0, row.get("rendered_frames") or 0),
+            total_frames=row.get("total_frames") or 0,
+            attempt=row.get("attempt") or 0,
+            max_retries=row.get("max_retries") or 0,
+            submitted_at=row.get("submitted_at") or "",
+            last_heartbeat_at=row.get("last_heartbeat_at"),
+            input_filename=row.get("input_filename", ""),
+            render_overrides_json=row.get("render_overrides_json"),
+            chunk_index=row.get("chunk_index"),
+            priority=row.get("priority") or 0,
+            output_files=row.get("output_files"),
+        )
+
+    @property
+    def is_terminal(self) -> bool:
+        return JobStatus(self.status).is_terminal
+
+    @property
+    def is_serverless(self) -> bool:
+        return self.machine_type in SERVERLESS_TYPE_VALUES
+
+    def remaining_frames(self) -> tuple[int, int] | None:
+        new_start = self.frame_start + self.rendered_frames * self.frame_step
+        if new_start > self.frame_end:
+            return None
+        return (new_start, self.frame_end)
+
+    def can_retry_same_endpoint(self) -> bool:
+        return self.attempt < self.max_retries
+
+    def is_complete_by_frames(self) -> bool:
+        return self.total_frames > 0 and self.rendered_frames >= self.total_frames
+
+    def is_heartbeat_dead(self, grace_sec: float, timeout_sec: float) -> bool:
+        if not self.submitted_at:
+            return False
+        now = datetime.now(timezone.utc)
+        try:
+            submitted = datetime.fromisoformat(self.submitted_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return False
+        if (now - submitted).total_seconds() < grace_sec:
+            return False
+        if self.last_heartbeat_at is None:
+            return True
+        try:
+            hb_time = datetime.fromisoformat(str(self.last_heartbeat_at).replace("Z", "+00:00"))
+            return (now - hb_time).total_seconds() > timeout_sec
+        except (ValueError, TypeError):
+            return False
+
+
+# ---------------------------------------------------------------------------
+# Planned Task (output of frame allocation)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PlannedTask:
+    machine_id: str
+    machine_type: str
+    gpu_model: str
+    gpu_vram_gb: float
+    frame_start: int
+    frame_end: int
+    frame_step: int
+    total_frames: int
+    power_score: float
+    chunk_index: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Dispatch Context & Result
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DispatchContext:
+    group_id: str
+    input_filename: str
+    render_overrides_b64: str
+    blend_url: str
+    max_retries: int = 0
+    priority: int = 0
+
+
+@dataclass(frozen=True)
+class DispatchResult:
+    job_id: str
+    machine_id: str
+    status: str
+    provider_job_id: str | None = None
+    error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Group status aggregation
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class GroupStatusResult:
+    status: str
+    should_persist: bool
+
+
+# ---------------------------------------------------------------------------
+# Create-job params (value object for repository)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CreateJobParams:
+    job_id: str
+    machine_id: str
+    group_id: str
+    input_filename: str
+    total_frames: int
+    frame_start: int
+    frame_end: int
+    frame_step: int
+    render_overrides_json: str
+    max_retries: int = 0
+    priority: int = 0
+    chunk_index: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Render Group
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RenderGroup:
+    id: str
+    input_filename: str
+    r2_input_key: str
+    total_frames: int
+    frame_start: int
+    frame_end: int
+    frame_step: int
+    status: str
+    submitted_at: str
+    user_id: str | None = None
+    source_asset_id: str | None = None
+    render_overrides_json: str | None = None
+    scheduling_json: str | None = None
+    analysis_snapshot_json: str | None = None
+    analysis_warnings_json: str | None = None
+    completed_at: str | None = None
+    error: str | None = None
+    allowed_machine_types_json: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> RenderGroup:
+        return cls(
+            id=row["id"],
+            input_filename=row.get("input_filename", ""),
+            r2_input_key=row.get("r2_input_key", ""),
+            total_frames=row.get("total_frames") or 0,
+            frame_start=row.get("frame_start") or 1,
+            frame_end=row.get("frame_end") or 1,
+            frame_step=row.get("frame_step") or 1,
+            status=row.get("status", "uploading"),
+            submitted_at=row.get("submitted_at") or "",
+            user_id=row.get("user_id"),
+            source_asset_id=row.get("source_asset_id"),
+            render_overrides_json=row.get("render_overrides_json"),
+            scheduling_json=row.get("scheduling_json"),
+            analysis_snapshot_json=row.get("analysis_snapshot_json"),
+            analysis_warnings_json=row.get("analysis_warnings_json"),
+            completed_at=row.get("completed_at"),
+            error=row.get("error"),
+            allowed_machine_types_json=row.get("allowed_machine_types_json"),
+        )
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in ("done", "failed", "cancelled")
+
+
+# ---------------------------------------------------------------------------
+# User Input File
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class UserInputFile:
+    id: str
+    user_id: str
+    display_name: str
+    input_filename: str
+    r2_key: str
+    frame_start: int | None = None
+    frame_end: int | None = None
+    frame_step: int | None = None
+    analysis_snapshot_json: str | None = None
+    render_overrides_json: str | None = None
+    scheduling_json: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    last_used_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> UserInputFile:
+        return cls(
+            id=row["id"],
+            user_id=row.get("user_id", ""),
+            display_name=row.get("display_name") or row.get("input_filename", ""),
+            input_filename=row.get("input_filename", ""),
+            r2_key=row.get("r2_key", ""),
+            frame_start=row.get("frame_start"),
+            frame_end=row.get("frame_end"),
+            frame_step=row.get("frame_step"),
+            analysis_snapshot_json=row.get("analysis_snapshot_json"),
+            render_overrides_json=row.get("render_overrides_json"),
+            scheduling_json=row.get("scheduling_json"),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+            last_used_at=row.get("last_used_at"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Frame plan result (output of frame planning)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FramePlanResult:
+    frame_start: int
+    frame_end: int
+    frame_step: int
+    total_frames: int

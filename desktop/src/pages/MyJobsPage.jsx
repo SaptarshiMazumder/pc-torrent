@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   cancelRenderGroup,
+  cancelAllRenderGroups,
   getFirebaseToken,
   getRenderGroupOutputs,
   getJobOutputs,
@@ -20,6 +21,7 @@ import { useDownloads } from "../contexts/DownloadContext";
 export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onReRender, onNavigate }) {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
+  const [cancelingAll, setCancelingAll] = useState(false);
   const [openFrameGalleries, setOpenFrameGalleries] = useState({});
   const [frameGalleries, setFrameGalleries] = useState({});
   const [authToken, setAuthToken] = useState("");
@@ -67,6 +69,19 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
         delete next[groupId];
         return next;
       });
+    }
+  };
+
+  const handleCancelAll = async () => {
+    if (cancelingAll) return;
+    setCancelingAll(true);
+    try {
+      await cancelAllRenderGroups(backendUrl);
+      onRefresh?.();
+    } catch {
+      // silently fail
+    } finally {
+      setCancelingAll(false);
     }
   };
 
@@ -201,11 +216,20 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
             {jobs.length} job{jobs.length !== 1 ? "s" : ""}
           </span>
           <button
+            className="btn btn-danger"
+            type="button"
+            onClick={handleCancelAll}
+            disabled={cancelingAll || jobs.length === 0}
+            style={{ marginLeft: "auto" }}
+          >
+            {cancelingAll ? "Cancelling..." : "Cancel All"}
+          </button>
+          <button
             className="btn btn-secondary"
             type="button"
             onClick={onRefresh}
             disabled={loading}
-            style={{ marginLeft: "auto" }}
+            style={{ marginLeft: 8 }}
           >
             {loading ? "Refreshing..." : "Refresh"}
           </button>

@@ -40,6 +40,8 @@ class ModalCallbackHandler:
         self._job_repo = job_repo
         self._on_failure = on_failure
         self._registry = registry
+        self._monitors: dict[str, threading.Event] = {}
+        self._monitors_lock = threading.Lock()
 
     def start_monitoring(
         self,
@@ -51,6 +53,10 @@ class ModalCallbackHandler:
         render_overrides_b64: str,
         group_id: str,
     ) -> None:
+        stop_event = threading.Event()
+        with self._monitors_lock:
+            self._monitors[job_id] = stop_event
+
         monitor = _JobMonitor(
             job_id=job_id,
             provider_job_id=provider_job_id,
@@ -59,12 +65,36 @@ class ModalCallbackHandler:
             job_repo=self._job_repo,
             on_failure=self._on_failure,
             registry=self._registry,
+            stop_event=stop_event,
         )
+
+        def _run_and_cleanup() -> None:
+            monitor.run()
+            with self._monitors_lock:
+                self._monitors.pop(job_id, None)
+
         t = threading.Thread(
-            target=monitor.run, daemon=True,
+            target=_run_and_cleanup, daemon=True,
             name=f"modal-mon-{job_id[:8]}",
         )
         t.start()
+
+    def stop_monitoring(self, job_id: str) -> None:
+        """Signal a monitor to stop immediately."""
+        with self._monitors_lock:
+            event = self._monitors.get(job_id)
+        if event:
+            event.set()
+            log.info("Signalled monitor for job %s to stop", job_id)
+
+    def stop_all(self) -> None:
+        """Signal all active monitors to stop."""
+        with self._monitors_lock:
+            for event in self._monitors.values():
+                event.set()
+            count = len(self._monitors)
+        if count:
+            log.info("Signalled %d modal monitors to stop", count)
 
 
 class _JobMonitor:
@@ -78,6 +108,7 @@ class _JobMonitor:
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None],
         registry: InstanceRegistry | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self._job_id = job_id
         self._provider_job_id = provider_job_id
@@ -86,14 +117,19 @@ class _JobMonitor:
         self._job_repo = job_repo
         self._on_failure = on_failure
         self._registry = registry
+        self._stop = stop_event or threading.Event()
 
         self._started_at = time.monotonic()
         self._last_activity_at = time.monotonic()
         self._last_activity_marker: tuple[int, int] | None = None
 
     def run(self) -> None:
-        while True:
-            time.sleep(self._cfg.monitor_interval_sec)
+        while not self._stop.is_set():
+            self._stop.wait(self._cfg.monitor_interval_sec)
+            if self._stop.is_set():
+                log.info("Job %s: monitor stopped by cancel", self._job_id)
+                self._remove_snapshot()
+                break
             try:
                 if self._tick():
                     break

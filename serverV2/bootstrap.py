@@ -27,7 +27,7 @@ from serverV2.fleets.vast.machine_registrar import VastMachineRegistrar
 from serverV2.fleets.vast.recovery import VastRecovery
 from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
-from serverV2.orchestrator.dispatch_queue import DispatchQueueManager
+from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.orchestrator.dispatcher import Dispatcher
 from serverV2.orchestrator.frame_allocator import FrameAllocator
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -162,8 +162,8 @@ def build(config: AppConfig | None = None) -> Container:
     allocator = FrameAllocator(registry)
     dispatcher = Dispatcher(registry)
 
-    # -- dispatch queue manager --
-    queue_manager = DispatchQueueManager()
+    # -- dispatch queue (DB-backed) --
+    queue_repo = DispatchQueueRepository()
 
     # -- machine picker: returns available machines filtered to enabled fleets --
     enabled_types = registry.enabled_types
@@ -191,7 +191,7 @@ def build(config: AppConfig | None = None) -> Container:
         group_repo=group_repo,
         machine_repo=machine_repo,
         fleet_registry=registry,
-        queue_manager=queue_manager,
+        queue_repo=queue_repo,
         machine_picker=_machine_picker,
     )
     failure_handler.set_orchestrator(orchestrator)

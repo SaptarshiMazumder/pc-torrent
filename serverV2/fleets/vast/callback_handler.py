@@ -50,6 +50,8 @@ class VastCallbackHandler:
         self._job_repo = job_repo
         self._on_failure = on_failure
         self._registry = registry
+        self._monitors: dict[str, threading.Event] = {}
+        self._monitors_lock = threading.Lock()
 
     def start_monitoring(
         self,
@@ -61,6 +63,10 @@ class VastCallbackHandler:
         render_overrides_b64: str,
         group_id: str,
     ) -> None:
+        stop_event = threading.Event()
+        with self._monitors_lock:
+            self._monitors[job_id] = stop_event
+
         instance_id = int(provider_job_id)
         poller = _InstancePoller(
             job_id=job_id,
@@ -70,12 +76,36 @@ class VastCallbackHandler:
             job_repo=self._job_repo,
             on_failure=self._on_failure,
             registry=self._registry,
+            stop_event=stop_event,
         )
+
+        def _run_and_cleanup() -> None:
+            poller.run()
+            with self._monitors_lock:
+                self._monitors.pop(job_id, None)
+
         t = threading.Thread(
-            target=poller.run, daemon=True,
+            target=_run_and_cleanup, daemon=True,
             name=f"vast-poll-{job_id[:8]}",
         )
         t.start()
+
+    def stop_monitoring(self, job_id: str) -> None:
+        """Signal a monitor to stop immediately."""
+        with self._monitors_lock:
+            event = self._monitors.get(job_id)
+        if event:
+            event.set()
+            log.info("Signalled vast monitor for job %s to stop", job_id)
+
+    def stop_all(self) -> None:
+        """Signal all active monitors to stop."""
+        with self._monitors_lock:
+            for event in self._monitors.values():
+                event.set()
+            count = len(self._monitors)
+        if count:
+            log.info("Signalled %d vast monitors to stop", count)
 
 
 class _InstancePoller:
@@ -89,6 +119,7 @@ class _InstancePoller:
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None],
         registry: InstanceRegistry | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self._job_id = job_id
         self._instance_id = instance_id
@@ -97,6 +128,7 @@ class _InstancePoller:
         self._job_repo = job_repo
         self._on_failure = on_failure
         self._registry = registry
+        self._stop = stop_event or threading.Event()
 
         self._started_at = time.monotonic()
         self._became_running_at: float | None = None
@@ -104,8 +136,12 @@ class _InstancePoller:
         self._last_frame_change_at = time.monotonic()
 
     def run(self) -> None:
-        while True:
-            time.sleep(self._cfg.poll_interval_sec)
+        while not self._stop.is_set():
+            self._stop.wait(self._cfg.poll_interval_sec)
+            if self._stop.is_set():
+                log.info("Job %s: vast monitor stopped by cancel", self._job_id)
+                self._remove_snapshot()
+                break
             try:
                 if self._tick():
                     break
@@ -286,7 +322,9 @@ class _InstancePoller:
     def _wait_for_callback(self) -> str:
         iterations = max(1, _EXIT_CALLBACK_WAIT_SEC // _EXIT_POLL_SEC)
         for _ in range(iterations):
-            time.sleep(_EXIT_POLL_SEC)
+            self._stop.wait(_EXIT_POLL_SEC)
+            if self._stop.is_set():
+                return "cancelled"
             job = self._job_repo.get_raw_by_id(self._job_id)
             status = job["status"] if job else "unknown"
             if status in ("done", "failed", "cancelled"):

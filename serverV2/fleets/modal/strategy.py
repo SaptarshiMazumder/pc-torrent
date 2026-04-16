@@ -63,6 +63,7 @@ class ModalFleetStrategy:
             max_retries=context.max_retries,
             priority=context.priority,
             chunk_index=task.chunk_index,
+            attempt=task.attempt,
         ))
 
         try:
@@ -102,6 +103,9 @@ class ModalFleetStrategy:
 
     def cancel(self, provider_job_id: str, machine_id: str) -> None:
         self._client.cancel_job(provider_job_id)
+
+    def stop_monitoring(self, job_id: str) -> None:
+        self._callback.stop_monitoring(job_id)
 
     def provider_job_id_from_job(self, job: dict[str, Any]) -> str | None:
         return (job.get("modal_function_call_id") or "").strip() or None

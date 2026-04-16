@@ -17,7 +17,6 @@ from serverV2.core.value_objects import (
     extract_analysis_warnings,
     latest_output_filename,
     normalize_render_overrides,
-    normalize_scheduling,
     now_iso,
     parse_json_list,
     parse_json_object,
@@ -141,7 +140,7 @@ class RenderGroupService:
             raise RenderGroupServiceError(400, "File not found in storage")
 
         render_overrides = normalize_render_overrides(getattr(payload, "render_overrides", None))
-        scheduling = normalize_scheduling(getattr(payload, "scheduling", None))
+        scheduling = getattr(payload, "scheduling", None) or {}
         analysis_snapshot = getattr(payload, "analysis_snapshot", None)
         analysis_snapshot = analysis_snapshot if isinstance(analysis_snapshot, dict) else {}
         analysis_warnings = extract_analysis_warnings(analysis_snapshot)
@@ -220,7 +219,6 @@ class RenderGroupService:
             input_filename=group["input_filename"],
             tasks=planned,
             render_overrides_json=overrides_json,
-            scheduling=scheduling,
         )
 
         tasks = [
@@ -298,7 +296,7 @@ class RenderGroupService:
             base_overrides.setdefault("scene", {})["camera"] = payload.camera
 
         render_overrides = normalize_render_overrides(base_overrides)
-        scheduling = normalize_scheduling(parse_json_object(original.get("scheduling_json"), {}))
+        scheduling = parse_json_object(original.get("scheduling_json"), {})
 
         new_group_id = str(uuid4())
         now = now_iso()
@@ -341,7 +339,6 @@ class RenderGroupService:
             input_filename=original["input_filename"],
             tasks=planned,
             render_overrides_json=overrides_json,
-            scheduling=scheduling,
         )
 
         tasks = [
@@ -387,7 +384,7 @@ class RenderGroupService:
         resolved_render_settings = normalize_render_overrides(
             parse_json_object(group.get("render_overrides_json"), {})
         )
-        scheduling = normalize_scheduling(parse_json_object(group.get("scheduling_json"), {}))
+        scheduling = parse_json_object(group.get("scheduling_json"), {})
         analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
         analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 

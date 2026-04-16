@@ -37,5 +37,8 @@ class CommunityStrategy:
     def cancel(self, provider_job_id: str, machine_id: str) -> None:
         pass
 
+    def stop_monitoring(self, job_id: str) -> None:
+        pass
+
     def provider_job_id_from_job(self, job: dict[str, Any]) -> str | None:
         return None

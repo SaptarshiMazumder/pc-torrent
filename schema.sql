@@ -129,6 +129,20 @@ CREATE TABLE IF NOT EXISTS user_input_files (
     PRIMARY KEY (id)
 );
 
+CREATE TABLE IF NOT EXISTS dispatch_queue (
+    id SERIAL PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    frame_start INTEGER NOT NULL,
+    frame_end INTEGER NOT NULL,
+    frame_step INTEGER NOT NULL,
+    total_frames INTEGER NOT NULL,
+    attempt INTEGER DEFAULT 0 NOT NULL,
+    chunk_index INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_dispatch_queue_group_id ON public.dispatch_queue USING btree (group_id);
+
 CREATE INDEX idx_failure_events_job_id ON public.failure_events USING btree (job_id);
 
 CREATE INDEX idx_failure_events_occurred_at ON public.failure_events USING btree (occurred_at DESC);

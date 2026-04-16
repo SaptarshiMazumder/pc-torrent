@@ -222,17 +222,6 @@ def normalize_render_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def normalize_scheduling(raw: dict[str, Any] | None) -> dict[str, Any]:
-    src = raw if isinstance(raw, dict) else {}
-    return {
-        "max_retries_per_chunk": (
-            _coerce_int(src.get("max_retries_per_chunk"), minimum=0, maximum=10)
-            if src.get("max_retries_per_chunk") is not None
-            else 2
-        ),
-        "priority": _coerce_int(src.get("priority"), minimum=-100, maximum=100) or 0,
-    }
-
 
 def extract_analysis_warnings(analysis_snapshot: dict[str, Any] | None) -> list[str]:
     if not isinstance(analysis_snapshot, dict):

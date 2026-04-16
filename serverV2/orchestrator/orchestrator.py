@@ -1,17 +1,16 @@
 """RenderOrchestrator — Facade.
 
 The single entry point callers use.  Composes FrameAllocator, Dispatcher,
-CallbackRouter, BlendUrlResolver, and DispatchQueueManager.
+CallbackRouter, BlendUrlResolver, and DispatchQueueRepository.
 
-All dispatch logic (initial + retry) lives here.  The queue is a dumb
-container; the orchestrator decides when and where to dispatch.
+All dispatch logic (initial + retry) lives here.  The queue is a DB table;
+the orchestrator decides when and where to dispatch.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
-import threading
 from typing import Any, Callable
 
 from serverV2.allocation.power_scorer import compute_power_score
@@ -26,13 +25,13 @@ from serverV2.core.models import (
 )
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
-from serverV2.orchestrator.dispatch_queue import (
-    DispatchQueueManager,
-    GroupDispatchQueue,
-    QueueItem,
-)
+from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.dispatcher import Dispatcher
 from serverV2.orchestrator.frame_allocator import FrameAllocator
+from serverV2.repositories.dispatch_queue_repository import (
+    DispatchQueueRepository,
+    QueueItem,
+)
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
@@ -52,7 +51,7 @@ class RenderOrchestrator:
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
         fleet_registry: FleetRegistry,
-        queue_manager: DispatchQueueManager,
+        queue_repo: DispatchQueueRepository,
         machine_picker: Callable[[], list[Machine]],
     ) -> None:
         self._allocator = frame_allocator
@@ -63,10 +62,8 @@ class RenderOrchestrator:
         self._group_repo = group_repo
         self._machine_repo = machine_repo
         self._fleet = fleet_registry
-        self._queue_mgr = queue_manager
+        self._queue_repo = queue_repo
         self._machine_picker = machine_picker
-        self._requeued_jobs: set[str] = set()
-        self._requeue_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 1. Plan: split frames across machines
@@ -100,12 +97,8 @@ class RenderOrchestrator:
         input_filename: str,
         tasks: list[PlannedTask],
         render_overrides_json: str,
-        scheduling: dict[str, Any],
     ) -> list[DispatchResult]:
         overrides_b64 = base64.b64encode(render_overrides_json.encode()).decode()
-        max_retries = scheduling.get("max_retries_per_chunk", 0)
-
-        queue = self._queue_mgr.create(group_id, max_retries)
 
         items = [
             QueueItem(
@@ -117,18 +110,18 @@ class RenderOrchestrator:
             )
             for t in tasks
         ]
-        queue.enqueue_all(items)
+        self._queue_repo.enqueue_all(group_id, items)
 
         context = DispatchContext(
             group_id=group_id,
             input_filename=input_filename,
             render_overrides_b64=overrides_b64,
             blend_url="",
-            max_retries=max_retries,
-            priority=scheduling.get("priority", 0),
+            max_retries=MAX_RETRIES,
+            priority=0,
         )
 
-        return self._flush_queue(queue, context, initial_tasks=tasks)
+        return self._flush_queue(group_id, context, initial_tasks=tasks)
 
     # ------------------------------------------------------------------
     # 3. Failure handling: requeue remaining frames
@@ -136,12 +129,6 @@ class RenderOrchestrator:
 
     def on_job_failed(self, job_id: str, error: str) -> None:
         """Called after a job is marked failed. Decides whether to requeue."""
-        with self._requeue_lock:
-            if job_id in self._requeued_jobs:
-                log.info("Job %s already requeued — ignoring duplicate failure", job_id)
-                return
-            self._requeued_jobs.add(job_id)
-
         raw = self._job_repo.get_raw_by_id(job_id)
         if not raw:
             return
@@ -161,14 +148,10 @@ class RenderOrchestrator:
         if remaining is None:
             return
 
-        queue = self._queue_mgr.get(group_id)
-        if queue is None:
-            queue = self._queue_mgr.create(group_id, rj.max_retries)
-
         next_attempt = (rj.attempt or 0) + 1
-        if next_attempt > queue.max_retries:
+        if next_attempt > MAX_RETRIES:
             log.warning("Job %s: max retries (%d) exhausted for frames %d-%d",
-                        job_id, queue.max_retries, remaining[0], remaining[1])
+                        job_id, MAX_RETRIES, remaining[0], remaining[1])
             return
 
         frame_start, frame_end = remaining
@@ -180,9 +163,9 @@ class RenderOrchestrator:
             attempt=next_attempt,
             chunk_index=rj.chunk_index,
         )
-        queue.enqueue(item)
+        self._queue_repo.enqueue(group_id, item)
         log.info("Job %s: requeued frames %d-%d (attempt %d/%d)",
-                 job_id, frame_start, frame_end, next_attempt, queue.max_retries)
+                 job_id, frame_start, frame_end, next_attempt, MAX_RETRIES)
 
         overrides_b64 = base64.b64encode(
             (rj.render_overrides_json or "{}").encode()
@@ -196,7 +179,7 @@ class RenderOrchestrator:
             priority=rj.priority,
         )
 
-        self._flush_queue(queue, context)
+        self._flush_queue(group_id, context)
 
     # ------------------------------------------------------------------
     # 4. Worker callbacks (routed through CallbackRouter)
@@ -218,24 +201,26 @@ class RenderOrchestrator:
     # ------------------------------------------------------------------
 
     def cancel_group(self, group_id: str) -> dict[str, Any]:
-        """Full cancel: mark DB, drain queue, kill fleet containers."""
-        # 1. Mark group cancelled in DB FIRST — blocks all requeues immediately
+        """Full cancel: stop monitors, mark DB, drain queue, kill providers."""
+        # 1. Mark group + jobs cancelled in DB (blocks requeues via DB guard)
         self._group_repo.update_status(group_id, "cancelled")
-
-        # 2. Mark all active jobs cancelled
         jobs = self._job_repo.get_active_by_group(group_id)
         for job in jobs:
             self._job_repo.update_status(job["id"], "cancelled", error="Cancelled by user")
 
-        # 3. Drain dispatch queue
-        queue = self._queue_mgr.get(group_id)
-        if queue:
-            drained = queue.drain()
-            if drained:
-                log.info("Group %s: drained %d items from dispatch queue", group_id, len(drained))
-            self._queue_mgr.remove(group_id)
+        # 2. Stop all monitor threads for these jobs — kills the polling loops
+        for job in jobs:
+            mt = self._machine_repo.get_type(job["machine_id"])
+            strategy = self._fleet.get(mt)
+            if strategy:
+                strategy.stop_monitoring(job["id"])
 
-        # 4. Cancel provider jobs on each fleet
+        # 3. Drain dispatch queue
+        drained = self._queue_repo.drain(group_id)
+        if drained:
+            log.info("Group %s: drained %d items from dispatch queue", group_id, drained)
+
+        # 4. Cancel provider-side jobs (Modal function calls, Vast instances)
         for job in jobs:
             mt = self._machine_repo.get_type(job["machine_id"])
             strategy = self._fleet.get(mt)
@@ -258,21 +243,21 @@ class RenderOrchestrator:
 
     def _flush_queue(
         self,
-        queue: GroupDispatchQueue,
+        group_id: str,
         context: DispatchContext,
         initial_tasks: list[PlannedTask] | None = None,
     ) -> list[DispatchResult]:
-        """Dequeue all items, assign machines, dispatch."""
-        grp = self._group_repo.get_by_id(context.group_id)
+        """Dequeue all items from DB, assign machines, dispatch."""
+        grp = self._group_repo.get_by_id(group_id)
         if grp and grp.get("status") in ("cancelled", "done"):
-            log.info("Group %s is %s — refusing to dispatch", context.group_id, grp["status"])
+            log.info("Group %s is %s — refusing to dispatch", group_id, grp["status"])
             return []
 
         results: list[DispatchResult] = []
         idx = 0
 
         while True:
-            item = queue.dequeue()
+            item = self._queue_repo.dequeue(group_id)
             if item is None:
                 break
 
@@ -282,7 +267,7 @@ class RenderOrchestrator:
                 machine = self._pick_machine()
                 if machine is None:
                     log.error("No available machine for frames %d-%d (group %s)",
-                              item.frame_start, item.frame_end, queue.group_id)
+                              item.frame_start, item.frame_end, group_id)
                     continue
                 task = PlannedTask(
                     machine_id=machine.id,
@@ -295,6 +280,7 @@ class RenderOrchestrator:
                     total_frames=item.total_frames,
                     power_score=compute_power_score(machine),
                     chunk_index=item.chunk_index,
+                    attempt=item.attempt,
                 )
 
             blend_url = self._blend_url.resolve(
@@ -314,7 +300,7 @@ class RenderOrchestrator:
                 results.append(result)
             except Exception as exc:
                 log.error("Dispatch failed for frames %d-%d (group %s): %s",
-                          item.frame_start, item.frame_end, queue.group_id, exc)
+                          item.frame_start, item.frame_end, group_id, exc)
 
             idx += 1
 

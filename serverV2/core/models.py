@@ -149,6 +149,7 @@ class PlannedTask:
     total_frames: int
     power_score: float
     chunk_index: int | None = None
+    attempt: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +203,7 @@ class CreateJobParams:
     max_retries: int = 0
     priority: int = 0
     chunk_index: int | None = None
+    attempt: int = 0
 
 
 # ---------------------------------------------------------------------------

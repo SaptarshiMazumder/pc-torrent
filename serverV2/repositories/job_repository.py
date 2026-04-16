@@ -36,7 +36,7 @@ class JobRepository:
                 params.job_id, params.machine_id, params.group_id,
                 params.input_filename, params.total_frames,
                 params.frame_start, params.frame_end, params.frame_step,
-                params.render_overrides_json, 0, params.max_retries,
+                params.render_overrides_json, params.attempt, params.max_retries,
                 params.priority, params.chunk_index, _now_iso(),
             ),
         )

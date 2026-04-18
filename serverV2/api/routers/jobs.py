@@ -155,6 +155,29 @@ def next_for_machine(machine_id: str):
 
 # ---- output management ----
 
+@router.post("/jobs/{job_id}/request-upload-urls")
+def request_upload_urls(job_id: str, body: dict):
+    from serverV2.infrastructure import storage
+    from serverV2.core.value_objects import sanitize_filename
+    from serverV2.infrastructure.db import query_one
+
+    job = query_one("SELECT id, group_id FROM jobs WHERE id = %s", (job_id,))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    filenames = body.get("filenames", [])
+    if not filenames:
+        raise HTTPException(400, "No filenames provided")
+
+    group_id = job.get("group_id") or job_id
+    urls = {
+        fname: storage.generate_presigned_upload_url(
+            f"jobs/{group_id}/output/{sanitize_filename(fname)}", expires_in=3600,
+        )
+        for fname in filenames
+    }
+    return {"urls": urls}
+
+
 @router.get("/jobs/{job_id}/outputs")
 def get_outputs(job_id: str):
     try:

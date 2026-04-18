@@ -9,6 +9,8 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+from typing import Callable
+
 from serverV2.config import ModalConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.modal.client import ModalClient
@@ -26,11 +28,13 @@ class ModalFleetStrategy:
         client: ModalClient,
         callback_handler: ModalCallbackHandler,
         job_repo: JobRepository,
+        on_failure: Callable[[str, str], None] | None = None,
     ) -> None:
         self._cfg = config
         self._client = client
         self._callback = callback_handler
         self._job_repo = job_repo
+        self._on_failure = on_failure
 
     @property
     def machine_type(self) -> str:
@@ -82,8 +86,12 @@ class ModalFleetStrategy:
             )
         except Exception as exc:
             log.error("Modal dispatch failed for %s: %s", job_id, exc)
-            self._job_repo.mark_failed(job_id, f"Dispatch failed: {exc}")
-            return DispatchResult(job_id=job_id, machine_id=task.machine_id, status="failed", error=str(exc))
+            error = f"Dispatch failed: {exc}"
+            if self._on_failure:
+                self._on_failure(job_id, error)
+            else:
+                self._job_repo.mark_failed(job_id, error)
+            return DispatchResult(job_id=job_id, machine_id=task.machine_id, status="failed", error=error)
 
         self._callback.start_monitoring(
             job_id=job_id,

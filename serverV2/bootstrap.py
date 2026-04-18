@@ -129,6 +129,7 @@ def build(config: AppConfig | None = None) -> Container:
     vast_strategy = VastFleetStrategy(
         config=cfg.vast, client=vast_client,
         callback_handler=vast_callback, job_repo=job_repo,
+        on_failure=_on_failure,
     )
     vast_registrar = VastMachineRegistrar(cfg.vast)
     vast_recovery = VastRecovery(
@@ -147,6 +148,7 @@ def build(config: AppConfig | None = None) -> Container:
     modal_strategy = ModalFleetStrategy(
         config=cfg.modal, client=modal_client,
         callback_handler=modal_callback, job_repo=job_repo,
+        on_failure=_on_failure,
     )
     modal_registrar = ModalMachineRegistrar(cfg.modal)
     modal_recovery = ModalRecovery(
@@ -176,7 +178,7 @@ def build(config: AppConfig | None = None) -> Container:
         return machines
 
     # -- callbacks --
-    failure_handler = FailureHandler(job_repo)
+    failure_handler = FailureHandler(job_repo, group_repo)
     success_handler = SuccessHandler(job_repo, group_repo)
     callback_router = CallbackRouter(job_repo, success_handler, failure_handler)
     router_ref[0] = callback_router

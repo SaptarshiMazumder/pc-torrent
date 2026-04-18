@@ -127,32 +127,34 @@ class RenderOrchestrator:
     # 3. Failure handling: requeue remaining frames
     # ------------------------------------------------------------------
 
-    def on_job_failed(self, job_id: str, error: str) -> None:
-        """Called after a job is marked failed. Decides whether to requeue."""
+    def on_job_failed(self, job_id: str, error: str) -> bool:
+        """Called BEFORE a job is marked failed.  Decides whether to requeue.
+
+        Returns True if a retry was dispatched, False if retries are exhausted.
+        The caller (FailureHandler) marks the original job as failed only after
+        this method returns, so the group always has an active job during retries.
+        """
         raw = self._job_repo.get_raw_by_id(job_id)
         if not raw:
-            return
+            return False
 
         rj = RenderJob.from_row(raw)
         group_id = rj.group_id
 
-        if rj.status not in ("failed",):
-            return
-
         grp = self._group_repo.get_by_id(group_id)
         if grp and grp.get("status") in ("cancelled", "done"):
             log.info("Group %s is %s — not requeuing job %s", group_id, grp["status"], job_id)
-            return
+            return False
 
         remaining = rj.remaining_frames()
         if remaining is None:
-            return
+            return False
 
         next_attempt = (rj.attempt or 0) + 1
         if next_attempt > MAX_RETRIES:
             log.warning("Job %s: max retries (%d) exhausted for frames %d-%d",
                         job_id, MAX_RETRIES, remaining[0], remaining[1])
-            return
+            return False
 
         frame_start, frame_end = remaining
         item = QueueItem(
@@ -180,6 +182,7 @@ class RenderOrchestrator:
         )
 
         self._flush_queue(group_id, context)
+        return True
 
     # ------------------------------------------------------------------
     # 4. Worker callbacks (routed through CallbackRouter)

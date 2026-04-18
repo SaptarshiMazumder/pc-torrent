@@ -23,6 +23,9 @@ def compute_group_status(
     any_running = any(s == "running" for s in job_statuses)
 
     if current_group_status in _TERMINAL_GROUP:
+        if not no_active:
+            # Active retry jobs exist — unlock from terminal state.
+            return GroupStatusResult(status="running", should_persist=True)
         if no_active and any_done and all_frames:
             return GroupStatusResult(status="done", should_persist=current_group_status != "done")
         return GroupStatusResult(status=current_group_status, should_persist=False)

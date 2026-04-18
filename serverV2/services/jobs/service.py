@@ -110,6 +110,11 @@ class JobService:
         return {"job_id": job_id, "rendered_frames": rendered_frames, "total_frames": total_frames}
 
     def heartbeat(self, job_id: str, phase: str | None = None) -> dict[str, Any]:
+        job = self._jobs.get_raw_by_id(job_id)
+        if not job:
+            raise JobServiceError(404, "Job not found")
+        if job.get("status") in ("cancelled", "done"):
+            return {"job_id": job_id, "acknowledged": False, "reason": "job_cancelled"}
         if not self._jobs.update_heartbeat(job_id, phase):
             raise JobServiceError(404, "Job not found")
         return {"job_id": job_id, "acknowledged": True}

@@ -71,7 +71,7 @@ class VastRecovery:
             )
             return
 
-        inst = self._client.get_instance(vast_id)
+        inst = self._client.instances.get(vast_id)
         if inst is None:
             log.warning("Vast recovery: instance %d for job %s is gone — marking failed", vast_id, job_id)
             execute(
@@ -105,11 +105,11 @@ class VastRecovery:
         for row in terminal_rows:
             try:
                 vast_id = int(row["runpod_job_id"])
-                inst = self._client.get_instance(vast_id)
+                inst = self._client.instances.get(vast_id)
                 if inst is not None:
                     actual = str(inst.get("actual_status") or "").lower()
                     if actual not in ("exited", "stopped", "offline"):
                         log.info("Vast cleanup: destroying orphaned instance %d (job %s terminal)", vast_id, row["id"])
-                        self._client.destroy_instance(vast_id)
+                        self._client.instances.destroy(vast_id)
             except Exception as e:
                 log.warning("Vast cleanup error for instance %s: %s", row.get("runpod_job_id"), e)

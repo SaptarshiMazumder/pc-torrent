@@ -33,6 +33,7 @@ _FATAL_MSG_FRAGMENTS = (
 )
 _EXIT_CALLBACK_WAIT_SEC = 60
 _EXIT_POLL_SEC = 5
+_MAX_CONSECUTIVE_API_ERRORS = 10
 
 
 class VastCallbackHandler:
@@ -80,9 +81,12 @@ class VastCallbackHandler:
         )
 
         def _run_and_cleanup() -> None:
-            poller.run()
-            with self._monitors_lock:
-                self._monitors.pop(job_id, None)
+            try:
+                poller.run()
+            finally:
+                poller._remove_snapshot()
+                with self._monitors_lock:
+                    self._monitors.pop(job_id, None)
 
         t = threading.Thread(
             target=_run_and_cleanup, daemon=True,
@@ -134,6 +138,7 @@ class _InstancePoller:
         self._became_running_at: float | None = None
         self._last_rendered_frames: int | None = None
         self._last_frame_change_at = time.monotonic()
+        self._consecutive_api_errors = 0
 
     def run(self) -> None:
         while not self._stop.is_set():
@@ -145,8 +150,19 @@ class _InstancePoller:
             try:
                 if self._tick():
                     break
+                self._consecutive_api_errors = 0
             except Exception as e:
-                log.error("Vast poll error for job %s: %s", self._job_id, e)
+                self._consecutive_api_errors += 1
+                log.error("Vast poll error for job %s (%d/%d): %s",
+                          self._job_id, self._consecutive_api_errors,
+                          _MAX_CONSECUTIVE_API_ERRORS, e)
+                if self._consecutive_api_errors >= _MAX_CONSECUTIVE_API_ERRORS:
+                    self._on_failure(
+                        self._job_id,
+                        f"Vast API unreachable for {self._consecutive_api_errors} consecutive polls",
+                    )
+                    self._remove_snapshot()
+                    break
 
     def _tick(self) -> bool:
         inst = self._client.instances.get(self._instance_id)

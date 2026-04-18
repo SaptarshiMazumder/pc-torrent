@@ -69,9 +69,12 @@ class ModalCallbackHandler:
         )
 
         def _run_and_cleanup() -> None:
-            monitor.run()
-            with self._monitors_lock:
-                self._monitors.pop(job_id, None)
+            try:
+                monitor.run()
+            finally:
+                monitor._remove_snapshot()
+                with self._monitors_lock:
+                    self._monitors.pop(job_id, None)
 
         t = threading.Thread(
             target=_run_and_cleanup, daemon=True,

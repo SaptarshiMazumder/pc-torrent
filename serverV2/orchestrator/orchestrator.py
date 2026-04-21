@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import logging
 from typing import Any, Callable
+from uuid import uuid4
 
 from serverV2.allocation.power_scorer import compute_power_score
 from serverV2.callbacks.router import CallbackRouter
@@ -32,6 +33,7 @@ from serverV2.repositories.dispatch_queue_repository import (
     DispatchQueueRepository,
     QueueItem,
 )
+from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
@@ -52,6 +54,7 @@ class RenderOrchestrator:
         machine_repo: MachineRepository,
         fleet_registry: FleetRegistry,
         queue_repo: DispatchQueueRepository,
+        in_progress_repo: InProgressChunkRepository,
         machine_picker: Callable[[], list[Machine]],
     ) -> None:
         self._allocator = frame_allocator
@@ -63,6 +66,7 @@ class RenderOrchestrator:
         self._machine_repo = machine_repo
         self._fleet = fleet_registry
         self._queue_repo = queue_repo
+        self._in_progress = in_progress_repo
         self._machine_picker = machine_picker
 
     # ------------------------------------------------------------------
@@ -130,9 +134,8 @@ class RenderOrchestrator:
     def on_job_failed(self, job_id: str, error: str) -> bool:
         """Called BEFORE a job is marked failed.  Decides whether to requeue.
 
-        Returns True if a retry was dispatched, False if retries are exhausted.
-        The caller (FailureHandler) marks the original job as failed only after
-        this method returns, so the group always has an active job during retries.
+        Returns True if a retry was dispatched, False if retries are exhausted
+        OR the signal is stale (the chunk has already moved on to a newer job).
         """
         raw = self._job_repo.get_raw_by_id(job_id)
         if not raw:
@@ -141,6 +144,17 @@ class RenderOrchestrator:
         rj = RenderJob.from_row(raw)
         group_id = rj.group_id
 
+        # Stale-signal guard: if this failing job is no longer the active
+        # attempt for its chunk, a retry has already been dispatched and we
+        # must not spawn another one.
+        current_job_for_chunk = self._in_progress.current_job_for(group_id, rj.chunk_index or 0)
+        if current_job_for_chunk is not None and current_job_for_chunk != job_id:
+            log.info(
+                "Stale failure signal for job %s (chunk %s now owned by %s)",
+                job_id, rj.chunk_index, current_job_for_chunk,
+            )
+            return False
+
         grp = self._group_repo.get_by_id(group_id)
         if grp and grp.get("status") in ("cancelled", "done"):
             log.info("Group %s is %s — not requeuing job %s", group_id, grp["status"], job_id)
@@ -148,12 +162,14 @@ class RenderOrchestrator:
 
         remaining = rj.remaining_frames()
         if remaining is None:
+            self._in_progress.release(group_id, rj.chunk_index or 0)
             return False
 
         next_attempt = (rj.attempt or 0) + 1
         if next_attempt > MAX_RETRIES:
             log.warning("Job %s: max retries (%d) exhausted for frames %d-%d",
                         job_id, MAX_RETRIES, remaining[0], remaining[1])
+            self._in_progress.release(group_id, rj.chunk_index or 0)
             return False
 
         frame_start, frame_end = remaining
@@ -218,10 +234,11 @@ class RenderOrchestrator:
             if strategy:
                 strategy.stop_monitoring(job["id"])
 
-        # 3. Drain dispatch queue
+        # 3. Drain dispatch queue + in-progress ledger
         drained = self._queue_repo.drain(group_id)
         if drained:
             log.info("Group %s: drained %d items from dispatch queue", group_id, drained)
+        self._in_progress.release_all(group_id)
 
         # 4. Cancel provider-side jobs (Modal function calls, Vast instances)
         for job in jobs:
@@ -298,8 +315,20 @@ class RenderOrchestrator:
                 priority=context.priority,
             )
 
+            # Pre-generate job_id and claim the chunk in the in-progress ledger
+            # BEFORE dispatching.  If the strategy's synchronous failure path
+            # fires during dispatch, the retry chain's stale-signal guard can
+            # see this claim and deduplicate correctly.
+            job_id = str(uuid4())
+            self._in_progress.claim_or_replace(
+                group_id=context.group_id,
+                chunk_index=task.chunk_index or 0,
+                job_id=job_id,
+                attempt=task.attempt,
+            )
+
             try:
-                result = self._dispatcher.dispatch_one(task, dispatch_ctx)
+                result = self._dispatcher.dispatch_one(task, dispatch_ctx, job_id=job_id)
                 results.append(result)
             except Exception as exc:
                 log.error("Dispatch failed for frames %d-%d (group %s): %s",

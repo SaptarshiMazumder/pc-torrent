@@ -37,7 +37,7 @@ const modalProvider = {
 
     const providerStatus = live?.provider_status ?? null;
     const displayStatus = providerStatus || task.status;
-    const rendered = live?.rendered_frames ?? task.rendered_frames ?? 0;
+    const rendered = task.rendered_frames ?? 0;
     const total = live?.total_frames ?? task.total_frames ?? null;
     const rangeLabel = (live?.frame_start ?? task.frame_start) != null && (live?.frame_end ?? task.frame_end) != null
       ? `${live?.frame_start ?? task.frame_start}–${live?.frame_end ?? task.frame_end}`

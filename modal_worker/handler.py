@@ -759,8 +759,9 @@ def handler(job: dict) -> dict:
         except Exception:
             pass
 
-        # 7. Mark done
+        # 7. Finish.  Completion is decided by the orchestrator based on
+        # registered output files — we do not self-declare "done".  The
+        # backend will cancel this Modal function once it detects completion.
         heartbeat.stop()
-        _mark_done(backend_url, job_id, uploaded)
-        log.info(f"Job {job_id} done - {len(uploaded)} files uploaded")
-        return {"status": "done", "output_files": uploaded}
+        log.info(f"Job {job_id} finished rendering - {len(uploaded)} files uploaded")
+        return {"status": "finished", "output_files": uploaded}

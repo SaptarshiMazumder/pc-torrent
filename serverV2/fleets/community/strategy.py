@@ -27,9 +27,9 @@ class CommunityStrategy:
     def is_enabled(self) -> bool:
         return True
 
-    def dispatch(self, task: PlannedTask, context: DispatchContext) -> DispatchResult:
+    def dispatch(self, task: PlannedTask, context: DispatchContext, job_id: str) -> DispatchResult:
         return DispatchResult(
-            job_id=context.group_id,
+            job_id=job_id,
             machine_id=task.machine_id,
             status="pending",
         )

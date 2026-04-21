@@ -145,7 +145,8 @@ def execute_returning(sql: str, params: tuple | None = None) -> dict[str, Any] |
 
 
 def init_db() -> None:
-    """Initialize the connection pool and verify connectivity."""
+    """Initialize the connection pool, verify connectivity, and ensure any
+    serverV2-owned tables exist.  Legacy tables are inherited from v1."""
     import logging
     log = logging.getLogger(__name__)
     try:
@@ -153,6 +154,18 @@ def init_db() -> None:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS in_progress_chunks (
+                        group_id       TEXT NOT NULL,
+                        chunk_index    INTEGER NOT NULL,
+                        current_job_id TEXT NOT NULL,
+                        attempt        INTEGER NOT NULL,
+                        updated_at     TEXT NOT NULL,
+                        PRIMARY KEY (group_id, chunk_index)
+                    )
+                    """
+                )
         log.info("Database connection pool initialized")
     except Exception as exc:
         log.error("Failed to initialize database: %s", exc)

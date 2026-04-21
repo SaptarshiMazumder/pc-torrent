@@ -15,9 +15,12 @@ from typing import Any, Callable
 
 from serverV2.config import VastConfig
 from serverV2.core.models import InstanceSnapshot
+from serverV2.core.value_objects import parse_output_files
 from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.vast.client import VastClient
+from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.repositories.progress_repository import ProgressRepository
 
 log = logging.getLogger(__name__)
 
@@ -43,13 +46,19 @@ class VastCallbackHandler:
         config: VastConfig,
         client: VastClient,
         job_repo: JobRepository,
+        heartbeat_repo: HeartbeatRepository,
+        progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
+        on_success: Callable[[str], None],
         registry: InstanceRegistry | None = None,
     ) -> None:
         self._cfg = config
         self._client = client
         self._job_repo = job_repo
+        self._heartbeats = heartbeat_repo
+        self._progress = progress_repo
         self._on_failure = on_failure
+        self._on_success = on_success
         self._registry = registry
         self._monitors: dict[str, threading.Event] = {}
         self._monitors_lock = threading.Lock()
@@ -75,7 +84,10 @@ class VastCallbackHandler:
             config=self._cfg,
             client=self._client,
             job_repo=self._job_repo,
+            heartbeat_repo=self._heartbeats,
+            progress_repo=self._progress,
             on_failure=self._on_failure,
+            on_success=self._on_success,
             registry=self._registry,
             stop_event=stop_event,
         )
@@ -121,7 +133,10 @@ class _InstancePoller:
         config: VastConfig,
         client: VastClient,
         job_repo: JobRepository,
+        heartbeat_repo: HeartbeatRepository,
+        progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
+        on_success: Callable[[str], None],
         registry: InstanceRegistry | None = None,
         stop_event: threading.Event | None = None,
     ) -> None:
@@ -130,7 +145,10 @@ class _InstancePoller:
         self._cfg = config
         self._client = client
         self._job_repo = job_repo
+        self._heartbeats = heartbeat_repo
+        self._progress = progress_repo
         self._on_failure = on_failure
+        self._on_success = on_success
         self._registry = registry
         self._stop = stop_event or threading.Event()
 
@@ -195,7 +213,7 @@ class _InstancePoller:
             return True
 
         if self._all_frames_done(job) and local_status == "running":
-            self._job_repo.mark_done(self._job_id)
+            self._on_success(self._job_id)
             self._client.instances.destroy(self._instance_id)
             self._remove_snapshot()
             return True
@@ -228,7 +246,7 @@ class _InstancePoller:
         if not job or job["status"] in ("done", "failed", "cancelled"):
             return True
         if self._all_frames_done(job):
-            self._job_repo.mark_done(self._job_id)
+            self._on_success(self._job_id)
             return True
         self._on_failure(self._job_id, "Vast.ai instance disappeared unexpectedly")
         return True
@@ -268,7 +286,7 @@ class _InstancePoller:
             self._remove_snapshot()
             return True
         if self._all_frames_done(job):
-            self._job_repo.mark_done(self._job_id)
+            self._on_success(self._job_id)
             self._remove_snapshot()
             return True
         final_status = self._wait_for_callback()
@@ -306,15 +324,31 @@ class _InstancePoller:
             and any(f in status_msg for f in _FATAL_MSG_FRAGMENTS)
         )
 
+    def _uploaded_count(self, job: dict[str, Any]) -> int:
+        """Verified upload count — only files registered in output_files.
+        Use for completion decisions; worker self-reports don't belong here."""
+        return len(parse_output_files(job.get("output_files")))
+
+    def _rendered_count(self, job: dict[str, Any]) -> int:
+        """Best estimate of rendered count for liveness/staleness checks.
+        Combines all signals (worker-pushed + verified); do NOT use for 'done'."""
+        counts = [
+            job.get("rendered_frames") or 0,
+            self._uploaded_count(job),
+        ]
+        live = self._progress.get(self._job_id)
+        if live is not None:
+            counts.append(live.rendered_frames)
+        return max(counts)
+
     def _all_frames_done(self, job: dict[str, Any]) -> bool:
         total = job.get("total_frames") or 0
-        rendered = job.get("rendered_frames") or 0
-        return total > 0 and rendered >= total
+        return total > 0 and self._uploaded_count(job) >= total
 
     def _is_stale(self, job: dict[str, Any]) -> bool:
         if job["status"] != "running":
             return False
-        cur = job.get("rendered_frames") or 0
+        cur = self._rendered_count(job)
         if cur != self._last_rendered_frames:
             self._last_rendered_frames = cur
             self._last_frame_change_at = time.monotonic()
@@ -322,12 +356,11 @@ class _InstancePoller:
         return time.monotonic() - self._last_frame_change_at > self._cfg.in_progress_stale_sec
 
     def _is_heartbeat_dead(self, job: dict[str, Any]) -> bool:
-        from serverV2.infrastructure import heartbeat_store
         if self._became_running_at is None:
             return False
         if time.monotonic() - self._became_running_at < self._cfg.heartbeat_grace_sec:
             return False
-        alive = heartbeat_store.is_alive(self._job_id)
+        alive = self._heartbeats.is_alive(self._job_id)
         if alive is None:
             return False  # Redis unavailable — don't false-positive kill jobs
         return not alive

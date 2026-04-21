@@ -26,13 +26,16 @@ from serverV2.fleets.vast.client import VastClient
 from serverV2.fleets.vast.machine_registrar import VastMachineRegistrar
 from serverV2.fleets.vast.recovery import VastRecovery
 from serverV2.fleets.vast.strategy import VastFleetStrategy
+from serverV2.infrastructure.redis_client import RedisClient
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.orchestrator.dispatcher import Dispatcher
 from serverV2.orchestrator.frame_allocator import FrameAllocator
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
+from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.user_input_file_repository import UserInputFileRepository
 from serverV2.scanner.failover_scanner import FailoverScanner
@@ -87,16 +90,22 @@ class Container:
         self.status_aggregator = status_aggregator
 
 
-def build(config: AppConfig | None = None) -> Container:
+def build(
+    config: AppConfig | None = None,
+    redis_client: RedisClient | None = None,
+) -> Container:
     """Compose the full object graph.  Pure wiring, no side effects."""
 
     cfg = config or AppConfig.from_env()
+    redis = redis_client or RedisClient()
 
     # -- repositories --
     job_repo = JobRepository()
     machine_repo = MachineRepository(stale_seconds=cfg.machine_stale_seconds)
     group_repo = RenderGroupRepository()
     asset_repo = UserInputFileRepository()
+    heartbeat_repo = HeartbeatRepository(redis)
+    progress_repo = ProgressRepository(redis)
 
     # -- fleet registry --
     registry = FleetRegistry()
@@ -108,7 +117,7 @@ def build(config: AppConfig | None = None) -> Container:
     modal_instance_registry = InstanceRegistry()
     vast_instance_registry = InstanceRegistry()
 
-    # -- _on_failure: fleet monitors -> CallbackRouter (late-bound) --
+    # -- fleet monitor callbacks -> CallbackRouter (late-bound) --
     router_ref: list[CallbackRouter | None] = [None]
 
     def _on_failure(job_id: str, error: str) -> None:
@@ -119,11 +128,22 @@ def build(config: AppConfig | None = None) -> Container:
                 error=error,
             )
 
+    def _on_success(job_id: str) -> None:
+        if router_ref[0]:
+            router_ref[0].route(
+                job_id=job_id,
+                outcome=CallbackOutcome.SUCCESS,
+            )
+
     # -- vast fleet --
     vast_client = VastClient(cfg.vast)
     vast_callback = VastCallbackHandler(
         config=cfg.vast, client=vast_client,
-        job_repo=job_repo, on_failure=_on_failure,
+        job_repo=job_repo,
+        heartbeat_repo=heartbeat_repo,
+        progress_repo=progress_repo,
+        on_failure=_on_failure,
+        on_success=_on_success,
         registry=vast_instance_registry,
     )
     vast_strategy = VastFleetStrategy(
@@ -142,7 +162,11 @@ def build(config: AppConfig | None = None) -> Container:
     modal_client = ModalClient(cfg.modal)
     modal_callback = ModalCallbackHandler(
         config=cfg.modal, client=modal_client,
-        job_repo=job_repo, on_failure=_on_failure,
+        job_repo=job_repo,
+        heartbeat_repo=heartbeat_repo,
+        progress_repo=progress_repo,
+        on_failure=_on_failure,
+        on_success=_on_success,
         registry=modal_instance_registry,
     )
     modal_strategy = ModalFleetStrategy(
@@ -228,6 +252,8 @@ def build(config: AppConfig | None = None) -> Container:
     job_service = JobService(
         job_repo=job_repo,
         machine_repo=machine_repo,
+        heartbeat_repo=heartbeat_repo,
+        progress_repo=progress_repo,
     )
 
     machine_service = MachineService(vast_config=cfg.vast, modal_config=cfg.modal)

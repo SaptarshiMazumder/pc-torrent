@@ -103,7 +103,13 @@ class RenderJob:
         return self.machine_type in SERVERLESS_TYPE_VALUES
 
     def remaining_frames(self) -> tuple[int, int] | None:
-        new_start = self.frame_start + self.rendered_frames * self.frame_step
+        """Frames not yet uploaded.  Uses verified output_files count, not the
+        worker-pushed rendered_frames counter — self-reports can lie, uploaded
+        files cannot.  Assumes sequential rendering (workers always do).
+        """
+        from serverV2.core.value_objects import parse_output_files
+        uploaded = len(parse_output_files(self.output_files))
+        new_start = self.frame_start + uploaded * self.frame_step
         if new_start > self.frame_end:
             return None
         return (new_start, self.frame_end)

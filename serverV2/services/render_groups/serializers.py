@@ -13,7 +13,10 @@ from serverV2.core.value_objects import (
 
 def serialize_task(job: dict[str, Any], machine: dict[str, Any] | None = None) -> dict[str, Any]:
     total_frames = job.get("total_frames")
-    rendered_frames = max(0, job.get("rendered_frames") or 0)
+    output_files = parse_output_files(job.get("output_files"))
+
+    # Verified upload count is the single source of truth for progress.
+    rendered_frames = len(output_files)
     if total_frames and total_frames > 0:
         rendered_frames = min(rendered_frames, total_frames)
 
@@ -27,8 +30,6 @@ def serialize_task(job: dict[str, Any], machine: dict[str, Any] | None = None) -
     else:
         display_gpu = machine["gpu_model"] if machine else "Unknown"
         display_vram = machine.get("gpu_vram_gb", 0) if machine else 0
-
-    output_files = parse_output_files(job.get("output_files"))
 
     return {
         "job_id": job["id"],

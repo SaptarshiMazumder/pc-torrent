@@ -152,15 +152,19 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
     [fetchFrameGallery, openFrameGalleries]
   );
 
-  // Poll open galleries for live updates
+  // Poll open galleries for live updates — only while the job is still active.
+  // Terminal jobs (done/failed/cancelled) have a frozen output list; no reason to poll.
   useEffect(() => {
     const openIds = Object.keys(openFrameGalleries).filter((id) => openFrameGalleries[id]);
     if (openIds.length === 0) return;
+    const TERMINAL = new Set(["done", "failed", "cancelled"]);
     const tick = () => {
       const currentJobs = jobsRef.current || [];
       for (const id of openIds) {
         const job = currentJobs.find((candidate) => jobKey(candidate) === id);
-        if (job) void fetchFrameGallery(job, { silent: true });
+        if (job && !TERMINAL.has(job.status)) {
+          void fetchFrameGallery(job, { silent: true });
+        }
       }
     };
     tick();

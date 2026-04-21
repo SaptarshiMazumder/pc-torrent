@@ -388,13 +388,13 @@ class RenderGroupService:
         analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
         analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 
-        from serverV2.infrastructure.db import query_all, query_one
-        jobs = query_all(
-            "SELECT * FROM jobs WHERE group_id = %s ORDER BY frame_start ASC", (group_id,)
-        )
+        jobs = self._jobs.get_raw_by_group(group_id)
+
+        machine_ids = [job["machine_id"] for job in jobs if job.get("machine_id")]
+        machines_by_id = self._machines.get_raw_by_ids(machine_ids)
 
         tasks = [
-            serialize_task(job, query_one("SELECT * FROM machines WHERE id = %s", (job["machine_id"],)))
+            serialize_task(job, machines_by_id.get(job.get("machine_id")))
             for job in jobs
         ]
 
@@ -447,6 +447,22 @@ class RenderGroupService:
             "latest_output_file": latest_output_filename(latest_candidates) if latest_candidates else None,
             "tasks": tasks,
         }
+
+    # ------------------------------------------------------------------
+    # outputs
+    # ------------------------------------------------------------------
+
+    def get_outputs(self, group_id: str) -> dict[str, Any]:
+        from serverV2.services.jobs.serializers import build_output_entries
+
+        if not self._groups.get_by_id(group_id):
+            raise RenderGroupServiceError(404, "Render group not found")
+
+        jobs = self._jobs.get_raw_by_group(group_id)
+        entries: list[dict[str, Any]] = []
+        for job in jobs:
+            entries.extend(build_output_entries(job, group_id))
+        return {"group_id": group_id, "files": entries, "count": len(entries)}
 
     # ------------------------------------------------------------------
     # delete

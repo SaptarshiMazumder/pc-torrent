@@ -24,8 +24,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from serverV2.bootstrap import Container, build
-from serverV2.infrastructure import heartbeat_store
 from serverV2.infrastructure.db import init_db, try_acquire_leader_lock
+from serverV2.infrastructure.redis_client import RedisClient
 
 log = logging.getLogger(__name__)
 
@@ -55,9 +55,11 @@ def on_startup() -> None:
     log.info("ServerV2 starting up...")
 
     init_db()
-    heartbeat_store.init()
 
-    _container = build()
+    redis_client = RedisClient()
+    redis_client.connect()
+
+    _container = build(redis_client=redis_client)
 
     _wire_routers(_container)
 

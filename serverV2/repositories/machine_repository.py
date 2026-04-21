@@ -40,6 +40,15 @@ class MachineRepository:
         row = query_one("SELECT * FROM machines WHERE id = %s", (machine_id,))
         return Machine.from_row(row) if row else None
 
+    def get_raw_by_ids(self, machine_ids: list[str]) -> dict[str, dict]:
+        """Return raw rows keyed by machine id.  Missing ids are omitted."""
+        if not machine_ids:
+            return {}
+        rows = query_all(
+            "SELECT * FROM machines WHERE id = ANY(%s)", (list(machine_ids),),
+        )
+        return {r["id"]: r for r in rows}
+
     def get_type(self, machine_id: str) -> str:
         row = query_one("SELECT machine_type FROM machines WHERE id = %s", (machine_id,))
         return row["machine_type"] if row else "windows"

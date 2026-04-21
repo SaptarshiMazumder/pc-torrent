@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
 
 from serverV2.api.dependencies import get_current_user
@@ -181,7 +181,7 @@ def request_upload_urls(job_id: str, body: dict):
 @router.get("/jobs/{job_id}/outputs")
 def get_outputs(job_id: str):
     try:
-        return _get().get_output_entries(job_id)
+        return _get().get_outputs(job_id)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
 
@@ -193,6 +193,19 @@ def download_output(job_id: str, filename: str):
         return RedirectResponse(url)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
+
+
+@router.get("/jobs/{job_id}/output/{filename}/preview")
+def preview_output(job_id: str, filename: str):
+    try:
+        payload, media_type = _get().get_output_preview(job_id, filename)
+    except JobServiceError as e:
+        raise HTTPException(e.status, e.message)
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=60"},
+    )
 
 
 @router.get("/jobs/{job_id}/download-zip")

@@ -197,13 +197,10 @@ def download_input(group_id: str, filename: str):
 
 @router.get("/render-groups/{group_id}/outputs")
 def get_outputs(group_id: str):
-    from serverV2.infrastructure.db import query_all
-    from serverV2.services.jobs.serializers import build_output_entries
-    jobs = query_all("SELECT * FROM jobs WHERE group_id = %s", (group_id,))
-    entries = []
-    for job in jobs:
-        entries.extend(build_output_entries(job, group_id))
-    return entries
+    try:
+        return _get().get_outputs(group_id)
+    except RenderGroupServiceError as e:
+        raise HTTPException(e.status, e.message)
 
 
 @router.get("/render-groups/{group_id}/download-zip")

@@ -36,9 +36,11 @@ class JobServiceError(Exception):
 
 class JobService:
 
-    def __init__(self, *, job_repo, machine_repo) -> None:
+    def __init__(self, *, job_repo, machine_repo, heartbeat_repo, progress_repo) -> None:
         self._jobs = job_repo
         self._machines = machine_repo
+        self._heartbeats = heartbeat_repo
+        self._progress = progress_repo
 
     # ---- upload request ----
 
@@ -103,15 +105,11 @@ class JobService:
         return {"job_id": job_id, "status": status}
 
     def update_progress(self, job_id: str, rendered_frames: int, total_frames: int) -> dict[str, Any]:
-        job = self._jobs.get_raw_by_id(job_id)
-        if not job:
-            raise JobServiceError(404, "Job not found")
-        self._jobs.update_progress(job_id, rendered_frames, total_frames)
+        self._progress.record(job_id, rendered_frames, total_frames)
         return {"job_id": job_id, "rendered_frames": rendered_frames, "total_frames": total_frames}
 
     def heartbeat(self, job_id: str, phase: str | None = None) -> dict[str, Any]:
-        from serverV2.infrastructure import heartbeat_store
-        heartbeat_store.record(job_id, phase)
+        self._heartbeats.record(job_id, phase)
         return {"job_id": job_id, "acknowledged": True}
 
     # ---- output management ----
@@ -123,11 +121,12 @@ class JobService:
         merged = self._jobs.merge_output_files(job_id, files)
         return {"job_id": job_id, "output_files": merged}
 
-    def get_output_entries(self, job_id: str) -> list[dict[str, Any]]:
+    def get_outputs(self, job_id: str) -> dict[str, Any]:
         job = self._jobs.get_raw_by_id(job_id)
         if not job:
             raise JobServiceError(404, "Job not found")
-        return build_output_entries(job)
+        entries = build_output_entries(job)
+        return {"job_id": job_id, "files": entries, "count": len(entries)}
 
     def get_output_download_url(self, job_id: str, filename: str) -> str:
         job = self._jobs.get_raw_by_id(job_id)
@@ -138,6 +137,28 @@ class JobService:
         if not storage.file_exists(key):
             raise JobServiceError(404, "Output file not found")
         return storage.generate_presigned_url(key, download_name=filename)
+
+    def get_output_preview(self, job_id: str, filename: str) -> tuple[bytes, str]:
+        from serverV2.services.previews.renderer import (
+            PREVIEW_MEDIA_TYPE,
+            PreviewRenderError,
+            generate_image_preview,
+        )
+        job = self._jobs.get_raw_by_id(job_id)
+        if not job:
+            raise JobServiceError(404, "Job not found")
+        group_id = job.get("group_id") or job_id
+        key = f"jobs/{group_id}/output/{sanitize_filename(filename)}"
+        if not storage.file_exists(key):
+            raise JobServiceError(404, "Output file not found")
+        try:
+            raw = storage.download_file(key)
+        except Exception as exc:
+            raise JobServiceError(404, "Output file not found") from exc
+        try:
+            return generate_image_preview(raw), PREVIEW_MEDIA_TYPE
+        except PreviewRenderError as exc:
+            raise JobServiceError(415, str(exc)) from exc
 
     def download_all_as_zip(self, job_id: str) -> io.BytesIO:
         job = self._jobs.get_raw_by_id(job_id)

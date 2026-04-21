@@ -58,6 +58,12 @@ class JobRepository:
         )
         return [RenderJob.from_row(self._attach_machine_type(r)) for r in rows]
 
+    def get_raw_by_group(self, group_id: str) -> list[dict[str, Any]]:
+        return query_all(
+            "SELECT * FROM jobs WHERE group_id = %s ORDER BY frame_start ASC",
+            (group_id,),
+        )
+
     def get_active_by_group(self, group_id: str) -> list[dict[str, Any]]:
         return query_all(
             "SELECT * FROM jobs WHERE group_id = %s AND status IN ('pending', 'running')",

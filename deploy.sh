@@ -10,7 +10,7 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 GCP_PROJECT="gen-lang-client-0545494042"
 GCP_REGION="asia-northeast1"
-SERVICE_NAME="pcrent-server"
+SERVICE_NAME="pcrent-server-v2"
 
 # Colors
 GREEN='\033[0;32m'
@@ -34,8 +34,8 @@ echo -e "========================================${NC}"
 # -----------------------------------------------
 log_step "[1/5] Loading environment variables"
 
-if [ ! -f "$PROJECT_ROOT/server/.env" ]; then
-    log_error "server/.env not found. Create it from server/.env.example"
+if [ ! -f "$PROJECT_ROOT/serverV2/.env" ]; then
+    log_error "serverV2/.env not found"
     exit 1
 fi
 
@@ -46,38 +46,25 @@ while IFS='=' read -r key value; do
         continue
     fi
     export "$key=$value"
-done < "$PROJECT_ROOT/server/.env"
+done < "$PROJECT_ROOT/serverV2/.env"
 
 log_ok "DATABASE_URL loaded (Neon PostgreSQL)"
 log_ok "R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:0:10}..."
 log_ok "R2_BUCKET_NAME: $R2_BUCKET_NAME"
-log_ok "CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:0:8}..."
 
-FIREBASE_SERVICE_ACCOUNT_PATH="${FIREBASE_SERVICE_ACCOUNT_PATH:-}"
 FIREBASE_SERVICE_ACCOUNT_JSON="${FIREBASE_SERVICE_ACCOUNT_JSON:-}"
-if [[ -z "$FIREBASE_SERVICE_ACCOUNT_PATH" ]]; then
-    auto_key_file=$(find "$PROJECT_ROOT/server/creds" -maxdepth 1 -name '*-adminsdk-*.json' -print -quit 2>/dev/null || true)
-    if [[ -n "$auto_key_file" ]]; then
-        FIREBASE_SERVICE_ACCOUNT_PATH="${auto_key_file#$PROJECT_ROOT/server/}"
-    fi
+if [[ -z "$FIREBASE_SERVICE_ACCOUNT_JSON" ]]; then
+    log_error "FIREBASE_SERVICE_ACCOUNT_JSON not set in serverV2/.env"
+    exit 1
 fi
-if [[ -n "$FIREBASE_SERVICE_ACCOUNT_PATH" ]]; then
-    FIREBASE_KEY_FILE="$PROJECT_ROOT/server/$FIREBASE_SERVICE_ACCOUNT_PATH"
-    if [[ -f "$FIREBASE_KEY_FILE" ]]; then
-        FIREBASE_SERVICE_ACCOUNT_JSON="$(tr -d '\r\n' < "$FIREBASE_KEY_FILE")"
-        log_ok "Firebase key loaded from server/$FIREBASE_SERVICE_ACCOUNT_PATH"
-    else
-        log_error "FIREBASE_SERVICE_ACCOUNT_PATH not found: server/$FIREBASE_SERVICE_ACCOUNT_PATH"
-        exit 1
-    fi
-fi
+log_ok "Firebase credentials loaded (inline JSON)"
 
 # -----------------------------------------------
 # [2/5] Deploy Backend to Cloud Run
 # -----------------------------------------------
 log_step "[2/5] Deploying backend -> Google Cloud Run"
 
-cd "$PROJECT_ROOT/server"
+cd "$PROJECT_ROOT/serverV2"
 log_info "Building Docker image via Cloud Build..."
 gcloud builds submit \
     --tag "gcr.io/$GCP_PROJECT/$SERVICE_NAME" \
@@ -88,9 +75,7 @@ log_ok "Docker image built and pushed"
 cd "$PROJECT_ROOT"
 
 # Re-read comma-containing env vars directly to avoid IFS='=' parsing issues
-RUNPOD_ENDPOINTS=$(grep '^RUNPOD_ENDPOINTS=' "$PROJECT_ROOT/server/.env" | head -1 | cut -d'=' -f2-)
-MODAL_ENDPOINTS=$(grep '^MODAL_ENDPOINTS=' "$PROJECT_ROOT/server/.env" | head -1 | cut -d'=' -f2-)
-
+MODAL_ENDPOINTS=$(grep '^MODAL_ENDPOINTS=' "$PROJECT_ROOT/serverV2/.env" | head -1 | cut -d'=' -f2-)
 
 log_info "Deploying container to Cloud Run (region: $GCP_REGION)..."
 gcloud run deploy "$SERVICE_NAME" \
@@ -100,42 +85,31 @@ gcloud run deploy "$SERVICE_NAME" \
     --project "$GCP_PROJECT" \
     --allow-unauthenticated \
     --memory 2Gi \
+    --min-instances 1 \
     --set-env-vars "DATABASE_URL=$DATABASE_URL" \
     --set-env-vars "R2_ACCOUNT_ID=$R2_ACCOUNT_ID" \
     --set-env-vars "R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID" \
     --set-env-vars "R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY" \
     --set-env-vars "R2_BUCKET_NAME=$R2_BUCKET_NAME" \
-    --set-env-vars "RUNPOD_API_KEY=$RUNPOD_API_KEY" \
-    --set-env-vars "RUNPOD_PROVISIONING_ENABLED=${RUNPOD_PROVISIONING_ENABLED:-true}" \
-    --set-env-vars "RUNPOD_ENDPOINT_ID=${RUNPOD_ENDPOINT_ID:-}" \
-    --set-env-vars "^@^RUNPOD_ENDPOINTS=${RUNPOD_ENDPOINTS:-}" \
+    --set-env-vars "PUBLIC_BACKEND_URL=$PUBLIC_BACKEND_URL" \
     --set-env-vars "MODAL_PROVISIONING_ENABLED=${MODAL_PROVISIONING_ENABLED:-true}" \
     --set-env-vars "MODAL_TOKEN_ID=${MODAL_TOKEN_ID:-}" \
     --set-env-vars "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET:-}" \
     --set-env-vars "^@^MODAL_ENDPOINTS=${MODAL_ENDPOINTS:-}" \
-    --set-env-vars "^@^MODAL_DISABLED_GPU_TYPES=${MODAL_DISABLED_GPU_TYPES:-a100}" \
+    --set-env-vars "^@^MODAL_DISABLED_GPU_TYPES=${MODAL_DISABLED_GPU_TYPES:-}" \
     --set-env-vars "MODAL_APP_NAME=${MODAL_APP_NAME:-pcrent-render}" \
     --set-env-vars "MODAL_WORKSPACE=${MODAL_WORKSPACE:-}" \
     --set-env-vars "MODAL_ENDPOINT_URL_PREFIX=${MODAL_ENDPOINT_URL_PREFIX:-}" \
-    --set-env-vars "PUBLIC_BACKEND_URL=$PUBLIC_BACKEND_URL" \
-    --set-env-vars "RUNPOD_GPU_MODEL=${RUNPOD_GPU_MODEL:-RunPod Serverless}" \
-    --set-env-vars "RUNPOD_GPU_VRAM_GB=${RUNPOD_GPU_VRAM_GB:-24}" \
-    --set-env-vars "RUNPOD_CPU_CORES=${RUNPOD_CPU_CORES:-16}" \
-    --set-env-vars "RUNPOD_RAM_GB=${RUNPOD_RAM_GB:-64}" \
-    --set-env-vars "RUNPOD_INIT_STALL_SEC=${RUNPOD_INIT_STALL_SEC:-60}" \
-    --set-env-vars "RUNPOD_AUTOSCALE_MIN_WORKERS=${RUNPOD_AUTOSCALE_MIN_WORKERS:-3}" \
-    --set-env-vars "RUNPOD_AUTOSCALE_MAX_WORKERS=${RUNPOD_AUTOSCALE_MAX_WORKERS:-4}" \
-    --set-env-vars "RUNPOD_AUTOSCALE_SAFETY_SWEEP_SEC=${RUNPOD_AUTOSCALE_SAFETY_SWEEP_SEC:-30}" \
     --set-env-vars "MODAL_GPU_VRAM_GB=${MODAL_GPU_VRAM_GB:-24}" \
-    --set-env-vars "MODAL_CPU_CORES=${MODAL_CPU_CORES:-16}" \
-    --set-env-vars "MODAL_RAM_GB=${MODAL_RAM_GB:-64}" \
-    --set-env-vars "MODAL_WORKERS_PER_ENDPOINT=${MODAL_WORKERS_PER_ENDPOINT:-3}" \
+    --set-env-vars "MODAL_WORKERS_PER_ENDPOINT=${MODAL_WORKERS_PER_ENDPOINT:-1}" \
+    --set-env-vars "MODAL_WORKER_IMAGE=${MODAL_WORKER_IMAGE:-}" \
+    --set-env-vars "VAST_PROVISIONING_ENABLED=${VAST_PROVISIONING_ENABLED:-true}" \
     --set-env-vars "VAST_API_KEY=${VAST_API_KEY:-}" \
     --set-env-vars "VAST_DOCKER_IMAGE=${VAST_DOCKER_IMAGE:-}" \
     --set-env-vars "VAST_MAX_PRICE_PER_GPU=${VAST_MAX_PRICE_PER_GPU:-0.50}" \
     --set-env-vars "VAST_DISK_GB=${VAST_DISK_GB:-20}" \
     --set-env-vars "VAST_WORKERS_PER_ENDPOINT=${VAST_WORKERS_PER_ENDPOINT:-2}" \
-    --set-env-vars "AGENT_API_KEY=$AGENT_API_KEY" \
+    --set-env-vars "ORCHESTRATOR_MAX_RETRIES=${ORCHESTRATOR_MAX_RETRIES:-2}" \
     --set-env-vars "^|^FIREBASE_SERVICE_ACCOUNT_JSON=$FIREBASE_SERVICE_ACCOUNT_JSON" \
     --quiet
 

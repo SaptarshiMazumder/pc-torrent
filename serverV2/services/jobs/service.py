@@ -22,7 +22,8 @@ from serverV2.core.value_objects import (
 )
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firestore_client import write_job_record
-from serverV2.services.jobs.serializers import build_output_entries, serialize_job
+from serverV2.services.jobs.outputs_resolver import OutputsResolver
+from serverV2.services.jobs.serializers import serialize_job
 
 log = logging.getLogger(__name__)
 
@@ -36,11 +37,20 @@ class JobServiceError(Exception):
 
 class JobService:
 
-    def __init__(self, *, job_repo, machine_repo, heartbeat_repo, progress_repo) -> None:
+    def __init__(
+        self,
+        *,
+        job_repo,
+        machine_repo,
+        heartbeat_repo,
+        progress_repo,
+        outputs_resolver: OutputsResolver,
+    ) -> None:
         self._jobs = job_repo
         self._machines = machine_repo
         self._heartbeats = heartbeat_repo
         self._progress = progress_repo
+        self._outputs = outputs_resolver
 
     # ---- upload request ----
 
@@ -125,7 +135,8 @@ class JobService:
         job = self._jobs.get_raw_by_id(job_id)
         if not job:
             raise JobServiceError(404, "Job not found")
-        entries = build_output_entries(job)
+        scope_id = job.get("group_id") or job_id
+        entries = self._outputs.entries([job], scope_id=scope_id)
         return {"job_id": job_id, "files": entries, "count": len(entries)}
 
     def get_output_download_url(self, job_id: str, filename: str) -> str:

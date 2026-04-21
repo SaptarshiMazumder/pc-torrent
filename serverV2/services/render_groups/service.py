@@ -52,6 +52,7 @@ class RenderGroupService:
         asset_repo,
         orchestrator,
         fleet_registry,
+        outputs_resolver,
     ) -> None:
         self._groups = group_repo
         self._jobs = job_repo
@@ -59,6 +60,7 @@ class RenderGroupService:
         self._assets = asset_repo
         self._orchestrator = orchestrator
         self._fleet = fleet_registry
+        self._outputs = outputs_resolver
 
     # ------------------------------------------------------------------
     # create
@@ -453,15 +455,11 @@ class RenderGroupService:
     # ------------------------------------------------------------------
 
     def get_outputs(self, group_id: str) -> dict[str, Any]:
-        from serverV2.services.jobs.serializers import build_output_entries
-
         if not self._groups.get_by_id(group_id):
             raise RenderGroupServiceError(404, "Render group not found")
 
         jobs = self._jobs.get_raw_by_group(group_id)
-        entries: list[dict[str, Any]] = []
-        for job in jobs:
-            entries.extend(build_output_entries(job, group_id))
+        entries = self._outputs.entries(jobs, scope_id=group_id)
         return {"group_id": group_id, "files": entries, "count": len(entries)}
 
     # ------------------------------------------------------------------

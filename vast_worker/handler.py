@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -39,10 +40,20 @@ RENDER_DRIVER_SCRIPT = os.getenv("RENDER_DRIVER_SCRIPT", "/scripts/render_driver
 PROGRESS_PUSH_INTERVAL = float(os.getenv("PROGRESS_PUSH_INTERVAL", "2"))
 OUTPUT_SCAN_INTERVAL = float(os.getenv("OUTPUT_SCAN_INTERVAL", "1.0"))
 HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "10"))
+# Grace window after first EGL/OpenGL error before we conclude Blender is
+# wedged and kill it.  Transient EEVEE probe failures clear the watchdog when
+# the next PCR_PROGRESS event arrives.
+EGL_WATCHDOG_SEC = float(os.getenv("EGL_WATCHDOG_SEC", "90"))
 RENDER_FATAL_PATTERNS = (
     "[RENDER_DRIVER] ERROR:",
     "RuntimeError: Error: Cannot render, no camera",
     "Error: Cannot render, no camera",
+)
+RENDER_WEDGE_PATTERNS = (
+    "EGL_BAD_MATCH",
+    "EGL_BAD_DISPLAY",
+    "EGL_NOT_INITIALIZED",
+    "Failed to create OpenGL context",
 )
 
 
@@ -99,6 +110,117 @@ class WorkerHeartbeat:
         while not self._stop.is_set():
             self._push()
             self._stop.wait(HEARTBEAT_INTERVAL)
+
+
+# ---------------------------------------------------------------------------
+# EGL watchdog (identical to modal_worker/handler.py)
+# ---------------------------------------------------------------------------
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the bash process and every descendant (Blender, render_driver, ...).
+
+    `proc.kill()` only signals bash itself, leaving grandchildren alive and
+    holding the stdout pipe open, which wedges the handler's read loop.
+    Popen must be created with `start_new_session=True` so `proc.pid` is the
+    process-group id we can target with killpg.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        log.warning(f"Could not resolve process group for pid {proc.pid}: {exc}")
+        pgid = None
+
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            log.warning(f"killpg({pgid}, SIGKILL) failed: {exc}; falling back to proc.kill()")
+
+    try:
+        proc.kill()
+    except Exception as exc:
+        log.warning(f"proc.kill() fallback failed: {exc}")
+
+
+class EGLWatchdog:
+    """Kill Blender only if EGL/OpenGL errors persist without render progress.
+
+    Blender can emit a burst of EGL errors during EEVEE probing and still
+    recover (e.g. by falling back to CYCLES). Killing on the first occurrence
+    aborts otherwise-healthy renders. Instead we arm a grace timer when the
+    first wedge pattern appears; any PCR_PROGRESS event disarms it. If the
+    timer expires with no progress the container is genuinely stuck, so we
+    kill the Blender process ourselves.
+    """
+
+    def __init__(self, proc: subprocess.Popen, window_sec: float):
+        self._proc = proc
+        self._window_sec = window_sec
+        self._lock = threading.Lock()
+        self._first_error_at: float | None = None
+        self._first_error_line: str = ""
+        self._stop = threading.Event()
+        self._fired = False
+        self._thread: threading.Thread | None = None
+
+    @property
+    def fired(self) -> bool:
+        return self._fired
+
+    @property
+    def first_error_line(self) -> str:
+        return self._first_error_line
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="egl-watchdog"
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def note_wedge_pattern(self, line: str) -> None:
+        with self._lock:
+            if self._first_error_at is not None:
+                return
+            self._first_error_at = time.monotonic()
+            self._first_error_line = line
+        log.warning(
+            "EGL/OpenGL wedge pattern detected, arming %.0fs watchdog: %s",
+            self._window_sec,
+            line,
+        )
+
+    def note_progress(self) -> None:
+        with self._lock:
+            if self._first_error_at is None:
+                return
+            self._first_error_at = None
+            self._first_error_line = ""
+        log.info("Render progress received — disarming EGL watchdog")
+
+    def _run(self) -> None:
+        while not self._stop.wait(1.0):
+            with self._lock:
+                if self._first_error_at is None:
+                    continue
+                elapsed = time.monotonic() - self._first_error_at
+                if elapsed < self._window_sec:
+                    continue
+                line = self._first_error_line
+            log.error(
+                "EGL watchdog firing: no render progress for %.0fs after '%s', "
+                "killing Blender process group",
+                elapsed,
+                line,
+            )
+            self._fired = True
+            _kill_process_group(self._proc)
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +557,18 @@ def main() -> int:
 
             heartbeat.set_phase("starting_blender")
             log.info(f"Starting render: {RENDER_SH}")
-            proc = subprocess.Popen(["bash", RENDER_SH], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.Popen(
+                ["bash", RENDER_SH],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
             uploader = IncrementalOutputUploader(backend_url, job_id, output_dir)
             uploader.start()
+            egl_watchdog = EGLWatchdog(proc, EGL_WATCHDOG_SEC)
+            egl_watchdog.start()
             heartbeat.set_phase("rendering")
 
             # 5. Stream progress
@@ -455,8 +586,13 @@ def main() -> int:
                             if pattern in line:
                                 fatal_render_error = line
                                 break
+                    for pattern in RENDER_WEDGE_PATTERNS:
+                        if pattern in line:
+                            egl_watchdog.note_wedge_pattern(line)
+                            break
 
                 if "PCR_PROGRESS" in line:
+                    egl_watchdog.note_progress()
                     try:
                         payload = json.loads(line.split("PCR_PROGRESS", 1)[1].strip())
                         if payload.get("kind") == "frame":
@@ -473,6 +609,7 @@ def main() -> int:
                         last_push = now
 
             proc.wait()
+            egl_watchdog.stop()
             uploader.stop()
             heartbeat.set_phase("uploading")
             try:
@@ -481,8 +618,13 @@ def main() -> int:
                 log.warning(f"Final incremental output flush failed: {exc}")
             uploaded = uploader.uploaded
 
-            if proc.returncode != 0 or fatal_render_error:
-                if fatal_render_error:
+            if proc.returncode != 0 or fatal_render_error or egl_watchdog.fired:
+                if egl_watchdog.fired:
+                    err = (
+                        f"EGL watchdog killed Blender after {EGL_WATCHDOG_SEC:.0f}s "
+                        f"without progress ({egl_watchdog.first_error_line})"
+                    )
+                elif fatal_render_error:
                     err = f"Render runtime error detected: {fatal_render_error}"
                 else:
                     err = f"render.sh exited with code {proc.returncode}"

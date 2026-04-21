@@ -39,4 +39,10 @@ def compute_group_status(
     if no_active and all_failed:
         return GroupStatusResult(status="failed", should_persist=current_group_status != "failed")
 
+    # No active jobs, not all frames rendered — partial failure.  Some chunks
+    # succeeded, some exhausted retries, nothing more pending.  From the user's
+    # POV the group didn't complete its job, so it's failed.
+    if no_active and not all_frames:
+        return GroupStatusResult(status="failed", should_persist=current_group_status != "failed")
+
     return GroupStatusResult(status=current_group_status, should_persist=False)

@@ -216,9 +216,12 @@ def delete_job(job_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(e.status, e.message)
 
 
-@router.put("/jobs/{job_id}/output-files")
-def register_output_files(job_id: str, files: list[str]):
+@router.post("/jobs/{job_id}/register-outputs")
+def register_outputs(job_id: str, body: dict):
+    filenames = body.get("filenames", [])
+    if not filenames:
+        raise HTTPException(400, "No filenames provided")
     try:
-        return _get().register_outputs(job_id, files)
+        return _get().register_outputs(job_id, filenames)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)

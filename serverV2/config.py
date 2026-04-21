@@ -110,7 +110,7 @@ class VastConfig:
 
 
 def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpoint]:
-    path = config_json_path or os.path.join(os.path.dirname(__file__), "..", "server", "config.json")
+    path = config_json_path or os.path.join(os.path.dirname(__file__), "config.json")
     try:
         with open(path, "r") as f:
             cfg = json.load(f)

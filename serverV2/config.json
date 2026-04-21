@@ -1,0 +1,22 @@
+{
+  "vast_instances": [
+    {
+      "gpu_name": "RTX A6000",
+      "label": "Vast RTX A6000 48GB",
+      "vram_gb": 48,
+      "render_speed": 1.3
+    },
+    {
+      "gpu_name": "RTX A5000",
+      "label": "Vast RTX A5000 24GB",
+      "vram_gb": 24,
+      "render_speed": 1.0
+    },
+    {
+      "gpu_name": "RTX 3090",
+      "label": "Vast RTX 3090 24GB",
+      "vram_gb": 24,
+      "render_speed": 0.95
+    }
+  ]
+}

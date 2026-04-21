@@ -7,7 +7,6 @@ from typing import Any
 from serverV2.core.value_objects import (
     compute_progress_pct,
     latest_output_filename,
-    output_frame_sort_key,
     parse_output_files,
 )
 
@@ -39,19 +38,3 @@ def serialize_job(job: dict[str, Any], machine: dict[str, Any] | None = None) ->
         "output_files_count": len(output_files),
         "latest_output_file": latest_output_filename(output_files),
     }
-
-
-def build_output_entries(
-    job: dict[str, Any],
-    group_id: str | None = None,
-) -> list[dict[str, Any]]:
-    output_files = parse_output_files(job.get("output_files"))
-    sorted_files = sorted(output_files, key=output_frame_sort_key)
-    entries = []
-    for f in sorted_files:
-        entries.append({
-            "filename": f,
-            "job_id": job["id"],
-            "group_id": group_id or job.get("group_id"),
-        })
-    return entries

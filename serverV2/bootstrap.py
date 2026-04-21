@@ -39,7 +39,9 @@ from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.user_input_file_repository import UserInputFileRepository
 from serverV2.scanner.failover_scanner import FailoverScanner
+from serverV2.infrastructure import storage
 from serverV2.services.assets.service import AssetService
+from serverV2.services.jobs.outputs_resolver import OutputsResolver
 from serverV2.services.jobs.service import JobService
 from serverV2.services.machines.service import MachineService
 from serverV2.services.render_groups.service import RenderGroupService
@@ -240,6 +242,10 @@ def build(
     # -- application services --
     upload_coordinator = UploadCoordinator()
 
+    outputs_resolver = OutputsResolver(
+        presigner=lambda key, name: storage.generate_presigned_url(key, download_name=name),
+    )
+
     render_group_service = RenderGroupService(
         group_repo=group_repo,
         job_repo=job_repo,
@@ -247,6 +253,7 @@ def build(
         asset_repo=asset_repo,
         orchestrator=orchestrator,
         fleet_registry=registry,
+        outputs_resolver=outputs_resolver,
     )
 
     job_service = JobService(
@@ -254,6 +261,7 @@ def build(
         machine_repo=machine_repo,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
+        outputs_resolver=outputs_resolver,
     )
 
     machine_service = MachineService(vast_config=cfg.vast, modal_config=cfg.modal)

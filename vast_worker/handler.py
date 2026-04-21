@@ -654,9 +654,11 @@ def main() -> int:
                 _mark_failed(backend_url, job_id, err)
                 return 1
 
-            # 7. Mark done
-            _mark_done(backend_url, job_id, uploaded)
-            log.info(f"Job {job_id} done - {len(uploaded)} files uploaded")
+            # 7. Finish.  Completion is decided by the orchestrator based on
+            # registered output files — we do not self-declare "done".  The
+            # backend monitor will destroy this Vast instance once it detects
+            # completion.
+            log.info(f"Job {job_id} finished rendering - {len(uploaded)} files uploaded")
             return 0
     finally:
         heartbeat.stop()

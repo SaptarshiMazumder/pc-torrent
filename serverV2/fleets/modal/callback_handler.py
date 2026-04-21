@@ -179,27 +179,26 @@ class _JobMonitor:
             return True
 
         if self._is_complete(job):
-            self._on_success(self._job_id)
-            self._remove_snapshot()
+            self._handle_success()
             return True
 
         if local_status == "pending" and elapsed > self._cfg.in_queue_timeout_sec:
             if self._is_complete(job):
-                self._on_success(self._job_id)
+                self._handle_success()
                 return True
             self._handle_failure(f"Modal job stuck in pending for {elapsed:.0f}s")
             return True
 
         if local_status == "running" and self._is_heartbeat_dead(job):
             if self._is_complete(job):
-                self._on_success(self._job_id)
+                self._handle_success()
                 return True
             self._handle_failure(f"Modal job heartbeat dead (no ping for >{_HEARTBEAT_TIMEOUT_SEC}s)")
             return True
 
         if local_status == "running" and self._is_stale():
             if self._is_complete(job):
-                self._on_success(self._job_id)
+                self._handle_success()
                 return True
             self._handle_failure(f"Modal job stale — no new frames for {self._cfg.in_progress_stale_sec / 60:.0f} min")
             return True
@@ -270,3 +269,14 @@ class _JobMonitor:
         self._client.cancel_job(self._provider_job_id)
         self._remove_snapshot()
         self._on_failure(self._job_id, error)
+
+    def _handle_success(self) -> None:
+        """Terminate the Modal function and notify the callback router.
+
+        Cancelling the Modal job kills the container so the worker doesn't
+        keep retrying status updates after we've already accepted the files.
+        Mirrors Vast's ``instances.destroy`` on the success path.
+        """
+        self._client.cancel_job(self._provider_job_id)
+        self._remove_snapshot()
+        self._on_success(self._job_id)

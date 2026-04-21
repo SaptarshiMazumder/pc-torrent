@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from serverV2.infrastructure import storage
+from serverV2.services.assets.serializers import serialize_asset
 
 log = logging.getLogger(__name__)
 
@@ -22,14 +23,16 @@ class AssetService:
     def __init__(self, *, asset_repo) -> None:
         self._assets = asset_repo
 
-    def list_assets(self, user_id: str) -> list[dict[str, Any]]:
-        return self._assets.list_by_user(user_id)
+    def list_assets(self, user_id: str) -> dict[str, Any]:
+        rows = self._assets.list_by_user(user_id)
+        files = [serialize_asset(r) for r in rows]
+        return {"files": files, "count": len(files)}
 
     def get_asset(self, asset_id: str, user_id: str) -> dict[str, Any]:
-        asset = self._assets.get_by_id(asset_id, user_id)
-        if not asset:
+        row = self._assets.get_by_id(asset_id, user_id)
+        if not row:
             raise AssetServiceError(404, "Input file not found")
-        return asset
+        return serialize_asset(row)
 
     def rename_asset(self, asset_id: str, display_name: str, user_id: str) -> dict[str, Any]:
         asset = self._assets.get_by_id(asset_id, user_id)

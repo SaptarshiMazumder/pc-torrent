@@ -33,6 +33,7 @@ from serverV2.orchestrator.dispatcher import Dispatcher
 from serverV2.orchestrator.frame_allocator import FrameAllocator
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
+from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.progress_repository import ProgressRepository
@@ -108,6 +109,7 @@ def build(
     asset_repo = UserInputFileRepository()
     heartbeat_repo = HeartbeatRepository(redis)
     progress_repo = ProgressRepository(redis)
+    in_progress_repo = InProgressChunkRepository()
 
     # -- fleet registry --
     registry = FleetRegistry()
@@ -138,7 +140,10 @@ def build(
             )
 
     # -- vast fleet --
+    # Order matters: registrar owns the machine→gpu map; strategy receives it
+    # as a lookup callable so it can dispatch to the right GPU per machine.
     vast_client = VastClient(cfg.vast)
+    vast_registrar = VastMachineRegistrar(cfg.vast)
     vast_callback = VastCallbackHandler(
         config=cfg.vast, client=vast_client,
         job_repo=job_repo,
@@ -151,9 +156,9 @@ def build(
     vast_strategy = VastFleetStrategy(
         config=cfg.vast, client=vast_client,
         callback_handler=vast_callback, job_repo=job_repo,
+        gpu_name_lookup=vast_registrar.gpu_name_for_machine,
         on_failure=_on_failure,
     )
-    vast_registrar = VastMachineRegistrar(cfg.vast)
     vast_recovery = VastRecovery(
         config=cfg.vast, client=vast_client,
         callback_handler=vast_callback,
@@ -161,7 +166,10 @@ def build(
     registry.register(vast_strategy)
 
     # -- modal fleet --
+    # Order matters: registrar owns the machine→gpu_type map; strategy
+    # receives it as a lookup callable.
     modal_client = ModalClient(cfg.modal)
+    modal_registrar = ModalMachineRegistrar(cfg.modal)
     modal_callback = ModalCallbackHandler(
         config=cfg.modal, client=modal_client,
         job_repo=job_repo,
@@ -174,9 +182,9 @@ def build(
     modal_strategy = ModalFleetStrategy(
         config=cfg.modal, client=modal_client,
         callback_handler=modal_callback, job_repo=job_repo,
+        gpu_type_lookup=modal_registrar.gpu_type_for_machine,
         on_failure=_on_failure,
     )
-    modal_registrar = ModalMachineRegistrar(cfg.modal)
     modal_recovery = ModalRecovery(
         config=cfg.modal, callback_handler=modal_callback,
     )
@@ -205,7 +213,7 @@ def build(
 
     # -- callbacks --
     failure_handler = FailureHandler(job_repo, group_repo)
-    success_handler = SuccessHandler(job_repo, group_repo)
+    success_handler = SuccessHandler(job_repo, group_repo, in_progress_repo)
     callback_router = CallbackRouter(job_repo, success_handler, failure_handler)
     router_ref[0] = callback_router
 
@@ -220,6 +228,7 @@ def build(
         machine_repo=machine_repo,
         fleet_registry=registry,
         queue_repo=queue_repo,
+        in_progress_repo=in_progress_repo,
         machine_picker=_machine_picker,
     )
     failure_handler.set_orchestrator(orchestrator)

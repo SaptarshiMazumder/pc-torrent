@@ -6,10 +6,7 @@ Implements IFleetStrategy via composition.
 from __future__ import annotations
 
 import logging
-from typing import Any
-from uuid import uuid4
-
-from typing import Callable
+from typing import Any, Callable
 
 from serverV2.config import ModalConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
@@ -28,12 +25,14 @@ class ModalFleetStrategy:
         client: ModalClient,
         callback_handler: ModalCallbackHandler,
         job_repo: JobRepository,
+        gpu_type_lookup: Callable[[str], str],
         on_failure: Callable[[str, str], None] | None = None,
     ) -> None:
         self._cfg = config
         self._client = client
         self._callback = callback_handler
         self._job_repo = job_repo
+        self._gpu_type_lookup = gpu_type_lookup
         self._on_failure = on_failure
 
     @property
@@ -51,9 +50,7 @@ class ModalFleetStrategy:
     def is_enabled(self) -> bool:
         return self._cfg.is_enabled()
 
-    def dispatch(self, task: PlannedTask, context: DispatchContext) -> DispatchResult:
-        job_id = str(uuid4())
-
+    def dispatch(self, task: PlannedTask, context: DispatchContext, job_id: str) -> DispatchResult:
         self._job_repo.create(CreateJobParams(
             job_id=job_id,
             machine_id=task.machine_id,
@@ -71,7 +68,7 @@ class ModalFleetStrategy:
         ))
 
         try:
-            gpu_type = self._cfg.endpoints[0].gpu_type if self._cfg.endpoints else "a10g"
+            gpu_type = self._gpu_type_lookup(task.machine_id)
             provider_job_id = self._client.dispatch_job(
                 job_id=job_id,
                 gpu_type=gpu_type,

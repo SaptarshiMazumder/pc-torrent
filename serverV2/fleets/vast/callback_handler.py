@@ -322,18 +322,15 @@ class _InstancePoller:
         return time.monotonic() - self._last_frame_change_at > self._cfg.in_progress_stale_sec
 
     def _is_heartbeat_dead(self, job: dict[str, Any]) -> bool:
+        from serverV2.infrastructure import heartbeat_store
         if self._became_running_at is None:
             return False
         if time.monotonic() - self._became_running_at < self._cfg.heartbeat_grace_sec:
             return False
-        hb_at = job.get("last_heartbeat_at")
-        if not hb_at:
-            return True
-        try:
-            hb_time = datetime.fromisoformat(str(hb_at).replace("Z", "+00:00"))
-            return (datetime.now(timezone.utc) - hb_time).total_seconds() > self._cfg.heartbeat_timeout_sec
-        except (ValueError, AttributeError):
-            return True
+        alive = heartbeat_store.is_alive(self._job_id)
+        if alive is None:
+            return False  # Redis unavailable — don't false-positive kill jobs
+        return not alive
 
     def _wait_for_callback(self) -> str:
         iterations = max(1, _EXIT_CALLBACK_WAIT_SEC // _EXIT_POLL_SEC)

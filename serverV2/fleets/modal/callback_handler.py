@@ -205,17 +205,14 @@ class _JobMonitor:
         return (time.monotonic() - self._last_activity_at) > self._cfg.in_progress_stale_sec
 
     def _is_heartbeat_dead(self, job: dict[str, Any]) -> bool:
+        from serverV2.infrastructure import heartbeat_store
         elapsed = time.monotonic() - self._started_at
         if elapsed < _HEARTBEAT_GRACE_SEC:
             return False
-        hb = job.get("last_heartbeat_at")
-        if not hb:
-            return True
-        try:
-            hb_time = datetime.fromisoformat(str(hb).replace("Z", "+00:00"))
-            return (datetime.now(timezone.utc) - hb_time).total_seconds() > _HEARTBEAT_TIMEOUT_SEC
-        except Exception:
-            return False
+        alive = heartbeat_store.is_alive(self._job_id)
+        if alive is None:
+            return False  # Redis unavailable — don't false-positive kill jobs
+        return not alive
 
     def _write_snapshot(self, job: dict[str, Any], elapsed: float) -> None:
         if not self._registry:

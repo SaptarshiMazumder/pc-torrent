@@ -24,7 +24,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from serverV2.bootstrap import Container, build
-from serverV2.infrastructure.db import init_db
+from serverV2.infrastructure import heartbeat_store
+from serverV2.infrastructure.db import init_db, try_acquire_leader_lock
 
 log = logging.getLogger(__name__)
 
@@ -54,17 +55,24 @@ def on_startup() -> None:
     log.info("ServerV2 starting up...")
 
     init_db()
+    heartbeat_store.init()
 
     _container = build()
 
     _wire_routers(_container)
 
-    _register_machines(_container)
+    # Background daemons must only run on ONE Cloud Run instance.  Machine
+    # registration still happens on every instance (it's an idempotent upsert),
+    # but heartbeats, recovery, and the failover scanner are leader-only.
+    _register_all_machines(_container)
 
-    _run_recovery(_container)
-
-    _container.failover_scanner.start()
-    log.info("ServerV2 startup complete")
+    if try_acquire_leader_lock():
+        _start_heartbeats(_container)
+        _run_recovery(_container)
+        _container.failover_scanner.start()
+        log.info("ServerV2 startup complete (leader)")
+    else:
+        log.info("ServerV2 startup complete (follower — daemons skipped)")
 
 
 def _wire_routers(c: Container) -> None:
@@ -95,18 +103,28 @@ def _wire_routers(c: Container) -> None:
     app.include_router(debug.router)
 
 
-def _register_machines(c: Container) -> None:
+def _register_all_machines(c: Container) -> None:
     try:
         c.vast_registrar.register_all()
-        c.vast_registrar.start_heartbeat()
     except Exception as exc:
         log.warning("Vast machine registration failed: %s", exc)
 
     try:
         c.modal_registrar.register_all()
-        c.modal_registrar.start_heartbeat()
     except Exception as exc:
         log.warning("Modal machine registration failed: %s", exc)
+
+
+def _start_heartbeats(c: Container) -> None:
+    try:
+        c.vast_registrar.start_heartbeat()
+    except Exception as exc:
+        log.warning("Vast heartbeat thread failed to start: %s", exc)
+
+    try:
+        c.modal_registrar.start_heartbeat()
+    except Exception as exc:
+        log.warning("Modal heartbeat thread failed to start: %s", exc)
 
 
 def _run_recovery(c: Container) -> None:

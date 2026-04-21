@@ -9,3 +9,4 @@ sse-starlette
 Pillow
 pydantic
 zstandard
+redis

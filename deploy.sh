@@ -86,7 +86,9 @@ gcloud run deploy "$SERVICE_NAME" \
     --allow-unauthenticated \
     --memory 2Gi \
     --min-instances 1 \
+    --no-cpu-throttling \
     --set-env-vars "DATABASE_URL=$DATABASE_URL" \
+    --set-env-vars "REDIS_URL=${REDIS_URL:-}" \
     --set-env-vars "R2_ACCOUNT_ID=$R2_ACCOUNT_ID" \
     --set-env-vars "R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID" \
     --set-env-vars "R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY" \

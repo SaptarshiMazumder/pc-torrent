@@ -49,6 +49,36 @@ def get_conn():
             pool.putconn(conn)
 
 
+_LEADER_LOCK_KEY = 7_391_823
+_leader_conn = None
+
+
+def try_acquire_leader_lock() -> bool:
+    """Acquire a Postgres advisory lock so only one Cloud Run instance runs
+    background daemons.  Released automatically when the process exits."""
+    global _leader_conn
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        pool = _get_pool()
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (_LEADER_LOCK_KEY,))
+            row = cur.fetchone()
+            acquired = bool(row and row[0])
+        conn.commit()
+        if acquired:
+            _leader_conn = conn
+            log.info("Leader election: this instance is leader")
+        else:
+            pool.putconn(conn)
+            log.info("Leader election: another instance is leader — skipping daemons")
+        return acquired
+    except Exception:
+        log.exception("Leader election failed — defaulting to leader")
+        return True
+
+
 _local = threading.local()
 
 

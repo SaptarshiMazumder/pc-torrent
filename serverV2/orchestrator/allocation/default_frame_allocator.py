@@ -1,22 +1,28 @@
-"""FrameAllocator — wraps pure allocation logic + fleet registry lookups.
+"""DefaultFrameAllocator — the current allocation behaviour.
 
-Single responsibility: turn a frame range + machines into PlannedTasks.
+Initial: distribute + expand serverless, honouring fleet enablement.
+Retry:   highest ``compute_power_score`` among the available pool.
+
+Swap this implementation to introduce tier / GPU / price rules without
+touching the lifecycle or the coordinator.
 """
 
 from __future__ import annotations
 
 from serverV2.allocation.frame_distributor import distribute_frames
+from serverV2.allocation.power_scorer import compute_power_score
 from serverV2.allocation.serverless_expander import expand_serverless_assignments
 from serverV2.core.models import Machine, PlannedTask
 from serverV2.fleets.registry import FleetRegistry
+from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
 
 
-class FrameAllocator:
+class DefaultFrameAllocator:
 
     def __init__(self, registry: FleetRegistry) -> None:
         self._registry = registry
 
-    def allocate(
+    def allocate_initial(
         self,
         *,
         frame_start: int,
@@ -59,3 +65,29 @@ class FrameAllocator:
             )
 
         return tasks
+
+    def allocate_retry(
+        self,
+        chunk_request: ChunkRequest,
+        machines: list[Machine],
+    ) -> PlannedTask | None:
+        eligible = [
+            m for m in machines
+            if m.id not in chunk_request.excluded_machine_ids
+        ]
+        if not eligible:
+            return None
+        machine = max(eligible, key=compute_power_score)
+        return PlannedTask(
+            machine_id=machine.id,
+            machine_type=machine.machine_type,
+            gpu_model=machine.gpu_model,
+            gpu_vram_gb=machine.gpu_vram_gb,
+            frame_start=chunk_request.frame_start,
+            frame_end=chunk_request.frame_end,
+            frame_step=chunk_request.frame_step,
+            total_frames=chunk_request.total_frames,
+            power_score=compute_power_score(machine),
+            chunk_index=chunk_request.chunk_index,
+            attempt=chunk_request.attempt,
+        )

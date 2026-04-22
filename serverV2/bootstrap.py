@@ -27,11 +27,13 @@ from serverV2.fleets.vast.machine_registrar import VastMachineRegistrar
 from serverV2.fleets.vast.recovery import VastRecovery
 from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.infrastructure.redis_client import RedisClient
+from serverV2.orchestrator.allocation.default_frame_allocator import DefaultFrameAllocator
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
-from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
-from serverV2.orchestrator.dispatcher import Dispatcher
-from serverV2.orchestrator.frame_allocator import FrameAllocator
+from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
+from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
+from serverV2.orchestrator.lifecycle import RenderLifecycle
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
+from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
@@ -195,7 +197,7 @@ def build(
     registry.register(community_strategy)
 
     # -- allocation + dispatch --
-    allocator = FrameAllocator(registry)
+    allocator = DefaultFrameAllocator(registry)
     dispatcher = Dispatcher(registry)
 
     # -- dispatch queue (DB-backed) --
@@ -217,20 +219,28 @@ def build(
     callback_router = CallbackRouter(job_repo, success_handler, failure_handler)
     router_ref[0] = callback_router
 
-    # -- orchestrator (facade) --
-    orchestrator = RenderOrchestrator(
-        frame_allocator=allocator,
+    # -- orchestration: DispatchCoordinator (plumbing) + RenderLifecycle
+    # (narrative) + RenderOrchestrator (facade).  External callers hold only
+    # the facade; lifecycle holds the flow logic; coordinator is thin plumbing.
+    dispatch_coordinator = DispatchCoordinator(
+        queue_repo=queue_repo,
+        in_progress_repo=in_progress_repo,
         dispatcher=dispatcher,
-        callback_router=callback_router,
         blend_url_resolver=blend_resolver,
+    )
+    lifecycle = RenderLifecycle(
+        allocator=allocator,
+        coordinator=dispatch_coordinator,
+        callback_router=callback_router,
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,
-        fleet_registry=registry,
         queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
+        fleet_registry=registry,
         machine_picker=_machine_picker,
     )
+    orchestrator = RenderOrchestrator(lifecycle)
     failure_handler.set_orchestrator(orchestrator)
 
     # -- failover scanner --

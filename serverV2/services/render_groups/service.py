@@ -24,6 +24,7 @@ from serverV2.core.value_objects import (
 )
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firestore_client import write_render_group_record
+from serverV2.services.assets.serializers import serialize_asset
 from serverV2.services.blend_parser.parser import BlendParseError, parse_upload
 from serverV2.services.render_groups.frame_planning import resolve_frame_range
 from serverV2.services.render_groups.serializers import (
@@ -118,13 +119,28 @@ class RenderGroupService:
             "r2_key": r2_key,
             "machine_ids": getattr(payload, "machine_ids", None) or [],
             "upload_required": upload_required,
-            "source_asset": source_asset,
+            "source_asset": serialize_asset(source_asset) if source_asset else None,
             "max_upload_bytes": MAX_UPLOAD_BYTES,
             "single_put_max_bytes": SINGLE_PUT_MAX_BYTES,
             "multipart_required": multipart_required,
             "suggested_upload_mode": "multipart" if multipart_required else "single_put",
             "file_size_bytes": file_size_bytes,
         }
+
+    # ------------------------------------------------------------------
+    # input download (workers pull the blend from the group's r2_input_key,
+    # which may live under jobs/{gid}/input/ OR under an asset's r2_key if
+    # the render reused a previously-uploaded file)
+    # ------------------------------------------------------------------
+
+    def get_input_download_url(self, group_id: str) -> str:
+        group = self._groups.get_by_id(group_id)
+        if not group:
+            raise RenderGroupServiceError(404, "Render group not found")
+        key = group.get("r2_input_key")
+        if not key or not storage.file_exists(key):
+            raise RenderGroupServiceError(404, "Input file not found")
+        return storage.generate_presigned_url(key)
 
     # ------------------------------------------------------------------
     # confirm_upload
@@ -404,7 +420,7 @@ class RenderGroupService:
         total_frames = group.get("total_frames") or 0
         total_rendered = min(
             total_frames,
-            sum(t["rendered_frames"] or 0 for t in tasks if t["status"] != "failed"),
+            sum(t["rendered_frames"] or 0 for t in tasks),
         )
 
         from serverV2.callbacks.group_status_aggregator import compute_group_status

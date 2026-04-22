@@ -45,7 +45,7 @@ class SuccessHandler:
         total_frames = group["total_frames"] or 0
         total_rendered = min(
             total_frames,
-            sum(j.rendered_frames for j in jobs if j.status != "failed"),
+            sum(j.rendered_frames for j in jobs),
         )
         result = compute_group_status(
             current_group_status=group["status"],

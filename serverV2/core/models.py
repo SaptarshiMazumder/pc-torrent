@@ -72,6 +72,12 @@ class RenderJob:
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RenderJob:
+        # rendered_frames is the single source of truth for "how many frames
+        # are complete."  We compute it as the max of the DB counter (which
+        # may be stale now that progress lives in Redis) and the verified
+        # count of uploaded files — whichever is higher is the real count.
+        from serverV2.core.value_objects import parse_output_files
+        uploaded = len(parse_output_files(row.get("output_files")))
         return cls(
             job_id=row["id"],
             group_id=row.get("group_id", ""),
@@ -81,7 +87,7 @@ class RenderJob:
             frame_start=row.get("frame_start") or 0,
             frame_end=row.get("frame_end") or 0,
             frame_step=row.get("frame_step") or 1,
-            rendered_frames=max(0, row.get("rendered_frames") or 0),
+            rendered_frames=max(0, row.get("rendered_frames") or 0, uploaded),
             total_frames=row.get("total_frames") or 0,
             attempt=row.get("attempt") or 0,
             max_retries=row.get("max_retries") or 0,

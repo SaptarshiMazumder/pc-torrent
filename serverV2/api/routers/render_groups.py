@@ -185,12 +185,10 @@ def multipart_abort(group_id: str, payload: MultipartAbortPayload):
 
 @router.get("/render-groups/{group_id}/input/{filename}")
 def download_input(group_id: str, filename: str):
-    from serverV2.infrastructure import storage
-    key = f"jobs/{group_id}/input/{filename}"
-    if not storage.file_exists(key):
-        raise HTTPException(404, "Input file not found")
-    url = storage.generate_presigned_url(key)
-    return RedirectResponse(url)
+    try:
+        return RedirectResponse(_get().get_input_download_url(group_id))
+    except RenderGroupServiceError as e:
+        raise HTTPException(e.status, e.message)
 
 
 # ---- output downloads ----

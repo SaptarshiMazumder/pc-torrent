@@ -1,5 +1,4 @@
-"""
-Modal serverless handler for PC Rent rendering.
+"""Modal serverless handler for PC Rent rendering.
 
 Receives a render job, runs Blender via the existing render.sh script,
 streams progress back to the backend, uploads output frames, and marks
@@ -15,19 +14,40 @@ Expected input:
     "render_overrides_b64": str,  # base64-encoded JSON render overrides
     "backend_url":         str    # e.g. "https://your-server.com"
 }
+
+This file is the flow narrative.  Grunt work is delegated:
+
+    BackendClient                — every HTTP call to the render backend
+    ModalHeartbeat               — periodic liveness ping
+    IncrementalOutputUploader    — stream frames to R2 as they appear
+    EGLWatchdog                  — kill Blender on sticky OpenGL errors
+    MemoryWatchdog               — kill Blender before kernel OOM-kill
+    blend_file_discovery         — pick the right .blend in a bundle
+    kill_process_group           — shared subprocess-termination helper
+
+Open THIS file to understand what happens during a Modal render.
 """
 
 import base64
 import json
 import logging
 import os
-import signal
 import subprocess
 import tempfile
-import threading
 import time
 
 import requests
+
+from modal_worker.backend_client import BackendClient
+from modal_worker.blend_file_discovery import (
+    choose_render_target,
+    find_blend_files,
+)
+from modal_worker.egl_watchdog import EGLWatchdog, WEDGE_PATTERNS
+from modal_worker.incremental_output_uploader import IncrementalOutputUploader
+from modal_worker.memory_watchdog import MemoryWatchdog
+from modal_worker.modal_heartbeat import ModalHeartbeat
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -37,503 +57,20 @@ RENDER_SH = os.getenv("RENDER_SH", "/scripts/render.sh")
 PROGRESS_SCRIPT = os.getenv("PROGRESS_SCRIPT", "/scripts/progress_handler.py")
 RENDER_DRIVER_SCRIPT = os.getenv("RENDER_DRIVER_SCRIPT", "/scripts/render_driver.py")
 
-# Push a progress update to backend at most every N seconds
-PROGRESS_PUSH_INTERVAL = float(os.getenv("PROGRESS_PUSH_INTERVAL", "2"))
-OUTPUT_SCAN_INTERVAL = float(os.getenv("OUTPUT_SCAN_INTERVAL", "1.0"))
-# Grace window after first EGL/OpenGL error before we conclude Blender is
-# wedged and kill it. Transient EEVEE probe failures that Blender recovers
-# from (e.g. by falling back to CYCLES) will clear the watchdog when the
-# next PCR_PROGRESS event arrives.
+# Push a progress update to the backend at most every N seconds.
+PROGRESS_PUSH_INTERVAL_SEC = float(os.getenv("PROGRESS_PUSH_INTERVAL", "2"))
+
+# EGL watchdog: grace window after first EGL/OpenGL error before we conclude
+# Blender is wedged and kill it.  Transient EEVEE probe failures that Blender
+# recovers from (e.g. by falling back to CYCLES) will clear the watchdog when
+# the next PCR_PROGRESS event arrives.
 EGL_WATCHDOG_SEC = float(os.getenv("EGL_WATCHDOG_SEC", "90"))
-# Patterns that indicate Blender may be stuck in a GPU/display-context loop
-# without exiting on its own. render.sh already converts other fatal signals
-# ([RENDER_DRIVER] ERROR, "Cannot render, no camera", etc.) into a nonzero
-# exit code, so we intentionally do NOT list them here.
-RENDER_WEDGE_PATTERNS = (
-    "EGL_BAD_MATCH",
-    "EGL_BAD_DISPLAY",
-    "EGL_NOT_INITIALIZED",
-    "Failed to create OpenGL context",
-)
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _find_blend_files(root_dir: str) -> list[str]:
-    blend_files: list[str] = []
-    for current_root, _, files in os.walk(root_dir):
-        for name in files:
-            lower_name = name.lower()
-            if not lower_name.endswith(".blend"):
-                continue
-            if lower_name.startswith("._"):
-                continue
-            full_path = os.path.join(current_root, name)
-            rel = os.path.relpath(full_path, root_dir).replace("\\", "/")
-            if rel.startswith("__MACOSX/") or "/._" in rel:
-                continue
-            blend_files.append(full_path)
-    blend_files.sort()
-    return blend_files
-
-
-def _choose_render_target_blend(
-    source_filename: str,
-    input_dir: str,
-    blend_files: list[str],
-) -> tuple[str, bool]:
-    """
-    Choose a deterministic render target when archive contains multiple .blend files.
-    Preference:
-    1) root-level .blend files only (if any exist)
-    2) file stem matches uploaded filename stem
-    3) larger file size
-    4) shorter/lexical relative path
-    5) (fallback) shallower path for non-root-only bundles
-    """
-    source_stem = os.path.splitext(os.path.basename(source_filename))[0].lower()
-
-    entries = []
-    for path in blend_files:
-        rel = os.path.relpath(path, input_dir).replace("\\", "/")
-        stem = os.path.splitext(os.path.basename(path))[0].lower()
-        depth = rel.count("/")
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            size = 0
-        entries.append(
-            {
-                "path": path,
-                "rel": rel,
-                "stem_rank": 0 if stem == source_stem else 1,
-                "depth": depth,
-                "size": size,
-            }
-        )
-
-    root_entries = [entry for entry in entries if entry["depth"] == 0]
-    pool = root_entries if root_entries else entries
-    ranked = sorted(
-        pool,
-        key=lambda entry: (
-            entry["stem_rank"],
-            -entry["size"],
-            entry["depth"],
-            len(entry["rel"]),
-            entry["rel"].lower(),
-        ),
-    )
-    return ranked[0]["path"], bool(root_entries)
-
-def _mark_running(backend_url: str, job_id: str):
-    try:
-        requests.put(
-            f"{backend_url}/jobs/{job_id}/status",
-            json={"status": "running"},
-            timeout=15,
-        )
-    except Exception as e:
-        log.warning(f"Failed to mark job running: {e}")
-
-
-class ModalHeartbeat:
-    """Sends periodic heartbeats to the server so the monitor can detect
-    dead/cancelled containers quickly instead of waiting for the 90-min stale timeout."""
-
-    INTERVAL = 10  # seconds between heartbeats
-
-    def __init__(self, backend_url: str, job_id: str):
-        self._backend_url = backend_url.rstrip("/")
-        self._job_id = job_id
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self, phase: str = "starting"):
-        self._phase = phase
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name=f"modal-hb-{self._job_id[:8]}"
-        )
-        self._thread.start()
-
-    def set_phase(self, phase: str):
-        self._phase = phase
-
-    def stop(self):
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=5)
-
-    def _run(self):
-        while not self._stop.wait(self.INTERVAL):
-            try:
-                requests.put(
-                    f"{self._backend_url}/jobs/{self._job_id}/heartbeat",
-                    json={"phase": self._phase},
-                    timeout=10,
-                )
-            except Exception as exc:
-                log.warning(f"Heartbeat failed for job {self._job_id}: {exc}")
-
-
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the bash process and every descendant (Blender, render_driver, ...).
-
-    `proc.kill()` only signals bash itself, leaving grandchildren alive and
-    holding the stdout pipe open, which wedges the handler's read loop.
-    Popen was created with `start_new_session=True` so `proc.pid` is the
-    process-group id we can target with killpg.
-    """
-    try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, PermissionError, OSError) as exc:
-        log.warning(f"Could not resolve process group for pid {proc.pid}: {exc}")
-        pgid = None
-
-    if pgid is not None:
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-            return
-        except (ProcessLookupError, PermissionError, OSError) as exc:
-            log.warning(f"killpg({pgid}, SIGKILL) failed: {exc}; falling back to proc.kill()")
-
-    try:
-        proc.kill()
-    except Exception as exc:
-        log.warning(f"proc.kill() fallback failed: {exc}")
-
-
-class EGLWatchdog:
-    """Kill Blender only if EGL/OpenGL errors persist without render progress.
-
-    Blender can emit a burst of EGL errors during EEVEE probing and still
-    recover (e.g. by falling back to CYCLES). Killing on the first occurrence
-    aborts otherwise-healthy renders. Instead we arm a grace timer when the
-    first wedge pattern appears; any PCR_PROGRESS event disarms it. If the
-    timer expires with no progress the container is genuinely stuck, so we
-    kill the Blender process ourselves.
-    """
-
-    def __init__(self, proc: subprocess.Popen, window_sec: float):
-        self._proc = proc
-        self._window_sec = window_sec
-        self._lock = threading.Lock()
-        self._first_error_at: float | None = None
-        self._first_error_line: str = ""
-        self._stop = threading.Event()
-        self._fired = False
-        self._thread: threading.Thread | None = None
-
-    @property
-    def fired(self) -> bool:
-        return self._fired
-
-    @property
-    def first_error_line(self) -> str:
-        return self._first_error_line
-
-    def start(self) -> None:
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="egl-watchdog"
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
-
-    def note_wedge_pattern(self, line: str) -> None:
-        with self._lock:
-            if self._first_error_at is not None:
-                return
-            self._first_error_at = time.monotonic()
-            self._first_error_line = line
-        log.warning(
-            "EGL/OpenGL wedge pattern detected, arming %.0fs watchdog: %s",
-            self._window_sec,
-            line,
-        )
-
-    def note_progress(self) -> None:
-        with self._lock:
-            if self._first_error_at is None:
-                return
-            self._first_error_at = None
-            self._first_error_line = ""
-        log.info("Render progress received — disarming EGL watchdog")
-
-    def _run(self) -> None:
-        while not self._stop.wait(1.0):
-            with self._lock:
-                if self._first_error_at is None:
-                    continue
-                elapsed = time.monotonic() - self._first_error_at
-                if elapsed < self._window_sec:
-                    continue
-                line = self._first_error_line
-            log.error(
-                "EGL watchdog firing: no render progress for %.0fs after '%s', "
-                "killing Blender process group",
-                elapsed,
-                line,
-            )
-            self._fired = True
-            _kill_process_group(self._proc)
-            return
-
-
-def _push_progress(backend_url: str, job_id: str, rendered_frames: int, total_frames: int):
-    try:
-        requests.put(
-            f"{backend_url}/jobs/{job_id}/progress",
-            json={"rendered_frames": rendered_frames, "total_frames": total_frames},
-            timeout=15,
-        )
-    except Exception as e:
-        log.warning(f"Failed to push progress: {e}")
-
-
-def _upload_outputs(
-    backend_url: str,
-    job_id: str,
-    output_dir: str,
-    filenames: list[str] | None = None,
-) -> list[str]:
-    """Upload rendered output files directly to R2 via presigned URLs (bypasses Cloud Run size limits)."""
-    if filenames is None:
-        files = sorted(
-            f for f in os.listdir(output_dir)
-            if os.path.isfile(os.path.join(output_dir, f))
-        )
-    else:
-        files = sorted(
-            f for f in filenames
-            if os.path.isfile(os.path.join(output_dir, f))
-        )
-    if not files:
-        log.warning("No output files found after render")
-        return []
-
-    # Request presigned PUT URLs from server
-    log.info(f"Requesting presigned upload URLs for {len(files)} file(s)")
-    resp = requests.post(
-        f"{backend_url}/jobs/{job_id}/request-upload-urls",
-        json={"filenames": files},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    urls: dict = resp.json()["urls"]
-
-    # Upload each file directly to R2
-    uploaded: list[str] = []
-    for i, fname in enumerate(files):
-        url = urls.get(fname)
-        if not url:
-            raise RuntimeError(f"No presigned URL returned for {fname}")
-        fpath = os.path.join(output_dir, fname)
-        fsize = os.path.getsize(fpath)
-        log.info(f"Uploading {i + 1}/{len(files)}: {fname} ({fsize / 1024 / 1024:.1f} MB)")
-        with open(fpath, "rb") as fh:
-            put_resp = requests.put(url, data=fh, headers={"Content-Type": "application/octet-stream"}, timeout=600)
-            put_resp.raise_for_status()
-        uploaded.append(fname)
-
-    # Register uploaded filenames with the server (updates DB output_files list)
-    log.info(f"Registering {len(uploaded)} output file(s) with server")
-    requests.post(
-        f"{backend_url}/jobs/{job_id}/register-outputs",
-        json={"filenames": uploaded},
-        timeout=30,
-    ).raise_for_status()
-
-    return uploaded
-
-
-class IncrementalOutputUploader:
-    """
-    Uploads output files to R2 as soon as they appear on disk.
-    Keeps already-uploaded frames safe if the render later fails.
-    """
-
-    def __init__(self, backend_url: str, job_id: str, output_dir: str):
-        self.backend_url = backend_url.rstrip("/")
-        self.job_id = job_id
-        self.output_dir = output_dir
-        self._uploaded: set[str] = set()
-        self._last_sizes: dict[str, int] = {}
-        self._stable_counts: dict[str, int] = {}
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    @property
-    def uploaded(self) -> list[str]:
-        return sorted(self._uploaded)
-
-    def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(
-            target=self._run,
-            daemon=True,
-            name=f"output-uploader-{self.job_id[:8]}",
-        )
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
-
-    def _run(self):
-        while not self._stop.is_set():
-            try:
-                self._scan_once(require_stable=True)
-            except Exception as exc:
-                log.warning(f"Incremental upload scan failed for {self.job_id}: {exc}")
-            self._stop.wait(OUTPUT_SCAN_INTERVAL)
-
-    def _candidate_files(self) -> list[str]:
-        try:
-            return sorted(
-                f for f in os.listdir(self.output_dir)
-                if not f.startswith(".") and os.path.isfile(os.path.join(self.output_dir, f))
-            )
-        except FileNotFoundError:
-            return []
-
-    def _scan_once(self, require_stable: bool):
-        ready: list[str] = []
-        for fname in self._candidate_files():
-            if fname in self._uploaded:
-                continue
-
-            fpath = os.path.join(self.output_dir, fname)
-            try:
-                size = os.path.getsize(fpath)
-            except OSError:
-                continue
-            if size <= 0:
-                continue
-
-            last_size = self._last_sizes.get(fname)
-            if last_size == size:
-                self._stable_counts[fname] = self._stable_counts.get(fname, 0) + 1
-            else:
-                self._stable_counts[fname] = 0
-            self._last_sizes[fname] = size
-
-            if not require_stable or self._stable_counts.get(fname, 0) >= 1:
-                ready.append(fname)
-
-        if ready:
-            self._upload_batch(ready)
-
-    def _upload_batch(self, filenames: list[str]):
-        resp = requests.post(
-            f"{self.backend_url}/jobs/{self.job_id}/request-upload-urls",
-            json={"filenames": filenames},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        urls: dict = resp.json().get("urls", {})
-
-        uploaded_now: list[str] = []
-        for fname in filenames:
-            if fname in self._uploaded:
-                continue
-            url = urls.get(fname)
-            if not url:
-                log.warning(f"No presigned URL returned for {fname}")
-                continue
-
-            fpath = os.path.join(self.output_dir, fname)
-            try:
-                with open(fpath, "rb") as fh:
-                    put_resp = requests.put(
-                        url,
-                        data=fh,
-                        headers={"Content-Type": "application/octet-stream"},
-                        timeout=600,
-                    )
-                    put_resp.raise_for_status()
-            except Exception as exc:
-                log.warning(f"Failed uploading frame {fname}: {exc}")
-                continue
-
-            uploaded_now.append(fname)
-
-        if not uploaded_now:
-            return
-
-        requests.post(
-            f"{self.backend_url}/jobs/{self.job_id}/register-outputs",
-            json={"filenames": uploaded_now},
-            timeout=30,
-        ).raise_for_status()
-
-        for fname in uploaded_now:
-            self._uploaded.add(fname)
-            self._last_sizes.pop(fname, None)
-            self._stable_counts.pop(fname, None)
-        log.info(
-            f"Registered {len(uploaded_now)} incremental output file(s) "
-            f"(total uploaded: {len(self._uploaded)})"
-        )
-
-    def flush_final(self):
-        # Render process has already stopped. Upload everything remaining.
-        self._scan_once(require_stable=False)
-        self._scan_once(require_stable=False)
-
-
-def _put_status(backend_url: str, job_id: str, payload: dict, deadline: float = 600) -> None:
-    """PUT job status with retries to tolerate ngrok/Cloud Run latency spikes."""
-    delay = 5
-    last_exc = None
-    start = time.monotonic()
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            resp = requests.put(
-                f"{backend_url}/jobs/{job_id}/status",
-                json=payload,
-                timeout=60,
-            )
-            resp.raise_for_status()
-            try:
-                body = resp.json()
-            except ValueError:
-                body = None
-            if isinstance(body, dict) and body.get("success") is False:
-                reason = str(body.get("reason") or "backend rejected status update").strip()
-                raise RuntimeError(
-                    f"Backend rejected status update for job {job_id}: {reason}"
-                )
-            return
-        except Exception as e:
-            last_exc = e
-            elapsed = time.monotonic() - start
-            log.warning(f"Status update attempt {attempt} failed ({elapsed:.0f}s elapsed): {e}")
-            if time.monotonic() - start + delay >= deadline:
-                break
-            time.sleep(delay)
-            delay = min(delay * 2, 30)
-    raise last_exc
-
-
-def _mark_done(backend_url: str, job_id: str, output_files: list[str]):
-    _put_status(backend_url, job_id, {"status": "done", "output_files": output_files})
-
-
-def _mark_failed(backend_url: str, job_id: str, error: str):
-    try:
-        _put_status(backend_url, job_id, {"status": "failed", "error": error})
-    except Exception as e:
-        log.error(f"Failed to mark job failed after retries: {e}")
+# Memory watchdog: kill Blender when available RAM falls below this fraction
+# of total RAM, so the Python handler can return cleanly before the kernel
+# OOM-kills the whole container.
+MEM_WATCHDOG_MIN_FREE_FRACTION = float(os.getenv("MEM_WATCHDOG_MIN_FREE_FRACTION", "0.10"))
+MEM_WATCHDOG_POLL_SEC = float(os.getenv("MEM_WATCHDOG_POLL_SEC", "1.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +90,8 @@ def handler(job: dict) -> dict:
 
     log.info(f"Job {job_id}: frames {frame_start}-{frame_end} step {frame_step}")
 
+    client = BackendClient(backend_url, job_id)
+
     with tempfile.TemporaryDirectory() as workdir:
         input_dir = os.path.join(workdir, "input")
         output_dir = os.path.join(workdir, "output")
@@ -560,8 +99,8 @@ def handler(job: dict) -> dict:
         os.makedirs(output_dir)
 
         # 1. Mark running + start heartbeat
-        _mark_running(backend_url, job_id)
-        heartbeat = ModalHeartbeat(backend_url, job_id)
+        client.mark_running()
+        heartbeat = ModalHeartbeat(client, job_id)
         heartbeat.start(phase="downloading")
 
         # 2. Download .blend (follow redirects — server URL redirects to R2)
@@ -573,7 +112,7 @@ def handler(job: dict) -> dict:
             err = f"Failed to download blend file: {e}"
             log.error(err)
             heartbeat.stop()
-            _mark_failed(backend_url, job_id, err)
+            client.mark_failed(err)
             return {"status": "failed", "error": err}
 
         # Stream download to disk to avoid loading entire file into RAM
@@ -595,15 +134,15 @@ def handler(job: dict) -> dict:
             log.info(f"Extracted contents: {os.listdir(input_dir)}")
 
         heartbeat.set_phase("rendering")
-        blend_files = _find_blend_files(input_dir)
+        blend_files = find_blend_files(input_dir)
         if not blend_files:
             err = "No .blend file found in uploaded input bundle"
             log.error(err)
             heartbeat.stop()
-            _mark_failed(backend_url, job_id, err)
+            client.mark_failed(err)
             return {"status": "failed", "error": err}
 
-        blend_path, selected_from_root = _choose_render_target_blend(filename, input_dir, blend_files)
+        blend_path, selected_from_root = choose_render_target(filename, input_dir, blend_files)
         chosen_rel = os.path.relpath(blend_path, input_dir).replace("\\", "/")
         if len(blend_files) > 1:
             candidates = sorted(
@@ -638,7 +177,7 @@ def handler(job: dict) -> dict:
             "BLENDER_BIN": BLENDER_BIN,
             "INPUT_DIR": input_dir,
             "OUTPUT_DIR": output_dir,
-            "BLEND_FILE": blend_path,  # empty string = render.sh auto-discovers
+            "BLEND_FILE": blend_path,
             "FRAME_START": str(frame_start),
             "FRAME_END": str(frame_end),
             "FRAME_STEP": str(frame_step),
@@ -657,10 +196,16 @@ def handler(job: dict) -> dict:
             text=True,
             start_new_session=True,
         )
-        uploader = IncrementalOutputUploader(backend_url, job_id, output_dir)
+        uploader = IncrementalOutputUploader(client, job_id, output_dir)
         uploader.start()
         egl_watchdog = EGLWatchdog(proc, EGL_WATCHDOG_SEC)
         egl_watchdog.start()
+        mem_watchdog = MemoryWatchdog(
+            proc,
+            min_free_fraction=MEM_WATCHDOG_MIN_FREE_FRACTION,
+            poll_sec=MEM_WATCHDOG_POLL_SEC,
+        )
+        mem_watchdog.start()
 
         # 5. Stream progress
         total_frames = (frame_end - frame_start) // frame_step + 1
@@ -671,7 +216,7 @@ def handler(job: dict) -> dict:
             line = line.rstrip()
             if line:
                 log.info(line)
-                for pattern in RENDER_WEDGE_PATTERNS:
+                for pattern in WEDGE_PATTERNS:
                     if pattern in line:
                         egl_watchdog.note_wedge_pattern(line)
                         break
@@ -689,12 +234,13 @@ def handler(job: dict) -> dict:
                     pass
 
                 now = time.monotonic()
-                if now - last_push >= PROGRESS_PUSH_INTERVAL:
-                    _push_progress(backend_url, job_id, rendered_frames, total_frames)
+                if now - last_push >= PROGRESS_PUSH_INTERVAL_SEC:
+                    client.push_progress(rendered_frames, total_frames)
                     last_push = now
 
         proc.wait()
         egl_watchdog.stop()
+        mem_watchdog.stop()
         heartbeat.set_phase("uploading")
         uploader.stop()
         try:
@@ -703,8 +249,10 @@ def handler(job: dict) -> dict:
             log.warning(f"Final incremental output flush failed: {exc}")
         uploaded = uploader.uploaded
 
-        if proc.returncode != 0 or egl_watchdog.fired:
-            if egl_watchdog.fired:
+        if proc.returncode != 0 or egl_watchdog.fired or mem_watchdog.fired:
+            if mem_watchdog.fired:
+                err = f"Memory watchdog killed Blender — {mem_watchdog.reason}"
+            elif egl_watchdog.fired:
                 err = (
                     f"EGL watchdog killed Blender after {EGL_WATCHDOG_SEC:.0f}s "
                     f"without progress ({egl_watchdog.first_error_line})"
@@ -715,7 +263,7 @@ def handler(job: dict) -> dict:
                 err = f"{err}. {len(uploaded)} frame(s) already uploaded and recoverable."
             log.error(err)
             heartbeat.stop()
-            _mark_failed(backend_url, job_id, err)
+            client.mark_failed(err)
             return {"status": "failed", "error": err, "output_files": uploaded}
 
         # 6. Catch up any files that were not incrementally uploaded
@@ -727,35 +275,25 @@ def handler(job: dict) -> dict:
         if missing_files:
             log.info(f"Uploading remaining {len(missing_files)} output file(s)")
             try:
-                catch_up = _upload_outputs(
-                    backend_url,
-                    job_id,
-                    output_dir,
-                    filenames=missing_files,
-                )
+                catch_up = _catch_up_upload(client, output_dir, missing_files)
                 uploaded += [f for f in catch_up if f not in uploaded]
             except Exception as e:
                 err = f"Output catch-up upload failed: {e}"
                 log.error(err)
                 heartbeat.stop()
-                _mark_failed(backend_url, job_id, err)
+                client.mark_failed(err)
                 return {"status": "failed", "error": err, "output_files": uploaded}
         if not uploaded:
             err = "Render produced no output files"
             log.error(err)
             heartbeat.stop()
-            _mark_failed(backend_url, job_id, err)
+            client.mark_failed(err)
             return {"status": "failed", "error": err}
 
         # Push a final progress snapshot based on the outputs that actually made
         # it to storage so the backend can reconcile the chunk before `done`.
         try:
-            _push_progress(
-                backend_url,
-                job_id,
-                max(rendered_frames, len(uploaded)),
-                total_frames,
-            )
+            client.push_progress(max(rendered_frames, len(uploaded)), total_frames)
         except Exception:
             pass
 
@@ -765,3 +303,42 @@ def handler(job: dict) -> dict:
         heartbeat.stop()
         log.info(f"Job {job_id} finished rendering - {len(uploaded)} files uploaded")
         return {"status": "finished", "output_files": uploaded}
+
+
+# ---------------------------------------------------------------------------
+# Catch-up upload for any files the IncrementalOutputUploader missed
+# ---------------------------------------------------------------------------
+
+def _catch_up_upload(
+    client: BackendClient,
+    output_dir: str,
+    filenames: list[str],
+) -> list[str]:
+    files = sorted(f for f in filenames if os.path.isfile(os.path.join(output_dir, f)))
+    if not files:
+        return []
+
+    log.info(f"Requesting presigned upload URLs for {len(files)} file(s)")
+    urls = client.request_upload_urls(files)
+
+    uploaded: list[str] = []
+    for i, fname in enumerate(files):
+        url = urls.get(fname)
+        if not url:
+            raise RuntimeError(f"No presigned URL returned for {fname}")
+        fpath = os.path.join(output_dir, fname)
+        fsize = os.path.getsize(fpath)
+        log.info(f"Uploading {i + 1}/{len(files)}: {fname} ({fsize / 1024 / 1024:.1f} MB)")
+        with open(fpath, "rb") as fh:
+            put_resp = requests.put(
+                url,
+                data=fh,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=600,
+            )
+            put_resp.raise_for_status()
+        uploaded.append(fname)
+
+    log.info(f"Registering {len(uploaded)} output file(s) with server")
+    client.register_outputs(uploaded)
+    return uploaded

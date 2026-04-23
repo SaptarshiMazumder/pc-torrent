@@ -22,7 +22,6 @@ import modal
 
 app = modal.App("pcrent-render")
 _HERE = Path(__file__).resolve().parent
-_HANDLER_PATH = str(_HERE / "handler.py")
 _WEB_ENDPOINT = modal.fastapi_endpoint if hasattr(modal, "fastapi_endpoint") else modal.web_endpoint
 WORKER_IMAGE_REF = os.getenv(
     "MODAL_WORKER_IMAGE",
@@ -33,7 +32,7 @@ if not WORKER_IMAGE_REF:
 
 # Reuse the existing GHCR worker image (has Blender 5.0.1, CUDA, render scripts).
 # The RunPod 'runpod' pip package is present in the image but harmless — we never
-# import it.  We copy in our Modal-specific handler that omits runpod imports.
+# import it.  We copy in our Modal-specific package that omits runpod imports.
 worker_image = (
     modal.Image.from_registry(
         WORKER_IMAGE_REF,
@@ -44,19 +43,22 @@ worker_image = (
     )
 )
 
-# Modal SDK API compatibility:
-# - newer SDK: Image.copy_local_file(...)
-# - older SDK: Image.add_local_file(...)
-if hasattr(worker_image, "copy_local_file"):
-    worker_image = worker_image.copy_local_file(_HANDLER_PATH, "/modal_handler.py")
+# Copy the whole modal_worker/ package into the image so the handler can
+# import its sibling modules (backend_client, modal_heartbeat, watchdogs,
+# uploader, blend discovery).  Modal SDK API compatibility:
+# - newer SDK: Image.copy_local_dir(...)
+# - older SDK: Image.add_local_dir(...)
+if hasattr(worker_image, "copy_local_dir"):
+    worker_image = worker_image.copy_local_dir(str(_HERE), "/modal_worker")
 else:
-    worker_image = worker_image.add_local_file(_HANDLER_PATH, "/modal_handler.py")
+    worker_image = worker_image.add_local_dir(str(_HERE), "/modal_worker")
 
 
 def _run_handler(input_data: dict):
     import sys
-    sys.path.insert(0, "/")
-    from modal_handler import handler
+    if "/" not in sys.path:
+        sys.path.insert(0, "/")
+    from modal_worker.handler import handler
 
     return handler({"input": input_data})
 

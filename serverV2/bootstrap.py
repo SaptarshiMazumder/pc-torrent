@@ -15,6 +15,7 @@ from serverV2.fleets.community.strategy import CommunityStrategy
 from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.modal.callback import ModalCallbackHandler
 from serverV2.fleets.modal.client import ModalClient
+from serverV2.fleets.modal.endpoint_validator import validate_modal_endpoints
 from serverV2.fleets.modal.machine_registrar import ModalMachineRegistrar
 from serverV2.fleets.modal.recovery import ModalRecovery
 from serverV2.fleets.modal.strategy import ModalFleetStrategy
@@ -41,6 +42,7 @@ from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.user_input_file_repository import UserInputFileRepository
+from serverV2.repositories.worker_start_repository import WorkerStartRepository
 from serverV2.fleets.community.community_monitor import CommunityMonitor
 from serverV2.infrastructure import storage
 from serverV2.services.assets.service import AssetService
@@ -104,6 +106,11 @@ def build(
     cfg = config or AppConfig.from_env()
     redis = redis_client or RedisClient()
 
+    # -- Modal endpoint drift check --
+    # Fail loud at boot if config.json declares a Modal GPU that is not
+    # deployed on Modal.  Prevents silent 404s at dispatch time.
+    validate_modal_endpoints(cfg.modal)
+
     # -- repositories --
     job_repo = JobRepository()
     machine_repo = MachineRepository(stale_seconds=cfg.machine_stale_seconds)
@@ -111,6 +118,7 @@ def build(
     asset_repo = UserInputFileRepository()
     heartbeat_repo = HeartbeatRepository(redis)
     progress_repo = ProgressRepository(redis)
+    worker_start_repo = WorkerStartRepository(redis)
     in_progress_repo = InProgressChunkRepository()
 
     # -- fleet registry --
@@ -284,6 +292,7 @@ def build(
         machine_repo=machine_repo,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
+        worker_start_repo=worker_start_repo,
         outputs_resolver=outputs_resolver,
     )
 

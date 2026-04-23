@@ -44,13 +44,24 @@ class JobService:
         machine_repo,
         heartbeat_repo,
         progress_repo,
+        worker_start_repo,
         outputs_resolver: OutputsResolver,
     ) -> None:
         self._jobs = job_repo
         self._machines = machine_repo
         self._heartbeats = heartbeat_repo
         self._progress = progress_repo
+        self._worker_start = worker_start_repo
         self._outputs = outputs_resolver
+
+    # ---- duplicate-start guard for serverless containers ----
+
+    def try_claim_worker_start(self, job_id: str) -> bool:
+        """Called once per container start.  True if this caller is the
+        first to claim, False if another container already claimed this
+        ``job_id`` — the worker must abort to defeat Modal's re-queue.
+        """
+        return self._worker_start.try_claim(job_id)
 
     # ---- upload request ----
 

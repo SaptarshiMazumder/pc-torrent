@@ -92,6 +92,22 @@ def handler(job: dict) -> dict:
 
     client = BackendClient(backend_url, job_id)
 
+    # First thing: claim the worker-start.  If another container already
+    # claimed this job_id, Modal re-queued us behind our backs — refuse
+    # immediately, return a clean dict so Modal (with retries=NO_RETRY) does
+    # not spawn yet another container.  No 5 GB blend redownload, no
+    # scene-prep, no wasted compute.
+    if not client.try_worker_start():
+        log.error(
+            "worker-start conflict: Modal re-invoked handler for job %s — "
+            "refusing to re-execute",
+            job_id,
+        )
+        return {
+            "status": "failed",
+            "error": "Duplicate Modal invocation refused",
+        }
+
     with tempfile.TemporaryDirectory() as workdir:
         input_dir = os.path.join(workdir, "input")
         output_dir = os.path.join(workdir, "output")

@@ -13,7 +13,7 @@ from serverV2.config import AppConfig
 from serverV2.core.enums import CallbackOutcome
 from serverV2.fleets.community.strategy import CommunityStrategy
 from serverV2.fleets.instance_registry import InstanceRegistry
-from serverV2.fleets.modal.callback_handler import ModalCallbackHandler
+from serverV2.fleets.modal.callback import ModalCallbackHandler
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.machine_registrar import ModalMachineRegistrar
 from serverV2.fleets.modal.recovery import ModalRecovery
@@ -21,7 +21,7 @@ from serverV2.fleets.modal.strategy import ModalFleetStrategy
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.fleets.status_aggregator import InstanceStatusAggregator
 from serverV2.fleets.status_provider import ModalStatusProvider, VastStatusProvider
-from serverV2.fleets.vast.callback_handler import VastCallbackHandler
+from serverV2.fleets.vast.callback import VastCallbackHandler
 from serverV2.fleets.vast.client import VastClient
 from serverV2.fleets.vast.machine_registrar import VastMachineRegistrar
 from serverV2.fleets.vast.recovery import VastRecovery
@@ -41,7 +41,7 @@ from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.user_input_file_repository import UserInputFileRepository
-from serverV2.scanner.failover_scanner import FailoverScanner
+from serverV2.fleets.community.community_monitor import CommunityMonitor
 from serverV2.infrastructure import storage
 from serverV2.services.assets.service import AssetService
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
@@ -59,7 +59,7 @@ class Container:
         config: AppConfig,
         orchestrator: RenderOrchestrator,
         fleet_registry: FleetRegistry,
-        failover_scanner: FailoverScanner,
+        community_monitor: CommunityMonitor,
         job_repo: JobRepository,
         machine_repo: MachineRepository,
         group_repo: RenderGroupRepository,
@@ -78,7 +78,7 @@ class Container:
         self.config = config
         self.orchestrator = orchestrator
         self.fleet_registry = fleet_registry
-        self.failover_scanner = failover_scanner
+        self.community_monitor = community_monitor
         self.job_repo = job_repo
         self.machine_repo = machine_repo
         self.group_repo = group_repo
@@ -149,6 +149,7 @@ def build(
     vast_callback = VastCallbackHandler(
         config=cfg.vast, client=vast_client,
         job_repo=job_repo,
+        group_repo=group_repo,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
         on_failure=_on_failure,
@@ -175,6 +176,7 @@ def build(
     modal_callback = ModalCallbackHandler(
         config=cfg.modal, client=modal_client,
         job_repo=job_repo,
+        group_repo=group_repo,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
         on_failure=_on_failure,
@@ -242,12 +244,15 @@ def build(
     orchestrator = RenderOrchestrator(lifecycle)
     failure_handler.set_orchestrator(orchestrator)
 
-    # -- failover scanner --
-    scanner = FailoverScanner(
+    # -- community fleet monitor (machine-offline + group-terminal reconciliation)
+    # Modal and Vast own their own health via per-job monitors inside their
+    # callback handlers; community is pull-based and needs this daemon.
+    community_monitor = CommunityMonitor(
         job_repo=job_repo,
         group_repo=group_repo,
+        machine_repo=machine_repo,
         callback_router=callback_router,
-        failover_stale_seconds=cfg.failover_stale_seconds,
+        stale_seconds=cfg.failover_stale_seconds,
     )
 
     # -- status providers + aggregator --
@@ -290,7 +295,7 @@ def build(
         config=cfg,
         orchestrator=orchestrator,
         fleet_registry=registry,
-        failover_scanner=scanner,
+        community_monitor=community_monitor,
         job_repo=job_repo,
         machine_repo=machine_repo,
         group_repo=group_repo,

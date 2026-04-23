@@ -11,7 +11,7 @@ from typing import Any, Callable
 from serverV2.config import VastConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.vast.client import VastClient
-from serverV2.fleets.vast.callback_handler import VastCallbackHandler
+from serverV2.fleets.vast.callback import VastCallbackHandler
 from serverV2.repositories.job_repository import JobRepository
 
 log = logging.getLogger(__name__)

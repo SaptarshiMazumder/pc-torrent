@@ -1,8 +1,9 @@
 """RenderOrchestrator — public facade over the orchestration layer.
 
-Routers, fleet monitors, failure/success handlers, and the failover
-scanner talk to THIS class.  All methods are one-line delegations to
-``RenderLifecycle`` where the actual flow lives.
+Owns decisions that affect allocation or dispatch: planning, initial
+execution, failure (retry coordination) and cancellation.  Success and
+progress events are handled directly by ``CallbackRouter`` — they require
+no orchestration decisions, so they do not pass through this facade.
 
 Keep this file trivial.  If you want to understand what happens during a
 render's lifetime, open ``orchestrator/lifecycle.py``.
@@ -59,14 +60,6 @@ class RenderOrchestrator:
 
     def on_job_failed(self, job_id: str, error: str) -> bool:
         return self._lifecycle.handle_chunk_failure(job_id, error)
-
-    def on_job_success(self, job_id: str) -> None:
-        self._lifecycle.handle_chunk_success(job_id)
-
-    def on_job_progress(
-        self, job_id: str, rendered_frames: int, total_frames: int,
-    ) -> None:
-        self._lifecycle.record_chunk_progress(job_id, rendered_frames, total_frames)
 
     # ---- cancellation ----
 

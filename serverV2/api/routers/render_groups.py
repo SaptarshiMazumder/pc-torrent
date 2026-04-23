@@ -141,44 +141,43 @@ def delete(group_id: str, user: dict = Depends(get_current_user)):
 
 @router.post("/render-groups/{group_id}/multipart-upload/init")
 def multipart_init(group_id: str, payload: MultipartInitPayload):
-    from serverV2.infrastructure.db import query_one
-    group = query_one("SELECT r2_input_key FROM render_groups WHERE id = %s", (group_id,))
-    if not group:
-        raise HTTPException(404, "Render group not found")
     try:
+        key = _get().resolve_input_key(group_id)
         return _up().init_multipart(
-            group["r2_input_key"], payload.file_size_bytes,
+            key, payload.file_size_bytes,
             payload.content_type, payload.part_size_bytes,
         )
+    except RenderGroupServiceError as e:
+        raise HTTPException(e.status, e.message)
     except UploadValidationError as e:
         raise HTTPException(e.status, e.message)
 
 
 @router.post("/render-groups/{group_id}/multipart-upload/part-urls")
 def multipart_part_urls(group_id: str, payload: MultipartPartUrlsPayload):
-    from serverV2.infrastructure.db import query_one
-    group = query_one("SELECT r2_input_key FROM render_groups WHERE id = %s", (group_id,))
-    if not group:
-        raise HTTPException(404, "Render group not found")
-    return _up().part_urls(group["r2_input_key"], payload.upload_id, payload.part_numbers)
+    try:
+        key = _get().resolve_input_key(group_id)
+        return _up().part_urls(key, payload.upload_id, payload.part_numbers)
+    except RenderGroupServiceError as e:
+        raise HTTPException(e.status, e.message)
 
 
 @router.post("/render-groups/{group_id}/multipart-upload/complete")
 def multipart_complete(group_id: str, payload: MultipartCompletePayload):
-    from serverV2.infrastructure.db import query_one
-    group = query_one("SELECT r2_input_key FROM render_groups WHERE id = %s", (group_id,))
-    if not group:
-        raise HTTPException(404, "Render group not found")
-    return _up().complete(group["r2_input_key"], payload.upload_id, payload.parts)
+    try:
+        key = _get().resolve_input_key(group_id)
+        return _up().complete(key, payload.upload_id, payload.parts)
+    except RenderGroupServiceError as e:
+        raise HTTPException(e.status, e.message)
 
 
 @router.post("/render-groups/{group_id}/multipart-upload/abort")
 def multipart_abort(group_id: str, payload: MultipartAbortPayload):
-    from serverV2.infrastructure.db import query_one
-    group = query_one("SELECT r2_input_key FROM render_groups WHERE id = %s", (group_id,))
-    if not group:
-        raise HTTPException(404, "Render group not found")
-    return _up().abort(group["r2_input_key"], payload.upload_id)
+    try:
+        key = _get().resolve_input_key(group_id)
+        return _up().abort(key, payload.upload_id)
+    except RenderGroupServiceError as e:
+        raise HTTPException(e.status, e.message)
 
 
 # ---- input file download (workers pull blend from here) ----

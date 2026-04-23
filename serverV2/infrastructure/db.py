@@ -22,17 +22,41 @@ _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None:
-        _pool = psycopg2.pool.ThreadedConnectionPool(1, 30, DATABASE_URL)
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            1, 30, DATABASE_URL,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+        )
     return _pool
+
+
+_CHECKOUT_RETRIES = 2
+
+
+def _checkout_healthy_conn(pool: psycopg2.pool.ThreadedConnectionPool):
+    last_exc: Exception | None = None
+    for _ in range(_CHECKOUT_RETRIES + 1):
+        conn = pool.getconn()
+        if conn.closed:
+            pool.putconn(conn, close=True)
+            continue
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            conn.rollback()
+            return conn
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            last_exc = exc
+            pool.putconn(conn, close=True)
+    raise last_exc if last_exc else psycopg2.OperationalError("Could not obtain a healthy DB connection")
 
 
 @contextmanager
 def get_conn():
     pool = _get_pool()
-    conn = pool.getconn()
-    if conn.closed:
-        pool.putconn(conn, close=True)
-        conn = pool.getconn()
+    conn = _checkout_healthy_conn(pool)
     try:
         yield conn
         conn.commit()

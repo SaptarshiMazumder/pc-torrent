@@ -124,6 +124,20 @@ def heartbeat(job_id: str, payload: JobHeartbeatPayload | None = None):
         raise HTTPException(e.status, e.message)
 
 
+@router.put("/jobs/{job_id}/worker-start")
+def worker_start(job_id: str):
+    """Serverless worker's first action: claim the start.  Returns 200 to
+    the first caller and 409 to any duplicate — Modal's silent re-queue of
+    the same FunctionCall input is defeated by this guard.
+    """
+    claimed = _get().try_claim_worker_start(job_id)
+    if not claimed:
+        raise HTTPException(
+            409, f"Job {job_id} already started by another container",
+        )
+    return {"first_start": True}
+
+
 # ---- reads ----
 
 @router.get("/jobs")

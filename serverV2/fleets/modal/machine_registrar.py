@@ -60,7 +60,7 @@ class ModalMachineRegistrar:
                         status = 'available', last_seen_at = %s
                     WHERE id = %s
                     """,
-                    (ep.label, self._cfg.gpu_vram_gb, self._cfg.cpu_cores, self._cfg.ram_gb,
+                    (ep.label, ep.vram_gb, ep.cpu_cores, ep.ram_gb,
                      "Linux", "modal_serverless", now, machine_id),
                 )
             else:
@@ -73,8 +73,8 @@ class ModalMachineRegistrar:
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'available', %s, %s)
                     """,
-                    (machine_id, machine_key, ep.label, self._cfg.gpu_vram_gb,
-                     self._cfg.cpu_cores, self._cfg.ram_gb,
+                    (machine_id, machine_key, ep.label, ep.vram_gb,
+                     ep.cpu_cores, ep.ram_gb,
                      "Linux", "modal_serverless", now, now),
                 )
 

@@ -50,7 +50,7 @@ class VastMachineRegistrar:
                         status = 'available', last_seen_at = %s
                     WHERE id = %s
                     """,
-                    (ep.label, ep.vram_gb, self._cfg.cpu_cores, self._cfg.ram_gb,
+                    (ep.label, ep.vram_gb, ep.cpu_cores, ep.ram_gb,
                      "Linux", "vast_serverless", ep.render_speed, now, machine_id),
                 )
             else:
@@ -65,7 +65,7 @@ class VastMachineRegistrar:
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'available', %s, %s)
                     """,
                     (machine_id, machine_key, ep.label, ep.vram_gb,
-                     self._cfg.cpu_cores, self._cfg.ram_gb,
+                     ep.cpu_cores, ep.ram_gb,
                      "Linux", "vast_serverless", ep.render_speed, now, now),
                 )
 

@@ -48,11 +48,6 @@ def _env_bool(name: str, default: bool) -> bool:
         return False
     return default
 
-def _env_csv_set(name: str) -> set[str]:
-    raw = os.getenv(name, "")
-    return {p.strip().lower() for p in raw.split(",") if p.strip()}
-
-
 # ---------------------------------------------------------------------------
 # Vast
 # ---------------------------------------------------------------------------
@@ -62,7 +57,9 @@ class VastEndpoint:
     gpu_name: str
     label: str
     vram_gb: float
-    render_speed: float = 1.0
+    cpu_cores: int
+    ram_gb: float
+    render_speed: float
 
 @dataclass(frozen=True)
 class VastConfig:
@@ -71,8 +68,6 @@ class VastConfig:
     provisioning_enabled: bool
     disk_gb: float
     max_price_per_gpu: float
-    cpu_cores: int
-    ram_gb: float
     poll_interval_sec: float
     startup_timeout_sec: float
     in_progress_stale_sec: float
@@ -95,8 +90,6 @@ class VastConfig:
             provisioning_enabled=_env_bool("VAST_PROVISIONING_ENABLED", True),
             disk_gb=_env_float("VAST_DISK_GB", 20.0),
             max_price_per_gpu=_env_float("VAST_MAX_PRICE_PER_GPU", 1.00),
-            cpu_cores=_env_int("VAST_CPU_CORES", 8),
-            ram_gb=_env_float("VAST_RAM_GB", 32.0),
             poll_interval_sec=_env_float("VAST_POLL_INTERVAL_SEC", 15.0),
             startup_timeout_sec=_env_float("VAST_STARTUP_TIMEOUT_SEC", 300.0),
             in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 30 * 60),
@@ -119,14 +112,23 @@ def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpo
         return []
     results: list[VastEndpoint] = []
     for entry in cfg.get("vast_instances", []):
-        gpu_name = entry.get("gpu_name", "").strip()
+        gpu_name = str(entry.get("gpu_name", "")).strip()
         if not gpu_name:
-            continue
+            raise ValueError(
+                f"vast_instances entry has missing gpu_name: {entry!r}"
+            )
+        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed"):
+            if required not in entry:
+                raise ValueError(
+                    f"vast_instances entry {gpu_name!r} is missing required field {required!r}"
+                )
         results.append(VastEndpoint(
             gpu_name=gpu_name,
-            label=entry.get("label", "").strip() or f"Vast {gpu_name}",
-            vram_gb=float(entry.get("vram_gb", 24)),
-            render_speed=float(entry.get("render_speed", 1.0)),
+            label=str(entry.get("label", "")).strip() or f"Vast {gpu_name}",
+            vram_gb=float(entry["vram_gb"]),
+            cpu_cores=int(entry["cpu_cores"]),
+            ram_gb=float(entry["ram_gb"]),
+            render_speed=float(entry["render_speed"]),
         ))
     return results
 
@@ -139,6 +141,9 @@ def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpo
 class ModalEndpoint:
     gpu_type: str
     label: str
+    vram_gb: float
+    cpu_cores: int
+    ram_gb: float
 
 @dataclass(frozen=True)
 class ModalConfig:
@@ -146,10 +151,6 @@ class ModalConfig:
     token_secret: str
     app_name: str
     provisioning_enabled: bool
-    disabled_gpu_types: frozenset[str]
-    gpu_vram_gb: float
-    cpu_cores: int
-    ram_gb: float
     public_backend_url: str
     workers_per_endpoint: int
     heartbeat_interval_sec: int
@@ -182,17 +183,12 @@ class ModalConfig:
 
     @classmethod
     def from_env(cls) -> ModalConfig:
-        disabled = _env_csv_set("MODAL_DISABLED_GPU_TYPES")
         raw_timeout = _env_float("MODAL_DISPATCH_TIMEOUT_SEC", 6 * 60 * 60)
         return cls(
             token_id=_env_str("MODAL_TOKEN_ID"),
             token_secret=_env_str("MODAL_TOKEN_SECRET"),
             app_name=_env_str("MODAL_APP_NAME", "pcrent-render"),
             provisioning_enabled=_env_bool("MODAL_PROVISIONING_ENABLED", True),
-            disabled_gpu_types=frozenset(disabled),
-            gpu_vram_gb=_env_float("MODAL_GPU_VRAM_GB", 24.0),
-            cpu_cores=_env_int("MODAL_CPU_CORES", 16),
-            ram_gb=_env_float("MODAL_RAM_GB", 64.0),
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             workers_per_endpoint=_env_int("MODAL_WORKERS_PER_ENDPOINT", 3),
             heartbeat_interval_sec=10,
@@ -202,32 +198,57 @@ class ModalConfig:
             in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 30 * 60),
             endpoint_url_prefix=_env_str("MODAL_ENDPOINT_URL_PREFIX").strip().rstrip("/"),
             workspace=_env_str("MODAL_WORKSPACE").strip(),
-            endpoints=tuple(_parse_modal_endpoints(disabled)),
+            endpoints=tuple(_parse_modal_endpoints()),
         )
 
 def _normalize_gpu_type(gpu_type: str) -> str | None:
     v = gpu_type.strip().lower()
     return "a10g" if v in {"a10", "a10g"} else None
 
-def _parse_modal_endpoints(disabled: set[str]) -> list[ModalEndpoint]:
-    raw = _env_str("MODAL_ENDPOINTS").strip()
-    if not raw:
+
+def _parse_modal_endpoints(
+    config_json_path: str | None = None,
+) -> list[ModalEndpoint]:
+    """Read Modal endpoints from ``config.json``.  Single source of truth
+    for the fleet — every required field (``gpu_type``, ``vram_gb``) MUST
+    be present in the JSON entry; missing values raise at boot.
+    """
+    path = config_json_path or os.path.join(os.path.dirname(__file__), "config.json")
+    try:
+        with open(path, "r") as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        log.warning("Could not load %s: %s", path, exc)
         return []
     results: list[ModalEndpoint] = []
     seen: set[str] = set()
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if ":" in part:
-            raw_type, label = part.split(":", 1)
-            gpu_type = _normalize_gpu_type(raw_type.strip())
-        else:
-            gpu_type = _normalize_gpu_type(part)
-            label = f"Modal {part.strip().upper()}" if gpu_type else ""
-        if not gpu_type or gpu_type in disabled or gpu_type in seen:
-            continue
-        results.append(ModalEndpoint(gpu_type=gpu_type, label=label.strip()))
+    for entry in cfg.get("modal_instances", []):
+        raw_type = str(entry.get("gpu_type", "")).strip()
+        gpu_type = _normalize_gpu_type(raw_type)
+        if not gpu_type:
+            raise ValueError(
+                f"modal_instances entry has invalid or missing gpu_type: {entry!r}"
+            )
+        if gpu_type in seen:
+            raise ValueError(
+                f"modal_instances entry duplicates gpu_type={gpu_type!r}"
+            )
+        for required in ("vram_gb", "cpu_cores", "ram_gb"):
+            if required not in entry:
+                raise ValueError(
+                    f"modal_instances entry {gpu_type!r} is missing required field {required!r}"
+                )
+        label = (
+            str(entry.get("label", "")).strip()
+            or f"Modal {raw_type.upper()}"
+        )
+        results.append(ModalEndpoint(
+            gpu_type=gpu_type,
+            label=label,
+            vram_gb=float(entry["vram_gb"]),
+            cpu_cores=int(entry["cpu_cores"]),
+            ram_gb=float(entry["ram_gb"]),
+        ))
         seen.add(gpu_type)
     return results
 

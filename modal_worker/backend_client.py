@@ -31,6 +31,39 @@ class BackendClient:
         self._job_id = job_id
 
     # ------------------------------------------------------------------
+    # Duplicate-start guard (PUT /jobs/{id}/worker-start)
+    # ------------------------------------------------------------------
+
+    def try_worker_start(self) -> bool:
+        """Return True if this worker is the first to start for this job.
+        Return False if another container already claimed — we must abort.
+
+        Fail-open on network errors: if the backend is unreachable, return
+        True so a transient outage doesn't block legitimate renders.  The
+        guard is re-enabled as soon as the backend is reachable again.
+        """
+        try:
+            resp = requests.put(
+                f"{self._backend_url}/jobs/{self._job_id}/worker-start",
+                timeout=10,
+            )
+        except Exception as exc:
+            log.warning(
+                f"worker-start call failed for {self._job_id} "
+                f"(failing open — cannot detect duplicate starts): {exc}"
+            )
+            return True
+        if resp.status_code == 409:
+            return False
+        if 200 <= resp.status_code < 300:
+            return True
+        log.warning(
+            f"worker-start returned HTTP {resp.status_code} "
+            f"(failing open): {resp.text[:200]}"
+        )
+        return True
+
+    # ------------------------------------------------------------------
     # Status updates (PUT /jobs/{id}/status)
     # ------------------------------------------------------------------
 

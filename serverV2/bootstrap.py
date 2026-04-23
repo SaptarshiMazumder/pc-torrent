@@ -231,7 +231,6 @@ def build(
     lifecycle = RenderLifecycle(
         allocator=allocator,
         coordinator=dispatch_coordinator,
-        callback_router=callback_router,
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,

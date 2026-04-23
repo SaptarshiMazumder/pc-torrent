@@ -198,48 +198,115 @@ async function uploadMultipartInput(kind, id, file, onProgress, signal = null) {
   };
   reportProgress();
 
-  const completedParts = [];
+  const PART_CONCURRENCY = 4;
+  const PART_URL_BATCH_SIZE = 16;
+  const RETRY_DELAYS_MS = [200, 800];
+
   const partUrlCache = new Map();
-  const partUrlBatchSize = 16;
+  const batchInFlight = new Map();
+  const etags = new Array(totalParts);
+  let nextPartNumber = 1;
+  let firstError = null;
 
-  try {
-    for (let partNumber = 1; partNumber <= totalParts; partNumber += 1) {
-      if (!partUrlCache.has(partNumber)) {
-        const batch = [];
-        for (let n = partNumber; n <= totalParts && n < partNumber + partUrlBatchSize; n += 1) {
-          batch.push(n);
-        }
+  const batchStartFor = (partNumber) =>
+    Math.floor((partNumber - 1) / PART_URL_BATCH_SIZE) * PART_URL_BATCH_SIZE + 1;
 
-        const partUrlResp = await apiFetch(`/${kind}/${id}/multipart-upload/part-urls`, {
+  const ensurePartUrl = async (partNumber) => {
+    if (partUrlCache.has(partNumber)) return partUrlCache.get(partNumber);
+    const batchStart = batchStartFor(partNumber);
+    let pending = batchInFlight.get(batchStart);
+    if (!pending) {
+      const batchEnd = Math.min(totalParts, batchStart + PART_URL_BATCH_SIZE - 1);
+      const batch = [];
+      for (let n = batchStart; n <= batchEnd; n += 1) batch.push(n);
+      pending = (async () => {
+        const resp = await apiFetch(`/${kind}/${id}/multipart-upload/part-urls`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            upload_id: init.upload_id,
-            part_numbers: batch,
-          }),
+          body: JSON.stringify({ upload_id: init.upload_id, part_numbers: batch }),
           signal,
         });
-        const entries = Object.entries(partUrlResp.urls || {});
-        for (const [k, v] of entries) {
+        for (const [k, v] of Object.entries(resp.urls || {})) {
           const numeric = Number.parseInt(k, 10);
           if (Number.isInteger(numeric) && typeof v === "string") {
             partUrlCache.set(numeric, v);
           }
         }
-      }
+      })();
+      batchInFlight.set(batchStart, pending);
+    }
+    try {
+      await pending;
+    } finally {
+      if (batchInFlight.get(batchStart) === pending) batchInFlight.delete(batchStart);
+    }
+    const url = partUrlCache.get(partNumber);
+    if (!url) throw new Error(`Missing upload URL for part ${partNumber}`);
+    partUrlCache.delete(partNumber);
+    return url;
+  };
 
-      const partUrl = partUrlCache.get(partNumber);
-      if (!partUrl) throw new Error(`Missing upload URL for part ${partNumber}`);
-      partUrlCache.delete(partNumber);
+  const uploadPartWithRetry = async (partNumber) => {
+    const url = await ensurePartUrl(partNumber);
+    const start = (partNumber - 1) * partSize;
+    const end = Math.min(file.size, start + partSize);
+    const blob = file.slice(start, end);
 
-      const start = (partNumber - 1) * partSize;
-      const end = Math.min(file.size, start + partSize);
-      const blob = file.slice(start, end);
-      const etag = await uploadBlobPart(partUrl, blob, signal, (delta) => {
-        uploadedBytes += delta;
+    const totalAttempts = RETRY_DELAYS_MS.length + 1;
+    let lastError = null;
+    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+      let attemptBytes = 0;
+      try {
+        return await uploadBlobPart(url, blob, signal, (delta) => {
+          attemptBytes += delta;
+          uploadedBytes += delta;
+          reportProgress();
+        });
+      } catch (err) {
+        if (err?.name === "AbortError" || signal?.aborted) throw err;
+        uploadedBytes -= attemptBytes;
         reportProgress();
-      });
-      completedParts.push({ part_number: partNumber, etag });
+        lastError = err;
+        if (attempt < totalAttempts) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+        }
+      }
+    }
+    throw lastError;
+  };
+
+  const claimNextPart = () => {
+    if (firstError || nextPartNumber > totalParts) return null;
+    const n = nextPartNumber;
+    nextPartNumber += 1;
+    return n;
+  };
+
+  const worker = async () => {
+    while (true) {
+      const partNumber = claimNextPart();
+      if (partNumber === null) return;
+      try {
+        etags[partNumber - 1] = await uploadPartWithRetry(partNumber);
+      } catch (err) {
+        if (!firstError) firstError = err;
+        return;
+      }
+    }
+  };
+
+  try {
+    const workerCount = Math.min(PART_CONCURRENCY, totalParts);
+    const workers = [];
+    for (let i = 0; i < workerCount; i += 1) workers.push(worker());
+    await Promise.all(workers);
+
+    if (firstError) throw firstError;
+
+    const completedParts = [];
+    for (let i = 0; i < totalParts; i += 1) {
+      if (!etags[i]) throw new Error(`Missing ETag for part ${i + 1}`);
+      completedParts.push({ part_number: i + 1, etag: etags[i] });
     }
 
     await apiFetch(`/${kind}/${id}/multipart-upload/complete`, {

@@ -142,6 +142,15 @@ class RenderGroupService:
             raise RenderGroupServiceError(404, "Input file not found")
         return storage.generate_presigned_url(key)
 
+    def resolve_input_key(self, group_id: str) -> str:
+        group = self._groups.get_by_id(group_id)
+        if not group:
+            raise RenderGroupServiceError(404, "Render group not found")
+        key = group.get("r2_input_key")
+        if not key:
+            raise RenderGroupServiceError(404, "Render group has no input key")
+        return key
+
     # ------------------------------------------------------------------
     # confirm_upload
     # ------------------------------------------------------------------

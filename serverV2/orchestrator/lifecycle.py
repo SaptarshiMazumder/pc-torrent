@@ -4,9 +4,10 @@ Every method on this class tells one top-to-bottom story:
 
     start_render           — user submitted a render
     handle_chunk_failure   — a worker's chunk failed
-    handle_chunk_success   — a worker's chunk finished
-    record_chunk_progress  — a worker reported progress
     cancel_render          — user cancelled the render
+
+Success and progress events do not need orchestration decisions — they
+are handled directly by ``CallbackRouter`` and do not pass through here.
 
 All decisions (stale-signal guard, retry-attempt limit, cancellation
 teardown order) live here.  Grunt work is delegated:
@@ -24,8 +25,6 @@ import base64
 import logging
 from typing import Any, Callable
 
-from serverV2.callbacks.router import CallbackRouter
-from serverV2.core.enums import CallbackOutcome
 from serverV2.core.models import (
     DispatchContext,
     DispatchResult,
@@ -54,7 +53,6 @@ class RenderLifecycle:
         *,
         allocator: FrameAllocator,
         coordinator: DispatchCoordinator,
-        callback_router: CallbackRouter,
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
@@ -65,7 +63,6 @@ class RenderLifecycle:
     ) -> None:
         self._allocator = allocator
         self._coordinator = coordinator
-        self._callbacks = callback_router
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._machine_repo = machine_repo
@@ -211,28 +208,7 @@ class RenderLifecycle:
         return True
 
     # ------------------------------------------------------------------
-    # Story 3: a chunk finished
-    # ------------------------------------------------------------------
-
-    def handle_chunk_success(self, job_id: str) -> None:
-        self._callbacks.route(job_id=job_id, outcome=CallbackOutcome.SUCCESS)
-
-    # ------------------------------------------------------------------
-    # Story 4: a worker reported progress
-    # ------------------------------------------------------------------
-
-    def record_chunk_progress(
-        self, job_id: str, rendered_frames: int, total_frames: int,
-    ) -> None:
-        self._callbacks.route(
-            job_id=job_id,
-            outcome=CallbackOutcome.PROGRESS,
-            rendered_frames=rendered_frames,
-            total_frames=total_frames,
-        )
-
-    # ------------------------------------------------------------------
-    # Story 5: user cancelled the render
+    # Story 3: user cancelled the render
     # ------------------------------------------------------------------
 
     def cancel_render(self, group_id: str) -> dict[str, Any]:

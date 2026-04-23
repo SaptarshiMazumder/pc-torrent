@@ -11,7 +11,7 @@ from typing import Any, Callable
 from serverV2.config import ModalConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.modal.client import ModalClient
-from serverV2.fleets.modal.callback_handler import ModalCallbackHandler
+from serverV2.fleets.modal.callback import ModalCallbackHandler
 from serverV2.repositories.job_repository import JobRepository
 
 log = logging.getLogger(__name__)

@@ -71,7 +71,7 @@ def on_startup() -> None:
     if try_acquire_leader_lock():
         _start_heartbeats(_container)
         _run_recovery(_container)
-        _container.failover_scanner.start()
+        _container.community_monitor.start()
         log.info("ServerV2 startup complete (leader)")
     else:
         log.info("ServerV2 startup complete (follower — daemons skipped)")

@@ -1,0 +1,87 @@
+%% Frame allocation flow — initial planning path.
+%% Shows resource picker, strategy selection, and BOTH allocator algorithms
+%% (DefaultAllocationStrategy and FastRenderAllocationStrategy).
+%% Import into draw.io: Arrange -> Insert -> Advanced -> Mermaid.
+
+flowchart TD
+    Start([User submits render<br/>RenderOrchestrator.plan]) --> RP[/"resource_picker()"/]
+
+    RP --> RPDetail["Build AvailableResources:<br/>• community_machines from MachineRepo.get_available_community<br/>• serverless_capabilities from cfg.modal.endpoints + cfg.vast.endpoints<br/>• serverless_in_flight from JobRepo.count_active_by_fleet"]
+    RPDetail --> Pin{machine_ids<br/>provided?}
+    Pin -->|yes| Filter[Keep only matching community machines<br/>drop ALL serverless capabilities]
+    Pin -->|no| Pick
+    Filter --> Pick
+
+    Pick{"_pick_strategy(file_size, total_frames)<br/>file_size >= 2 GB OR total_frames >= 30 ?"}
+    Pick -->|no| DEF[DefaultAllocationStrategy]
+    Pick -->|yes| FAST[FastRenderAllocationStrategy]
+
+    %% =====================================================
+    %% DEFAULT STRATEGY
+    %% =====================================================
+    subgraph DEFBOX [DefaultAllocationStrategy.allocate_initial]
+        direction TB
+        D1["_eligible_targets(resources):<br/>community + serverless caps where<br/>fleet enabled AND in_flight &lt; fleet_max_parallel"]
+        D2{any eligible?}
+        D2 -->|no| D_EMPTY[return empty list]
+        D2 -->|yes| D3["distribute_frames(<br/>total_frames, frame_range, targets,<br/>min_frames_fn = registry.min_frames_per_instance)"]
+        D3 --> D4["For each share:<br/>build PlannedTask with fleet,<br/>machine_id (community) OR gpu_type (serverless),<br/>frame_start/end, vram_gb, render_speed,<br/>chunk_index = i, attempt = 0"]
+        D1 --> D2
+    end
+    DEF --> D1
+    D4 --> Tasks
+    D_EMPTY --> Empty([no tasks - render aborts])
+
+    %% =====================================================
+    %% FAST RENDER STRATEGY
+    %% =====================================================
+    subgraph FASTBOX [FastRenderAllocationStrategy.allocate_initial]
+        direction TB
+        F1["_band_for(file_size_bytes):<br/>light  &lt; 500 MB -> vram=8,  fpm=8<br/>medium &lt; 2 GB   -> vram=16, fpm=5<br/>heavy  &lt; 5 GB   -> vram=24, fpm=3<br/>ultra  &gt;= 5 GB  -> vram=48, fpm=2<br/>unknown          -> vram=16, fpm=5"]
+        F2["_eligible_targets(resources, vram_floor):<br/>community.gpu_vram_gb &gt;= floor<br/>+ serverless cap where fleet enabled,<br/>  in_flight &lt; fleet_max_parallel,<br/>  cap.vram_gb &gt;= floor"]
+        F3{eligible empty?}
+        F3 -->|yes| F3b["Fallback: re-run with vram_floor = 0<br/>(better to try than refuse)"]
+        F3b --> F3c{still empty?}
+        F3c -->|yes| F_EMPTY[return empty list]
+        F3c -->|no| F4
+        F3 -->|no| F4
+        F4["ideal_count =<br/>clamp(ceil(total_frames / fpm), 1, HARD_CAP=12)"]
+        F4 --> F5["_select_mix:<br/>sort eligible by compute_power_score DESC<br/>FOR each target until len(selected) == ideal_count:<br/>  • CommunityMachine: take once<br/>  • FleetCapability: take min(fleet_headroom, remaining)<br/>    headroom = fleet_max_parallel - in_flight"]
+        F5 --> F6{selected empty?}
+        F6 -->|yes| F_EMPTY
+        F6 -->|no| F7["distribute_frames(<br/>total_frames, frame_range, selected,<br/>weighted by render_speed)"]
+        F7 --> F8["For each share -> PlannedTask<br/>same shape as Default,<br/>chunk_index = i, attempt = 0"]
+        F1 --> F2
+    end
+    FAST --> F1
+    F8 --> Tasks
+    F_EMPTY --> Empty
+
+    Tasks[/"list[PlannedTask] returned to RenderLifecycle.plan"/]
+    Tasks --> Exec[RenderLifecycle.start_render -> DispatchCoordinator.enqueue_and_flush]
+
+    %% =====================================================
+    %% DISPATCH COORDINATOR (cap-gated)
+    %% =====================================================
+    subgraph COORDBOX [DispatchCoordinator.enqueue_and_flush]
+        direction TB
+        C1["For each task: queue_repo.enqueue(group_id, item)<br/>persists item with fleet, gpu_type, machine_id, frames, ..."]
+        C2["in_flight = JobRepo.count_active_by_fleet()<br/>(snapshot, mutated locally)"]
+        C3{"For each task:<br/>in_flight[task.fleet] &gt;=<br/>fleet_cap_lookup(task.fleet) ?"}
+        C3 -->|yes| C_QUEUED["Skip - leave in dispatch_queue<br/>(will be drained when slot opens)"]
+        C3 -->|no| C4["queue_repo.dequeue_for_fleet(task.fleet)"]
+        C4 --> C5["job_id = uuid4()<br/>in_progress.claim_or_replace(group, chunk, job_id, attempt)"]
+        C5 --> C6["Dispatcher.dispatch_one(task, ctx, job_id)<br/>-> FleetRegistry.get_or_raise(task.fleet).dispatch"]
+        C6 --> C7["IFleetStrategy.dispatch:<br/>• JobRepo.create row<br/>• client.dispatch_job -> provider_job_id<br/>• callback_handler.start_monitoring (Modal/Vast)<br/>  spawns per-job monitor thread<br/>• Community: no-op, agent will pull"]
+        C1 --> C2 --> C3
+    end
+    Exec --> C1
+    C7 --> Done([Job is live - monitor will route SUCCESS or FAILURE<br/>via CallbackRouter])
+    C_QUEUED --> Wait([Waiting in dispatch_queue<br/>drained by drain_for_fleet on slot release])
+
+    classDef strategy fill:#e8f1ff,stroke:#3366aa,stroke-width:2px
+    classDef coord fill:#fff5e6,stroke:#cc8833,stroke-width:2px
+    classDef terminal fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    class DEFBOX,FASTBOX strategy
+    class COORDBOX coord
+    class Done,Empty,Wait terminal

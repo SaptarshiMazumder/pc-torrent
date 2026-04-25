@@ -216,6 +216,13 @@ class RenderGroupService:
         if plan is None or plan.total_frames <= 0:
             raise RenderGroupServiceError(400, "No renderable frames found in .blend file")
 
+        # Capture the blend file size as a heaviness signal for the
+        # allocator strategy picker (Phase 3).  HEAD-equivalent against R2.
+        try:
+            r2_input_size_bytes = storage.get_file_size(r2_key)
+        except Exception:
+            r2_input_size_bytes = None
+
         self._groups.full_update(
             group_id,
             total_frames=plan.total_frames,
@@ -226,19 +233,31 @@ class RenderGroupService:
             scheduling_json=json.dumps(scheduling),
             analysis_snapshot_json=json.dumps(analysis_snapshot),
             analysis_warnings_json=json.dumps(analysis_warnings),
+            r2_input_size_bytes=r2_input_size_bytes,
             status="pending",
         )
         self._save_asset(group, r2_key, plan, analysis_snapshot, render_overrides, scheduling)
 
-        machines = self._resolve_machines(getattr(payload, "machine_ids", None))
+        machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
 
         planned = self._orchestrator.plan(
             frame_start=plan.frame_start,
             frame_end=plan.frame_end,
             frame_step=plan.frame_step,
             total_frames=plan.total_frames,
-            machines=machines,
+            machine_ids=machine_ids,
+            file_size_bytes=r2_input_size_bytes,
         )
+
+        if not planned:
+            err = (
+                "No eligible render targets. "
+                "Pinned community machines are offline, or no serverless capacity available."
+                if machine_ids
+                else "No eligible render targets. Community machines offline and no serverless capacity available."
+            )
+            self._groups.full_update(group_id, status="failed", error=err)
+            raise RenderGroupServiceError(503, err)
 
         overrides_json = json.dumps(render_overrides)
         dispatch_results = self._orchestrator.execute(
@@ -328,20 +347,28 @@ class RenderGroupService:
         new_group_id = str(uuid4())
         now = now_iso()
 
+        # Carry the heaviness signal forward — same blend file, same size.
+        r2_input_size_bytes = original.get("r2_input_size_bytes")
+        if r2_input_size_bytes is None:
+            try:
+                r2_input_size_bytes = storage.get_file_size(r2_key)
+            except Exception:
+                r2_input_size_bytes = None
+
         from serverV2.infrastructure.db import execute
         execute(
             """
             INSERT INTO render_groups (
-                id, input_filename, r2_input_key, total_frames,
-                frame_start, frame_end, frame_step,
+                id, input_filename, r2_input_key, r2_input_size_bytes,
+                total_frames, frame_start, frame_end, frame_step,
                 render_overrides_json, scheduling_json,
                 analysis_snapshot_json, analysis_warnings_json,
                 status, submitted_at, user_id, source_asset_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
             """,
             (
-                new_group_id, original["input_filename"], r2_key,
+                new_group_id, original["input_filename"], r2_key, r2_input_size_bytes,
                 total_frames, frame_start, frame_end, frame_step,
                 json.dumps(render_overrides), json.dumps(scheduling),
                 original.get("analysis_snapshot_json") or "{}",
@@ -350,15 +377,26 @@ class RenderGroupService:
             ),
         )
 
-        machines = self._resolve_machines(getattr(payload, "machine_ids", None))
+        machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
 
         planned = self._orchestrator.plan(
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
             total_frames=total_frames,
-            machines=machines,
+            machine_ids=machine_ids,
+            file_size_bytes=r2_input_size_bytes,
         )
+
+        if not planned:
+            err = (
+                "No eligible render targets. "
+                "Pinned community machines are offline, or no serverless capacity available."
+                if machine_ids
+                else "No eligible render targets. Community machines offline and no serverless capacity available."
+            )
+            self._groups.update_status(new_group_id, "failed", error=err)
+            raise RenderGroupServiceError(503, err)
 
         overrides_json = json.dumps(render_overrides)
         dispatch_results = self._orchestrator.execute(
@@ -506,21 +544,20 @@ class RenderGroupService:
     # internal helpers
     # ------------------------------------------------------------------
 
-    def _resolve_machines(self, machine_ids: list[str] | None) -> list:
-        if machine_ids:
-            machines = []
-            for mid in machine_ids:
-                m = self._machines.get_by_id(mid)
-                if not m:
-                    raise RenderGroupServiceError(400, f"Machine {mid[:8]}... not found")
-                machines.append(m)
-            if not machines:
-                raise RenderGroupServiceError(400, "Selected machines are unavailable.")
-            return machines
-        machines = self._machines.get_available()
-        if not machines:
-            raise RenderGroupServiceError(400, "No available machines right now. Try again shortly.")
-        return machines
+    def _validated_machine_ids(self, machine_ids: list[str] | None) -> list[str] | None:
+        """Validate user-supplied community machine ids if any.
+
+        Returns None when the user did not pin specific machines (the
+        orchestrator will then consider the full pool of community boxes
+        plus enabled serverless capabilities).
+        """
+        if not machine_ids:
+            return None
+        for mid in machine_ids:
+            m = self._machines.get_by_id(mid)
+            if not m:
+                raise RenderGroupServiceError(400, f"Machine {mid[:8]}... not found")
+        return list(machine_ids)
 
     def _save_asset(self, group, r2_key, plan, analysis_snapshot, render_overrides, scheduling):
         uid = group.get("user_id")

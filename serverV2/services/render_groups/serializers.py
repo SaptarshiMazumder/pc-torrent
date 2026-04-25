@@ -20,21 +20,33 @@ def serialize_task(job: dict[str, Any], machine: dict[str, Any] | None = None) -
     if total_frames and total_frames > 0:
         rendered_frames = min(rendered_frames, total_frames)
 
+    fleet = (job.get("machine_type") or "").strip()
+    gpu_type = (job.get("gpu_type") or "").strip()
     actual_gpu = job.get("actual_gpu_name")
     actual_vram = job.get("actual_gpu_vram_gb")
 
-    if actual_gpu:
-        vram_suffix = f" {int(actual_vram)}GB" if actual_vram else ""
-        display_gpu = f"Vast {actual_gpu}{vram_suffix}"
-        display_vram = actual_vram or (machine.get("gpu_vram_gb", 0) if machine else 0)
+    if fleet == "vast_serverless":
+        if actual_gpu:
+            vram_suffix = f" {int(actual_vram)}GB" if actual_vram else ""
+            display_gpu = f"Vast {actual_gpu}{vram_suffix}"
+            display_vram = actual_vram or 0
+        else:
+            display_gpu = f"Vast {gpu_type}" if gpu_type else "Vast"
+            display_vram = actual_vram or 0
+    elif fleet == "modal_serverless":
+        display_gpu = f"Modal {gpu_type.upper()}" if gpu_type else "Modal"
+        display_vram = actual_vram or 0
+    elif machine:
+        display_gpu = machine.get("gpu_model") or "Unknown"
+        display_vram = machine.get("gpu_vram_gb", 0)
     else:
-        display_gpu = machine["gpu_model"] if machine else "Unknown"
-        display_vram = machine.get("gpu_vram_gb", 0) if machine else 0
+        display_gpu = "Unknown"
+        display_vram = 0
 
     return {
         "job_id": job["id"],
         "machine_id": job["machine_id"],
-        "machine_type": machine.get("machine_type", "windows") if machine else "windows",
+        "machine_type": fleet or (machine.get("machine_type", "windows") if machine else "windows"),
         "machine_gpu": display_gpu,
         "machine_vram": display_vram,
         "frame_start": job.get("frame_start"),
@@ -64,8 +76,8 @@ def build_dispatch_task_entry(
     return {
         "job_id": dispatch_result.job_id,
         "machine_id": planned_task.machine_id,
-        "machine_gpu": planned_task.gpu_model,
-        "machine_vram": planned_task.gpu_vram_gb,
+        "machine_gpu": planned_task.label,
+        "machine_vram": planned_task.vram_gb,
         "frame_start": planned_task.frame_start,
         "frame_end": planned_task.frame_end,
         "frame_step": planned_task.frame_step,
@@ -74,7 +86,6 @@ def build_dispatch_task_entry(
         "rendered_frames": 0,
         "progress_pct": None,
         "status": "pending",
-        "power_score": planned_task.power_score,
         "error": None,
         "attempt": 0,
         "max_retries": scheduling.get("max_retries_per_chunk", 0),

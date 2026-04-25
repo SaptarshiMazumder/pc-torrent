@@ -1,29 +1,19 @@
-"""JobService — standalone job lifecycle (upload, confirm, status, outputs, download).
+"""JobService — worker-callback handling, output management, community pull.
 
-Composes: job_repo, machine_repo, storage, upload_coordinator.
+Composes: job_repo, heartbeat_repo, progress_repo, worker_start_repo, outputs_resolver.
 Pure DB operations — zero orchestration calls.
 """
 
 from __future__ import annotations
 
 import io
-import json
 import logging
 import zipfile
 from typing import Any
-from uuid import uuid4
 
-from serverV2.core.value_objects import (
-    MAX_UPLOAD_BYTES,
-    SINGLE_PUT_MAX_BYTES,
-    now_iso,
-    parse_output_files,
-    sanitize_filename,
-)
+from serverV2.core.value_objects import parse_output_files, sanitize_filename
 from serverV2.infrastructure import storage
-from serverV2.infrastructure.auth.firestore_client import write_job_record
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
-from serverV2.services.jobs.serializers import serialize_job
 
 log = logging.getLogger(__name__)
 
@@ -62,51 +52,6 @@ class JobService:
         ``job_id`` — the worker must abort to defeat Modal's re-queue.
         """
         return self._worker_start.try_claim(job_id)
-
-    # ---- upload request ----
-
-    def request_upload(self, payload: Any, user: dict[str, Any]) -> dict[str, Any]:
-        if not getattr(payload, "filename", None):
-            raise JobServiceError(400, "filename is required")
-        filename = sanitize_filename(payload.filename)
-        machine_id = getattr(payload, "machine_id", None) or "unassigned"
-        file_size_bytes = getattr(payload, "file_size_bytes", None)
-        multipart_required = False
-        if file_size_bytes is not None:
-            from serverV2.services.upload.validators import validate_upload_size
-            file_size_bytes = validate_upload_size(file_size_bytes)
-            multipart_required = file_size_bytes > SINGLE_PUT_MAX_BYTES
-
-        job_id = str(uuid4())
-        r2_key = f"jobs/{job_id}/input/{filename}"
-        upload_url = storage.generate_presigned_upload_url(r2_key)
-
-        self._jobs.create_uploading_job(
-            job_id=job_id,
-            machine_id=machine_id,
-            input_filename=filename,
-            r2_key=r2_key,
-            user_id=user["uid"],
-        )
-
-        return {
-            "job_id": job_id,
-            "upload_url": upload_url,
-            "r2_key": r2_key,
-            "max_upload_bytes": MAX_UPLOAD_BYTES,
-            "single_put_max_bytes": SINGLE_PUT_MAX_BYTES,
-            "multipart_required": multipart_required,
-            "file_size_bytes": file_size_bytes,
-        }
-
-    def confirm_upload(self, job_id: str, user: dict[str, Any]) -> dict[str, Any]:
-        job = self._jobs.get_owned_by_id(job_id, user["uid"])
-        if not job:
-            raise JobServiceError(404, "Job not found")
-        if job.get("status") != "uploading":
-            raise JobServiceError(409, "Job is not in uploading state")
-        self._jobs.confirm_upload(job_id)
-        return {"job_id": job_id, "status": "pending"}
 
     # ---- status callbacks (from workers) ----
 
@@ -208,24 +153,3 @@ class JobService:
     def next_for_machine(self, machine_id: str) -> dict[str, Any] | None:
         return self._jobs.claim_next_for_machine(machine_id)
 
-    # ---- reads ----
-
-    def get_status(self, job_id: str) -> dict[str, Any]:
-        job = self._jobs.get_raw_by_id(job_id)
-        if not job:
-            raise JobServiceError(404, "Job not found")
-        from serverV2.infrastructure.db import query_one
-        machine = query_one("SELECT * FROM machines WHERE id = %s", (job.get("machine_id"),))
-        return serialize_job(job, machine)
-
-    def list_by_user(self, user_id: str) -> list[dict[str, Any]]:
-        return self._jobs.get_by_user(user_id)
-
-    def delete(self, job_id: str, user: dict) -> dict[str, bool]:
-        job = self._jobs.get_raw_by_id(job_id)
-        if not job:
-            raise JobServiceError(404, "Job not found")
-        if job.get("status") in ("pending", "running"):
-            raise JobServiceError(400, "Cannot delete a job that is still in progress")
-        self._jobs.delete_terminal(job_id)
-        return {"success": True}

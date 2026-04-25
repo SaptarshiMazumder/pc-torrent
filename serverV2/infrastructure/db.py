@@ -190,6 +190,42 @@ def init_db() -> None:
                     )
                     """
                 )
+                # Phase 1 of allocator redesign — store machine_type directly
+                # on the job so we don't need to JOIN against the machines
+                # table (serverless jobs no longer have machine rows).
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS machine_type TEXT"
+                )
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS gpu_type TEXT"
+                )
+                # Serverless jobs (modal/vast) have no machine row, so
+                # machine_id must be NULL on those rows.  Drop the legacy
+                # NOT NULL constraint that pre-dates Phase 1.
+                cur.execute(
+                    "ALTER TABLE jobs ALTER COLUMN machine_id DROP NOT NULL"
+                )
+                # Phase 2 — fleet-cap-aware dispatch queue.  Each queue row
+                # carries enough context to be dispatched later, when a
+                # slot opens up in the target fleet.
+                for column_def in (
+                    "fleet TEXT",
+                    "gpu_type TEXT",
+                    "machine_id TEXT",
+                    "input_filename TEXT",
+                    "render_overrides_b64 TEXT",
+                    "max_retries INTEGER DEFAULT 0",
+                    "priority INTEGER DEFAULT 0",
+                ):
+                    cur.execute(
+                        f"ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS {column_def}"
+                    )
+                # Phase 3 — heaviness signal stored on the render group, used
+                # by FastRenderAllocationStrategy to decide chunk count and
+                # VRAM filter.
+                cur.execute(
+                    "ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS r2_input_size_bytes BIGINT"
+                )
         log.info("Database connection pool initialized")
     except Exception as exc:
         log.error("Failed to initialize database: %s", exc)

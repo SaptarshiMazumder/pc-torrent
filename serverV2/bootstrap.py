@@ -2,6 +2,11 @@
 
 Call ``build()`` once at startup to get a fully-configured Container.
 Every dependency is explicit; nothing is a hidden global.
+
+After Phase 1 of the allocator redesign, Modal and Vast no longer have
+machine registrars — their endpoints come from ``config.json`` and the
+allocator works against ``FleetCapability`` descriptors directly.  Only
+the community fleet has DB-backed machine rows.
 """
 
 from __future__ import annotations
@@ -11,12 +16,13 @@ from serverV2.callbacks.router import CallbackRouter
 from serverV2.callbacks.success_handler import SuccessHandler
 from serverV2.config import AppConfig
 from serverV2.core.enums import CallbackOutcome
+from serverV2.core.models import AvailableResources, FleetCapability
+from serverV2.fleets.community.community_monitor import CommunityMonitor
 from serverV2.fleets.community.strategy import CommunityStrategy
 from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.modal.callback import ModalCallbackHandler
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.endpoint_validator import validate_modal_endpoints
-from serverV2.fleets.modal.machine_registrar import ModalMachineRegistrar
 from serverV2.fleets.modal.recovery import ModalRecovery
 from serverV2.fleets.modal.strategy import ModalFleetStrategy
 from serverV2.fleets.registry import FleetRegistry
@@ -24,11 +30,12 @@ from serverV2.fleets.status_aggregator import InstanceStatusAggregator
 from serverV2.fleets.status_provider import ModalStatusProvider, VastStatusProvider
 from serverV2.fleets.vast.callback import VastCallbackHandler
 from serverV2.fleets.vast.client import VastClient
-from serverV2.fleets.vast.machine_registrar import VastMachineRegistrar
 from serverV2.fleets.vast.recovery import VastRecovery
 from serverV2.fleets.vast.strategy import VastFleetStrategy
+from serverV2.infrastructure import storage
 from serverV2.infrastructure.redis_client import RedisClient
-from serverV2.orchestrator.allocation.default_frame_allocator import DefaultFrameAllocator
+from serverV2.orchestrator.allocation.default_allocation_strategy import DefaultAllocationStrategy
+from serverV2.orchestrator.allocation.fast_render_allocation_strategy import FastRenderAllocationStrategy
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
@@ -43,14 +50,14 @@ from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.user_input_file_repository import UserInputFileRepository
 from serverV2.repositories.worker_start_repository import WorkerStartRepository
-from serverV2.fleets.community.community_monitor import CommunityMonitor
-from serverV2.infrastructure import storage
 from serverV2.services.assets.service import AssetService
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
 from serverV2.services.jobs.service import JobService
 from serverV2.services.machines.service import MachineService
 from serverV2.services.render_groups.service import RenderGroupService
 from serverV2.services.upload.coordinator import UploadCoordinator
+
+
 
 
 class Container:
@@ -60,6 +67,7 @@ class Container:
         self,
         config: AppConfig,
         orchestrator: RenderOrchestrator,
+        dispatch_coordinator: DispatchCoordinator,
         fleet_registry: FleetRegistry,
         community_monitor: CommunityMonitor,
         job_repo: JobRepository,
@@ -71,14 +79,13 @@ class Container:
         job_service: JobService,
         machine_service: MachineService,
         asset_service: AssetService,
-        vast_registrar: VastMachineRegistrar,
-        modal_registrar: ModalMachineRegistrar,
         vast_recovery: VastRecovery,
         modal_recovery: ModalRecovery,
         status_aggregator: InstanceStatusAggregator,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
+        self.dispatch_coordinator = dispatch_coordinator
         self.fleet_registry = fleet_registry
         self.community_monitor = community_monitor
         self.job_repo = job_repo
@@ -90,8 +97,6 @@ class Container:
         self.job_service = job_service
         self.machine_service = machine_service
         self.asset_service = asset_service
-        self.vast_registrar = vast_registrar
-        self.modal_registrar = modal_registrar
         self.vast_recovery = vast_recovery
         self.modal_recovery = modal_recovery
         self.status_aggregator = status_aggregator
@@ -150,10 +155,9 @@ def build(
             )
 
     # -- vast fleet --
-    # Order matters: registrar owns the machine→gpu map; strategy receives it
-    # as a lookup callable so it can dispatch to the right GPU per machine.
+    # No machine registrar — Vast capabilities live in config.json.
+    # Strategy reads task.gpu_type at dispatch time.
     vast_client = VastClient(cfg.vast)
-    vast_registrar = VastMachineRegistrar(cfg.vast)
     vast_callback = VastCallbackHandler(
         config=cfg.vast, client=vast_client,
         job_repo=job_repo,
@@ -167,7 +171,6 @@ def build(
     vast_strategy = VastFleetStrategy(
         config=cfg.vast, client=vast_client,
         callback_handler=vast_callback, job_repo=job_repo,
-        gpu_name_lookup=vast_registrar.gpu_name_for_machine,
         on_failure=_on_failure,
     )
     vast_recovery = VastRecovery(
@@ -177,10 +180,8 @@ def build(
     registry.register(vast_strategy)
 
     # -- modal fleet --
-    # Order matters: registrar owns the machine→gpu_type map; strategy
-    # receives it as a lookup callable.
+    # No machine registrar — Modal capabilities live in config.json.
     modal_client = ModalClient(cfg.modal)
-    modal_registrar = ModalMachineRegistrar(cfg.modal)
     modal_callback = ModalCallbackHandler(
         config=cfg.modal, client=modal_client,
         job_repo=job_repo,
@@ -194,7 +195,6 @@ def build(
     modal_strategy = ModalFleetStrategy(
         config=cfg.modal, client=modal_client,
         callback_handler=modal_callback, job_repo=job_repo,
-        gpu_type_lookup=modal_registrar.gpu_type_for_machine,
         on_failure=_on_failure,
     )
     modal_recovery = ModalRecovery(
@@ -207,21 +207,57 @@ def build(
     registry.register(community_strategy)
 
     # -- allocation + dispatch --
-    allocator = DefaultFrameAllocator(registry)
+    # Two strategies are constructed; the lifecycle picks one per render
+    # based on file size + frame count (heuristic in RenderLifecycle).
+    default_strategy = DefaultAllocationStrategy(registry)
+    fast_render_strategy = FastRenderAllocationStrategy(registry)
     dispatcher = Dispatcher(registry)
 
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
 
-    # -- machine picker: returns available machines filtered to enabled fleets --
-    enabled_types = registry.enabled_types
+    # -- resource picker: builds AvailableResources per allocation --
+    def _resource_picker() -> AvailableResources:
+        community = machine_repo.get_available_community()
+        capabilities: list[FleetCapability] = []
+        for ep in cfg.modal.endpoints:
+            capabilities.append(FleetCapability(
+                fleet="modal_serverless",
+                gpu_type=ep.gpu_type,
+                label=ep.label,
+                vram_gb=ep.vram_gb,
+                cpu_cores=ep.cpu_cores,
+                ram_gb=ep.ram_gb,
+                render_speed=1.0,
+                fleet_max_parallel=cfg.modal.max_parallel,
+            ))
+        for ep in cfg.vast.endpoints:
+            capabilities.append(FleetCapability(
+                fleet="vast_serverless",
+                gpu_type=ep.gpu_name,
+                label=ep.label,
+                vram_gb=ep.vram_gb,
+                cpu_cores=ep.cpu_cores,
+                ram_gb=ep.ram_gb,
+                render_speed=ep.render_speed,
+                fleet_max_parallel=cfg.vast.max_parallel,
+            ))
+        in_flight = job_repo.count_active_by_fleet()
+        return AvailableResources(
+            community_machines=community,
+            serverless_capabilities=capabilities,
+            serverless_in_flight=in_flight,
+        )
 
-    def _machine_picker():
-        machines = machine_repo.get_available()
-        active = enabled_types()
-        if active:
-            machines = [m for m in machines if m.machine_type in active]
-        return machines
+    # -- per-fleet cap lookup used by the dispatch coordinator --
+    def _fleet_cap_lookup(fleet: str) -> int:
+        if fleet == "modal_serverless":
+            return cfg.modal.max_parallel
+        if fleet == "vast_serverless":
+            return cfg.vast.max_parallel
+        # Community: each machine handles its own queue, no fleet-wide cap.
+        # Use a high number so the coordinator never gates community.
+        return 10_000
 
     # -- callbacks --
     failure_handler = FailureHandler(job_repo, group_repo)
@@ -237,17 +273,25 @@ def build(
         in_progress_repo=in_progress_repo,
         dispatcher=dispatcher,
         blend_url_resolver=blend_resolver,
+        job_repo=job_repo,
+        fleet_cap_lookup=_fleet_cap_lookup,
     )
+
+    # Late-bind the coordinator into the success/failure handlers so they
+    # can drain queued items when slots free up.  Two-phase wiring breaks
+    # the otherwise-circular construction order.
+    success_handler.set_coordinator(dispatch_coordinator)
+    failure_handler.set_coordinator(dispatch_coordinator)
     lifecycle = RenderLifecycle(
-        allocator=allocator,
+        default_strategy=default_strategy,
+        fast_render_strategy=fast_render_strategy,
         coordinator=dispatch_coordinator,
         job_repo=job_repo,
         group_repo=group_repo,
-        machine_repo=machine_repo,
         queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
         fleet_registry=registry,
-        machine_picker=_machine_picker,
+        resource_picker=_resource_picker,
     )
     orchestrator = RenderOrchestrator(lifecycle)
     failure_handler.set_orchestrator(orchestrator)
@@ -303,6 +347,7 @@ def build(
     return Container(
         config=cfg,
         orchestrator=orchestrator,
+        dispatch_coordinator=dispatch_coordinator,
         fleet_registry=registry,
         community_monitor=community_monitor,
         job_repo=job_repo,
@@ -314,8 +359,6 @@ def build(
         job_service=job_service,
         machine_service=machine_service,
         asset_service=asset_service,
-        vast_registrar=vast_registrar,
-        modal_registrar=modal_registrar,
         vast_recovery=vast_recovery,
         modal_recovery=modal_recovery,
         status_aggregator=status_aggregator,

@@ -5,7 +5,6 @@ import {
   cancelAllRenderGroups,
   getFirebaseToken,
   getRenderGroupOutputs,
-  getJobOutputs,
 } from "../services/api";
 import { cacheViewerFrame } from "../services/sidecar";
 import {
@@ -96,9 +95,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
         }));
       }
       try {
-        const payload = job.group_id
-          ? await getRenderGroupOutputs(backendUrl, id)
-          : await getJobOutputs(backendUrl, id);
+        const payload = await getRenderGroupOutputs(backendUrl, id);
         const files = Array.isArray(payload?.files) ? payload.files.slice().sort(outputSort) : [];
         setFrameGalleries((prev) => ({
           ...prev,
@@ -196,7 +193,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
         startDownload(
           id,
           displayName,
-          () => job.group_id ? getRenderGroupOutputs(backendUrl, id) : getJobOutputs(backendUrl, id)
+          () => getRenderGroupOutputs(backendUrl, id)
         );
         onNavigate?.("downloads");
       },

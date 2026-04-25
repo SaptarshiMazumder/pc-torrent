@@ -124,14 +124,15 @@ class MachineService:
         return query_all("SELECT * FROM machines ORDER BY registered_at DESC")
 
     def list_available(self, machine_repo) -> list[dict[str, Any]]:
-        excluded = self._excluded_types()
-        machines = machine_repo.get_available()
+        # Community-only after Phase 1 of the allocator redesign — Modal
+        # and Vast capacities live in config.json, not the machines table.
+        machines = machine_repo.get_available_community()
         return [
             {
                 "id": m.id,
-                "machine_type": m.machine_type,
+                "machine_type": "windows",
                 "gpu_model": m.gpu_model,
-                "gpu_vram_gb": m.gpu_vram_gb,
+                "gpu_vram_gb": m.vram_gb,
                 "cpu_cores": m.cpu_cores,
                 "ram_gb": m.ram_gb,
                 "status": m.status,
@@ -139,5 +140,4 @@ class MachineService:
                 "last_seen_at": m.last_seen_at,
             }
             for m in machines
-            if m.machine_type not in excluded
         ]

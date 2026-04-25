@@ -1,12 +1,27 @@
-"""Pure function: split a frame range across machines proportionally to power scores."""
+"""Pure function: split a frame range across targets proportionally to power scores.
+
+Returns a list of :class:`FrameShare` — each share carries the target it
+was assigned to plus the frame range and chunk total.  The strategy maps
+shares to :class:`PlannedTask` with the right fleet discriminant; this
+module stays type-agnostic.
+"""
 
 from __future__ import annotations
 
-from typing import Callable
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from serverV2.allocation.budget_limiter import limit_machines_for_frame_budget
 from serverV2.allocation.power_scorer import compute_power_score
-from serverV2.core.models import Machine, PlannedTask
+
+
+@dataclass(frozen=True)
+class FrameShare:
+    target: Any                 # CommunityMachine or FleetCapability
+    frame_start: int
+    frame_end: int
+    total_frames: int
+    score: float
 
 
 def distribute_frames(
@@ -15,28 +30,28 @@ def distribute_frames(
     frame_start: int,
     frame_end: int,
     frame_step: int,
-    machines: list[Machine],
-    min_frames_fn: Callable[[Machine], int] | None = None,
-) -> list[PlannedTask]:
-    machines = limit_machines_for_frame_budget(machines, total_frames, min_frames_fn)
-    if not machines:
+    targets: list[Any],
+    min_frames_fn: Callable[[Any], int] | None = None,
+) -> list[FrameShare]:
+    targets = limit_machines_for_frame_budget(targets, total_frames, min_frames_fn)
+    if not targets:
         return []
 
-    scores = [(m, compute_power_score(m)) for m in machines]
+    scores = [(t, compute_power_score(t)) for t in targets]
     total_score = sum(s for _, s in scores)
     if total_score <= 0:
-        total_score = float(len(machines))
-        scores = [(m, 1.0) for m in machines]
+        total_score = float(len(targets))
+        scores = [(t, 1.0) for t in targets]
 
-    tasks: list[PlannedTask] = []
+    shares: list[FrameShare] = []
     current_frame = frame_start
 
-    for i, (machine, score) in enumerate(scores):
+    for i, (target, score) in enumerate(scores):
         if i == len(scores) - 1:
             chunk_end = frame_end
         else:
-            share = score / total_score
-            chunk_frames = max(1, round(total_frames * share))
+            share_fraction = score / total_score
+            chunk_frames = max(1, round(total_frames * share_fraction))
             chunk_end = min(current_frame + (chunk_frames - 1) * frame_step, frame_end)
 
         chunk_total = (
@@ -44,17 +59,13 @@ def distribute_frames(
             if chunk_end >= current_frame
             else 0
         )
-        tasks.append(PlannedTask(
-            machine_id=machine.id,
-            machine_type=machine.machine_type,
-            gpu_model=machine.gpu_model,
-            gpu_vram_gb=machine.gpu_vram_gb,
+        shares.append(FrameShare(
+            target=target,
             frame_start=current_frame,
             frame_end=chunk_end,
-            frame_step=frame_step,
             total_frames=chunk_total,
-            power_score=round(score, 1),
+            score=round(score, 1),
         ))
         current_frame = chunk_end + frame_step
 
-    return tasks
+    return shares

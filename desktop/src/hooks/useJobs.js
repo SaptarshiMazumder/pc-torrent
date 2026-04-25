@@ -1,17 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { listJobs, listRenderGroups, getJob, getRenderGroup, deleteJob, deleteRenderGroup } from "../services/api";
+import { listRenderGroups, getRenderGroup, deleteRenderGroup } from "../services/api";
 
 const POLL_INTERVAL = 3000;
 
 function toTimestamp(value) {
   const parsed = Date.parse(value || "");
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function canonicalJobKey(job) {
-  if (job?.group_id) return `group:${job.group_id}`;
-  if (job?.job_id) return `job:${job.job_id}`;
-  return "";
 }
 
 function normalizeRenderGroup(group) {
@@ -46,54 +40,12 @@ function normalizeRenderGroup(group) {
   };
 }
 
-function normalizeSingleJob(job) {
-  const jobId =
-    typeof job?.job_id === "string" && job.job_id
-      ? job.job_id
-      : typeof job?.id === "string" && job.id
-      ? job.id
-      : "";
-  if (!jobId) return null;
-
-  const filename =
-    (typeof job?.input_filename === "string" && job.input_filename.trim()) ||
-    (typeof job?.filename === "string" && job.filename.trim()) ||
-    "Untitled";
-
-  return {
-    ...job,
-    job_id: jobId,
-    id: jobId,
-    filename,
-    input_filename: filename,
-    status: job?.status || "pending",
-    output_files: Array.isArray(job?.output_files) ? job.output_files : [],
-    progress_pct: typeof job?.progress_pct === "number" ? job.progress_pct : null,
-    rendered_frames: typeof job?.rendered_frames === "number" ? job.rendered_frames : 0,
-    output_files_count:
-      typeof job?.output_files_count === "number"
-        ? job.output_files_count
-        : Array.isArray(job?.output_files)
-        ? job.output_files.length
-        : 0,
-  };
-}
-
-function mergeAndNormalizeJobs(groups, singleJobs) {
-  const combined = [
-    ...(Array.isArray(groups) ? groups.map(normalizeRenderGroup).filter(Boolean) : []),
-    ...(Array.isArray(singleJobs) ? singleJobs.map(normalizeSingleJob).filter(Boolean) : []),
-  ].sort((a, b) => toTimestamp(b.submitted_at) - toTimestamp(a.submitted_at));
-
-  const seen = new Set();
-  const deduped = [];
-  for (const job of combined) {
-    const key = canonicalJobKey(job);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(job);
-  }
-  return deduped;
+function normalizeGroups(groups) {
+  if (!Array.isArray(groups)) return [];
+  return groups
+    .map(normalizeRenderGroup)
+    .filter(Boolean)
+    .sort((a, b) => toTimestamp(b.submitted_at) - toTimestamp(a.submitted_at));
 }
 
 export function useJobs(backendUrl) {
@@ -110,16 +62,12 @@ export function useJobs(backendUrl) {
     backendUrlRef.current = backendUrl;
   }, [backendUrl]);
 
-  // Fetch full renter history: render-groups + legacy single jobs.
   const fetchAll = useCallback(async (url) => {
     if (!url) return;
     setLoading(true);
     try {
-      const [groups, singleJobs] = await Promise.all([
-        listRenderGroups(url).catch(() => []),
-        listJobs(url).catch(() => []),
-      ]);
-      setJobs(mergeAndNormalizeJobs(groups, singleJobs));
+      const groups = await listRenderGroups(url).catch(() => []);
+      setJobs(normalizeGroups(groups));
     } finally {
       setLoading(false);
     }
@@ -151,43 +99,15 @@ export function useJobs(backendUrl) {
     ]);
   }, []);
 
-  const addJob = useCallback((jobId, machineGpu, filename) => {
-    setJobs((prev) => [
-      {
-        job_id: jobId,
-        id: jobId,
-        machine_gpu: machineGpu,
-        filename: filename || "Untitled",
-        input_filename: filename || "Untitled",
-        status: "pending",
-        submitted_at: new Date().toISOString(),
-        completed_at: null,
-        output_files: [],
-        output_files_count: 0,
-        latest_output_file: null,
-        error: null,
-        total_frames: null,
-        rendered_frames: 0,
-        progress_pct: null,
-      },
-      ...prev,
-    ]);
-  }, []);
-
   const removeJob = useCallback(async (id) => {
     const url = backendUrlRef.current;
-    const job = jobsRef.current.find((j) => (j.group_id || j.job_id) === id);
     try {
-      if (job?.group_id) {
-        await deleteRenderGroup(url, job.group_id);
-      } else if (job?.job_id) {
-        await deleteJob(url, job.job_id);
-      }
+      await deleteRenderGroup(url, id);
     } catch {
       // If the backend rejects (e.g. job still active), don't remove from UI
       return;
     }
-    setJobs((prev) => prev.filter((j) => (j.group_id || j.job_id) !== id));
+    setJobs((prev) => prev.filter((j) => j.group_id !== id));
   }, []);
 
   const markRenderGroupCancelled = useCallback((groupId) => {
@@ -205,7 +125,7 @@ export function useJobs(backendUrl) {
     );
   }, []);
 
-  // Poll active jobs
+  // Poll active groups
   useEffect(() => {
     let polling = false;
 
@@ -214,9 +134,8 @@ export function useJobs(backendUrl) {
       const url = backendUrlRef.current;
       if (!url) return;
 
-      const current = jobsRef.current;
-      const active = current.filter(
-        (j) => canonicalJobKey(j) && !["done", "failed", "cancelled"].includes(j.status)
+      const active = jobsRef.current.filter(
+        (j) => j.group_id && !["done", "failed", "cancelled"].includes(j.status)
       );
       if (active.length === 0) return;
 
@@ -225,39 +144,21 @@ export function useJobs(backendUrl) {
         await Promise.all(
           active.map(async (job) => {
             try {
-              if (job.group_id) {
-                const updated = normalizeRenderGroup(
-                  await getRenderGroup(url, job.group_id)
-                );
-                if (!updated) return;
-
-                setJobs((cur) =>
-                  cur.map((existing) =>
-                    canonicalJobKey(existing) === `group:${job.group_id}`
-                      ? {
-                          ...existing,
-                          ...updated,
-                          tasks:
-                            updated.tasks?.length > 0
-                              ? updated.tasks
-                              : Array.isArray(existing.tasks)
-                              ? existing.tasks
-                              : [],
-                        }
-                      : existing
-                  )
-                );
-                return;
-              }
-
-              if (!job.job_id) return;
-              const updated = normalizeSingleJob(await getJob(url, job.job_id));
+              const updated = normalizeRenderGroup(await getRenderGroup(url, job.group_id));
               if (!updated) return;
-
               setJobs((cur) =>
                 cur.map((existing) =>
-                  canonicalJobKey(existing) === `job:${job.job_id}`
-                    ? { ...existing, ...updated }
+                  existing.group_id === job.group_id
+                    ? {
+                        ...existing,
+                        ...updated,
+                        tasks:
+                          updated.tasks?.length > 0
+                            ? updated.tasks
+                            : Array.isArray(existing.tasks)
+                            ? existing.tasks
+                            : [],
+                      }
                     : existing
                 )
               );
@@ -277,5 +178,5 @@ export function useJobs(backendUrl) {
 
   const refresh = useCallback(() => fetchAll(backendUrlRef.current), [fetchAll]);
 
-  return { jobs, loading, addJob, addRenderGroup, removeJob, markRenderGroupCancelled, refresh };
+  return { jobs, loading, addRenderGroup, removeJob, markRenderGroupCancelled, refresh };
 }

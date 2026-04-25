@@ -24,17 +24,18 @@ class JobRepository:
         execute(
             """
             INSERT INTO jobs (
-                id, machine_id, group_id, input_filename, status,
+                id, machine_id, machine_type, gpu_type,
+                group_id, input_filename, status,
                 total_frames, rendered_frames, output_files,
                 frame_start, frame_end, frame_step,
                 render_overrides_json, attempt, max_retries, priority,
                 chunk_index, submitted_at
             )
-            VALUES (%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
-                params.job_id, params.machine_id, params.group_id,
-                params.input_filename, params.total_frames,
+                params.job_id, params.machine_id, params.fleet, params.gpu_type,
+                params.group_id, params.input_filename, params.total_frames,
                 params.frame_start, params.frame_end, params.frame_step,
                 params.render_overrides_json, params.attempt, params.max_retries,
                 params.priority, params.chunk_index, _now_iso(),
@@ -69,6 +70,19 @@ class JobRepository:
             "SELECT * FROM jobs WHERE group_id = %s AND status IN ('pending', 'running')",
             (group_id,),
         )
+
+    def count_active_by_fleet(self) -> dict[str, int]:
+        """Live capacity check.  Returns {machine_type: count} of jobs in
+        ``pending`` or ``running`` state.  Used by the resource picker to
+        compute how much serverless headroom each fleet has before
+        ``fleet_max_parallel`` is exhausted.
+        """
+        rows = query_all(
+            "SELECT machine_type, count(*) AS n FROM jobs "
+            "WHERE status IN ('pending', 'running') "
+            "GROUP BY machine_type",
+        )
+        return {r["machine_type"]: int(r["n"]) for r in rows if r.get("machine_type")}
 
     # ---- status mutations ----
 
@@ -141,13 +155,14 @@ class JobRepository:
         execute(
             """
             INSERT INTO jobs (
-                id, machine_id, group_id, input_filename, status,
+                id, machine_id, machine_type,
+                group_id, input_filename, status,
                 total_frames, rendered_frames, output_files,
                 frame_start, frame_end, frame_step,
                 render_overrides_json, attempt, max_retries, priority,
                 chunk_index, submitted_at
             )
-            VALUES (%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,0,%s,%s,%s,%s)
+            VALUES (%s,%s,'windows',%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,0,%s,%s,%s,%s)
             """,
             (
                 new_job_id, failover_machine_id, group_id, input_filename,

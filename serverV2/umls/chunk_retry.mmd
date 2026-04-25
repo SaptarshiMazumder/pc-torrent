@@ -1,0 +1,129 @@
+%% Chunk failure -> retry flow.
+%% Shows the full path from failure source through CallbackRouter,
+%% FailureHandler, RenderLifecycle.handle_chunk_failure (anti-affinity
+%% retry), the allocator's allocate_retry algorithm, and dispatch.
+%% Import into draw.io: Arrange -> Insert -> Advanced -> Mermaid.
+
+sequenceDiagram
+    autonumber
+    participant SRC as Failure source<br/>JobMonitor / CommunityMonitor / sync dispatch fail
+    participant ROUTER as CallbackRouter
+    participant FH as FailureHandler
+    participant ORCH as RenderOrchestrator<br/>-> RenderLifecycle.handle_chunk_failure
+    participant IPR as InProgressChunkRepository
+    participant GREPO as RenderGroupRepository
+    participant JREPO as JobRepository
+    participant ALLOC as FrameAllocator<br/>(Default OR FastRender)
+    participant COORD as DispatchCoordinator
+    participant DISP as Dispatcher
+    participant FS as IFleetStrategy<br/>(retry target)
+    participant CB as Modal/Vast<br/>CallbackHandler
+
+    SRC->>ROUTER: route(FAILURE, job_id, error)
+    ROUTER->>JREPO: get_raw_by_id(job_id)
+    Note over ROUTER: skip if status in (done, cancelled)
+    ROUTER->>FH: handle(job_id, error)
+
+    activate FH
+    FH->>JREPO: get_raw_by_id(job_id)
+    Note over FH: capture failed_fleet BEFORE retry<br/>(slot freed in this fleet regardless)
+
+    FH->>ORCH: on_job_failed(job_id, error)
+    activate ORCH
+
+    Note over ORCH: ============ STALE-SIGNAL GUARD ============
+    ORCH->>IPR: current_job_for(group, chunk)
+    alt current_job != failing job_id
+        ORCH-->>FH: False<br/>(retry already dispatched)
+    else current_job == failing job_id OR none
+        ORCH->>GREPO: get_by_id(group)
+        alt group is cancelled or done
+            ORCH-->>FH: False (don't requeue into terminal group)
+        else group is active
+            Note over ORCH: ============ RETRY BUDGET ============
+            ORCH->>ORCH: rj.remaining_frames()<br/>frames not yet uploaded
+            alt remaining is None
+                ORCH->>IPR: release(group, chunk)
+                ORCH-->>FH: False (chunk already complete)
+            else has remaining
+                ORCH->>ORCH: next_attempt = rj.attempt + 1
+                alt next_attempt &gt; MAX_RETRIES
+                    ORCH->>IPR: release(group, chunk)
+                    ORCH-->>FH: False (exhausted)
+                else within budget
+                    Note over ORCH: ============ ANTI-AFFINITY ============
+                    ORCH->>ORCH: _exclusions_for(failed_row):<br/>serverless: ((fleet, gpu_type),)<br/>community:  (machine_id,)
+                    ORCH->>GREPO: read r2_input_size_bytes<br/>(heaviness signal)
+                    ORCH->>ORCH: build ChunkRequest:<br/>group, chunk_index, frame_start/end, frame_step,<br/>total_frames, attempt = next_attempt,<br/>excluded_machine_ids,<br/>excluded_serverless_capabilities,<br/>file_size_bytes
+
+                    Note over ORCH: ============ STRATEGY PICK ============
+                    ORCH->>ORCH: _pick_strategy(file_size, total_frames)<br/>fast if file_size &gt;= 2GB OR total_frames &gt;= 30
+                    ORCH->>ALLOC: allocate_retry(chunk_request, resource_picker())
+
+                    activate ALLOC
+                    Note over ALLOC: ===== allocate_retry algorithm =====
+                    Note over ALLOC: 1. eligible = _eligible_targets(resources, vram_floor)<br/>   FastRender: vram_floor from heaviness band<br/>   Default:    no vram filter
+                    Note over ALLOC: 2. if empty AND FastRender:<br/>      re-run with vram_floor = 0
+                    Note over ALLOC: 3. eligible = filter(t):<br/>      community: t.id NOT IN excluded_machine_ids<br/>      capability: (t.fleet, t.gpu_type) NOT IN excluded_caps
+                    Note over ALLOC: 4. if eligible empty -> return None
+                    Note over ALLOC: 5. target = max(eligible, key=compute_power_score)<br/>   (highest VRAM * speed * cores wins)
+                    Note over ALLOC: 6. build PlannedTask:<br/>   community -> fleet="community", machine_id<br/>   capability -> fleet, gpu_type<br/>   carry chunk_index + attempt forward
+                    ALLOC-->>ORCH: PlannedTask OR None
+                    deactivate ALLOC
+
+                    alt allocator returned None
+                        ORCH-->>FH: False (no eligible target)
+                    else got retry_task
+                        ORCH->>COORD: enqueue_and_flush(group, [retry_task], ctx)
+                        activate COORD
+                        COORD->>COORD: queue_repo.enqueue(group, item)
+                        COORD->>JREPO: count_active_by_fleet (cap check)
+                        alt fleet at cap
+                            Note over COORD: leave queued -<br/>drained later by drain_for_fleet
+                        else fleet has headroom
+                            COORD->>COORD: queue_repo.dequeue_for_fleet(task.fleet)
+                            COORD->>IPR: claim_or_replace(group, chunk, NEW job_id, attempt)
+                            COORD->>DISP: dispatch_one(retry_task, ctx, new_job_id)
+                            DISP->>FS: dispatch(retry_task, ctx, new_job_id)
+                            FS->>JREPO: create job row
+                            FS->>FS: client.dispatch_job -> provider_job_id
+                            FS->>CB: start_monitoring(new_job_id, ...)
+                            Note over CB: spawns fresh per-job monitor thread
+                        end
+                        deactivate COORD
+                        ORCH-->>FH: True (retry dispatched)
+                    end
+                end
+            end
+        end
+    end
+    deactivate ORCH
+
+    FH->>JREPO: mark_failed(failing job_id, error)
+
+    alt retry was dispatched
+        Note over FH: group stays "running" - new active job exists<br/>(no group reconciliation needed)
+    else retries exhausted OR no eligible target
+        FH->>GREPO: get_by_id(group)
+        FH->>JREPO: get_by_group(group)
+        FH->>FH: compute_group_status(...)<br/>(pure function)
+        alt all_done OR (no_active AND any_done AND all_frames)
+            FH->>GREPO: update_status(group, "done")
+        else no_active AND not_all_frames
+            FH->>GREPO: update_status(group, "failed")
+        end
+    end
+
+    Note over FH,COORD: ============ DRAIN FREED SLOT ============
+    FH->>COORD: drain_for_fleet(failed_fleet)
+    activate COORD
+    loop while in_flight[fleet] &lt; cap AND queue has items for fleet
+        COORD->>JREPO: count_active_by_fleet
+        COORD->>COORD: queue_repo.dequeue_for_fleet(failed_fleet)
+        COORD->>IPR: claim_or_replace(...)
+        COORD->>DISP: dispatch_one(queued_task, ctx, job_id)
+        DISP->>FS: dispatch(...)
+        FS->>CB: start_monitoring(...)
+    end
+    deactivate COORD
+    deactivate FH

@@ -110,7 +110,11 @@
       "Bash(sed -i -e 's|from \"\\\\.\\\\./lib/api\"|from \"../services/api\"|g' -e 's|from \"\\\\.\\\\./lib/sidecar\"|from \"../services/sidecar\"|g' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/hooks/useJobs.js c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/hooks/useAgent.js)",
       "Bash(ls c:/Users/googler/OneDrive/Desktop/Projects/pc-rent/server/.env*)",
       "Bash(ls c:/Users/googler/OneDrive/Desktop/Projects/pc-rent/.env*)",
-      "Bash(wc -l api/routers/render_groups.py scheduling/frame_distributor.py scheduling/dispatch_coordinator.py scheduling/strategies/*.py)"
+      "Bash(wc -l api/routers/render_groups.py scheduling/frame_distributor.py scheduling/dispatch_coordinator.py scheduling/strategies/*.py)",
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('src/services/api.js','utf8'\\); console.log\\('OK'\\)\")",
+      "Bash(node --check c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/hooks/useJobs.js)",
+      "Bash(grep -rn \"/jobs/request-upload\\\\|/jobs/.*/confirm-upload\\\\|/jobs/.*/multipart\\\\|/jobs/' \\\\+ \\\\|\\\\\"\\\\\\\\/jobs\\\\\\\\/\\\\\"\" c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/ --include=\"*.py\" --include=\"*.js\" --include=\"*.jsx\")",
+      "Bash(node --check c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/services/api.js)"
     ]
   }
 }

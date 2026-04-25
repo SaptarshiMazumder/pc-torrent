@@ -12,7 +12,7 @@ are handled directly by ``CallbackRouter`` and do not pass through here.
 All decisions (stale-signal guard, retry-attempt limit, cancellation
 teardown order) live here.  Grunt work is delegated:
 
-    FrameAllocator       — picks machines for chunks (initial + retry)
+    FrameAllocator       — picks fleet targets for chunks (initial + retry)
     DispatchCoordinator  — drains the queue, claims the ledger, dispatches
     GroupStatusAggregator (pure function) — computes group-level status
 
@@ -26,9 +26,9 @@ import logging
 from typing import Any, Callable
 
 from serverV2.core.models import (
+    AvailableResources,
     DispatchContext,
     DispatchResult,
-    Machine,
     PlannedTask,
     RenderJob,
 )
@@ -40,7 +40,6 @@ from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 log = logging.getLogger(__name__)
@@ -48,31 +47,36 @@ log = logging.getLogger(__name__)
 
 class RenderLifecycle:
 
+    # Heuristic thresholds for picking the FastRender strategy over the
+    # Default one.  Either condition (heavy file OR many frames) is enough.
+    _FAST_RENDER_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024   # 2 GB
+    _FAST_RENDER_TOTAL_FRAMES = 30
+
     def __init__(
         self,
         *,
-        allocator: FrameAllocator,
+        default_strategy: FrameAllocator,
+        fast_render_strategy: FrameAllocator,
         coordinator: DispatchCoordinator,
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
-        machine_repo: MachineRepository,
         queue_repo: DispatchQueueRepository,
         in_progress_repo: InProgressChunkRepository,
         fleet_registry: FleetRegistry,
-        machine_picker: Callable[[], list[Machine]],
+        resource_picker: Callable[[], AvailableResources],
     ) -> None:
-        self._allocator = allocator
+        self._default_strategy = default_strategy
+        self._fast_render_strategy = fast_render_strategy
         self._coordinator = coordinator
         self._job_repo = job_repo
         self._group_repo = group_repo
-        self._machine_repo = machine_repo
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
         self._fleet = fleet_registry
-        self._machine_picker = machine_picker
+        self._resource_picker = resource_picker
 
     # ------------------------------------------------------------------
-    # Planning — split frames across machines (no dispatch)
+    # Planning — split frames across fleet targets (no dispatch)
     # ------------------------------------------------------------------
 
     def plan(
@@ -82,15 +86,55 @@ class RenderLifecycle:
         frame_end: int,
         frame_step: int,
         total_frames: int,
-        machines: list[Machine],
+        machine_ids: list[str] | None = None,
+        file_size_bytes: int | None = None,
     ) -> list[PlannedTask]:
-        return self._allocator.allocate_initial(
+        resources = self._resource_picker()
+        raw_community = len(resources.community_machines)
+        raw_caps_by_fleet: dict[str, int] = {}
+        for cap in resources.serverless_capabilities:
+            raw_caps_by_fleet[cap.fleet] = raw_caps_by_fleet.get(cap.fleet, 0) + 1
+        pinned = bool(machine_ids)
+        if pinned:
+            # User pinned specific community machines.  Filter the pool
+            # accordingly and drop serverless capabilities entirely.
+            wanted = set(machine_ids)
+            resources = AvailableResources(
+                community_machines=[
+                    m for m in resources.community_machines if m.id in wanted
+                ],
+                serverless_capabilities=[],
+                serverless_in_flight=resources.serverless_in_flight,
+            )
+        strategy = self._pick_strategy(file_size_bytes, total_frames)
+        tasks = strategy.allocate_initial(
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
             total_frames=total_frames,
-            machines=machines,
+            resources=resources,
+            file_size_bytes=file_size_bytes,
         )
+        log.info(
+            "plan: strategy=%s pinned=%s raw_community=%d raw_caps=%s "
+            "after_filter_community=%d after_filter_caps=%d in_flight=%s "
+            "total_frames=%d file_size_bytes=%s -> tasks=%d",
+            type(strategy).__name__, pinned, raw_community, raw_caps_by_fleet,
+            len(resources.community_machines), len(resources.serverless_capabilities),
+            dict(resources.serverless_in_flight), total_frames, file_size_bytes,
+            len(tasks),
+        )
+        return tasks
+
+    def _pick_strategy(
+        self, file_size_bytes: int | None, total_frames: int,
+    ) -> FrameAllocator:
+        size_known = file_size_bytes is not None and file_size_bytes > 0
+        is_heavy = size_known and file_size_bytes >= self._FAST_RENDER_FILE_SIZE_BYTES
+        is_long = total_frames >= self._FAST_RENDER_TOTAL_FRAMES
+        if is_heavy or is_long:
+            return self._fast_render_strategy
+        return self._default_strategy
 
     # ------------------------------------------------------------------
     # Story 1: user submitted a render
@@ -170,6 +214,21 @@ class RenderLifecycle:
         frame_start, frame_end = remaining
         total_frames = ((frame_end - frame_start) // rj.frame_step) + 1
 
+        # Anti-affinity: don't retry on the same fleet/gpu_type or
+        # community machine that just failed.
+        excluded_caps, excluded_ids = self._exclusions_for(raw)
+
+        # Load heaviness signal from the group so the retry strategy
+        # can size + filter the same way as initial allocation.
+        file_size_bytes: int | None = None
+        if grp is not None:
+            raw_size = grp.get("r2_input_size_bytes")
+            if raw_size is not None:
+                try:
+                    file_size_bytes = int(raw_size)
+                except (TypeError, ValueError):
+                    file_size_bytes = None
+
         chunk_request = ChunkRequest(
             group_id=group_id,
             chunk_index=chunk_index,
@@ -178,19 +237,27 @@ class RenderLifecycle:
             frame_step=rj.frame_step,
             total_frames=total_frames,
             attempt=next_attempt,
+            excluded_machine_ids=excluded_ids,
+            excluded_serverless_capabilities=excluded_caps,
+            file_size_bytes=file_size_bytes,
         )
-        retry_task = self._allocator.allocate_retry(chunk_request, self._machine_picker())
+        retry_strategy = self._pick_strategy(file_size_bytes, total_frames)
+        retry_task = retry_strategy.allocate_retry(chunk_request, self._resource_picker())
         if retry_task is None:
             log.error(
-                "Job %s: no eligible machine for retry of frames %d-%d (group %s)",
+                "Job %s: no eligible target for retry of frames %d-%d (group %s)",
                 job_id, frame_start, frame_end, group_id,
             )
             return False
 
+        target_label = (
+            f"{retry_task.fleet}/{retry_task.gpu_type}"
+            if retry_task.gpu_type
+            else f"{retry_task.fleet}/{retry_task.machine_id}"
+        )
         log.info(
-            "Job %s: requeued frames %d-%d (attempt %d/%d) on machine %s",
-            job_id, frame_start, frame_end, next_attempt, MAX_RETRIES,
-            retry_task.machine_id,
+            "Job %s: requeued frames %d-%d (attempt %d/%d) on %s",
+            job_id, frame_start, frame_end, next_attempt, MAX_RETRIES, target_label,
         )
 
         overrides_b64 = base64.b64encode(
@@ -223,8 +290,8 @@ class RenderLifecycle:
 
         # 2. Stop monitor threads so they stop acting on this group
         for job in jobs:
-            mt = self._machine_repo.get_type(job["machine_id"])
-            strategy = self._fleet.get(mt)
+            fleet = job.get("machine_type") or ""
+            strategy = self._fleet.get(fleet)
             if strategy:
                 strategy.stop_monitoring(job["id"])
 
@@ -236,17 +303,55 @@ class RenderLifecycle:
 
         # 4. Cancel provider-side jobs (Modal function calls, Vast instances)
         for job in jobs:
-            mt = self._machine_repo.get_type(job["machine_id"])
-            strategy = self._fleet.get(mt)
-            if not strategy or not strategy.is_enabled():
+            job_id = job["id"]
+            fleet = job.get("machine_type") or ""
+            strategy = self._fleet.get(fleet)
+            if not strategy:
+                log.warning(
+                    "cancel %s: no strategy for fleet=%r — provider job not cancelled",
+                    job_id, fleet,
+                )
+                continue
+            if not strategy.is_enabled():
+                log.warning(
+                    "cancel %s: fleet %s disabled — provider job not cancelled",
+                    job_id, fleet,
+                )
                 continue
             pid = strategy.provider_job_id_from_job(job)
             if not pid:
+                log.warning(
+                    "cancel %s: fleet=%s has no provider_job_id stored — cannot cancel provider-side",
+                    job_id, fleet,
+                )
                 continue
             try:
-                strategy.cancel(pid, job["machine_id"])
+                strategy.cancel(pid)
+                log.info("cancel %s: fleet=%s pid=%s — cancel call returned", job_id, fleet, pid)
             except Exception as exc:
-                log.warning("Failed to cancel provider job %s: %s", pid, exc)
+                log.warning(
+                    "cancel %s: fleet=%s pid=%s raised %s: %s",
+                    job_id, fleet, pid, type(exc).__name__, exc,
+                )
 
         log.info("Group %s: cancelled %d jobs", group_id, len(jobs))
         return {"cancelled_jobs": len(jobs)}
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _exclusions_for(
+        job_row: dict[str, Any],
+    ) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+        """Return ``(excluded_serverless_capabilities, excluded_machine_ids)``
+        for anti-affinity on retry."""
+        fleet = (job_row.get("machine_type") or "").strip()
+        gpu_type = (job_row.get("gpu_type") or "").strip()
+        machine_id = (job_row.get("machine_id") or "").strip()
+        if fleet in ("modal_serverless", "vast_serverless") and gpu_type:
+            return ((fleet, gpu_type),), ()
+        if machine_id:
+            return (), (machine_id,)
+        return (), ()

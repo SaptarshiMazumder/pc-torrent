@@ -150,14 +150,25 @@ class ModalClient:
 
     def cancel_job(self, provider_job_id: str) -> None:
         if not provider_job_id.startswith("fc-"):
-            log.warning("Cannot cancel synthetic Modal id %s", provider_job_id)
+            log.warning(
+                "Cannot cancel Modal id %s — does not start with 'fc-' "
+                "(dispatch likely returned empty body, no function_call_id captured)",
+                provider_job_id,
+            )
             return
         try:
             import modal
+        except Exception as exc:
+            log.error("modal import failed during cancel of %s: %s", provider_job_id, exc)
+            return
+        try:
             modal.functions.FunctionCall.from_id(provider_job_id).cancel()
             log.info("Cancelled Modal call %s", provider_job_id)
         except Exception as exc:
-            log.warning("Failed to cancel Modal call %s: %s", provider_job_id, exc)
+            log.warning(
+                "Modal cancel %s raised %s: %s",
+                provider_job_id, type(exc).__name__, exc,
+            )
 
     def get_job_status(self, provider_job_id: str) -> dict[str, Any] | None:
         return None

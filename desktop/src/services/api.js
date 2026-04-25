@@ -309,53 +309,8 @@ export async function deleteInputFile(baseUrl, assetId) {
   });
 }
 
-export async function listJobs(baseUrl) {
-  return apiFetch(baseUrl, "/jobs");
-}
-
 export async function listRenderGroups(baseUrl) {
   return apiFetch(baseUrl, "/render-groups");
-}
-
-export async function submitJob(baseUrl, machineId, file, onProgress, signal = null) {
-  const requestInfo = await apiFetch(baseUrl, "/jobs/request-upload", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      machine_id: machineId,
-      filename: file.name,
-      file_size_bytes: file.size,
-    }),
-    signal,
-  });
-  const jobId = requestInfo.job_id;
-
-  try {
-    await uploadMultipartInput(baseUrl, "jobs", jobId, file, onProgress, signal);
-  } catch (error) {
-    const canFallback =
-      typeof requestInfo.upload_url === "string" &&
-      file.size <= Number(requestInfo.single_put_max_bytes || 5 * 1024 * 1024 * 1024) &&
-      isMultipartEndpointMissing(error);
-    if (!canFallback) throw error;
-    await uploadFileToPresignedUrl(requestInfo.upload_url, file, onProgress, signal);
-    if (onProgress) onProgress(100);
-  }
-
-  await apiFetch(baseUrl, `/jobs/${jobId}/confirm-upload`, { method: "POST", signal });
-  return { job_id: jobId, status: "pending" };
-}
-
-export async function getJob(baseUrl, jobId) {
-  return apiFetch(baseUrl, `/jobs/${jobId}`);
-}
-
-export function downloadUrl(baseUrl, jobId) {
-  return `${normalizeBaseUrl(baseUrl)}/jobs/${jobId}/download`;
-}
-
-export function jobOutputsUrl(baseUrl, jobId) {
-  return `${normalizeBaseUrl(baseUrl)}/jobs/${jobId}/outputs`;
 }
 
 export async function createDistributedRenderGroup(
@@ -433,10 +388,6 @@ export async function getRenderGroupOutputs(baseUrl, groupId) {
   return apiFetch(baseUrl, `/render-groups/${groupId}/outputs`);
 }
 
-export async function getJobOutputs(baseUrl, jobId) {
-  return apiFetch(baseUrl, `/jobs/${jobId}/outputs`);
-}
-
 export async function cancelRenderGroup(baseUrl, groupId) {
   return apiFetch(baseUrl, `/render-groups/${groupId}/cancel`, { method: "POST" });
 }
@@ -458,10 +409,6 @@ export async function rerenderGroup(baseUrl, groupId, { frameStart, frameEnd, fr
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-}
-
-export async function deleteJob(baseUrl, jobId) {
-  return apiFetch(baseUrl, `/jobs/${jobId}`, { method: "DELETE" });
 }
 
 export async function deleteRenderGroup(baseUrl, groupId) {

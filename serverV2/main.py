@@ -63,14 +63,14 @@ def on_startup() -> None:
 
     _wire_routers(_container)
 
-    # Background daemons must only run on ONE Cloud Run instance.  Machine
-    # registration still happens on every instance (it's an idempotent upsert),
-    # but heartbeats, recovery, and the failover scanner are leader-only.
-    _register_all_machines(_container)
-
+    # Background daemons must only run on ONE Cloud Run instance.  After
+    # the allocator redesign, Modal and Vast no longer have machine
+    # registrars / heartbeat threads — their capacity is described in
+    # config.json and they're elastic at dispatch time.  Recovery and the
+    # community monitor remain leader-only.
     if try_acquire_leader_lock():
-        _start_heartbeats(_container)
         _run_recovery(_container)
+        _drain_queues_after_recovery(_container)
         _container.community_monitor.start()
         log.info("ServerV2 startup complete (leader)")
     else:
@@ -90,7 +90,7 @@ def _wire_routers(c: Container) -> None:
     )
 
     machines.init(c.machine_service, machine_repo=c.machine_repo)
-    jobs.init(c.job_service, c.upload_coordinator)
+    jobs.init(c.job_service)
     render_groups.init(c.render_group_service, c.upload_coordinator)
     assets.init(c.asset_service)
     debug.init(aggregator=c.status_aggregator)
@@ -105,30 +105,6 @@ def _wire_routers(c: Container) -> None:
     app.include_router(debug.router)
 
 
-def _register_all_machines(c: Container) -> None:
-    try:
-        c.vast_registrar.register_all()
-    except Exception as exc:
-        log.warning("Vast machine registration failed: %s", exc)
-
-    try:
-        c.modal_registrar.register_all()
-    except Exception as exc:
-        log.warning("Modal machine registration failed: %s", exc)
-
-
-def _start_heartbeats(c: Container) -> None:
-    try:
-        c.vast_registrar.start_heartbeat()
-    except Exception as exc:
-        log.warning("Vast heartbeat thread failed to start: %s", exc)
-
-    try:
-        c.modal_registrar.start_heartbeat()
-    except Exception as exc:
-        log.warning("Modal heartbeat thread failed to start: %s", exc)
-
-
 def _run_recovery(c: Container) -> None:
     try:
         c.vast_recovery.recover()
@@ -139,3 +115,16 @@ def _run_recovery(c: Container) -> None:
         c.modal_recovery.recover()
     except Exception as exc:
         log.warning("Modal recovery failed: %s", exc)
+
+
+def _drain_queues_after_recovery(c: Container) -> None:
+    """Catch the post-restart edge case where queued items were left
+    behind by the previous process.  If no active job exists to fire a
+    drain trigger, those rows would sit forever — kick the drain once
+    per enabled fleet at boot.
+    """
+    for fleet in c.fleet_registry.enabled_fleets():
+        try:
+            c.dispatch_coordinator.drain_for_fleet(fleet)
+        except Exception as exc:
+            log.warning("Boot-time drain for %s failed: %s", fleet, exc)

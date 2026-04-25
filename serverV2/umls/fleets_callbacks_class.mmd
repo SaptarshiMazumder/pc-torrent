@@ -1,0 +1,151 @@
+%% Clean architecture overview for fleet orchestration + callbacks.
+%% Intentionally simplified: module-level classes and direct dependencies only.
+%% Paste into draw.io: Arrange -> Insert -> Advanced -> Mermaid.
+
+classDiagram
+    direction LR
+
+    namespace Core {
+        class AvailableResources
+        class PlannedTask
+        class ChunkRequest
+    }
+
+    namespace Orchestration {
+        class RenderOrchestrator {
+            +plan()
+            +execute()
+            +on_job_failed()
+            +cancel_group()
+        }
+
+        class RenderLifecycle {
+            +plan()
+            +start_render()
+            +handle_chunk_failure()
+            +cancel_render()
+        }
+    }
+
+    namespace Allocation {
+        class FrameAllocator {
+            <<interface>>
+            +allocate_initial()
+            +allocate_retry()
+        }
+
+        class DefaultAllocationStrategy
+        class FastRenderAllocationStrategy
+    }
+
+    namespace Dispatch {
+        class DispatchCoordinator {
+            +enqueue_and_flush()
+            +drain_for_fleet()
+        }
+
+        class Dispatcher {
+            +dispatch_one()
+        }
+
+        class DispatchQueueRepository
+        class InProgressChunkRepository
+        class JobRepository
+        class RenderGroupRepository
+        class MachineRepository
+    }
+
+    namespace Fleets {
+        class FleetRegistry {
+            +get_or_raise()
+            +is_enabled()
+            +min_frames_per_instance()
+        }
+
+        class IFleetStrategy {
+            <<interface>>
+            +dispatch()
+            +cancel()
+            +stop_monitoring()
+        }
+
+        class ModalFleetStrategy
+        class VastFleetStrategy
+        class CommunityStrategy
+    }
+
+    namespace Monitoring {
+        class ModalCallbackHandler
+        class VastCallbackHandler
+        class ModalJobMonitor
+        class VastInstanceMonitor
+        class CommunityMonitor
+        class InstanceRegistry
+    }
+
+    namespace Callbacks {
+        class CallbackRouter {
+            +route()
+        }
+
+        class SuccessHandler {
+            +handle()
+        }
+
+        class FailureHandler {
+            +handle()
+        }
+    }
+
+    RenderOrchestrator --> RenderLifecycle
+
+    RenderLifecycle --> FrameAllocator
+    DefaultAllocationStrategy ..|> FrameAllocator
+    FastRenderAllocationStrategy ..|> FrameAllocator
+    DefaultAllocationStrategy --> FleetRegistry
+    FastRenderAllocationStrategy --> FleetRegistry
+    FrameAllocator ..> AvailableResources
+    FrameAllocator ..> PlannedTask
+    FrameAllocator ..> ChunkRequest
+
+    RenderLifecycle --> DispatchCoordinator
+    RenderLifecycle --> InProgressChunkRepository
+    RenderLifecycle --> JobRepository
+    RenderLifecycle --> RenderGroupRepository
+    RenderLifecycle --> MachineRepository
+
+    DispatchCoordinator --> Dispatcher
+    DispatchCoordinator --> DispatchQueueRepository
+    DispatchCoordinator --> InProgressChunkRepository
+    DispatchCoordinator --> JobRepository
+    Dispatcher --> FleetRegistry
+    Dispatcher ..> PlannedTask
+
+    FleetRegistry o-- IFleetStrategy
+    ModalFleetStrategy ..|> IFleetStrategy
+    VastFleetStrategy ..|> IFleetStrategy
+    CommunityStrategy ..|> IFleetStrategy
+
+    ModalFleetStrategy --> ModalCallbackHandler
+    VastFleetStrategy --> VastCallbackHandler
+
+    ModalCallbackHandler --> ModalJobMonitor
+    VastCallbackHandler --> VastInstanceMonitor
+    ModalJobMonitor --> InstanceRegistry
+    VastInstanceMonitor --> InstanceRegistry
+
+    ModalJobMonitor --> CallbackRouter
+    VastInstanceMonitor --> CallbackRouter
+    CommunityMonitor --> CallbackRouter
+
+    CallbackRouter --> SuccessHandler
+    CallbackRouter --> FailureHandler
+    SuccessHandler --> InProgressChunkRepository
+    SuccessHandler --> JobRepository
+    SuccessHandler --> RenderGroupRepository
+    SuccessHandler --> DispatchCoordinator
+
+    FailureHandler --> JobRepository
+    FailureHandler --> RenderGroupRepository
+    FailureHandler --> DispatchCoordinator
+    FailureHandler --> RenderOrchestrator

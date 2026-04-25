@@ -10,38 +10,62 @@ from serverV2.core.enums import JobStatus, SERVERLESS_TYPE_VALUES
 
 
 # ---------------------------------------------------------------------------
-# Machine
+# CommunityMachine — a real desktop with stable identity owned by a user.
+# Persisted as a row in the `machines` table.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class Machine:
+class CommunityMachine:
     id: str
-    machine_type: str
     gpu_model: str
-    gpu_vram_gb: float
+    vram_gb: float
     cpu_cores: int
     ram_gb: float
+    render_speed: float
     status: str
-    render_speed: float = 1.0
-    last_seen_at: str | None = None
+    last_seen_at: str | None
 
     @classmethod
-    def from_row(cls, row: dict[str, Any]) -> Machine:
+    def from_row(cls, row: dict[str, Any]) -> CommunityMachine:
         return cls(
             id=row["id"],
-            machine_type=row.get("machine_type", "windows"),
             gpu_model=row.get("gpu_model", "Unknown"),
-            gpu_vram_gb=row.get("gpu_vram_gb") or 0,
+            vram_gb=row.get("gpu_vram_gb") or 0,
             cpu_cores=row.get("cpu_cores") or 0,
             ram_gb=row.get("ram_gb") or 0,
-            status=row.get("status", "idle"),
             render_speed=row.get("render_speed") or 1.0,
+            status=row.get("status", "idle"),
             last_seen_at=row.get("last_seen_at"),
         )
 
-    @property
-    def is_serverless(self) -> bool:
-        return self.machine_type in SERVERLESS_TYPE_VALUES
+
+# ---------------------------------------------------------------------------
+# FleetCapability — "we can provision N of this kind of serverless machine."
+# Built at runtime from config.json + live in-flight count; never persisted.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FleetCapability:
+    fleet: str               # "modal_serverless" | "vast_serverless"
+    gpu_type: str            # "h100", "rtx_a6000", etc. — used for routing
+    label: str
+    vram_gb: float
+    cpu_cores: int
+    ram_gb: float
+    render_speed: float
+    fleet_max_parallel: int
+
+
+# ---------------------------------------------------------------------------
+# AvailableResources — what the allocator is given to plan against.
+# Built per-allocation by RenderLifecycle._resource_picker.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class AvailableResources:
+    community_machines: list[CommunityMachine]
+    serverless_capabilities: list[FleetCapability]
+    serverless_in_flight: dict[str, int]   # fleet -> count of pending+running
 
 
 # ---------------------------------------------------------------------------
@@ -146,20 +170,26 @@ class RenderJob:
 
 
 # ---------------------------------------------------------------------------
-# Planned Task (output of frame allocation)
+# Planned Task (output of frame allocation).
+#
+# `fleet` is the discriminant.  For community tasks `machine_id` is set
+# and `gpu_type` is None.  For serverless tasks `gpu_type` is set and
+# `machine_id` is None — the strategy provisions a fresh container at
+# dispatch time.  The dispatcher routes purely by `fleet`.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class PlannedTask:
-    machine_id: str
-    machine_type: str
-    gpu_model: str
-    gpu_vram_gb: float
+    fleet: str
+    label: str
+    vram_gb: float
+    render_speed: float
     frame_start: int
     frame_end: int
     frame_step: int
     total_frames: int
-    power_score: float
+    machine_id: str | None = None     # community fleet only
+    gpu_type: str | None = None       # serverless fleets only
     chunk_index: int | None = None
     attempt: int = 0
 
@@ -204,7 +234,7 @@ class GroupStatusResult:
 @dataclass(frozen=True)
 class CreateJobParams:
     job_id: str
-    machine_id: str
+    fleet: str                       # "community" | "modal_serverless" | "vast_serverless"
     group_id: str
     input_filename: str
     total_frames: int
@@ -212,6 +242,8 @@ class CreateJobParams:
     frame_end: int
     frame_step: int
     render_overrides_json: str
+    machine_id: str | None = None    # community only
+    gpu_type: str | None = None      # serverless only
     max_retries: int = 0
     priority: int = 0
     chunk_index: int | None = None

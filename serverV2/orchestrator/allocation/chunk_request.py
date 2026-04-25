@@ -18,6 +18,15 @@ class ChunkRequest:
     frame_step: int
     total_frames: int
     attempt: int
-    # Extensibility fields for future allocation rules.
-    user_id: str | None = None
+    # Anti-affinity on retry.  Strategies must filter these out:
+    #   * ``excluded_machine_ids``           — community fleet
+    #   * ``excluded_serverless_capabilities`` — pairs of (fleet, gpu_type)
     excluded_machine_ids: tuple[str, ...] = field(default_factory=tuple)
+    excluded_serverless_capabilities: tuple[tuple[str, str], ...] = field(
+        default_factory=tuple
+    )
+    # Heaviness signal for FastRender-style strategies on retry.  ``None``
+    # means heaviness is unknown (legacy rows pre-Phase-3).
+    file_size_bytes: int | None = None
+    # Extensibility for future allocation rules (tier, price caps, ...).
+    user_id: str | None = None

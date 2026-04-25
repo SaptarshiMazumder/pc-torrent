@@ -1,16 +1,19 @@
 """DispatchCoordinator — the mechanical plumbing behind a dispatch.
 
-Given a list of fully-allocated ``PlannedTask`` (machine already chosen by
-the allocator), this drains the dispatch queue, pre-generates job ids,
-claims the in-progress ledger, and routes each task through the
-``Dispatcher``.
+After Phase 2 of the allocator redesign, the coordinator is also the
+gatekeeper for fleet-cap enforcement: tasks that don't fit within the
+target fleet's headroom sit in the DB-backed ``dispatch_queue`` and are
+drained later by event-driven calls to :meth:`drain_for_fleet` from the
+success/failure handlers.
 
-Makes no allocation decisions and no retry decisions.  Pure plumbing.
+Makes no allocation decisions and no retry decisions.  Pure plumbing
+plus capacity gating.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Callable
 from uuid import uuid4
 
 from serverV2.core.models import DispatchContext, DispatchResult, PlannedTask
@@ -21,6 +24,7 @@ from serverV2.repositories.dispatch_queue_repository import (
     QueueItem,
 )
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
+from serverV2.repositories.job_repository import JobRepository
 
 log = logging.getLogger(__name__)
 
@@ -34,11 +38,19 @@ class DispatchCoordinator:
         in_progress_repo: InProgressChunkRepository,
         dispatcher: Dispatcher,
         blend_url_resolver: BlendUrlResolver,
+        job_repo: JobRepository,
+        fleet_cap_lookup: Callable[[str], int],
     ) -> None:
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
         self._dispatcher = dispatcher
         self._blend_url = blend_url_resolver
+        self._job_repo = job_repo
+        self._fleet_cap_lookup = fleet_cap_lookup
+
+    # ------------------------------------------------------------------
+    # initial dispatch (called by lifecycle.start_render and retry path)
+    # ------------------------------------------------------------------
 
     def enqueue_and_flush(
         self,
@@ -46,79 +58,144 @@ class DispatchCoordinator:
         tasks: list[PlannedTask],
         context: DispatchContext,
     ) -> list[DispatchResult]:
-        """Enqueue queue items for the given tasks, then dispatch all of them.
+        """Enqueue tasks, then dispatch as many as the per-fleet cap allows.
 
-        Each ``PlannedTask`` arrives with its machine already chosen by the
-        allocator; this method does not select machines.
+        Tasks that don't fit stay in the queue tagged by ``fleet`` and are
+        drained later by :meth:`drain_for_fleet` when a job ends.
         """
-        items = [
-            QueueItem(
-                frame_start=t.frame_start,
-                frame_end=t.frame_end,
-                frame_step=t.frame_step,
-                total_frames=t.total_frames,
-                chunk_index=t.chunk_index,
-                attempt=t.attempt,
-            )
-            for t in tasks
-        ]
-        self._queue_repo.enqueue_all(group_id, items)
-        return self._flush(group_id, context, tasks)
+        for t in tasks:
+            self._queue_repo.enqueue(group_id, _queue_item_for(t, context))
 
-    def _flush(
-        self,
-        group_id: str,
-        context: DispatchContext,
-        tasks: list[PlannedTask],
-    ) -> list[DispatchResult]:
+        in_flight = dict(self._job_repo.count_active_by_fleet())
         results: list[DispatchResult] = []
-        idx = 0
+        for t in tasks:
+            cap = self._fleet_cap_lookup(t.fleet)
+            current = in_flight.get(t.fleet, 0)
+            if current >= cap:
+                log.info(
+                    "Group %s: %s at cap (%d/%d) — chunk %s queued",
+                    group_id, t.fleet, current, cap, t.chunk_index,
+                )
+                continue
+            popped = self._queue_repo.dequeue_for_fleet(t.fleet)
+            if popped is None:
+                continue
+            in_flight[t.fleet] = current + 1
+            result = self._dispatch_queue_item(popped, group_id_hint=group_id)
+            if result is not None:
+                results.append(result)
+        return results
 
+    # ------------------------------------------------------------------
+    # event-driven drain (called by SuccessHandler / FailureHandler)
+    # ------------------------------------------------------------------
+
+    def drain_for_fleet(self, fleet: str) -> int:
+        """Pull queued items targeting ``fleet`` and dispatch as many as
+        the current cap allows.  Returns the number dispatched.
+        """
+        cap = self._fleet_cap_lookup(fleet)
+        dispatched = 0
         while True:
-            item = self._queue_repo.dequeue(group_id)
+            current = self._job_repo.count_active_by_fleet().get(fleet, 0)
+            if current >= cap:
+                break
+            item = self._queue_repo.dequeue_for_fleet(fleet)
             if item is None:
                 break
+            result = self._dispatch_queue_item(item)
+            if result is not None:
+                dispatched += 1
+        if dispatched:
+            log.info("drain_for_fleet(%s): dispatched %d queued chunk(s)", fleet, dispatched)
+        return dispatched
 
-            if idx >= len(tasks):
-                log.warning(
-                    "Group %s: dequeued an item with no matching task (idx=%d). "
-                    "Dropping it — this should not happen.", group_id, idx,
-                )
-                break
-            task = tasks[idx]
-            idx += 1
+    # ------------------------------------------------------------------
+    # internals
+    # ------------------------------------------------------------------
 
-            blend_url = self._blend_url.resolve(
-                task.machine_type, context.group_id, context.input_filename,
+    def _dispatch_queue_item(
+        self, item: QueueItem, *, group_id_hint: str | None = None,
+    ) -> DispatchResult | None:
+        group_id = group_id_hint or item.group_id
+        if not group_id:
+            log.warning(
+                "Queue item missing group_id (chunk %s) — dropping",
+                item.chunk_index,
             )
-            dispatch_ctx = DispatchContext(
-                group_id=context.group_id,
-                input_filename=context.input_filename,
-                render_overrides_b64=context.render_overrides_b64,
-                blend_url=blend_url,
-                max_retries=context.max_retries,
-                priority=context.priority,
+            return None
+
+        task = _task_from_queue_item(item)
+        blend_url = self._blend_url.resolve(task.fleet, group_id, item.input_filename)
+        dispatch_ctx = DispatchContext(
+            group_id=group_id,
+            input_filename=item.input_filename,
+            render_overrides_b64=item.render_overrides_b64,
+            blend_url=blend_url,
+            max_retries=item.max_retries,
+            priority=item.priority,
+        )
+
+        # Pre-generate job_id + claim the in-progress ledger BEFORE dispatch
+        # so the retry chain's stale-signal guard can deduplicate correctly
+        # if dispatch fails synchronously.
+        job_id = str(uuid4())
+        self._in_progress.claim_or_replace(
+            group_id=group_id,
+            chunk_index=task.chunk_index or 0,
+            job_id=job_id,
+            attempt=task.attempt,
+        )
+
+        try:
+            return self._dispatcher.dispatch_one(task, dispatch_ctx, job_id=job_id)
+        except Exception as exc:
+            log.error(
+                "Dispatch failed for frames %d-%d (group %s): %s",
+                task.frame_start, task.frame_end, group_id, exc,
             )
+            return None
 
-            # Pre-generate job_id and claim the chunk in the in-progress
-            # ledger BEFORE dispatch.  If the strategy's synchronous failure
-            # path fires during dispatch, the retry chain's stale-signal
-            # guard can see this claim and deduplicate correctly.
-            job_id = str(uuid4())
-            self._in_progress.claim_or_replace(
-                group_id=context.group_id,
-                chunk_index=task.chunk_index or 0,
-                job_id=job_id,
-                attempt=task.attempt,
-            )
 
-            try:
-                result = self._dispatcher.dispatch_one(task, dispatch_ctx, job_id=job_id)
-                results.append(result)
-            except Exception as exc:
-                log.error(
-                    "Dispatch failed for frames %d-%d (group %s): %s",
-                    task.frame_start, task.frame_end, group_id, exc,
-                )
+# ----------------------------------------------------------------------
+# helpers (module-level so they don't pollute the class)
+# ----------------------------------------------------------------------
 
-        return results
+def _queue_item_for(task: PlannedTask, context: DispatchContext) -> QueueItem:
+    return QueueItem(
+        frame_start=task.frame_start,
+        frame_end=task.frame_end,
+        frame_step=task.frame_step,
+        total_frames=task.total_frames,
+        fleet=task.fleet,
+        label=task.label,
+        vram_gb=task.vram_gb,
+        render_speed=task.render_speed,
+        gpu_type=task.gpu_type,
+        machine_id=task.machine_id,
+        input_filename=context.input_filename,
+        render_overrides_b64=context.render_overrides_b64,
+        max_retries=context.max_retries,
+        priority=context.priority,
+        attempt=task.attempt,
+        chunk_index=task.chunk_index,
+    )
+
+
+def _task_from_queue_item(item: QueueItem) -> PlannedTask:
+    return PlannedTask(
+        fleet=item.fleet,
+        machine_id=item.machine_id,
+        gpu_type=item.gpu_type,
+        label=item.label,
+        vram_gb=item.vram_gb,
+        render_speed=item.render_speed,
+        frame_start=item.frame_start,
+        frame_end=item.frame_end,
+        frame_step=item.frame_step,
+        total_frames=item.total_frames,
+        chunk_index=item.chunk_index,
+        attempt=item.attempt,
+    )
+
+

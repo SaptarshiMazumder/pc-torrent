@@ -1,11 +1,17 @@
-"""MachineRepository — all SQL for the ``machines`` table."""
+"""MachineRepository — all SQL for the ``machines`` table.
+
+After Phase 1 of the allocator redesign, this repository is community-only.
+Modal and Vast capabilities live in config.json and are never persisted as
+machine rows.  Any leftover serverless rows from before the migration are
+filtered out by ``machine_type = 'windows'`` on every query.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
 from serverV2.infrastructure.db import execute, query_all, query_one
-from serverV2.core.models import Machine
+from serverV2.core.models import CommunityMachine
 
 
 class MachineRepository:
@@ -13,13 +19,13 @@ class MachineRepository:
     def __init__(self, stale_seconds: int = 15) -> None:
         self._stale_seconds = stale_seconds
 
-    def get_available(self) -> list[Machine]:
+    def get_available_community(self) -> list[CommunityMachine]:
         cutoff = self._cutoff()
         execute(
             """
             UPDATE machines SET status = 'idle'
             WHERE status = 'available'
-              AND machine_type NOT IN ('modal_serverless', 'vast_serverless')
+              AND machine_type = 'windows'
               AND (last_seen_at IS NULL OR last_seen_at < %s)
             """,
             (cutoff,),
@@ -28,30 +34,31 @@ class MachineRepository:
             """
             SELECT * FROM machines
             WHERE status = 'available'
-              AND (machine_type IN ('modal_serverless', 'vast_serverless')
-                   OR last_seen_at >= %s)
+              AND machine_type = 'windows'
+              AND last_seen_at >= %s
             ORDER BY gpu_vram_gb DESC
             """,
             (cutoff,),
         )
-        return [Machine.from_row(r) for r in rows]
+        return [CommunityMachine.from_row(r) for r in rows]
 
-    def get_by_id(self, machine_id: str) -> Machine | None:
-        row = query_one("SELECT * FROM machines WHERE id = %s", (machine_id,))
-        return Machine.from_row(row) if row else None
+    def get_by_id(self, machine_id: str) -> CommunityMachine | None:
+        row = query_one(
+            "SELECT * FROM machines WHERE id = %s AND machine_type = 'windows'",
+            (machine_id,),
+        )
+        return CommunityMachine.from_row(row) if row else None
 
     def get_raw_by_ids(self, machine_ids: list[str]) -> dict[str, dict]:
-        """Return raw rows keyed by machine id.  Missing ids are omitted."""
+        """Return raw rows keyed by machine id.  Missing ids are omitted.
+        Used by serializers that resolve ``jobs.machine_id`` → display label.
+        """
         if not machine_ids:
             return {}
         rows = query_all(
             "SELECT * FROM machines WHERE id = ANY(%s)", (list(machine_ids),),
         )
         return {r["id"]: r for r in rows}
-
-    def get_type(self, machine_id: str) -> str:
-        row = query_one("SELECT machine_type FROM machines WHERE id = %s", (machine_id,))
-        return row["machine_type"] if row else "windows"
 
     def set_processing(self, machine_id: str) -> None:
         execute("UPDATE machines SET status = 'processing' WHERE id = %s", (machine_id,))
@@ -68,18 +75,22 @@ class MachineRepository:
             """
             UPDATE machines SET status = 'idle'
             WHERE status = 'available'
-              AND machine_type NOT IN ('modal_serverless', 'vast_serverless')
+              AND machine_type = 'windows'
               AND (last_seen_at IS NULL OR last_seen_at < %s)
             """,
             (self._cutoff(),),
         )
 
-    def get_failover_candidates(self, exclude_machine_id: str) -> list[Machine]:
+    def get_failover_candidates(self, exclude_machine_id: str) -> list[CommunityMachine]:
         rows = query_all(
-            "SELECT * FROM machines WHERE status = 'available' AND id != %s ORDER BY gpu_vram_gb DESC",
+            """
+            SELECT * FROM machines
+            WHERE status = 'available' AND machine_type = 'windows' AND id != %s
+            ORDER BY gpu_vram_gb DESC
+            """,
             (exclude_machine_id,),
         )
-        return [Machine.from_row(r) for r in rows]
+        return [CommunityMachine.from_row(r) for r in rows]
 
     def _cutoff(self) -> str:
         return (datetime.now(timezone.utc) - timedelta(seconds=self._stale_seconds)).isoformat()

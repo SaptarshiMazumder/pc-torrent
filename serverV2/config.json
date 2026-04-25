@@ -1,5 +1,19 @@
 {
+  "modal": {
+    "max_parallel": 15
+  },
+  "vast": {
+    "max_parallel": 15
+  },
   "vast_instances": [
+    {
+      "gpu_name": "RTX 4090",
+      "label": "Vast RTX 4090 24GB",
+      "vram_gb": 24,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.45
+    },
     {
       "gpu_name": "RTX A6000",
       "label": "Vast RTX A6000 48GB",
@@ -27,11 +41,25 @@
   ],
   "modal_instances": [
     {
-      "gpu_type": "a10g",
-      "label": "Modal A10G 24GB",
+      "gpu_type": "l4",
+      "label": "Modal L4 24GB",
       "vram_gb": 24,
+      "cpu_cores": 8,
+      "ram_gb": 32
+    },
+    {
+      "gpu_type": "l40s",
+      "label": "Modal L40S 48GB",
+      "vram_gb": 48,
       "cpu_cores": 16,
-      "ram_gb": 64
+      "ram_gb": 96
+    },
+    {
+      "gpu_type": "h100",
+      "label": "Modal H100 80GB",
+      "vram_gb": 80,
+      "cpu_cores": 16,
+      "ram_gb": 192
     }
   ]
 }

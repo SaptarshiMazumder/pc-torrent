@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from serverV2.core.models import DispatchResult, Machine, PlannedTask
+from serverV2.core.models import DispatchResult, PlannedTask
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 
 
@@ -31,14 +31,26 @@ class RenderOrchestrator:
         frame_end: int,
         frame_step: int,
         total_frames: int,
-        machines: list[Machine],
+        machine_ids: list[str] | None = None,
+        file_size_bytes: int | None = None,
     ) -> list[PlannedTask]:
+        """Plan an initial allocation.
+
+        ``machine_ids``: when set, restrict allocation to those community
+        machines (serverless fleets are excluded — the user picked specific
+        boxes).  When None, the full pool of community machines + enabled
+        serverless capabilities is considered.
+
+        ``file_size_bytes``: blend file size, used as the heaviness signal
+        by FastRenderAllocationStrategy.  ``None`` falls back to Default.
+        """
         return self._lifecycle.plan(
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
             total_frames=total_frames,
-            machines=machines,
+            machine_ids=machine_ids,
+            file_size_bytes=file_size_bytes,
         )
 
     def execute(

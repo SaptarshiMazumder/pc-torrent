@@ -72,10 +72,10 @@ class VastConfig:
     startup_timeout_sec: float
     in_progress_stale_sec: float
     public_backend_url: str
-    workers_per_endpoint: int
     heartbeat_interval_sec: int
     heartbeat_timeout_sec: float
     heartbeat_grace_sec: float
+    max_parallel: int = 15
     endpoints: tuple[VastEndpoint, ...] = field(default_factory=tuple)
     api_base: str = "https://console.vast.ai/api/v0"
 
@@ -94,21 +94,40 @@ class VastConfig:
             startup_timeout_sec=_env_float("VAST_STARTUP_TIMEOUT_SEC", 300.0),
             in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 30 * 60),
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
-            workers_per_endpoint=_env_int("VAST_WORKERS_PER_ENDPOINT", 2),
             heartbeat_interval_sec=10,
             heartbeat_timeout_sec=_env_float("VAST_HEARTBEAT_TIMEOUT_SEC", 45.0),
             heartbeat_grace_sec=_env_float("VAST_HEARTBEAT_GRACE_SEC", 90.0),
+            max_parallel=_load_fleet_max_parallel("vast", config_json_path),
             endpoints=tuple(_parse_vast_endpoints(config_json_path)),
         )
 
 
-def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpoint]:
+def _load_config_json(config_json_path: str | None = None) -> dict:
     path = config_json_path or os.path.join(os.path.dirname(__file__), "config.json")
     try:
         with open(path, "r") as f:
-            cfg = json.load(f)
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         log.warning("Could not load %s: %s", path, exc)
+        return {}
+
+
+def _load_fleet_max_parallel(
+    fleet_key: str, config_json_path: str | None = None,
+) -> int:
+    """Read ``<fleet>.max_parallel`` from config.json.  Default 15 if absent."""
+    cfg = _load_config_json(config_json_path)
+    block = cfg.get(fleet_key) or {}
+    try:
+        value = int(block.get("max_parallel", 15))
+    except (TypeError, ValueError):
+        value = 15
+    return max(1, value)
+
+
+def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpoint]:
+    cfg = _load_config_json(config_json_path)
+    if not cfg:
         return []
     results: list[VastEndpoint] = []
     for entry in cfg.get("vast_instances", []):
@@ -152,7 +171,6 @@ class ModalConfig:
     app_name: str
     provisioning_enabled: bool
     public_backend_url: str
-    workers_per_endpoint: int
     heartbeat_interval_sec: int
     monitor_interval_sec: int
     dispatch_timeout_sec: float | None
@@ -160,6 +178,7 @@ class ModalConfig:
     in_progress_stale_sec: float
     endpoint_url_prefix: str
     workspace: str
+    max_parallel: int = 15
     endpoints: tuple[ModalEndpoint, ...] = field(default_factory=tuple)
 
     def is_enabled(self) -> bool:
@@ -190,7 +209,6 @@ class ModalConfig:
             app_name=_env_str("MODAL_APP_NAME", "pcrent-render"),
             provisioning_enabled=_env_bool("MODAL_PROVISIONING_ENABLED", True),
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
-            workers_per_endpoint=_env_int("MODAL_WORKERS_PER_ENDPOINT", 3),
             heartbeat_interval_sec=10,
             monitor_interval_sec=30,
             dispatch_timeout_sec=None if raw_timeout <= 0 else raw_timeout,
@@ -198,12 +216,20 @@ class ModalConfig:
             in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 30 * 60),
             endpoint_url_prefix=_env_str("MODAL_ENDPOINT_URL_PREFIX").strip().rstrip("/"),
             workspace=_env_str("MODAL_WORKSPACE").strip(),
+            max_parallel=_load_fleet_max_parallel("modal"),
             endpoints=tuple(_parse_modal_endpoints()),
         )
 
 def _normalize_gpu_type(gpu_type: str) -> str | None:
-    v = gpu_type.strip().lower()
-    return "a10g" if v in {"a10", "a10g"} else None
+    """Sanitize the gpu_type string from config.json into a Python-identifier
+    form usable as a Modal function-name suffix (and therefore URL path).
+    Returns None for empty/invalid input — the boot validator will catch
+    any typo by HTTP-404'ing the resulting endpoint URL.
+    """
+    v = gpu_type.strip().lower().replace("-", "_")
+    if not v or not all(c.isalnum() or c == "_" for c in v):
+        return None
+    return v
 
 
 def _parse_modal_endpoints(
@@ -213,12 +239,8 @@ def _parse_modal_endpoints(
     for the fleet — every required field (``gpu_type``, ``vram_gb``) MUST
     be present in the JSON entry; missing values raise at boot.
     """
-    path = config_json_path or os.path.join(os.path.dirname(__file__), "config.json")
-    try:
-        with open(path, "r") as f:
-            cfg = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        log.warning("Could not load %s: %s", path, exc)
+    cfg = _load_config_json(config_json_path)
+    if not cfg:
         return []
     results: list[ModalEndpoint] = []
     seen: set[str] = set()

@@ -1,10 +1,17 @@
-"""Pure function: score a machine's compute power for proportional frame splitting."""
+"""Pure function: score an allocatable target for proportional frame splitting.
+
+Duck-typed.  Accepts any object with ``vram_gb``, ``cpu_cores``, ``ram_gb``
+and ``render_speed`` attributes — works for ``CommunityMachine`` and
+``FleetCapability`` interchangeably.
+"""
 
 from __future__ import annotations
 
-from serverV2.core.models import Machine
 
-
-def compute_power_score(machine: Machine) -> float:
-    base = (machine.gpu_vram_gb * 2) + (machine.cpu_cores * 0.5) + (machine.ram_gb * 0.2)
-    return base * machine.render_speed
+def compute_power_score(target) -> float:
+    base = (
+        (target.vram_gb * 2)
+        + (target.cpu_cores * 0.5)
+        + (target.ram_gb * 0.2)
+    )
+    return base * target.render_speed

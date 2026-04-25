@@ -21,5 +21,5 @@ class Dispatcher:
         context: DispatchContext,
         job_id: str,
     ) -> DispatchResult:
-        strategy = self._registry.get_or_raise(task.machine_type)
+        strategy = self._registry.get_or_raise(task.fleet)
         return strategy.dispatch(task, context, job_id=job_id)

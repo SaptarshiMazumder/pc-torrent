@@ -1,6 +1,9 @@
 """VastFleetStrategy — composes VastClient + VastCallbackHandler + JobRepository.
 
-Implements IFleetStrategy via composition, not inheritance.
+Implements IFleetStrategy via composition, not inheritance.  After Phase
+1 of the allocator redesign, the strategy reads ``task.gpu_type``
+directly (the GPU name string Vast expects) — no machine_id → gpu_name
+lookup needed.
 """
 
 from __future__ import annotations
@@ -16,6 +19,8 @@ from serverV2.repositories.job_repository import JobRepository
 
 log = logging.getLogger(__name__)
 
+_FLEET = "vast_serverless"
+
 
 class VastFleetStrategy:
 
@@ -25,23 +30,17 @@ class VastFleetStrategy:
         client: VastClient,
         callback_handler: VastCallbackHandler,
         job_repo: JobRepository,
-        gpu_name_lookup: Callable[[str], str],
         on_failure: Callable[[str, str], None] | None = None,
     ) -> None:
         self._cfg = config
         self._client = client
         self._callback = callback_handler
         self._job_repo = job_repo
-        self._gpu_name_lookup = gpu_name_lookup
         self._on_failure = on_failure
 
     @property
-    def machine_type(self) -> str:
-        return "vast_serverless"
-
-    @property
-    def workers_per_endpoint(self) -> int:
-        return self._cfg.workers_per_endpoint
+    def fleet(self) -> str:
+        return _FLEET
 
     @property
     def min_frames_per_instance(self) -> int:
@@ -51,9 +50,17 @@ class VastFleetStrategy:
         return self._cfg.is_enabled()
 
     def dispatch(self, task: PlannedTask, context: DispatchContext, job_id: str) -> DispatchResult:
+        if not task.gpu_type:
+            raise RuntimeError(
+                f"Vast dispatch requires task.gpu_type to be set; got None for job {job_id}"
+            )
+        gpu_name = task.gpu_type
+
         self._job_repo.create(CreateJobParams(
             job_id=job_id,
-            machine_id=task.machine_id,
+            fleet=_FLEET,
+            machine_id=None,
+            gpu_type=gpu_name,
             group_id=context.group_id,
             input_filename=context.input_filename,
             total_frames=task.total_frames,
@@ -68,7 +75,6 @@ class VastFleetStrategy:
         ))
 
         try:
-            gpu_name = self._gpu_name_lookup(task.machine_id)
             instance_id = self._client.dispatch_job(
                 job_id=job_id,
                 blend_url=context.blend_url,
@@ -89,12 +95,12 @@ class VastFleetStrategy:
                 self._on_failure(job_id, error)
             else:
                 self._job_repo.mark_failed(job_id, error)
-            return DispatchResult(job_id=job_id, machine_id=task.machine_id, status="failed", error=error)
+            return DispatchResult(job_id=job_id, machine_id="", status="failed", error=error)
 
         self._callback.start_monitoring(
             job_id=job_id,
             provider_job_id=provider_job_id,
-            machine_id=task.machine_id,
+            machine_id="",
             blend_url=context.blend_url,
             render_overrides_b64=context.render_overrides_b64,
             group_id=context.group_id,
@@ -102,12 +108,12 @@ class VastFleetStrategy:
 
         return DispatchResult(
             job_id=job_id,
-            machine_id=task.machine_id,
+            machine_id="",
             status="pending",
             provider_job_id=provider_job_id,
         )
 
-    def cancel(self, provider_job_id: str, machine_id: str) -> None:
+    def cancel(self, provider_job_id: str) -> None:
         self._client.cancel_job(provider_job_id)
 
     def stop_monitoring(self, job_id: str) -> None:

@@ -75,15 +75,50 @@ def _spawn_call(fn, data: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Single A10G endpoint. Keep backend MODAL_ENDPOINTS aligned to "a10g".
+# L4 — entry tier (24 GB VRAM, Ada arch).  Cheap option for small scenes
+# that fit comfortably in 24 GB; weaker compute than L40S but a third the
+# price.
 # ---------------------------------------------------------------------------
 
-@app.function(image=worker_image, gpu="A10G", timeout=86400, memory=65536, cpu=16, retries=0)
-def run_render_a10g(input_data: dict):
+@app.function(image=worker_image, gpu="L4", timeout=86400, memory=32768, cpu=8, retries=0)
+def run_render_l4(input_data: dict):
     return _run_handler(input_data)
 
 
 @app.function(image=worker_image, timeout=60, cpu=1)
 @_WEB_ENDPOINT(method="POST")
-def render_a10g(data: dict):
-    return _spawn_call(run_render_a10g, data)
+def render_l4(data: dict):
+    return _spawn_call(run_render_l4, data)
+
+
+# ---------------------------------------------------------------------------
+# L40S — workhorse tier (48 GB VRAM, Ada arch).  Graphics-optimised data
+# centre card, comparable to a 4090 in Cycles performance with double VRAM.
+# ---------------------------------------------------------------------------
+
+@app.function(image=worker_image, gpu="L40S", timeout=86400, memory=98304, cpu=16, retries=0)
+def run_render_l40s(input_data: dict):
+    return _run_handler(input_data)
+
+
+@app.function(image=worker_image, timeout=60, cpu=1)
+@_WEB_ENDPOINT(method="POST")
+def render_l40s(data: dict):
+    return _spawn_call(run_render_l40s, data)
+
+
+# ---------------------------------------------------------------------------
+# H100 80GB — ultra tier (80 GB VRAM, Hopper).  For scenes that need both
+# huge VRAM and fast compute — heavy textures + complex geometry combined.
+# Faster per-frame than A100 80GB despite being a compute-class card.
+# ---------------------------------------------------------------------------
+
+@app.function(image=worker_image, gpu="H100", timeout=86400, memory=196608, cpu=16, retries=0)
+def run_render_h100(input_data: dict):
+    return _run_handler(input_data)
+
+
+@app.function(image=worker_image, timeout=60, cpu=1)
+@_WEB_ENDPOINT(method="POST")
+def render_h100(data: dict):
+    return _spawn_call(run_render_h100, data)

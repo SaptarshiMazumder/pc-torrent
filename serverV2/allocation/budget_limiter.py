@@ -1,11 +1,14 @@
-"""Pure functions: cap how many machines / workers the frame budget can justify."""
+"""Pure functions: cap how many targets the frame budget can justify.
+
+Duck-typed — accepts ``CommunityMachine``, ``FleetCapability`` or any
+duck-equivalent (anything ``compute_power_score`` will accept).
+"""
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from serverV2.allocation.power_scorer import compute_power_score
-from serverV2.core.models import Machine
 
 DEFAULT_MIN_FRAMES_PER_WORKER = 2
 
@@ -21,21 +24,27 @@ def max_workers_for_frame_budget(
 
 
 def limit_machines_for_frame_budget(
-    machines: list[Machine],
+    targets: list[Any],
     total_frames: int,
-    min_frames_fn: Callable[[Machine], int] | None = None,
-) -> list[Machine]:
-    if not machines:
+    min_frames_fn: Callable[[Any], int] | None = None,
+) -> list[Any]:
+    """Drop targets the frame budget cannot keep busy.
+
+    Targets are kept in descending power-score order; we walk the ranked
+    list and stop once the running budget drops below the per-target
+    minimum.  Always returns at least one target if any were given.
+    """
+    if not targets:
         return []
 
-    ranked = sorted(machines, key=compute_power_score, reverse=True)
-    kept: list[Machine] = []
+    ranked = sorted(targets, key=compute_power_score, reverse=True)
+    kept: list[Any] = []
     remaining = total_frames
 
-    for machine in ranked:
-        mf = min_frames_fn(machine) if min_frames_fn else DEFAULT_MIN_FRAMES_PER_WORKER
+    for target in ranked:
+        mf = min_frames_fn(target) if min_frames_fn else DEFAULT_MIN_FRAMES_PER_WORKER
         if remaining >= mf:
-            kept.append(machine)
+            kept.append(target)
             remaining -= mf
 
     return kept if kept else ranked[:1]

@@ -10,8 +10,8 @@ class BlendUrlResolver:
     def __init__(self, config: AppConfig) -> None:
         self._cfg = config
 
-    def resolve(self, machine_type: str, group_id: str, input_filename: str) -> str:
-        if machine_type == "modal_serverless":
+    def resolve(self, fleet: str, group_id: str, input_filename: str) -> str:
+        if fleet == "modal_serverless":
             base = self._cfg.modal.public_backend_url
         else:
             base = self._cfg.vast.public_backend_url

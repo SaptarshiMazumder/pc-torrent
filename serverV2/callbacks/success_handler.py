@@ -1,13 +1,17 @@
-"""SuccessHandler — marks a job done and reconciles group status."""
+"""SuccessHandler — marks a job done, reconciles group status, drains queue."""
 
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from serverV2.callbacks.group_status_aggregator import compute_group_status
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
+
+if TYPE_CHECKING:
+    from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 
 log = logging.getLogger(__name__)
 
@@ -23,11 +27,19 @@ class SuccessHandler:
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._in_progress = in_progress_repo
+        self._coordinator: DispatchCoordinator | None = None
+
+    def set_coordinator(self, coordinator: "DispatchCoordinator") -> None:
+        """Late-bound to break the circular wiring with the coordinator
+        (lifecycle composes the coordinator + handlers, so the handlers
+        cannot take it via __init__)."""
+        self._coordinator = coordinator
 
     def handle(self, job_id: str, group_id: str) -> None:
         # Release the chunk from the in-progress ledger FIRST so any late
         # failure signal for this job is recognized as stale and ignored.
         raw = self._job_repo.get_raw_by_id(job_id)
+        fleet = (raw.get("machine_type") or "") if raw else ""
         if raw is not None:
             chunk_index = raw.get("chunk_index") or 0
             self._in_progress.release(group_id, chunk_index)
@@ -35,6 +47,13 @@ class SuccessHandler:
         self._job_repo.mark_done(job_id)
         log.info("Job %s marked done", job_id)
         self._reconcile_group(group_id)
+
+        # A slot just opened up in this fleet — drain any waiting items.
+        if fleet and self._coordinator is not None:
+            try:
+                self._coordinator.drain_for_fleet(fleet)
+            except Exception as exc:
+                log.warning("drain_for_fleet(%s) failed: %s", fleet, exc)
 
     def _reconcile_group(self, group_id: str) -> None:
         group = self._group_repo.get_by_id(group_id)

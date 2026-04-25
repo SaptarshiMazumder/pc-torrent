@@ -26,12 +26,23 @@ from serverV2.core.models import (
 )
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
+from serverV2.orchestrator.allocation.validators.target_validator import (
+    TargetValidator,
+)
+from serverV2.orchestrator.allocation.validators.validation_context import (
+    ValidationContext,
+)
 
 
 class DefaultAllocationStrategy:
 
-    def __init__(self, registry: FleetRegistry) -> None:
+    def __init__(
+        self,
+        registry: FleetRegistry,
+        validators: list[TargetValidator] | None = None,
+    ) -> None:
         self._registry = registry
+        self._validators: tuple[TargetValidator, ...] = tuple(validators or ())
 
     # ------------------------------------------------------------------
     # initial allocation
@@ -46,8 +57,10 @@ class DefaultAllocationStrategy:
         total_frames: int,
         resources: AvailableResources,
         file_size_bytes: int | None = None,   # ignored — Default is not heaviness-aware
+        engine: str | None = None,
     ) -> list[PlannedTask]:
-        targets = self._eligible_targets(resources)
+        context = ValidationContext(engine=engine)
+        targets = self._eligible_targets(resources, context)
         if not targets:
             return []
 
@@ -76,7 +89,8 @@ class DefaultAllocationStrategy:
         chunk_request: ChunkRequest,
         resources: AvailableResources,
     ) -> PlannedTask | None:
-        eligible = self._eligible_targets_for_retry(resources, chunk_request)
+        context = ValidationContext(engine=chunk_request.engine)
+        eligible = self._eligible_targets_for_retry(resources, chunk_request, context)
         if not eligible:
             return None
         target = max(eligible, key=compute_power_score)
@@ -116,17 +130,25 @@ class DefaultAllocationStrategy:
     # helpers
     # ------------------------------------------------------------------
 
-    def _eligible_targets(self, resources: AvailableResources) -> list:
+    def _eligible_targets(
+        self, resources: AvailableResources, context: ValidationContext,
+    ) -> list:
         """Community machines + one slot per serverless capability whose
-        fleet still has headroom under ``fleet_max_parallel``.
+        fleet still has headroom under ``fleet_max_parallel``, filtered
+        by the strategy's TargetValidators.
         """
-        community = list(resources.community_machines)
+        community: list = []
+        for m in resources.community_machines:
+            if self._passes_validators(m, context):
+                community.append(m)
         serverless: list = []
         in_flight = dict(resources.serverless_in_flight)
         for cap in resources.serverless_capabilities:
             if not self._registry.is_enabled(cap.fleet):
                 continue
             if in_flight.get(cap.fleet, 0) >= cap.fleet_max_parallel:
+                continue
+            if not self._passes_validators(cap, context):
                 continue
             serverless.append(cap)
         return community + serverless
@@ -135,11 +157,12 @@ class DefaultAllocationStrategy:
         self,
         resources: AvailableResources,
         chunk_request: ChunkRequest,
+        context: ValidationContext,
     ) -> list:
         excluded_caps = set(chunk_request.excluded_serverless_capabilities)
         excluded_ids = set(chunk_request.excluded_machine_ids)
 
-        eligible = self._eligible_targets(resources)
+        eligible = self._eligible_targets(resources, context)
         out: list = []
         for t in eligible:
             if isinstance(t, CommunityMachine):
@@ -150,6 +173,9 @@ class DefaultAllocationStrategy:
                     continue
             out.append(t)
         return out
+
+    def _passes_validators(self, target, context: ValidationContext) -> bool:
+        return all(v.is_valid(target, context) for v in self._validators)
 
     def _min_frames_for(self, target) -> int:
         if isinstance(target, CommunityMachine):

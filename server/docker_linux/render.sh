@@ -17,27 +17,36 @@ if ! [[ "$FRAME_STEP" =~ ^[0-9]+$ ]] || [ "$FRAME_STEP" -lt 1 ]; then
 fi
 export OUTPUT_DIR INPUT_DIR FRAME_STEP DEVICE_POLICY
 
-# Start a virtual X11 display for EEVEE (which uses OpenGL/EGL, not CUDA).
-# Without this, Blender falls back to CPU Mesa software rendering on headless
-# containers where /dev/dri device nodes are inaccessible.
-XVFB_PID=""
-if command -v Xvfb &>/dev/null && [ -z "${DISPLAY:-}" ]; then
-    DISPLAY_NUM=99
-    Xvfb ":${DISPLAY_NUM}" -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &>/dev/null &
-    XVFB_PID=$!
-    export DISPLAY=":${DISPLAY_NUM}"
-    echo "Xvfb started on DISPLAY=${DISPLAY} (pid ${XVFB_PID})"
-    sleep 0.5  # give Xvfb a moment to initialise
-else
-    echo "Xvfb not available or DISPLAY already set (DISPLAY=${DISPLAY:-<unset>}); skipping"
-fi
+# Detect render engine from RENDER_OVERRIDES_B64 (set by the worker handler).
+# We only need to special-case EEVEE: it requires an EGL/OpenGL context, which
+# fails on a headless CUDA container unless we use NVIDIA's surfaceless EGL.
+# Cycles ignores all of this and uses CUDA/OPTIX directly — its path is
+# UNCHANGED.
+ENGINE=$(python3 - <<'PY' 2>/dev/null || true
+import base64, json, os
+raw = os.environ.get("RENDER_OVERRIDES_B64", "")
+try:
+    data = base64.b64decode(raw) if raw else b""
+    obj = json.loads(data) if data else {}
+    print((obj.get("render", {}).get("engine") or "").upper())
+except Exception:
+    print("")
+PY
+)
 
-cleanup_xvfb() {
-    if [ -n "$XVFB_PID" ]; then
-        kill "$XVFB_PID" 2>/dev/null || true
-    fi
-}
-trap cleanup_xvfb EXIT
+if [ "$ENGINE" = "BLENDER_EEVEE" ] || [ "$ENGINE" = "BLENDER_EEVEE_NEXT" ]; then
+    # EEVEE: NVIDIA EGL surfaceless platform.  No DISPLAY, no Xvfb.  The host
+    # runtime injects libEGL_nvidia.so.0 because the Dockerfile sets
+    # NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility.
+    export EGL_PLATFORM=surfaceless
+    unset DISPLAY
+    echo "Render engine: $ENGINE — using surfaceless EGL on NVIDIA GPU"
+else
+    # Cycles / unknown / scene-default: KEEP CURRENT BEHAVIOR.
+    # (Xvfb is not installed in the worker image, so this branch is a no-op
+    # in practice — DISPLAY stays unset, Cycles uses CUDA/OPTIX, no EGL.)
+    echo "Render engine: ${ENGINE:-<unset>} — Cycles path (no EGL setup)"
+fi
 
 if [ -z "$BLEND_FILE" ]; then
     BLEND_FILE=$(find "$INPUT_DIR" -name "*.blend" -print -quit)

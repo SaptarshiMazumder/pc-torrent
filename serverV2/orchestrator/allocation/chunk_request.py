@@ -28,5 +28,9 @@ class ChunkRequest:
     # Heaviness signal for FastRender-style strategies on retry.  ``None``
     # means heaviness is unknown (legacy rows pre-Phase-3).
     file_size_bytes: int | None = None
+    # Render engine ("BLENDER_EEVEE", "CYCLES", ...) — fed into the validator
+    # context so EngineCompatibilityValidator can keep retries off fleets
+    # that can't run the engine.
+    engine: str | None = None
     # Extensibility for future allocation rules (tier, price caps, ...).
     user_id: str | None = None

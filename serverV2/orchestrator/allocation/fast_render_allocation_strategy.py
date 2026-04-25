@@ -32,6 +32,12 @@ from serverV2.core.models import (
 )
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
+from serverV2.orchestrator.allocation.validators.target_validator import (
+    TargetValidator,
+)
+from serverV2.orchestrator.allocation.validators.validation_context import (
+    ValidationContext,
+)
 
 # How many parallel containers a single render is willing to fan out to.
 # Below this we'd be wasting frames on too-few machines; above this the
@@ -56,8 +62,13 @@ _DEFAULT_FRAMES_PER_MACHINE = 5
 
 class FastRenderAllocationStrategy:
 
-    def __init__(self, registry: FleetRegistry) -> None:
+    def __init__(
+        self,
+        registry: FleetRegistry,
+        validators: list[TargetValidator] | None = None,
+    ) -> None:
         self._registry = registry
+        self._validators: tuple[TargetValidator, ...] = tuple(validators or ())
 
     # ------------------------------------------------------------------
     # initial allocation
@@ -72,14 +83,16 @@ class FastRenderAllocationStrategy:
         total_frames: int,
         resources: AvailableResources,
         file_size_bytes: int | None = None,
+        engine: str | None = None,
     ) -> list[PlannedTask]:
+        context = ValidationContext(engine=engine)
         vram_floor, frames_per_machine = _band_for(file_size_bytes)
-        eligible = self._eligible_targets(resources, vram_floor)
+        eligible = self._eligible_targets(resources, vram_floor, context)
         if not eligible:
             # Fall back: everything currently available.  Better to try than
             # refuse — a too-small VRAM card may still complete a smaller
             # chunk if the scene streams.
-            eligible = self._eligible_targets(resources, vram_gb_min=0)
+            eligible = self._eligible_targets(resources, 0, context)
         if not eligible:
             return []
 
@@ -117,10 +130,11 @@ class FastRenderAllocationStrategy:
         chunk_request: ChunkRequest,
         resources: AvailableResources,
     ) -> PlannedTask | None:
+        context = ValidationContext(engine=chunk_request.engine)
         vram_floor, _ = _band_for(chunk_request.file_size_bytes)
-        eligible = self._eligible_targets(resources, vram_floor)
+        eligible = self._eligible_targets(resources, vram_floor, context)
         if not eligible:
-            eligible = self._eligible_targets(resources, vram_gb_min=0)
+            eligible = self._eligible_targets(resources, 0, context)
 
         excluded_caps = set(chunk_request.excluded_serverless_capabilities)
         excluded_ids = set(chunk_request.excluded_machine_ids)
@@ -150,21 +164,33 @@ class FastRenderAllocationStrategy:
     # ------------------------------------------------------------------
 
     def _eligible_targets(
-        self, resources: AvailableResources, vram_gb_min: float,
+        self,
+        resources: AvailableResources,
+        vram_gb_min: float,
+        context: ValidationContext,
     ) -> list:
         out: list = []
         for m in resources.community_machines:
-            if m.vram_gb >= vram_gb_min:
-                out.append(m)
+            if m.vram_gb < vram_gb_min:
+                continue
+            if not self._passes_validators(m, context):
+                continue
+            out.append(m)
         in_flight = resources.serverless_in_flight
         for cap in resources.serverless_capabilities:
             if not self._registry.is_enabled(cap.fleet):
                 continue
             if in_flight.get(cap.fleet, 0) >= cap.fleet_max_parallel:
                 continue
-            if cap.vram_gb >= vram_gb_min:
-                out.append(cap)
+            if cap.vram_gb < vram_gb_min:
+                continue
+            if not self._passes_validators(cap, context):
+                continue
+            out.append(cap)
         return out
+
+    def _passes_validators(self, target, context: ValidationContext) -> bool:
+        return all(v.is_valid(target, context) for v in self._validators)
 
     @staticmethod
     def _fleet_caps(resources: AvailableResources) -> dict[str, int]:

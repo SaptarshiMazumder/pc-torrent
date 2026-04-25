@@ -34,12 +34,16 @@ class FrameAllocator(Protocol):
         total_frames: int,
         resources: AvailableResources,
         file_size_bytes: int | None = None,
+        engine: str | None = None,
     ) -> list[PlannedTask]:
         """Split the frame range into chunks and assign each a fleet target.
 
         ``file_size_bytes`` is the heaviness signal — strategies that care
         about scene weight (e.g. FastRender) read it; strategies that don't
         (Default) ignore it.  ``None`` means heaviness is unknown.
+
+        ``engine`` is forwarded to the strategy's TargetValidators so they
+        can drop fleets that cannot run the engine (e.g. Modal for EEVEE).
         """
         ...
 

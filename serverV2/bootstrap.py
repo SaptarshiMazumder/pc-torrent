@@ -36,6 +36,9 @@ from serverV2.infrastructure import storage
 from serverV2.infrastructure.redis_client import RedisClient
 from serverV2.orchestrator.allocation.default_allocation_strategy import DefaultAllocationStrategy
 from serverV2.orchestrator.allocation.fast_render_allocation_strategy import FastRenderAllocationStrategy
+from serverV2.orchestrator.allocation.validators.engine_compatibility_validator import (
+    EngineCompatibilityValidator,
+)
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
@@ -209,8 +212,11 @@ def build(
     # -- allocation + dispatch --
     # Two strategies are constructed; the lifecycle picks one per render
     # based on file size + frame count (heuristic in RenderLifecycle).
-    default_strategy = DefaultAllocationStrategy(registry)
-    fast_render_strategy = FastRenderAllocationStrategy(registry)
+    # Both share the same validator list — per-target eligibility rules
+    # (engine compatibility today; tier / price caps in the future).
+    target_validators = [EngineCompatibilityValidator()]
+    default_strategy = DefaultAllocationStrategy(registry, validators=target_validators)
+    fast_render_strategy = FastRenderAllocationStrategy(registry, validators=target_validators)
     dispatcher = Dispatcher(registry)
 
     # -- dispatch queue (DB-backed) --

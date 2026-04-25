@@ -25,7 +25,7 @@ _HERE = Path(__file__).resolve().parent
 _WEB_ENDPOINT = modal.fastapi_endpoint if hasattr(modal, "fastapi_endpoint") else modal.web_endpoint
 WORKER_IMAGE_REF = os.getenv(
     "MODAL_WORKER_IMAGE",
-    "ghcr.io/saptarshimazumder/pcrent-worker:2.08",
+    "ghcr.io/saptarshimazumder/pcrent-worker:2.11",
 ).strip()
 if not WORKER_IMAGE_REF:
     raise RuntimeError("MODAL_WORKER_IMAGE is empty")

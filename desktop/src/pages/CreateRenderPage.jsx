@@ -585,6 +585,17 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // Resolve engine: if user kept "scene_default", send the engine detected
+    // by the .blend parser so the worker can pick the EEVEE vs Cycles path.
+    // Sending null leaves the worker blind and EEVEE jobs end up on the
+    // Cycles-default code path.
+    let resolvedEngine = renderEngine !== "scene_default" ? renderEngine : null;
+    if (!resolvedEngine && analysis && Array.isArray(analysis.scenes)) {
+      const activeScene =
+        analysis.scenes.find((s) => s?.is_active) || analysis.scenes[0] || null;
+      if (activeScene?.engine) resolvedEngine = activeScene.engine;
+    }
+
     const overrides = {
       scene_name: sceneName || null,
       camera_mode: cameraMode,
@@ -594,7 +605,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
         ? cameraValidation.rows?.map((r) => ({ camera_name: r.camera_name, frame_start: r.frame_start, frame_end: r.frame_end, frame_step: r.frame_step, enabled: r.enabled !== false }))
         : [],
       timeline: frameRange ? { frame_start: frameRange.frame_start, frame_end: frameRange.frame_end, frame_step: frameRange.frame_step } : {},
-      render: { engine: renderEngine !== "scene_default" ? renderEngine : null },
+      render: { engine: resolvedEngine },
     };
 
     try {

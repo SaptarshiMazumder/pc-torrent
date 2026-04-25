@@ -22,6 +22,7 @@ Open THIS file to understand what happens during a render.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from typing import Any, Callable
 
@@ -88,6 +89,7 @@ class RenderLifecycle:
         total_frames: int,
         machine_ids: list[str] | None = None,
         file_size_bytes: int | None = None,
+        engine: str | None = None,
     ) -> list[PlannedTask]:
         resources = self._resource_picker()
         raw_community = len(resources.community_machines)
@@ -114,12 +116,13 @@ class RenderLifecycle:
             total_frames=total_frames,
             resources=resources,
             file_size_bytes=file_size_bytes,
+            engine=engine,
         )
         log.info(
-            "plan: strategy=%s pinned=%s raw_community=%d raw_caps=%s "
+            "plan: strategy=%s pinned=%s engine=%s raw_community=%d raw_caps=%s "
             "after_filter_community=%d after_filter_caps=%d in_flight=%s "
             "total_frames=%d file_size_bytes=%s -> tasks=%d",
-            type(strategy).__name__, pinned, raw_community, raw_caps_by_fleet,
+            type(strategy).__name__, pinned, engine, raw_community, raw_caps_by_fleet,
             len(resources.community_machines), len(resources.serverless_capabilities),
             dict(resources.serverless_in_flight), total_frames, file_size_bytes,
             len(tasks),
@@ -218,9 +221,10 @@ class RenderLifecycle:
         # community machine that just failed.
         excluded_caps, excluded_ids = self._exclusions_for(raw)
 
-        # Load heaviness signal from the group so the retry strategy
+        # Load heaviness signal + engine from the group so the retry strategy
         # can size + filter the same way as initial allocation.
         file_size_bytes: int | None = None
+        engine: str | None = None
         if grp is not None:
             raw_size = grp.get("r2_input_size_bytes")
             if raw_size is not None:
@@ -228,6 +232,18 @@ class RenderLifecycle:
                     file_size_bytes = int(raw_size)
                 except (TypeError, ValueError):
                     file_size_bytes = None
+            raw_overrides = grp.get("render_overrides_json")
+            if raw_overrides:
+                try:
+                    parsed = json.loads(raw_overrides)
+                    if isinstance(parsed, dict):
+                        render_section = parsed.get("render")
+                        if isinstance(render_section, dict):
+                            engine_value = render_section.get("engine")
+                            if isinstance(engine_value, str):
+                                engine = engine_value
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    engine = None
 
         chunk_request = ChunkRequest(
             group_id=group_id,
@@ -240,6 +256,7 @@ class RenderLifecycle:
             excluded_machine_ids=excluded_ids,
             excluded_serverless_capabilities=excluded_caps,
             file_size_bytes=file_size_bytes,
+            engine=engine,
         )
         retry_strategy = self._pick_strategy(file_size_bytes, total_frames)
         retry_task = retry_strategy.allocate_retry(chunk_request, self._resource_picker())

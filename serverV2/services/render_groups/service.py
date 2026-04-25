@@ -239,6 +239,7 @@ class RenderGroupService:
         self._save_asset(group, r2_key, plan, analysis_snapshot, render_overrides, scheduling)
 
         machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
+        engine = (render_overrides.get("render") or {}).get("engine")
 
         planned = self._orchestrator.plan(
             frame_start=plan.frame_start,
@@ -247,6 +248,7 @@ class RenderGroupService:
             total_frames=plan.total_frames,
             machine_ids=machine_ids,
             file_size_bytes=r2_input_size_bytes,
+            engine=engine,
         )
 
         if not planned:
@@ -378,6 +380,7 @@ class RenderGroupService:
         )
 
         machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
+        engine = (render_overrides.get("render") or {}).get("engine")
 
         planned = self._orchestrator.plan(
             frame_start=frame_start,
@@ -386,6 +389,7 @@ class RenderGroupService:
             total_frames=total_frames,
             machine_ids=machine_ids,
             file_size_bytes=r2_input_size_bytes,
+            engine=engine,
         )
 
         if not planned:

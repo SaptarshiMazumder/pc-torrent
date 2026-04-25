@@ -33,6 +33,7 @@ class RenderOrchestrator:
         total_frames: int,
         machine_ids: list[str] | None = None,
         file_size_bytes: int | None = None,
+        engine: str | None = None,
     ) -> list[PlannedTask]:
         """Plan an initial allocation.
 
@@ -43,6 +44,10 @@ class RenderOrchestrator:
 
         ``file_size_bytes``: blend file size, used as the heaviness signal
         by FastRenderAllocationStrategy.  ``None`` falls back to Default.
+
+        ``engine``: render engine string ("BLENDER_EEVEE", "CYCLES", ...).
+        Forwarded to the strategy's TargetValidators for fleet-compatibility
+        filtering.
         """
         return self._lifecycle.plan(
             frame_start=frame_start,
@@ -51,6 +56,7 @@ class RenderOrchestrator:
             total_frames=total_frames,
             machine_ids=machine_ids,
             file_size_bytes=file_size_bytes,
+            engine=engine,
         )
 
     def execute(

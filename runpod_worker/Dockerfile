@@ -1,11 +1,20 @@
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
-# Blender system deps
+# Tell the NVIDIA container runtime (used by both Modal and Vast under the hood)
+# to inject the host's GL/EGL libraries.  Cycles ignores these; EEVEE needs them.
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility
+
+# Blender system deps.  GLVND stack (libglvnd0/libegl1/libgl1/libopengl0) is the
+# vendor-neutral dispatcher — at runtime it routes to NVIDIA's libEGL_nvidia.so.0
+# injected by the container runtime when graphics caps are enabled.  Mesa libs
+# stay alongside as a fallback for the Cycles path (Cycles never touches them).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget xz-utils libxi6 libxxf86vm1 libxfixes3 \
     libxrender1 libgl1-mesa-glx libxkbcommon0 \
     libsm6 libice6 libxrandr2 libxinerama1 libxcursor1 \
     libegl1-mesa libgles2-mesa \
+    libglvnd0 libegl1 libgles2 libopengl0 \
     python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 

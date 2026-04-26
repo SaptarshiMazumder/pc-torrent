@@ -68,6 +68,7 @@ class VastInstanceManager:
         frame_end: int,
         frame_step: int,
         render_overrides_b64: str,
+        image: str | None = None,
     ) -> int:
         env_vars = {
             "JOB_ID": job_id,
@@ -83,7 +84,7 @@ class VastInstanceManager:
             headers=_auth_headers(self._cfg),
             json={
                 "client_id": "me",
-                "image": self._cfg.docker_image,
+                "image": image or self._cfg.docker_image,
                 "env": env_vars,
                 "disk": self._cfg.disk_gb,
                 "label": f"pcrent-{job_id[:12]}",
@@ -156,6 +157,7 @@ class VastClient:
         frame_step: int,
         render_overrides_b64: str,
         gpu_name: str,
+        image: str | None = None,
     ) -> int:
         """Search for an offer, rent it, return the instance_id."""
         offers = self.offers.search(gpu_name)
@@ -170,6 +172,7 @@ class VastClient:
             frame_end=frame_end,
             frame_step=frame_step,
             render_overrides_b64=render_overrides_b64,
+            image=image,
         )
 
     def cancel_job(self, instance_id: str) -> None:

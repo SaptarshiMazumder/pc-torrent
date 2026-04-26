@@ -78,15 +78,30 @@ class VastConfig:
     max_parallel: int = 15
     endpoints: tuple[VastEndpoint, ...] = field(default_factory=tuple)
     api_base: str = "https://console.vast.ai/api/v0"
+    # Separate image for EEVEE renders (NVIDIA EGL ICD + GLVND).  When unset
+    # we fall back to ``docker_image`` and EEVEE chunks land on the cycles
+    # image, which works only on hosts that already have a usable EGL stack.
+    docker_image_eevee: str | None = None
 
     def is_enabled(self) -> bool:
         return bool(self.provisioning_enabled and self.api_key and self.docker_image and self.endpoints)
+
+    def image_for_engine(self, engine: str | None) -> str:
+        """Return the docker image to rent based on the render engine.
+        EEVEE prefers ``docker_image_eevee`` when set; everything else (and
+        the EEVEE fallback when no eevee image is configured) uses
+        ``docker_image``.
+        """
+        if engine and engine.upper() in {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"}:
+            return self.docker_image_eevee or self.docker_image
+        return self.docker_image
 
     @classmethod
     def from_env(cls, config_json_path: str | None = None) -> VastConfig:
         return cls(
             api_key=_env_str("VAST_API_KEY"),
             docker_image=_env_str("VAST_DOCKER_IMAGE") or _env_str("MODAL_WORKER_IMAGE"),
+            docker_image_eevee=_env_str("VAST_DOCKER_IMAGE_EEVEE") or None,
             provisioning_enabled=_env_bool("VAST_PROVISIONING_ENABLED", True),
             disk_gb=_env_float("VAST_DISK_GB", 20.0),
             max_price_per_gpu=_env_float("VAST_MAX_PRICE_PER_GPU", 1.00),

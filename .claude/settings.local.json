@@ -116,7 +116,9 @@
       "Bash(grep -rn \"/jobs/request-upload\\\\|/jobs/.*/confirm-upload\\\\|/jobs/.*/multipart\\\\|/jobs/' \\\\+ \\\\|\\\\\"\\\\\\\\/jobs\\\\\\\\/\\\\\"\" c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/ --include=\"*.py\" --include=\"*.js\" --include=\"*.jsx\")",
       "Bash(node --check c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/services/api.js)",
       "Bash(node --check c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/CreateRenderPage.jsx)",
-      "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/server/docker_linux/render.sh)"
+      "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/server/docker_linux/render.sh)",
+      "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/server/docker_linux/render.eevee.sh)",
+      "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh)"
     ]
   }
 }

@@ -23,16 +23,34 @@ if [ -z "$GHCR_PAT" ] || [ -z "$GHCR_USER" ]; then
 fi
 
 TAG="${1:-latest}"
-IMAGE="ghcr.io/${GHCR_USER}/pcrent-worker:${TAG}"
+VARIANT="${2:-cycles}"
+
+case "$VARIANT" in
+    cycles)
+        IMAGE_NAME="pcrent-worker"
+        DOCKERFILE="$PROJECT_ROOT/runpod_worker/Dockerfile"
+        ;;
+    eevee)
+        IMAGE_NAME="pcrent-worker-eevee"
+        DOCKERFILE="$PROJECT_ROOT/runpod_worker/Dockerfile.eevee"
+        ;;
+    *)
+        echo "ERROR: unknown variant '$VARIANT'.  Expected 'cycles' or 'eevee'."
+        echo "Usage: $0 <tag> [cycles|eevee]"
+        exit 1
+        ;;
+esac
+
+IMAGE="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:${TAG}"
 
 echo "-> Logging in to GHCR..."
 echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
-echo "-> Building $IMAGE ..."
-docker build -t "$IMAGE" -f "$PROJECT_ROOT/runpod_worker/Dockerfile" "$PROJECT_ROOT"
+echo "-> Building $IMAGE (variant=$VARIANT) ..."
+docker build -t "$IMAGE" -f "$DOCKERFILE" "$PROJECT_ROOT"
 
 echo "-> Pushing $IMAGE ..."
 docker push "$IMAGE"
 
 echo ""
-echo "Done. Update your RunPod endpoint to use: $IMAGE"
+echo "Done. Image: $IMAGE"

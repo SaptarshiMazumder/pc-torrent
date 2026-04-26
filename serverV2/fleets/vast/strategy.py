@@ -75,6 +75,7 @@ class VastFleetStrategy:
         ))
 
         try:
+            image = self._cfg.image_for_engine(context.engine)
             instance_id = self._client.dispatch_job(
                 job_id=job_id,
                 blend_url=context.blend_url,
@@ -83,6 +84,7 @@ class VastFleetStrategy:
                 frame_step=task.frame_step,
                 render_overrides_b64=context.render_overrides_b64,
                 gpu_name=gpu_name,
+                image=image,
             )
             provider_job_id = str(instance_id)
             self._job_repo.save_provider_job_id(

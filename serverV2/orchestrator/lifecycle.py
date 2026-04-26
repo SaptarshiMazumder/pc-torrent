@@ -159,6 +159,7 @@ class RenderLifecycle:
             return []
 
         overrides_b64 = base64.b64encode(render_overrides_json.encode()).decode()
+        engine = self._engine_from_overrides_json(render_overrides_json)
         context = DispatchContext(
             group_id=group_id,
             input_filename=input_filename,
@@ -166,6 +167,7 @@ class RenderLifecycle:
             blend_url="",
             max_retries=MAX_RETRIES,
             priority=0,
+            engine=engine,
         )
         return self._coordinator.enqueue_and_flush(group_id, tasks, context)
 
@@ -287,6 +289,7 @@ class RenderLifecycle:
             blend_url="",
             max_retries=rj.max_retries,
             priority=rj.priority,
+            engine=engine,
         )
         self._coordinator.enqueue_and_flush(group_id, [retry_task], context)
         return True
@@ -372,3 +375,21 @@ class RenderLifecycle:
         if machine_id:
             return (), (machine_id,)
         return (), ()
+
+    @staticmethod
+    def _engine_from_overrides_json(raw: str | None) -> str | None:
+        """Extract ``render.engine`` from a render-overrides JSON string.
+        Returns None on any parse error or missing value."""
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        render_section = parsed.get("render")
+        if not isinstance(render_section, dict):
+            return None
+        engine = render_section.get("engine")
+        return engine if isinstance(engine, str) and engine else None

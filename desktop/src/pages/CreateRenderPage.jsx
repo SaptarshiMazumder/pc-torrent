@@ -29,6 +29,7 @@ import {
   saveGroupAnalysis,
   getGroupAnalysis,
 } from "../utils/blendAnalysis";
+import HeavinessPanel from "../components/jobs/HeavinessPanel";
 
 // ─── Flow stages ────────────────────────────────────────────
 // IDLE          → user picks a file / saved input
@@ -83,6 +84,10 @@ const INITIAL_STATE = {
   viewLayerName: "",
   cameraRanges: [],
   renderEngine: "scene_default",
+  // Resolution overrides — null means "use scene default"
+  resolutionX: null,
+  resolutionY: null,
+  resolutionPercentage: null,
   // Upload / submission
   groupId: "",
   uploadProgress: 0,
@@ -179,6 +184,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
     analysis, prepResult,
     frameStart, frameEnd, frameStep,
     sceneName, cameraMode, forceCameraName, viewLayerName, cameraRanges, renderEngine,
+    resolutionX, resolutionY, resolutionPercentage,
     groupId, uploadProgress,
     error, analysisNote,
   } = state;
@@ -639,7 +645,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
         ? cameraValidation.rows?.map((r) => ({ camera_name: r.camera_name, frame_start: r.frame_start, frame_end: r.frame_end, frame_step: r.frame_step, enabled: r.enabled !== false }))
         : [],
       timeline: frameRange ? { frame_start: frameRange.frame_start, frame_end: frameRange.frame_end, frame_step: frameRange.frame_step } : {},
-      render: { engine: resolvedEngine },
+      render: {
+        engine: resolvedEngine,
+        resolution_x: resolutionX,
+        resolution_y: resolutionY,
+        resolution_percentage: resolutionPercentage,
+      },
     };
 
     try {
@@ -1053,6 +1064,26 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
               </label>
             </div>
           </div>
+
+          {/* Scene heaviness — read from local Blender analysis. Resolution is
+              editable and folds into render_overrides at submit time. */}
+          {analysis?.heaviness && (
+            <HeavinessPanel
+              heaviness={analysis.heaviness}
+              resolutionOverride={{
+                resolution_x: resolutionX,
+                resolution_y: resolutionY,
+                resolution_percentage: resolutionPercentage,
+              }}
+              onResolutionChange={({ resolution_x, resolution_y, resolution_percentage }) => {
+                dispatch({ type: "SET_FIELDS", fields: {
+                  resolutionX: resolution_x,
+                  resolutionY: resolution_y,
+                  resolutionPercentage: resolution_percentage,
+                }});
+              }}
+            />
+          )}
 
           {/* Prep warnings/errors */}
           {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (

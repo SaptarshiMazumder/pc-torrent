@@ -4226,3 +4226,154 @@ body {
 .dl-entry-path:hover .dl-entry-path-arrow {
   opacity: 0.6;
 }
+
+
+/* ─── HeavinessPanel ─── */
+.hp-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.hp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hp-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(180, 175, 220, 0.6);
+  margin-bottom: 2px;
+}
+
+.hp-section-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px 16px;
+}
+
+.hp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px dashed rgba(180, 175, 220, 0.08);
+}
+
+.hp-row-label {
+  font-size: 12px;
+  color: rgba(180, 175, 220, 0.7);
+}
+
+.hp-row-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #eeedf5;
+  font-variant-numeric: tabular-nums;
+}
+
+.hp-row-value.muted {
+  color: rgba(180, 175, 220, 0.4);
+  font-weight: 500;
+}
+
+.hp-row-features {
+  grid-column: 1 / -1;
+}
+
+.hp-row-edit {
+  flex-wrap: wrap;
+}
+
+.hp-resolution-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hp-input {
+  background: rgba(16, 18, 36, 0.6);
+  border: 1px solid rgba(180, 175, 220, 0.15);
+  color: #eeedf5;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.hp-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.hp-input-num {
+  width: 70px;
+}
+
+.hp-input-pct {
+  width: 50px;
+}
+
+.hp-times,
+.hp-at,
+.hp-pct {
+  font-size: 12px;
+  color: rgba(180, 175, 220, 0.5);
+}
+
+.hp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hp-chip {
+  background: rgba(232, 114, 74, 0.12);
+  border: 1px solid rgba(232, 114, 74, 0.3);
+  color: #ffb89a;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.hp-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hp-skeleton-row {
+  height: 14px;
+  background: linear-gradient(90deg,
+    rgba(180, 175, 220, 0.06) 0%,
+    rgba(180, 175, 220, 0.12) 50%,
+    rgba(180, 175, 220, 0.06) 100%);
+  background-size: 200% 100%;
+  animation: hp-shimmer 1.5s linear infinite;
+  border-radius: 6px;
+}
+
+.hp-skeleton-row:nth-child(2) {
+  width: 80%;
+}
+
+.hp-skeleton-row:nth-child(3) {
+  width: 60%;
+}
+
+@keyframes hp-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.hp-empty {
+  padding: 14px 20px;
+  font-size: 12px;
+}

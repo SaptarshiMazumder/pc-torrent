@@ -282,10 +282,11 @@ class RenderLifecycle:
         # community machine that just failed.
         excluded_caps, excluded_ids = self._exclusions_for(raw)
 
-        # Load heaviness signal + engine from the group so the retry strategy
-        # can size + filter the same way as initial allocation.
+        # Load heaviness signal + engine + tier from the group so the retry
+        # strategy can size + filter + route the same way as initial allocation.
         file_size_bytes: int | None = None
         engine: str | None = None
+        tier: str | None = None
         if grp is not None:
             raw_size = grp.get("r2_input_size_bytes")
             if raw_size is not None:
@@ -305,6 +306,9 @@ class RenderLifecycle:
                                 engine = engine_value
                 except (TypeError, ValueError, json.JSONDecodeError):
                     engine = None
+            tier_raw = grp.get("tier")
+            if isinstance(tier_raw, str):
+                tier = tier_raw
 
         chunk_request = ChunkRequest(
             group_id=group_id,
@@ -319,7 +323,9 @@ class RenderLifecycle:
             file_size_bytes=file_size_bytes,
             engine=engine,
         )
-        retry_strategy = self._pick_strategy(file_size_bytes, total_frames)
+        retry_strategy = self._pick_strategy(
+            tiers.normalize(tier), file_size_bytes, total_frames,
+        )
         retry_task = retry_strategy.allocate_retry(chunk_request, self._resource_picker())
         if retry_task is None:
             log.error(

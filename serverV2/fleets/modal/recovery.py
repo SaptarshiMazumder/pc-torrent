@@ -19,6 +19,8 @@ class ModalRecovery:
     def recover(self) -> None:
         if not self._cfg.is_enabled():
             return
+        # Phase 1: serverless jobs no longer have a machines row, so the
+        # discriminator is jobs.machine_type, not a JOIN against machines.
         rows = query_all(
             """
             SELECT j.id, j.modal_function_call_id, j.machine_id, j.group_id,
@@ -27,9 +29,7 @@ class ModalRecovery:
             FROM jobs j
             LEFT JOIN render_groups rg ON rg.id = j.group_id
             WHERE j.status IN ('running', 'pending')
-              AND j.machine_id IN (
-                  SELECT id FROM machines WHERE machine_type = 'modal_serverless'
-              )
+              AND j.machine_type = 'modal_serverless'
             """,
         )
         if not rows:

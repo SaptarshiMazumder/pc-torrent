@@ -22,8 +22,12 @@ _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None:
+        # 100 max conns — Neon's pgbouncer upstream tolerates much more.
+        # Sized for Cloud-Run-Tokyo ↔ Neon-us-east-1 cross-region latency
+        # (~150 ms RTT) where each query pins a conn for at least that long;
+        # bursty monitor + heartbeat traffic was hitting the previous 30 cap.
         _pool = psycopg2.pool.ThreadedConnectionPool(
-            1, 30, DATABASE_URL,
+            1, 100, DATABASE_URL,
             keepalives=1,
             keepalives_idle=30,
             keepalives_interval=10,

@@ -35,6 +35,8 @@ class FrameAllocator(Protocol):
         resources: AvailableResources,
         file_size_bytes: int | None = None,
         engine: str | None = None,
+        tier_budget_usd: float | None = None,
+        heaviness: dict | None = None,
     ) -> list[PlannedTask]:
         """Split the frame range into chunks and assign each a fleet target.
 
@@ -44,6 +46,15 @@ class FrameAllocator(Protocol):
 
         ``engine`` is forwarded to the strategy's TargetValidators so they
         can drop fleets that cannot run the engine (e.g. Modal for EEVEE).
+
+        ``tier_budget_usd`` is an optional soft cost cap.  Strategies that
+        care (FastRender's Standard tier) drop expensive targets when the
+        cost analyzer says the mix exceeds the budget by a margin.
+        ``None`` disables the soft cap (default — current behaviour).
+
+        ``heaviness`` is the parsed analysis_snapshot["heaviness"] dict
+        (Phase 2).  Required by the soft budget cap; pass-through ignored
+        by strategies that don't enforce one.
         """
         ...
 

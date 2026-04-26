@@ -29,9 +29,10 @@ class JobRepository:
                 total_frames, rendered_frames, output_files,
                 frame_start, frame_end, frame_step,
                 render_overrides_json, attempt, max_retries, priority,
-                chunk_index, submitted_at
+                chunk_index, submitted_at,
+                price_per_hour_at_dispatch
             )
-            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 params.job_id, params.machine_id, params.fleet, params.gpu_type,
@@ -39,6 +40,7 @@ class JobRepository:
                 params.frame_start, params.frame_end, params.frame_step,
                 params.render_overrides_json, params.attempt, params.max_retries,
                 params.priority, params.chunk_index, _now_iso(),
+                params.price_per_hour_at_dispatch,
             ),
         )
         return params.job_id
@@ -227,6 +229,23 @@ class JobRepository:
             (json.dumps(merged), job_id),
         )
         return merged
+
+    # ---- start timestamp (for telemetry) ----
+
+    def mark_started(self, job_id: str) -> None:
+        """Stamp ``started_at = NOW()`` on the job, but only if it hasn't
+        been set yet.  Idempotent — safe to call from every PROGRESS
+        callback; only the first one wins.
+
+        ``started_at`` is the moment rendering actually began (first
+        PROGRESS event from the worker), not when the job was dispatched.
+        Phase 5 telemetry uses ``completed_at - started_at`` as the
+        per-chunk wall-time signal, excluding queue + provisioning.
+        """
+        execute(
+            "UPDATE jobs SET started_at = %s WHERE id = %s AND started_at IS NULL",
+            (_now_iso(), job_id),
+        )
 
     # ---- next for machine (desktop agent polling) ----
 

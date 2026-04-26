@@ -56,6 +56,13 @@ class VastFleetStrategy:
             )
         gpu_name = task.gpu_type
 
+        # Snapshot price at dispatch time for telemetry — looked up from
+        # config so the row is immune to later config edits.
+        price_at_dispatch = next(
+            (ep.price_per_hour for ep in self._cfg.endpoints if ep.gpu_name == gpu_name),
+            None,
+        )
+
         self._job_repo.create(CreateJobParams(
             job_id=job_id,
             fleet=_FLEET,
@@ -72,6 +79,7 @@ class VastFleetStrategy:
             priority=context.priority,
             chunk_index=task.chunk_index,
             attempt=task.attempt,
+            price_per_hour_at_dispatch=price_at_dispatch,
         ))
 
         try:

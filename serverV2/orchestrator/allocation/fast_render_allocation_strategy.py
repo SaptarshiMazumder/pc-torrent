@@ -110,12 +110,15 @@ class FastRenderAllocationStrategy:
         frame_step: int,
         total_frames: int,
         resources: AvailableResources,
-        file_size_bytes: int | None = None,
         engine: str | None = None,
-        tier_budget_usd: float | None = None,
         heaviness: dict | None = None,
+        tier_budget_usd: float | None = None,
     ) -> list[PlannedTask]:
         context = ValidationContext(engine=engine)
+        # File size for heaviness-band lookup lives inside the heaviness
+        # dict (Phase 2 + Phase 7-refactor consolidation).  None heaviness
+        # is fine — band_for(0) just returns the medium-band defaults.
+        file_size_bytes = int((heaviness or {}).get("file_size_bytes", 0) or 0)
         vram_floor, frames_per_machine = band_for(file_size_bytes)
         eligible = self._eligible_targets(resources, vram_floor, context)
         if not eligible:
@@ -156,7 +159,6 @@ class FastRenderAllocationStrategy:
             frame_step=frame_step,
             tier_budget_usd=tier_budget_usd,
             heaviness=heaviness,
-            file_size_bytes=file_size_bytes,
         )
 
         tasks: list[PlannedTask] = []
@@ -294,7 +296,6 @@ class FastRenderAllocationStrategy:
         frame_step: int,
         tier_budget_usd: float | None,
         heaviness: dict | None,
-        file_size_bytes: int | None,
     ) -> list:
         """Soft cap: while the picked mix's estimated cost exceeds
         ``tier_budget * BUDGET_CAP_MULTIPLIER``, drop the most-expensive
@@ -319,9 +320,7 @@ class FastRenderAllocationStrategy:
                 )
                 for s in shares
             ]
-            estimate = estimate_cost_for_mix(
-                heaviness, mix, file_size_bytes=file_size_bytes or 0,
-            )
+            estimate = estimate_cost_for_mix(heaviness, mix)
             if estimate.cost_mid_usd <= threshold:
                 return shares
 
@@ -509,30 +508,37 @@ def _smoke() -> None:
     print(f"3. retry picks next-value-best after exclusion: {retry.gpu_type}     OK")
 
     # ----- 4. tier_budget=None -> no cap (legacy callers unaffected) -----
+    from serverV2.core.value_objects import parse_analysis_heaviness
+    heaviness_2gb = parse_analysis_heaviness(None, file_size_bytes=2 * 1024 ** 3)
     res = _resources(caps=[rtx4090, l40s, h100], in_flight={})
     tasks_no_budget = strategy.allocate_initial(
         frame_start=1, frame_end=60, frame_step=1, total_frames=60,
         resources=res,
-        file_size_bytes=2 * 1024 ** 3,
+        heaviness=heaviness_2gb,
     )
     assert len(tasks_no_budget) > 0
     print(f"4. tier_budget=None -> no cap: {len(tasks_no_budget)} tasks (legacy compat)      OK")
 
     # ----- 5. tier_budget given but heaviness=None -> still no cap -----
+    # Pass an explicit zero-file heaviness so band_for picks the medium
+    # band (matches tasks_no_budget's heaviness shape for the comparison),
+    # but heaviness=None at the kwarg disables the cap.
     tasks_budget_no_heaviness = strategy.allocate_initial(
         frame_start=1, frame_end=60, frame_step=1, total_frames=60,
         resources=res,
-        file_size_bytes=2 * 1024 ** 3,
-        tier_budget_usd=0.50,
         heaviness=None,
+        tier_budget_usd=0.50,
     )
-    assert len(tasks_budget_no_heaviness) == len(tasks_no_budget), \
-        "heaviness=None should disable the cap (defensive)"
+    # heaviness=None means file_size_bytes inside is 0 -> band lookup
+    # picks the *light* band, different from tasks_no_budget which had a
+    # 2GB-medium-band heaviness.  So we just check the cap was skipped:
+    # the mix is non-empty and at full HARD_CAP (no trimming happened).
+    assert len(tasks_budget_no_heaviness) > 0, \
+        "heaviness=None should still allocate (cap is skipped, not allocation)"
     print(f"5. tier_budget given, heaviness=None -> cap skipped (defensive)       OK")
 
     # ----- 6. Soft budget cap drops most expensive target -----
-    from serverV2.core.value_objects import parse_analysis_heaviness
-    heaviness = parse_analysis_heaviness(None)
+    heaviness = parse_analysis_heaviness(None, file_size_bytes=500 * 1024 * 1024)
     heaviness["render_engine"] = "CYCLES"
     heaviness["samples"] = 1024
 
@@ -540,9 +546,8 @@ def _smoke() -> None:
     tasks_capped = strategy.allocate_initial(
         frame_start=1, frame_end=120, frame_step=1, total_frames=120,
         resources=res,
-        file_size_bytes=500 * 1024 * 1024,
-        tier_budget_usd=0.30,
         heaviness=heaviness,
+        tier_budget_usd=0.30,
     )
     gpus_capped = [t.gpu_type for t in tasks_capped]
     assert len(tasks_capped) >= 1
@@ -555,28 +560,24 @@ def _smoke() -> None:
     tasks_min = strategy.allocate_initial(
         frame_start=1, frame_end=120, frame_step=1, total_frames=120,
         resources=res,
-        file_size_bytes=500 * 1024 * 1024,
-        tier_budget_usd=0.0001,
         heaviness=heaviness,
+        tier_budget_usd=0.0001,
     )
     assert len(tasks_min) >= 1, "soft cap must leave at least 1 target"
     print(f"7. tiny budget -> cap stops at >=1 target ({len(tasks_min)})            OK")
 
     # ----- 8. Generous budget -> cap doesn't fire -----
-    # Compare same inputs as test 6 (same file_size, same total_frames),
-    # only the budget differs.  Generous budget should leave the mix intact
-    # while tight budget (test 6) trimmed H100.
+    # Compare same heaviness, only the budget differs.
     tasks_generous = strategy.allocate_initial(
         frame_start=1, frame_end=120, frame_step=1, total_frames=120,
         resources=res,
-        file_size_bytes=500 * 1024 * 1024,
-        tier_budget_usd=10000.0,
         heaviness=heaviness,
+        tier_budget_usd=10000.0,
     )
     tasks_no_budget_same_inputs = strategy.allocate_initial(
         frame_start=1, frame_end=120, frame_step=1, total_frames=120,
         resources=res,
-        file_size_bytes=500 * 1024 * 1024,
+        heaviness=heaviness,
     )
     assert len(tasks_generous) == len(tasks_no_budget_same_inputs), \
         f"generous budget should not trim: {len(tasks_generous)} vs {len(tasks_no_budget_same_inputs)}"

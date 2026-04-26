@@ -10,7 +10,8 @@ Cost model::
 
     For each slot in the mix:
         spf      = time_analyzer.estimate_seconds_per_frame(heaviness, slot.render_speed)
-        startup  = time_analyzer.estimate_startup_seconds(heaviness, file_size_bytes)
+        startup  = time_analyzer.estimate_startup_seconds(heaviness)
+                   # heaviness["file_size_bytes"] feeds the download term
         seconds  = startup + spf * slot.frames_assigned
         cost     = seconds / 3600 * slot.price_per_hour
 
@@ -93,19 +94,16 @@ def estimate_cost_for_mix(
     heaviness: dict[str, Any],
     mix: list[MixSlot],
     *,
-    file_size_bytes: int = 0,
     confidence_band: float = DEFAULT_CONFIDENCE_BAND,
 ) -> CostEstimate:
     """Cost + wall-time estimate for a candidate mix.
 
-    ``heaviness`` is the already-defaulted dict from ``parse_analysis_heaviness``.
+    ``heaviness`` is the already-defaulted dict from ``parse_analysis_heaviness``;
+    it carries ``file_size_bytes`` along with the scene-complexity signals,
+    so callers don't pass file size as a separate kwarg.
 
     ``mix`` is one ``MixSlot`` per target getting some share of frames.
     Empty mix → all-zero estimate (no division-by-zero, no NaNs).
-
-    ``file_size_bytes`` feeds the startup-overhead estimator (download
-    time scales with file size).  Default 0 = no download cost — useful
-    for callers that don't have file size information yet.
 
     Each ``MixSlot`` is treated as one chunk.  Startup overhead is
     paid once per slot.  Wall time is the slowest slot's total seconds
@@ -116,7 +114,7 @@ def estimate_cost_for_mix(
         return CostEstimate(0.0, 0.0, 0.0, 0.0)
 
     band = max(_MIN_CONFIDENCE_BAND, min(_MAX_CONFIDENCE_BAND, confidence_band))
-    startup = estimate_startup_seconds(heaviness, file_size_bytes)
+    startup = estimate_startup_seconds(heaviness)
 
     wall_time = 0.0
     cost_mid = 0.0
@@ -140,20 +138,19 @@ def estimate_cost_from_snapshot(
     analysis_snapshot: dict[str, Any] | None,
     mix: list[MixSlot],
     *,
-    file_size_bytes: int = 0,
+    file_size_bytes: int | None = None,
     confidence_band: float = DEFAULT_CONFIDENCE_BAND,
 ) -> CostEstimate:
-    """Convenience wrapper — pulls the heaviness sub-dict from the raw
-    analysis snapshot, then delegates to ``estimate_cost_for_mix``.
+    """Convenience wrapper — builds heaviness with the file_size_bytes
+    server-side stamp, then delegates to ``estimate_cost_for_mix``.
 
-    Use this entry point when you have the raw snapshot from the DB or
-    API; use ``estimate_cost_for_mix`` when you've already parsed the
-    heaviness once and are calling for many candidate mixes.
+    ``file_size_bytes`` stays an explicit kwarg here because callers at
+    this entry point typically have the snapshot from the DB but the
+    file size from a separate column.
     """
     return estimate_cost_for_mix(
-        parse_analysis_heaviness(analysis_snapshot),
+        parse_analysis_heaviness(analysis_snapshot, file_size_bytes=file_size_bytes),
         mix,
-        file_size_bytes=file_size_bytes,
         confidence_band=confidence_band,
     )
 
@@ -259,9 +256,11 @@ def _smoke() -> None:
     assert abs(pricey.wall_time_seconds - single.wall_time_seconds) < 0.01
     print("price 4x, same scene                      ->  cost 4x, wall-time same  OK")
 
-    # ------- file_size_bytes inflates startup, hence cost AND wall time -------
-    big_file = estimate_cost_for_mix(baseline, single_mix, file_size_bytes=2 * 1024 ** 3)
-    # 2GB file → +60s startup
+    # ------- file_size_bytes (carried inside heaviness) inflates startup -------
+    heaviness_with_file = parse_analysis_heaviness(None, file_size_bytes=2 * 1024 ** 3)
+    heaviness_with_file["render_engine"] = "CYCLES"
+    big_file = estimate_cost_for_mix(heaviness_with_file, single_mix)
+    # 2GB file -> +60s startup (30s/GB * 2GB)
     assert big_file.wall_time_seconds > single.wall_time_seconds
     assert big_file.cost_mid_usd > single.cost_mid_usd
     expected_extra = (60 / 3600.0) * 1.0   # 60s extra * $1/hr

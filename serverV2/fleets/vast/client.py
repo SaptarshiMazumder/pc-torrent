@@ -89,7 +89,7 @@ class VastInstanceManager:
                 "disk": self._cfg.disk_gb,
                 "label": f"pcrent-{job_id[:12]}",
                 "runtype": "args",
-                "args": ["python3", "-u", "/vast_handler.py"],
+                "args": ["python3", "-u", "/handler.py"],
             },
             timeout=30,
         )

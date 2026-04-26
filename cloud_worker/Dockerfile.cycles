@@ -17,17 +17,16 @@ RUN wget -q https://download.blender.org/release/Blender5.0/blender-5.0.1-linux-
 
 RUN mkdir -p /input /output /scripts
 
-# Render scripts (reuse existing ones from server/docker_linux)
-COPY server/docker_linux/render.sh /scripts/render.sh
-COPY server/docker_linux/progress_handler.py /scripts/progress_handler.py
-COPY server/docker_linux/render_driver.py /scripts/render_driver.py
-COPY server/docker_linux/pre_load.py /scripts/pre_load.py
+# Render scripts
+COPY cloud_worker/scripts/render.sh /scripts/render.sh
+COPY cloud_worker/scripts/progress_handler.py /scripts/progress_handler.py
+COPY cloud_worker/scripts/render_driver.py /scripts/render_driver.py
+COPY cloud_worker/scripts/pre_load.py /scripts/pre_load.py
 RUN sed -i 's/\r$//' /scripts/render.sh && chmod +x /scripts/render.sh
 
 # Handler deps
-RUN pip3 install --no-cache-dir runpod==1.7.9 requests==2.32.3
+RUN pip3 install --no-cache-dir requests==2.32.3
 
-COPY runpod_worker/handler.py /handler.py
-COPY vast_worker/handler.py /vast_handler.py
+COPY cloud_worker/scripts/handler.py /handler.py
 
 CMD ["python3", "-u", "/handler.py"]

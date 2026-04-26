@@ -1,9 +1,10 @@
 """RenderOrchestrator — public facade over the orchestration layer.
 
-Owns decisions that affect allocation or dispatch: planning, initial
-execution, failure (retry coordination) and cancellation.  Success and
-progress events are handled directly by ``CallbackRouter`` — they require
-no orchestration decisions, so they do not pass through this facade.
+Owns every state transition that touches a ``render_group``: planning,
+initial execution, failure (retry coordination), cancellation, and the
+group-status rollup that follows any job state change.  Callback handlers
+notify the orchestrator via ``on_job_succeeded`` / ``on_job_started`` /
+``on_job_failed_terminal`` — they never touch ``render_groups`` directly.
 
 Keep this file trivial.  If you want to understand what happens during a
 render's lifetime, open ``orchestrator/lifecycle.py``.
@@ -77,7 +78,21 @@ class RenderOrchestrator:
     # ---- chunk-level callbacks ----
 
     def on_job_failed(self, job_id: str, error: str) -> bool:
+        """Try to retry the failed chunk; return True if retry dispatched."""
         return self._lifecycle.handle_chunk_failure(job_id, error)
+
+    def on_job_started(self, group_id: str) -> None:
+        """A job transitioned pending → running; roll up to the group."""
+        self._lifecycle.reconcile_group_status(group_id)
+
+    def on_job_succeeded(self, group_id: str) -> None:
+        """A job was marked done; roll up to the group (e.g. last child → done)."""
+        self._lifecycle.reconcile_group_status(group_id)
+
+    def on_job_failed_terminal(self, group_id: str) -> None:
+        """A job was marked failed and retries are exhausted; roll up to
+        the group (e.g. last child → failed)."""
+        self._lifecycle.reconcile_group_status(group_id)
 
     # ---- cancellation ----
 

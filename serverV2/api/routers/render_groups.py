@@ -49,18 +49,7 @@ def _up() -> UploadCoordinator:
 
 @router.get("/render-groups")
 def list_render_groups(user: dict = Depends(get_current_user)):
-    from serverV2.infrastructure.db import query_all
-    groups = query_all(
-        "SELECT id FROM render_groups WHERE user_id = %s ORDER BY submitted_at DESC",
-        (user["uid"],),
-    )
-    results = []
-    for g in groups:
-        try:
-            results.append(_get().get_status(g["id"]))
-        except RenderGroupServiceError:
-            pass
-    return results
+    return _get().list_with_status(user["uid"])
 
 
 @router.post("/render-groups/create")

@@ -34,6 +34,8 @@ from serverV2.services.render_groups.serializers import (
 
 log = logging.getLogger(__name__)
 
+_ACTIVE_GROUP_STATUSES = frozenset({"uploading", "pending", "running"})
+
 
 class RenderGroupServiceError(Exception):
     def __init__(self, status: int, message: str) -> None:
@@ -449,7 +451,58 @@ class RenderGroupService:
         group = self._groups.get_by_id(group_id)
         if not group:
             raise RenderGroupServiceError(404, "Render group not found")
+        jobs = self._jobs.get_raw_by_group(group_id)
+        machine_ids = [job["machine_id"] for job in jobs if job.get("machine_id")]
+        machines_by_id = self._machines.get_raw_by_ids(machine_ids)
+        return self._build_active_status_dto(group, jobs, machines_by_id)
 
+    def list_with_status(self, user_id: str) -> list[dict[str, Any]]:
+        """List endpoint hot path.
+
+        Two-tier read: terminal groups serve from snapshot columns on the
+        ``render_groups`` row alone (no children loaded).  Active groups
+        load their jobs in a single batched query and machines in a single
+        batched query — N+1 collapsed to 3 queries total regardless of
+        how many groups the user has.
+        """
+        groups = self._groups.get_by_user(user_id)
+        if not groups:
+            return []
+
+        active_ids = [g["id"] for g in groups if g.get("status") in _ACTIVE_GROUP_STATUSES]
+
+        jobs_by_group: dict[str, list[dict[str, Any]]] = {}
+        machines_by_id: dict[str, dict[str, Any]] = {}
+        if active_ids:
+            jobs_by_group = self._jobs.get_raw_by_groups(active_ids)
+            machine_ids = [
+                j["machine_id"]
+                for jobs in jobs_by_group.values()
+                for j in jobs
+                if j.get("machine_id")
+            ]
+            machines_by_id = self._machines.get_raw_by_ids(machine_ids)
+
+        results: list[dict[str, Any]] = []
+        for g in groups:
+            if g.get("status") in _ACTIVE_GROUP_STATUSES:
+                results.append(self._build_active_status_dto(
+                    g, jobs_by_group.get(g["id"], []), machines_by_id,
+                ))
+            else:
+                results.append(self._build_terminal_status_dto(g))
+        return results
+
+    def _build_active_status_dto(
+        self,
+        group: dict[str, Any],
+        jobs: list[dict[str, Any]],
+        machines_by_id: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Full DTO for an active group — derives progress and per-chunk
+        ``tasks`` from freshly-loaded children.  Used by the detail/status
+        endpoints (single group) and by the list endpoint for the active
+        slice (batched children)."""
         resolved_render_settings = normalize_render_overrides(
             parse_json_object(group.get("render_overrides_json"), {})
         )
@@ -457,33 +510,21 @@ class RenderGroupService:
         analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
         analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 
-        jobs = self._jobs.get_raw_by_group(group_id)
-
-        machine_ids = [job["machine_id"] for job in jobs if job.get("machine_id")]
-        machines_by_id = self._machines.get_raw_by_ids(machine_ids)
-
         tasks = [
             serialize_task(job, machines_by_id.get(job.get("machine_id")))
             for job in jobs
         ]
 
-        statuses = [j["status"] for j in jobs]
         total_frames = group.get("total_frames") or 0
         total_rendered = min(
             total_frames,
             sum(t["rendered_frames"] or 0 for t in tasks),
         )
 
-        from serverV2.callbacks.group_status_aggregator import compute_group_status
-        aggregated = compute_group_status(
-            current_group_status=group["status"],
-            job_statuses=statuses,
-            total_frames=total_frames,
-            total_rendered=total_rendered,
-        )
-        overall_status = aggregated.status
-        if aggregated.should_persist:
-            self._groups.update_status(group_id, overall_status)
+        # Group status is owned by write-side callbacks (success/failure
+        # handlers + CallbackRouter on pending→running).  Read endpoints
+        # return the stored value directly — no recompute, no write-back.
+        overall_status = group["status"]
 
         overall_pct = None
         if total_frames > 0:
@@ -492,9 +533,16 @@ class RenderGroupService:
             overall_pct = 100.0
 
         latest_candidates = [t["latest_output_file"] for t in tasks if t.get("latest_output_file")]
+        latest_output = latest_output_filename(latest_candidates) if latest_candidates else None
+        latest_output_job_id: str | None = None
+        if latest_output:
+            for t in tasks:
+                if t.get("latest_output_file") == latest_output:
+                    latest_output_job_id = t.get("job_id")
+                    break
 
         return {
-            "group_id": group_id,
+            "group_id": group["id"],
             "status": overall_status,
             "input_filename": group["input_filename"],
             "total_frames": total_frames,
@@ -513,8 +561,56 @@ class RenderGroupService:
             "available_output_files_count": min(
                 total_frames, sum(t.get("output_files_count") or 0 for t in tasks),
             ),
-            "latest_output_file": latest_output_filename(latest_candidates) if latest_candidates else None,
+            "latest_output_file": latest_output,
+            "latest_output_job_id": latest_output_job_id,
+            "tasks_count": len(tasks),
             "tasks": tasks,
+        }
+
+    def _build_terminal_status_dto(self, group: dict[str, Any]) -> dict[str, Any]:
+        """Slim DTO for a terminal group — every per-chunk-derived field
+        comes from the snapshot columns on ``render_groups`` (written
+        once by the lifecycle when the group entered terminal state).
+        ``tasks`` is intentionally empty; the detail page re-loads
+        children on demand if the user opens it."""
+        resolved_render_settings = normalize_render_overrides(
+            parse_json_object(group.get("render_overrides_json"), {})
+        )
+        scheduling = parse_json_object(group.get("scheduling_json"), {})
+        analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
+        analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
+
+        total_frames = group.get("total_frames") or 0
+        total_rendered = group.get("overall_rendered_frames") or 0
+
+        overall_pct = None
+        if total_frames > 0:
+            overall_pct = round(min(100.0, total_rendered / total_frames * 100), 1)
+        if group.get("status") == "done":
+            overall_pct = 100.0
+
+        return {
+            "group_id": group["id"],
+            "status": group["status"],
+            "input_filename": group["input_filename"],
+            "total_frames": total_frames,
+            "frame_start": group["frame_start"],
+            "frame_end": group["frame_end"],
+            "frame_step": group["frame_step"],
+            "submitted_at": group.get("submitted_at"),
+            "completed_at": group.get("completed_at"),
+            "error": group.get("error"),
+            "resolved_render_settings": resolved_render_settings,
+            "scheduling": scheduling,
+            "analysis_snapshot": analysis_snapshot,
+            "analysis_warnings": analysis_warnings,
+            "overall_rendered_frames": total_rendered,
+            "overall_progress_pct": overall_pct,
+            "available_output_files_count": group.get("available_output_files_count") or 0,
+            "latest_output_file": group.get("latest_output_file"),
+            "latest_output_job_id": group.get("latest_output_job_id"),
+            "tasks_count": group.get("tasks_count") or 0,
+            "tasks": [],
         }
 
     # ------------------------------------------------------------------

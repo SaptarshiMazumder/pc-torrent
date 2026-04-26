@@ -178,6 +178,7 @@ class ModalEndpoint:
     vram_gb: float
     cpu_cores: int
     ram_gb: float
+    render_speed: float
 
 @dataclass(frozen=True)
 class ModalConfig:
@@ -270,7 +271,7 @@ def _parse_modal_endpoints(
             raise ValueError(
                 f"modal_instances entry duplicates gpu_type={gpu_type!r}"
             )
-        for required in ("vram_gb", "cpu_cores", "ram_gb"):
+        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed"):
             if required not in entry:
                 raise ValueError(
                     f"modal_instances entry {gpu_type!r} is missing required field {required!r}"
@@ -285,6 +286,7 @@ def _parse_modal_endpoints(
             vram_gb=float(entry["vram_gb"]),
             cpu_cores=int(entry["cpu_cores"]),
             ram_gb=float(entry["ram_gb"]),
+            render_speed=float(entry["render_speed"]),
         ))
         seen.add(gpu_type)
     return results

@@ -52,7 +52,14 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
     }
   };
 
-  const taskCount = Array.isArray(job?.tasks) ? job.tasks.length : 0;
+  // Backend snapshots `tasks_count` onto terminal groups so the list view
+  // can render this label without re-fetching the per-chunk tasks array.
+  const taskCount =
+    typeof job?.tasks_count === "number"
+      ? job.tasks_count
+      : Array.isArray(job?.tasks)
+        ? job.tasks.length
+        : 0;
   const machineLabel = job?.group_id
     ? `${taskCount} machine${taskCount !== 1 ? "s" : ""}`
     : job?.machine_gpu || "1 machine";

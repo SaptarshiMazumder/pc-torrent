@@ -2,15 +2,17 @@
 
 Every method on this class tells one top-to-bottom story:
 
-    start_render           — user submitted a render
-    handle_chunk_failure   — a worker's chunk failed
-    cancel_render          — user cancelled the render
+    start_render             — user submitted a render
+    handle_chunk_failure     — a worker's chunk failed (decides retry)
+    cancel_render            — user cancelled the render
+    reconcile_group_status   — a job state changed; roll up to the group
 
-Success and progress events do not need orchestration decisions — they
-are handled directly by ``CallbackRouter`` and do not pass through here.
+Group-level state is owned by this layer.  Callback handlers update only
+the job row, then notify the orchestrator (success / failure-after-retry /
+first progress) so this lifecycle can update the parent group.
 
 All decisions (stale-signal guard, retry-attempt limit, cancellation
-teardown order) live here.  Grunt work is delegated:
+teardown order, group rollup) live here.  Grunt work is delegated:
 
     FrameAllocator       — picks fleet targets for chunks (initial + retry)
     DispatchCoordinator  — drains the queue, claims the ledger, dispatches
@@ -26,12 +28,18 @@ import json
 import logging
 from typing import Any, Callable
 
+from serverV2.callbacks.group_status_aggregator import compute_group_status
 from serverV2.core.models import (
     AvailableResources,
     DispatchContext,
     DispatchResult,
     PlannedTask,
     RenderJob,
+)
+from serverV2.core.value_objects import (
+    latest_output_filename,
+    output_frame_sort_key,
+    parse_output_files,
 )
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
@@ -44,6 +52,8 @@ from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 log = logging.getLogger(__name__)
+
+_TERMINAL_GROUP_STATUSES = frozenset({"done", "failed", "cancelled"})
 
 
 class RenderLifecycle:
@@ -355,7 +365,89 @@ class RenderLifecycle:
                 )
 
         log.info("Group %s: cancelled %d jobs", group_id, len(jobs))
+
+        # Snapshot the per-group fields the list view will read for this
+        # cancelled group, so the list endpoint never needs to re-fetch
+        # children for it again.
+        all_jobs = self._job_repo.get_by_group(group_id)
+        group = self._group_repo.get_by_id(group_id)
+        if group is not None:
+            total_frames = group.get("total_frames") or 0
+            total_rendered = min(
+                total_frames,
+                sum(j.rendered_frames for j in all_jobs),
+            )
+            self._write_terminal_snapshot(group_id, all_jobs, total_rendered)
+
         return {"cancelled_jobs": len(jobs)}
+
+    # ------------------------------------------------------------------
+    # Story 4: a job state changed; roll the change up to the group
+    # ------------------------------------------------------------------
+
+    def reconcile_group_status(self, group_id: str) -> None:
+        """Recompute the group's overall status from its child jobs and
+        persist if it changed.  Single owner of group-status mutations
+        outside the cancel path — callbacks notify us via this entry
+        point instead of touching ``render_groups`` directly.
+
+        On terminal transitions (done/failed) we also write the
+        ``terminal_snapshot`` columns so the list endpoint can serve this
+        group without re-fetching its children ever again."""
+        group = self._group_repo.get_by_id(group_id)
+        if not group:
+            return
+        jobs = self._job_repo.get_by_group(group_id)
+        statuses = [j.status for j in jobs]
+        total_frames = group["total_frames"] or 0
+        total_rendered = min(
+            total_frames,
+            sum(j.rendered_frames for j in jobs),
+        )
+        result = compute_group_status(
+            current_group_status=group["status"],
+            job_statuses=statuses,
+            total_frames=total_frames,
+            total_rendered=total_rendered,
+        )
+        if not result.should_persist:
+            return
+        self._group_repo.update_status(group_id, result.status)
+        if result.status in _TERMINAL_GROUP_STATUSES:
+            self._write_terminal_snapshot(group_id, jobs, total_rendered)
+
+    def _write_terminal_snapshot(
+        self,
+        group_id: str,
+        jobs: list[RenderJob],
+        total_rendered: int,
+    ) -> None:
+        """Snapshot the per-group fields that the list view needs.  Picked
+        from the children once, persisted to ``render_groups``.  See
+        ``RenderGroupRepository.update_terminal_snapshot``."""
+        latest_file: str | None = None
+        latest_job_id: str | None = None
+        latest_key: tuple[int, str] | None = None
+        available = 0
+        for j in jobs:
+            files = parse_output_files(j.output_files)
+            available += len(files)
+            top = latest_output_filename(files)
+            if not top:
+                continue
+            key = output_frame_sort_key(top)
+            if latest_key is None or key > latest_key:
+                latest_file = top
+                latest_job_id = j.id
+                latest_key = key
+        self._group_repo.update_terminal_snapshot(
+            group_id,
+            tasks_count=len(jobs),
+            latest_output_file=latest_file,
+            latest_output_job_id=latest_job_id,
+            available_output_files_count=available,
+            overall_rendered_frames=total_rendered,
+        )
 
     # ------------------------------------------------------------------
     # helpers

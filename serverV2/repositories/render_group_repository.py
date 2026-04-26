@@ -26,6 +26,40 @@ class RenderGroupRepository:
         else:
             execute("UPDATE render_groups SET status = %s WHERE id = %s", (status, group_id))
 
+    def update_terminal_snapshot(
+        self,
+        group_id: str,
+        *,
+        tasks_count: int,
+        latest_output_file: str | None,
+        latest_output_job_id: str | None,
+        available_output_files_count: int,
+        overall_rendered_frames: int,
+    ) -> None:
+        """Persist the per-group fields that the list view needs but that
+        today are recomputed from children on every refresh.  Called once
+        per group, when it enters a terminal state — frees the list endpoint
+        from having to re-fetch jobs+machines for finished groups."""
+        execute(
+            """
+            UPDATE render_groups
+            SET tasks_count = %s,
+                latest_output_file = %s,
+                latest_output_job_id = %s,
+                available_output_files_count = %s,
+                overall_rendered_frames = %s
+            WHERE id = %s
+            """,
+            (
+                tasks_count,
+                latest_output_file,
+                latest_output_job_id,
+                available_output_files_count,
+                overall_rendered_frames,
+                group_id,
+            ),
+        )
+
     def update_frames(
         self, group_id: str, *, total_frames: int,
         frame_start: int, frame_end: int, frame_step: int,
@@ -80,8 +114,11 @@ class RenderGroupRepository:
         execute("DELETE FROM render_groups WHERE id = %s", (group_id,))
 
     def get_by_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Full rows — the list endpoint reads snapshot columns straight off
+        the row for terminal groups and only fetches children for the
+        active ones."""
         return query_all(
-            "SELECT id FROM render_groups WHERE user_id = %s ORDER BY submitted_at DESC",
+            "SELECT * FROM render_groups WHERE user_id = %s ORDER BY submitted_at DESC",
             (user_id,),
         )
 

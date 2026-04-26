@@ -1,17 +1,22 @@
-"""SuccessHandler — marks a job done, reconciles group status, drains queue."""
+"""SuccessHandler — marks a job done, drains the queue, asks the
+orchestrator to roll the change up to the group.
+
+Job-level mutations (mark_done, in-progress release, fleet drain) live
+here.  Group-level state changes go through the orchestrator — this
+handler never touches ``render_groups`` directly.
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
-from serverV2.callbacks.group_status_aggregator import compute_group_status
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
+    from serverV2.orchestrator.orchestrator import RenderOrchestrator
 
 log = logging.getLogger(__name__)
 
@@ -21,18 +26,21 @@ class SuccessHandler:
     def __init__(
         self,
         job_repo: JobRepository,
-        group_repo: RenderGroupRepository,
         in_progress_repo: InProgressChunkRepository,
     ) -> None:
         self._job_repo = job_repo
-        self._group_repo = group_repo
         self._in_progress = in_progress_repo
+        self._orchestrator: RenderOrchestrator | None = None
         self._coordinator: DispatchCoordinator | None = None
 
-    def set_coordinator(self, coordinator: "DispatchCoordinator") -> None:
-        """Late-bound to break the circular wiring with the coordinator
-        (lifecycle composes the coordinator + handlers, so the handlers
+    def set_orchestrator(self, orchestrator: "RenderOrchestrator") -> None:
+        """Late-bound to break the circular wiring with the orchestrator
+        (lifecycle composes the orchestrator + handlers, so the handlers
         cannot take it via __init__)."""
+        self._orchestrator = orchestrator
+
+    def set_coordinator(self, coordinator: "DispatchCoordinator") -> None:
+        """Late-bound to break the circular wiring with the coordinator."""
         self._coordinator = coordinator
 
     def handle(self, job_id: str, group_id: str) -> None:
@@ -46,7 +54,9 @@ class SuccessHandler:
 
         self._job_repo.mark_done(job_id)
         log.info("Job %s marked done", job_id)
-        self._reconcile_group(group_id)
+
+        if self._orchestrator is not None and group_id:
+            self._orchestrator.on_job_succeeded(group_id)
 
         # A slot just opened up in this fleet — drain any waiting items.
         if fleet and self._coordinator is not None:
@@ -54,23 +64,3 @@ class SuccessHandler:
                 self._coordinator.drain_for_fleet(fleet)
             except Exception as exc:
                 log.warning("drain_for_fleet(%s) failed: %s", fleet, exc)
-
-    def _reconcile_group(self, group_id: str) -> None:
-        group = self._group_repo.get_by_id(group_id)
-        if not group:
-            return
-        jobs = self._job_repo.get_by_group(group_id)
-        statuses = [j.status for j in jobs]
-        total_frames = group["total_frames"] or 0
-        total_rendered = min(
-            total_frames,
-            sum(j.rendered_frames for j in jobs),
-        )
-        result = compute_group_status(
-            current_group_status=group["status"],
-            job_statuses=statuses,
-            total_frames=total_frames,
-            total_rendered=total_rendered,
-        )
-        if result.should_persist:
-            self._group_repo.update_status(group_id, result.status)

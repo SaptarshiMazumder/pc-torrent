@@ -58,7 +58,7 @@ RENDER_WEDGE_PATTERNS = (
 
 
 # ---------------------------------------------------------------------------
-# Worker heartbeat (ported from runpod_worker/handler.py)
+# Worker heartbeat
 # ---------------------------------------------------------------------------
 
 class WorkerHeartbeat:

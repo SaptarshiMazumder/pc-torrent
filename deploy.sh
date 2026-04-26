@@ -74,8 +74,29 @@ log_ok "Docker image built and pushed"
 
 cd "$PROJECT_ROOT"
 
-# Re-read comma-containing env vars directly to avoid IFS='=' parsing issues
-MODAL_ENDPOINTS=$(grep '^MODAL_ENDPOINTS=' "$PROJECT_ROOT/serverV2/.env" | head -1 | cut -d'=' -f2-)
+# Convert serverV2/.env -> YAML for `gcloud run deploy --env-vars-file`.
+# Single source of truth: every var in serverV2/.env reaches Cloud Run, no
+# explicit allowlist to keep in sync.
+ENV_YAML="$PROJECT_ROOT/.env.cloudrun.yaml"
+trap 'rm -f "$ENV_YAML"' EXIT
+
+log_info "Generating Cloud Run env file from serverV2/.env..."
+python - "$PROJECT_ROOT/serverV2/.env" "$ENV_YAML" <<'PY'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+out = {}
+with open(src, encoding="utf-8") as f:
+    for raw in f:
+        line = raw.rstrip("\r\n").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v
+with open(dst, "w", encoding="utf-8") as f:
+    for k, v in out.items():
+        f.write(f"{k}: {json.dumps(v)}\n")
+PY
+log_ok "Wrote $(basename "$ENV_YAML") ($(wc -l < "$ENV_YAML" | tr -d ' ') vars)"
 
 log_info "Deploying container to Cloud Run (region: $GCP_REGION)..."
 gcloud run deploy "$SERVICE_NAME" \
@@ -87,32 +108,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --memory 2Gi \
     --min-instances 1 \
     --no-cpu-throttling \
-    --set-env-vars "DATABASE_URL=$DATABASE_URL" \
-    --set-env-vars "REDIS_URL=${REDIS_URL:-}" \
-    --set-env-vars "R2_ACCOUNT_ID=$R2_ACCOUNT_ID" \
-    --set-env-vars "R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID" \
-    --set-env-vars "R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY" \
-    --set-env-vars "R2_BUCKET_NAME=$R2_BUCKET_NAME" \
-    --set-env-vars "PUBLIC_BACKEND_URL=$PUBLIC_BACKEND_URL" \
-    --set-env-vars "MODAL_PROVISIONING_ENABLED=${MODAL_PROVISIONING_ENABLED:-true}" \
-    --set-env-vars "MODAL_TOKEN_ID=${MODAL_TOKEN_ID:-}" \
-    --set-env-vars "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET:-}" \
-    --set-env-vars "^@^MODAL_ENDPOINTS=${MODAL_ENDPOINTS:-}" \
-    --set-env-vars "^@^MODAL_DISABLED_GPU_TYPES=${MODAL_DISABLED_GPU_TYPES:-}" \
-    --set-env-vars "MODAL_APP_NAME=${MODAL_APP_NAME:-pcrent-render}" \
-    --set-env-vars "MODAL_WORKSPACE=${MODAL_WORKSPACE:-}" \
-    --set-env-vars "MODAL_ENDPOINT_URL_PREFIX=${MODAL_ENDPOINT_URL_PREFIX:-}" \
-    --set-env-vars "MODAL_GPU_VRAM_GB=${MODAL_GPU_VRAM_GB:-24}" \
-    --set-env-vars "MODAL_WORKERS_PER_ENDPOINT=${MODAL_WORKERS_PER_ENDPOINT:-1}" \
-    --set-env-vars "MODAL_WORKER_IMAGE=${MODAL_WORKER_IMAGE:-}" \
-    --set-env-vars "VAST_PROVISIONING_ENABLED=${VAST_PROVISIONING_ENABLED:-true}" \
-    --set-env-vars "VAST_API_KEY=${VAST_API_KEY:-}" \
-    --set-env-vars "VAST_DOCKER_IMAGE=${VAST_DOCKER_IMAGE:-}" \
-    --set-env-vars "VAST_MAX_PRICE_PER_GPU=${VAST_MAX_PRICE_PER_GPU:-0.50}" \
-    --set-env-vars "VAST_DISK_GB=${VAST_DISK_GB:-20}" \
-    --set-env-vars "VAST_WORKERS_PER_ENDPOINT=${VAST_WORKERS_PER_ENDPOINT:-2}" \
-    --set-env-vars "ORCHESTRATOR_MAX_RETRIES=${ORCHESTRATOR_MAX_RETRIES:-2}" \
-    --set-env-vars "^|^FIREBASE_SERVICE_ACCOUNT_JSON=$FIREBASE_SERVICE_ACCOUNT_JSON" \
+    --env-vars-file "$ENV_YAML" \
     --quiet
 
 BACKEND_URL=$(gcloud run services describe "$SERVICE_NAME" \

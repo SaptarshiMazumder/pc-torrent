@@ -28,11 +28,11 @@ VARIANT="${2:-cycles}"
 case "$VARIANT" in
     cycles)
         IMAGE_NAME="pcrent-worker"
-        DOCKERFILE="$PROJECT_ROOT/runpod_worker/Dockerfile"
+        DOCKERFILE="$PROJECT_ROOT/cloud_worker/Dockerfile.cycles"
         ;;
     eevee)
         IMAGE_NAME="pcrent-worker-eevee"
-        DOCKERFILE="$PROJECT_ROOT/runpod_worker/Dockerfile.eevee"
+        DOCKERFILE="$PROJECT_ROOT/cloud_worker/Dockerfile.eevee"
         ;;
     *)
         echo "ERROR: unknown variant '$VARIANT'.  Expected 'cycles' or 'eevee'."

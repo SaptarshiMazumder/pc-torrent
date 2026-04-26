@@ -98,9 +98,15 @@ class RenderLifecycle:
         frame_step: int,
         total_frames: int,
         machine_ids: list[str] | None = None,
-        file_size_bytes: int | None = None,
+        heaviness: dict | None = None,
         engine: str | None = None,
     ) -> list[PlannedTask]:
+        # File size for strategy selection is carried inside ``heaviness``
+        # (see ``parse_analysis_heaviness(snapshot, file_size_bytes=...)``).
+        # ``heaviness=None`` is fine — equivalent to a defaulted dict with
+        # file_size=0; the picker treats unknown size as "use Default".
+        file_size_bytes = int((heaviness or {}).get("file_size_bytes", 0) or 0)
+
         resources = self._resource_picker()
         raw_community = len(resources.community_machines)
         raw_caps_by_fleet: dict[str, int] = {}
@@ -125,8 +131,8 @@ class RenderLifecycle:
             frame_step=frame_step,
             total_frames=total_frames,
             resources=resources,
-            file_size_bytes=file_size_bytes,
             engine=engine,
+            heaviness=heaviness,
         )
         log.info(
             "plan: strategy=%s pinned=%s engine=%s raw_community=%d raw_caps=%s "
@@ -140,9 +146,9 @@ class RenderLifecycle:
         return tasks
 
     def _pick_strategy(
-        self, file_size_bytes: int | None, total_frames: int,
+        self, file_size_bytes: int, total_frames: int,
     ) -> FrameAllocator:
-        size_known = file_size_bytes is not None and file_size_bytes > 0
+        size_known = file_size_bytes > 0
         is_heavy = size_known and file_size_bytes >= self._FAST_RENDER_FILE_SIZE_BYTES
         is_long = total_frames >= self._FAST_RENDER_TOTAL_FRAMES
         if is_heavy or is_long:

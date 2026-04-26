@@ -33,7 +33,7 @@ class RenderOrchestrator:
         frame_step: int,
         total_frames: int,
         machine_ids: list[str] | None = None,
-        file_size_bytes: int | None = None,
+        heaviness: dict | None = None,
         engine: str | None = None,
     ) -> list[PlannedTask]:
         """Plan an initial allocation.
@@ -43,8 +43,11 @@ class RenderOrchestrator:
         boxes).  When None, the full pool of community machines + enabled
         serverless capabilities is considered.
 
-        ``file_size_bytes``: blend file size, used as the heaviness signal
-        by FastRenderAllocationStrategy.  ``None`` falls back to Default.
+        ``heaviness``: parsed analysis_snapshot["heaviness"] dict with
+        ``file_size_bytes`` injected (see ``parse_analysis_heaviness``).
+        Used by cost-aware strategies (FastRender, Economy) for both
+        target selection and the soft budget cap.  ``None`` is fine —
+        treated as a defaulted dict with file_size=0.
 
         ``engine``: render engine string ("BLENDER_EEVEE", "CYCLES", ...).
         Forwarded to the strategy's TargetValidators for fleet-compatibility
@@ -56,7 +59,7 @@ class RenderOrchestrator:
             frame_step=frame_step,
             total_frames=total_frames,
             machine_ids=machine_ids,
-            file_size_bytes=file_size_bytes,
+            heaviness=heaviness,
             engine=engine,
         )
 

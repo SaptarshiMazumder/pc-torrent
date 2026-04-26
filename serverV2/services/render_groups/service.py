@@ -18,6 +18,7 @@ from serverV2.core.value_objects import (
     latest_output_filename,
     normalize_render_overrides,
     now_iso,
+    parse_analysis_heaviness,
     parse_json_list,
     parse_json_object,
     sanitize_filename,
@@ -243,13 +244,21 @@ class RenderGroupService:
         machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
         engine = (render_overrides.get("render") or {}).get("engine")
 
+        # Build the heaviness dict once from the analyzer's snapshot + the
+        # server-side file size; cost-aware strategies read everything they
+        # need from this single object.
+        heaviness = parse_analysis_heaviness(
+            analysis_snapshot if isinstance(analysis_snapshot, dict) else None,
+            file_size_bytes=r2_input_size_bytes,
+        )
+
         planned = self._orchestrator.plan(
             frame_start=plan.frame_start,
             frame_end=plan.frame_end,
             frame_step=plan.frame_step,
             total_frames=plan.total_frames,
             machine_ids=machine_ids,
-            file_size_bytes=r2_input_size_bytes,
+            heaviness=heaviness,
             engine=engine,
         )
 
@@ -384,13 +393,22 @@ class RenderGroupService:
         machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
         engine = (render_overrides.get("render") or {}).get("engine")
 
+        # Build heaviness once for the rerender (analysis snapshot copied
+        # from the original group) + the new r2 file size.
+        original_snapshot_raw = original.get("analysis_snapshot_json") or "{}"
+        original_snapshot = parse_json_object(original_snapshot_raw, {})
+        heaviness = parse_analysis_heaviness(
+            original_snapshot,
+            file_size_bytes=r2_input_size_bytes,
+        )
+
         planned = self._orchestrator.plan(
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
             total_frames=total_frames,
             machine_ids=machine_ids,
-            file_size_bytes=r2_input_size_bytes,
+            heaviness=heaviness,
             engine=engine,
         )
 

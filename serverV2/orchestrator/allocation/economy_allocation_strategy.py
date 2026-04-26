@@ -108,12 +108,14 @@ class EconomyAllocationStrategy:
         frame_step: int,
         total_frames: int,
         resources: AvailableResources,
-        file_size_bytes: int | None = None,
         engine: str | None = None,
+        heaviness: dict | None = None,
         tier_budget_usd: float | None = None, # ignored — Economy is already cost-first
-        heaviness: dict | None = None,        # ignored — pass-through for Protocol compat
     ) -> list[PlannedTask]:
         context = ValidationContext(engine=engine)
+        # Heaviness carries file_size_bytes (Phase 7-refactor consolidation).
+        # None heaviness -> file_size 0 -> medium-band default.
+        file_size_bytes = int((heaviness or {}).get("file_size_bytes", 0) or 0)
         vram_floor = vram_floor_for(file_size_bytes)
 
         eligible = self._eligible_targets(resources, vram_floor, context)
@@ -537,10 +539,11 @@ def _smoke() -> None:
         ],
         caps=[],
     )
+    from serverV2.core.value_objects import parse_analysis_heaviness
     tasks = strategy.allocate_initial(
         frame_start=1, frame_end=10, frame_step=1, total_frames=10,
         resources=res,
-        file_size_bytes=3 * 1024 ** 3,
+        heaviness=parse_analysis_heaviness(None, file_size_bytes=3 * 1024 ** 3),
     )
     machine_ids = [t.machine_id for t in tasks]
     assert "c8gb" not in machine_ids and "c16gb" not in machine_ids
@@ -558,7 +561,7 @@ def _smoke() -> None:
     tasks = strategy.allocate_initial(
         frame_start=1, frame_end=10, frame_step=1, total_frames=10,
         resources=res,
-        file_size_bytes=10 * 1024 ** 3,   # 10GB -> floor=48
+        heaviness=parse_analysis_heaviness(None, file_size_bytes=10 * 1024 ** 3),  # floor=48
     )
     assert len(tasks) > 0, "should fall back to no floor when no eligible meets it"
     print(f"7. VRAM floor fallback (10GB file, all eligibles below floor)         OK")

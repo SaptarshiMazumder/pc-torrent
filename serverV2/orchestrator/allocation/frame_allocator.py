@@ -33,28 +33,27 @@ class FrameAllocator(Protocol):
         frame_step: int,
         total_frames: int,
         resources: AvailableResources,
-        file_size_bytes: int | None = None,
         engine: str | None = None,
-        tier_budget_usd: float | None = None,
         heaviness: dict | None = None,
+        tier_budget_usd: float | None = None,
     ) -> list[PlannedTask]:
         """Split the frame range into chunks and assign each a fleet target.
 
-        ``file_size_bytes`` is the heaviness signal — strategies that care
-        about scene weight (e.g. FastRender) read it; strategies that don't
-        (Default) ignore it.  ``None`` means heaviness is unknown.
-
         ``engine`` is forwarded to the strategy's TargetValidators so they
         can drop fleets that cannot run the engine (e.g. Modal for EEVEE).
+
+        ``heaviness`` is the parsed analysis_snapshot["heaviness"] dict
+        with ``file_size_bytes`` injected (see ``parse_analysis_heaviness``).
+        Strategies that care about scene weight (FastRender, Economy) read
+        ``heaviness["file_size_bytes"]`` for the heaviness-band lookup and
+        feed the whole dict to the cost analyzer.  Strategies that don't
+        care (Default) ignore it.  ``None`` means heaviness is unknown —
+        equivalent to a defaulted dict.
 
         ``tier_budget_usd`` is an optional soft cost cap.  Strategies that
         care (FastRender's Standard tier) drop expensive targets when the
         cost analyzer says the mix exceeds the budget by a margin.
         ``None`` disables the soft cap (default — current behaviour).
-
-        ``heaviness`` is the parsed analysis_snapshot["heaviness"] dict
-        (Phase 2).  Required by the soft budget cap; pass-through ignored
-        by strategies that don't enforce one.
         """
         ...
 

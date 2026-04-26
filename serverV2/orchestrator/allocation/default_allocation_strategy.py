@@ -56,10 +56,9 @@ class DefaultAllocationStrategy:
         frame_step: int,
         total_frames: int,
         resources: AvailableResources,
-        file_size_bytes: int | None = None,   # ignored — Default is not heaviness-aware
         engine: str | None = None,
-        tier_budget_usd: float | None = None, # ignored — Default has no budget cap
         heaviness: dict | None = None,        # ignored — pass-through for Protocol compat
+        tier_budget_usd: float | None = None, # ignored — Default has no budget cap
     ) -> list[PlannedTask]:
         context = ValidationContext(engine=engine)
         targets = self._eligible_targets(resources, context)

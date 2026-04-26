@@ -243,10 +243,7 @@ def estimate_seconds_per_frame_from_snapshot(
     return estimate_seconds_per_frame(heaviness, render_speed)
 
 
-def estimate_startup_seconds(
-    heaviness: dict[str, Any],
-    file_size_bytes: int = 0,
-) -> float:
+def estimate_startup_seconds(heaviness: dict[str, Any]) -> float:
     """Per-chunk startup overhead in seconds.
 
     Includes container boot, Blender start, blend-file download, BVH
@@ -254,13 +251,17 @@ def estimate_startup_seconds(
     chunk regardless of how many frames the chunk owns — the cost
     analyzer applies it once per ``MixSlot``.
 
-    Heavy scenes commonly land in the 5-20 minute range here.  The
-    constants are coarse heuristics; Phase 5 telemetry will refine.
+    All inputs come from the heaviness dict (Phase 2 sub-dict + the
+    ``file_size_bytes`` server-side stamp injected by
+    ``parse_analysis_heaviness``).  Heavy scenes commonly land in the
+    5-20 minute range here.  The constants are coarse heuristics;
+    Phase 5 telemetry will refine.
     """
     startup = BASELINE_STARTUP_SEC
 
     # File download from R2 to the worker.  Takes the full file size,
     # which already includes packed textures.
+    file_size_bytes = int(heaviness.get("file_size_bytes", 0) or 0)
     if file_size_bytes > 0:
         startup += (file_size_bytes / _BYTES_PER_GB) * DOWNLOAD_SEC_PER_GB
 
@@ -284,10 +285,15 @@ def estimate_startup_seconds_from_snapshot(
     analysis_snapshot: dict[str, Any] | None,
     file_size_bytes: int = 0,
 ) -> float:
-    """Convenience wrapper — pulls heaviness from snapshot, then
-    delegates to ``estimate_startup_seconds``."""
-    heaviness = parse_analysis_heaviness(analysis_snapshot)
-    return estimate_startup_seconds(heaviness, file_size_bytes)
+    """Convenience wrapper — builds heaviness with the file_size_bytes
+    stamp, then delegates to ``estimate_startup_seconds``.
+
+    ``file_size_bytes`` stays an explicit kwarg here because callers at
+    this entry point typically have the snapshot from the DB but the
+    file size from a separate server-side column.
+    """
+    heaviness = parse_analysis_heaviness(analysis_snapshot, file_size_bytes=file_size_bytes)
+    return estimate_startup_seconds(heaviness)
 
 
 # ---------------------------------------------------------------------------
@@ -433,49 +439,49 @@ def _smoke() -> None:
     print("\n=== Startup overhead ===\n")
 
     # Empty heaviness + zero file → just baseline
-    s_tiny = estimate_startup_seconds(parse_analysis_heaviness(None), 0)
+    s_tiny = estimate_startup_seconds(parse_analysis_heaviness(None))
     assert abs(s_tiny - BASELINE_STARTUP_SEC) < 1.0
     print(f"tiny scene (no file, no heaviness)        ->  {s_tiny:5.0f}s")
 
     # Moderate scene: 1 GB file, 10M verts, 500MB tex, 200 shader nodes
-    moderate = parse_analysis_heaviness(None)
+    moderate = parse_analysis_heaviness(None, file_size_bytes=1 * 1024 ** 3)
     moderate["vertex_count_total"] = 10_000_000
     moderate["texture_total_bytes"] = 512 * 1024 * 1024
     moderate["shader_node_count_total"] = 200
     moderate["material_count"] = 30
-    s_moderate = estimate_startup_seconds(moderate, file_size_bytes=1 * 1024 ** 3)
+    s_moderate = estimate_startup_seconds(moderate)
     # 90 + 30 + 30 + 50 + 5 + 10 = 215s ≈ 3.5 min
     assert 200 < s_moderate < 280, f"moderate scene should be ~3-5 min, got {s_moderate}"
     print(f"moderate (1GB, 10M verts, 500MB tex)      ->  {s_moderate:5.0f}s  ({s_moderate/60:.1f} min)")
 
     # Heavy scene: 5 GB, 50M verts, 2GB tex, 500 nodes
-    heavy = parse_analysis_heaviness(None)
+    heavy = parse_analysis_heaviness(None, file_size_bytes=5 * 1024 ** 3)
     heavy["vertex_count_total"] = 50_000_000
     heavy["texture_total_bytes"] = 2 * 1024 ** 3
     heavy["shader_node_count_total"] = 500
     heavy["material_count"] = 80
-    s_heavy = estimate_startup_seconds(heavy, file_size_bytes=5 * 1024 ** 3)
+    s_heavy = estimate_startup_seconds(heavy)
     # 90 + 150 + 150 + 200 + 5 + 25 = 620s ≈ 10 min
     assert 5 * 60 < s_heavy < 12 * 60, f"heavy scene should be 5-12 min, got {s_heavy}"
     print(f"heavy (5GB, 50M verts, 2GB tex)           ->  {s_heavy:5.0f}s  ({s_heavy/60:.1f} min)")
 
     # Very heavy scene: 10 GB, 100M verts, 4GB tex, 1000 nodes
-    very_heavy = parse_analysis_heaviness(None)
+    very_heavy = parse_analysis_heaviness(None, file_size_bytes=10 * 1024 ** 3)
     very_heavy["vertex_count_total"] = 100_000_000
     very_heavy["texture_total_bytes"] = 4 * 1024 ** 3
     very_heavy["shader_node_count_total"] = 1000
     very_heavy["material_count"] = 150
-    s_very_heavy = estimate_startup_seconds(very_heavy, file_size_bytes=10 * 1024 ** 3)
+    s_very_heavy = estimate_startup_seconds(very_heavy)
     # 90 + 300 + 300 + 400 + 55 = 1145s ≈ 19 min
     assert 15 * 60 < s_very_heavy < 22 * 60, f"very-heavy should be 15-22 min, got {s_very_heavy}"
     print(f"very heavy (10GB, 100M verts, 4GB tex)    ->  {s_very_heavy:5.0f}s  ({s_very_heavy/60:.1f} min)")
 
     # Pathological scene → cap at MAX_STARTUP_SEC
-    absurd = parse_analysis_heaviness(None)
+    absurd = parse_analysis_heaviness(None, file_size_bytes=100 * 1024 ** 3)
     absurd["vertex_count_total"] = 10_000_000_000
     absurd["texture_total_bytes"] = 100 * 1024 ** 3
     absurd["shader_node_count_total"] = 100_000
-    s_absurd = estimate_startup_seconds(absurd, file_size_bytes=100 * 1024 ** 3)
+    s_absurd = estimate_startup_seconds(absurd)
     assert s_absurd == MAX_STARTUP_SEC, f"runaway should cap at {MAX_STARTUP_SEC}, got {s_absurd}"
     print(f"absurd (capped to MAX_STARTUP_SEC)        ->  {s_absurd:5.0f}s  (capped)")
 

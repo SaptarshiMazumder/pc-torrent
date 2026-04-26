@@ -265,39 +265,58 @@ _HEAVINESS_DEFAULTS: dict[str, Any] = {
     "geometry_nodes_complexity": 0,
     "uses_subsurface_scattering": False,
     "uses_volumetrics": False,
+    # Server-side fact (render_groups.r2_input_size_bytes); injected by
+    # ``parse_analysis_heaviness(snapshot, file_size_bytes=...)``.  Kept
+    # in the heaviness dict so analyzers/allocators take a single
+    # "scene context" object rather than two separate kwargs.
+    "file_size_bytes": 0,
 }
 
 
-def parse_analysis_heaviness(analysis_snapshot: dict[str, Any] | None) -> dict[str, Any]:
+def parse_analysis_heaviness(
+    analysis_snapshot: dict[str, Any] | None,
+    *,
+    file_size_bytes: int | None = None,
+) -> dict[str, Any]:
     """Pull the ``heaviness`` sub-dict out of an analysis snapshot, filling
     in defaults for any missing field.  Always returns a complete dict —
     callers never need to None-check individual keys.
+
+    ``file_size_bytes`` is an optional server-side fact that gets stamped
+    onto the returned dict (the desktop analyzer doesn't know the .blend's
+    on-disk size; the server does, via ``render_groups.r2_input_size_bytes``).
+    Cost/time analyzers read it from the dict via ``heaviness["file_size_bytes"]``.
 
     Used by the cost / time estimators to read render-heaviness signals
     without re-implementing the defaulting logic at every call site.
     """
     out = dict(_HEAVINESS_DEFAULTS)
-    if not isinstance(analysis_snapshot, dict):
-        return out
-    raw = analysis_snapshot.get("heaviness")
-    if not isinstance(raw, dict):
-        return out
-    for key, default in _HEAVINESS_DEFAULTS.items():
-        if key not in raw:
-            continue
-        value = raw[key]
-        if isinstance(default, bool):
-            out[key] = bool(value)
-        elif isinstance(default, int):
-            try:
-                out[key] = int(value)
-            except (TypeError, ValueError):
-                pass
-        elif isinstance(default, str):
-            if isinstance(value, str):
-                out[key] = value
-        else:
-            out[key] = value
+    if isinstance(analysis_snapshot, dict):
+        raw = analysis_snapshot.get("heaviness")
+        if isinstance(raw, dict):
+            for key, default in _HEAVINESS_DEFAULTS.items():
+                if key == "file_size_bytes":
+                    continue   # server-side, never read from snapshot
+                if key not in raw:
+                    continue
+                value = raw[key]
+                if isinstance(default, bool):
+                    out[key] = bool(value)
+                elif isinstance(default, int):
+                    try:
+                        out[key] = int(value)
+                    except (TypeError, ValueError):
+                        pass
+                elif isinstance(default, str):
+                    if isinstance(value, str):
+                        out[key] = value
+                else:
+                    out[key] = value
+    if file_size_bytes is not None:
+        try:
+            out["file_size_bytes"] = max(0, int(file_size_bytes))
+        except (TypeError, ValueError):
+            pass
     return out
 
 

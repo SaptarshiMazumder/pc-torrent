@@ -5,6 +5,9 @@
   "vast": {
     "max_parallel": 15
   },
+  "community": {
+    "price_per_hour": 1.0
+  },
   "vast_instances": [
     {
       "gpu_name": "RTX 4090",
@@ -12,7 +15,8 @@
       "vram_gb": 24,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.45
+      "render_speed": 1.45,
+      "price_per_hour": 0.45
     },
     {
       "gpu_name": "RTX A6000",
@@ -20,7 +24,8 @@
       "vram_gb": 48,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.3
+      "render_speed": 1.3,
+      "price_per_hour": 0.55
     },
     {
       "gpu_name": "RTX A5000",
@@ -28,7 +33,8 @@
       "vram_gb": 24,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.0
+      "render_speed": 1.0,
+      "price_per_hour": 0.30
     },
     {
       "gpu_name": "RTX 3090",
@@ -36,7 +42,8 @@
       "vram_gb": 24,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 0.95
+      "render_speed": 0.95,
+      "price_per_hour": 0.25
     }
   ],
   "modal_instances": [
@@ -46,7 +53,8 @@
       "vram_gb": 24,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.0
+      "render_speed": 1.0,
+      "price_per_hour": 1.10
     },
     {
       "gpu_type": "l40s",
@@ -54,7 +62,8 @@
       "vram_gb": 48,
       "cpu_cores": 16,
       "ram_gb": 96,
-      "render_speed": 1.7
+      "render_speed": 1.7,
+      "price_per_hour": 2.10
     },
     {
       "gpu_type": "h100",
@@ -62,7 +71,8 @@
       "vram_gb": 80,
       "cpu_cores": 16,
       "ram_gb": 192,
-      "render_speed": 1.1
+      "render_speed": 1.1,
+      "price_per_hour": 4.50
     }
   ]
 }

@@ -138,6 +138,163 @@ payload = {
     "unsupported_fields": [],
 }
 
+# ---------------------------------------------------------------
+# Heaviness signals — Phase 2 of the tiered_allocation_plan.
+# Read by the cost estimator (server-side) to pick a render tier.
+# Each section is wrapped in try/except so a Blender API mismatch
+# in one area degrades just those fields rather than the whole
+# analysis.  Missing fields default sensibly in
+# value_objects.parse_analysis_heaviness on the server.
+# ---------------------------------------------------------------
+
+heaviness = {}
+
+# Render settings (engine, resolution, samples)
+try:
+    render = active_scene.render
+    engine = getattr(render, "engine", "")
+    res_x = _safe_int(getattr(render, "resolution_x", 1920), 1920)
+    res_y = _safe_int(getattr(render, "resolution_y", 1080), 1080)
+    res_pct = _safe_int(getattr(render, "resolution_percentage", 100), 100)
+    samples = 0
+    if engine == "CYCLES":
+        try:
+            samples = _safe_int(getattr(active_scene.cycles, "samples", 0), 0)
+        except Exception:
+            samples = 0
+    elif engine in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
+        try:
+            samples = _safe_int(getattr(active_scene.eevee, "taa_render_samples", 0), 0)
+        except Exception:
+            samples = 0
+    heaviness["render_engine"] = engine
+    heaviness["resolution_x"] = res_x
+    heaviness["resolution_y"] = res_y
+    heaviness["resolution_percentage"] = res_pct
+    heaviness["effective_pixels"] = int(res_x * res_y * res_pct / 100)
+    heaviness["samples"] = samples
+except Exception:
+    pass
+
+# Geometry heaviness (visible meshes in the active scene)
+visible_objects = []
+try:
+    visible_objects = [obj for obj in active_scene.objects if not obj.hide_render]
+    mesh_objects = [obj for obj in visible_objects if obj.type == "MESH" and obj.data]
+    vert_total = 0
+    for obj in mesh_objects:
+        try:
+            vert_total += len(obj.data.vertices)
+        except Exception:
+            pass
+    heaviness["vertex_count_total"] = vert_total
+    heaviness["object_count"] = len(visible_objects)
+    heaviness["mesh_count"] = len(mesh_objects)
+except Exception:
+    pass
+
+# Asset heaviness (materials, textures, shader complexity)
+active_materials = []
+try:
+    active_materials = [m for m in bpy.data.materials if m.users > 0]
+    active_images = [i for i in bpy.data.images if i.users > 0]
+    tex_bytes = 0
+    for img in active_images:
+        try:
+            w, h = img.size
+            channels = img.channels or 4
+            tex_bytes += int(w) * int(h) * int(channels)
+        except Exception:
+            pass
+    shader_nodes = 0
+    for m in active_materials:
+        try:
+            if m.use_nodes and m.node_tree:
+                shader_nodes += len(m.node_tree.nodes)
+        except Exception:
+            pass
+    heaviness["material_count"] = len(active_materials)
+    heaviness["texture_count"] = len(active_images)
+    heaviness["texture_total_bytes"] = tex_bytes
+    heaviness["shader_node_count_total"] = shader_nodes
+except Exception:
+    pass
+
+# Heavy-feature flags from modifiers
+uses_subdivision = False
+uses_displacement = False
+uses_particles = False
+uses_geometry_nodes = False
+geometry_nodes_complexity = 0
+try:
+    for obj in visible_objects:
+        for mod in getattr(obj, "modifiers", []):
+            mt = getattr(mod, "type", "")
+            if mt == "SUBSURF":
+                uses_subdivision = True
+            elif mt == "DISPLACE":
+                uses_displacement = True
+            elif mt == "PARTICLE_SYSTEM":
+                uses_particles = True
+            elif mt == "NODES":
+                uses_geometry_nodes = True
+                ng = getattr(mod, "node_group", None)
+                if ng and hasattr(ng, "nodes"):
+                    try:
+                        geometry_nodes_complexity += len(ng.nodes)
+                    except Exception:
+                        pass
+        if getattr(obj, "particle_systems", None):
+            try:
+                if len(obj.particle_systems) > 0:
+                    uses_particles = True
+            except Exception:
+                pass
+except Exception:
+    pass
+
+# Heavy-feature flags from shader graph (volumetrics, SSS) — world + materials
+VOLUME_NODE_IDNAMES = (
+    "ShaderNodeVolumeScatter",
+    "ShaderNodeVolumeAbsorption",
+    "ShaderNodeVolumePrincipled",
+)
+uses_volumetrics = False
+uses_subsurface_scattering = False
+try:
+    world = active_scene.world
+    if world and getattr(world, "use_nodes", False) and world.node_tree:
+        for node in world.node_tree.nodes:
+            if getattr(node, "bl_idname", "") in VOLUME_NODE_IDNAMES:
+                uses_volumetrics = True
+                break
+    for mat in active_materials:
+        try:
+            if not (mat.use_nodes and mat.node_tree):
+                continue
+            for node in mat.node_tree.nodes:
+                bid = getattr(node, "bl_idname", "")
+                if bid in VOLUME_NODE_IDNAMES:
+                    uses_volumetrics = True
+                elif bid == "ShaderNodeSubsurfaceScattering":
+                    uses_subsurface_scattering = True
+        except Exception:
+            pass
+        if uses_volumetrics and uses_subsurface_scattering:
+            break
+except Exception:
+    pass
+
+heaviness["uses_subdivision"] = uses_subdivision
+heaviness["uses_displacement"] = uses_displacement
+heaviness["uses_particles"] = uses_particles
+heaviness["uses_geometry_nodes"] = uses_geometry_nodes
+heaviness["geometry_nodes_complexity"] = geometry_nodes_complexity
+heaviness["uses_subsurface_scattering"] = uses_subsurface_scattering
+heaviness["uses_volumetrics"] = uses_volumetrics
+
+payload["heaviness"] = heaviness
+
 print("PCR_ANALYSIS_JSON:" + json.dumps(payload, separators=(",", ":")))
 "#;
 

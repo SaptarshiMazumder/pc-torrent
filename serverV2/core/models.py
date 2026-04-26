@@ -24,9 +24,13 @@ class CommunityMachine:
     render_speed: float
     status: str
     last_seen_at: str | None
+    # Cost-aware allocators (Phase 5+) read this; today no per-machine price
+    # column exists in the ``machines`` table — every community machine gets
+    # the global ``community.price_per_hour`` injected by MachineRepository.
+    price_per_hour: float = 1.0
 
     @classmethod
-    def from_row(cls, row: dict[str, Any]) -> CommunityMachine:
+    def from_row(cls, row: dict[str, Any], *, price_per_hour: float = 1.0) -> CommunityMachine:
         return cls(
             id=row["id"],
             gpu_model=row.get("gpu_model", "Unknown"),
@@ -36,6 +40,7 @@ class CommunityMachine:
             render_speed=row.get("render_speed") or 1.0,
             status=row.get("status", "idle"),
             last_seen_at=row.get("last_seen_at"),
+            price_per_hour=price_per_hour,
         )
 
 
@@ -54,6 +59,9 @@ class FleetCapability:
     ram_gb: float
     render_speed: float
     fleet_max_parallel: int
+    # Per-hour rental cost.  Read by cost-aware allocators (Phase 5+).
+    # Wired in bootstrap from VastEndpoint/ModalEndpoint.price_per_hour.
+    price_per_hour: float = 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -121,7 +121,10 @@ def build(
 
     # -- repositories --
     job_repo = JobRepository()
-    machine_repo = MachineRepository(stale_seconds=cfg.machine_stale_seconds)
+    machine_repo = MachineRepository(
+        stale_seconds=cfg.machine_stale_seconds,
+        community_price_per_hour=cfg.community_price_per_hour,
+    )
     group_repo = RenderGroupRepository()
     asset_repo = UserInputFileRepository()
     heartbeat_repo = HeartbeatRepository(redis)
@@ -236,6 +239,7 @@ def build(
                 ram_gb=ep.ram_gb,
                 render_speed=ep.render_speed,
                 fleet_max_parallel=cfg.modal.max_parallel,
+                price_per_hour=ep.price_per_hour,
             ))
         for ep in cfg.vast.endpoints:
             capabilities.append(FleetCapability(
@@ -247,6 +251,7 @@ def build(
                 ram_gb=ep.ram_gb,
                 render_speed=ep.render_speed,
                 fleet_max_parallel=cfg.vast.max_parallel,
+                price_per_hour=ep.price_per_hour,
             ))
         in_flight = job_repo.count_active_by_fleet()
         return AvailableResources(

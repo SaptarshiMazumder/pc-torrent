@@ -86,6 +86,23 @@ export function getLatestTaskWithOutput(tasks) {
 
 // Constructs a preview URL for a render group's latest frame
 export function getGroupPreviewUrl(job, backendUrl, authToken) {
+  // Fast path: terminal groups have these snapshotted at the top level by
+  // the backend, so we don't need to iterate `tasks` (which the list endpoint
+  // returns empty for terminal groups).
+  if (job?.latest_output_file && job?.latest_output_job_id) {
+    const availableCount =
+      typeof job.available_output_files_count === "number"
+        ? job.available_output_files_count
+        : 0;
+    return buildAuthenticatedUrl(
+      backendUrl,
+      `/jobs/${job.latest_output_job_id}/output/${encodeURIComponent(job.latest_output_file)}/preview`,
+      authToken,
+      availableCount
+    );
+  }
+  // Slow path: active groups still ship a `tasks` array — find the chunk
+  // with the latest output and build the URL from it.
   const latestTask = getLatestTaskWithOutput(job?.tasks);
   if (!latestTask?.latest_output_file) return "";
   const availableCount =

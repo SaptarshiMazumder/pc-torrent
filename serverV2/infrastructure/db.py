@@ -226,6 +226,21 @@ def init_db() -> None:
                 cur.execute(
                     "ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS r2_input_size_bytes BIGINT"
                 )
+                # Phase 4 — terminal-state snapshot.  When a group transitions
+                # to done/failed/cancelled, the lifecycle layer writes these
+                # columns from the children once.  The list endpoint reads
+                # them straight from the row for terminal groups so it does
+                # not need to re-fetch jobs+machines on every refresh.
+                for column_def in (
+                    "tasks_count INTEGER",
+                    "latest_output_file TEXT",
+                    "latest_output_job_id TEXT",
+                    "available_output_files_count INTEGER",
+                    "overall_rendered_frames INTEGER",
+                ):
+                    cur.execute(
+                        f"ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS {column_def}"
+                    )
         log.info("Database connection pool initialized")
     except Exception as exc:
         log.error("Failed to initialize database: %s", exc)

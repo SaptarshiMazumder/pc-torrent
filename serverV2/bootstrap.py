@@ -234,7 +234,7 @@ def build(
                 vram_gb=ep.vram_gb,
                 cpu_cores=ep.cpu_cores,
                 ram_gb=ep.ram_gb,
-                render_speed=1.0,
+                render_speed=ep.render_speed,
                 fleet_max_parallel=cfg.modal.max_parallel,
             ))
         for ep in cfg.vast.endpoints:
@@ -266,8 +266,10 @@ def build(
         return 10_000
 
     # -- callbacks --
-    failure_handler = FailureHandler(job_repo, group_repo)
-    success_handler = SuccessHandler(job_repo, group_repo, in_progress_repo)
+    # Handlers update only the job; group-level state changes go through the
+    # orchestrator (late-bound below to break the construction cycle).
+    failure_handler = FailureHandler(job_repo)
+    success_handler = SuccessHandler(job_repo, in_progress_repo)
     callback_router = CallbackRouter(job_repo, success_handler, failure_handler)
     router_ref[0] = callback_router
 
@@ -301,6 +303,8 @@ def build(
     )
     orchestrator = RenderOrchestrator(lifecycle)
     failure_handler.set_orchestrator(orchestrator)
+    success_handler.set_orchestrator(orchestrator)
+    callback_router.set_orchestrator(orchestrator)
 
     # -- community fleet monitor (machine-offline + group-terminal reconciliation)
     # Modal and Vast own their own health via per-job monitors inside their

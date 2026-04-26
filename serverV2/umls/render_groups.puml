@@ -1,0 +1,214 @@
+@startuml render_groups
+
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam shadowing false
+hide empty members
+
+title Render Groups Module — class diagram\n(annotated with the GET /render-groups hot path)
+
+' ---------------------------------------------------------------
+' Boundary stubs: classes outside this module that we depend on.
+' Drawn as <<external>> so the eye skips past them.
+' ---------------------------------------------------------------
+package "Boundary (other modules)" <<Frame>> {
+    class RenderOrchestrator <<external>> {
+        +plan(...)
+        +execute(group_id, tasks, ctx)
+        +cancel_group(group_id)
+    }
+    class FleetRegistry <<external>>
+    class OutputsResolver <<external>> {
+        +resolve_outputs(group_id, jobs)
+    }
+    class UploadCoordinator <<external>> {
+        +init_multipart(...)
+        +part_urls(...)
+        +complete(...)
+        +abort(...)
+    }
+}
+
+' ---------------------------------------------------------------
+' Render Groups module
+' ---------------------------------------------------------------
+package "Render Groups" <<Cloud>> {
+
+    package "API (FastAPI router)" {
+        class RenderGroupsRouter <<router>> {
+            +GET  /render-groups                                  : list_render_groups
+            +POST /render-groups/create                           : create
+            +POST /render-groups/{id}/confirm-upload              : confirm_upload
+            +GET  /render-groups/{id}                             : get_render_group
+            +GET  /render-groups/{id}/status                      : get_status
+            +POST /render-groups/{id}/cancel                      : cancel
+            +POST /render-groups/cancel-all                       : cancel_all
+            +POST /render-groups/{id}/rerender                    : rerender
+            +DELETE /render-groups/{id}                           : delete
+            +GET  /render-groups/{id}/input/{filename}            : download_input
+            +GET  /render-groups/{id}/outputs                     : get_outputs
+            +GET  /render-groups/{id}/download-zip                : download_zip
+            +POST /render-groups/{id}/multipart-upload/init       : multipart_init
+            +POST /render-groups/{id}/multipart-upload/part-urls  : multipart_part_urls
+            +POST /render-groups/{id}/multipart-upload/complete   : multipart_complete
+            +POST /render-groups/{id}/multipart-upload/abort      : multipart_abort
+        }
+    }
+
+    package "Service" {
+        class RenderGroupService <<facade>> {
+            +create(payload, user)
+            +confirm_upload(group_id, payload)
+            +get_status(group_id) : dict
+            +get_outputs(group_id)
+            +get_input_download_url(group_id, filename)
+            +resolve_input_key(group_id)
+            +cancel(group_id)
+            +rerender(group_id, payload)
+            +delete(group_id, user)
+        }
+    }
+
+    package "Pure helpers" {
+        class serializers <<module>> {
+            serialize_task(job, machine) : TaskDTO
+            build_dispatch_task_entry(planned, result) : TaskDTO
+        }
+        class frame_planning <<module>> {
+            resolve_frame_range(payload, group, analysis) : FramePlanResult?
+        }
+        class group_status_aggregator <<module>> {
+            compute_group_status(current, job_statuses, total_frames, total_rendered) : GroupStatusResult
+        }
+        class GroupStatusResult <<dataclass>> {
+            status: str
+            should_persist: bool
+        }
+    }
+
+    package "Repositories (this module's tables)" {
+        class RenderGroupRepository {
+            +get_by_id(id)
+            +get_by_user(user_id)
+            +get_active_groups()
+            +get_terminal_groups()
+            +create(...)
+            +update_status(id, status)
+            +update_frames(id, total, start, end, step)
+            +full_update(id, fields)
+            +delete(id)
+        }
+        class JobRepository {
+            +get_raw_by_id(id)
+            +get_raw_by_group(group_id)
+            +get_active_by_group(group_id)
+            +get_by_user(user_id)
+            +get_owned_by_id(id, user_id)
+            +count_active_by_fleet() : dict
+            +create(params)
+            +create_uploading_job(...)
+            +confirm_upload(id)
+            +update_status(id, status)
+            +mark_done(id) / mark_failed(id, error)
+            +update_progress(id, rendered, total)
+            +update_heartbeat(id, phase?)
+            +cancel_active_by_group(group_id)
+            +set_retry(id, attempt, frame_start)
+            +create_failover_job(...)
+            +get_output_files(id)
+            +merge_output_files(id, files)
+            +claim_next_for_machine(machine_id)
+            +save_provider_job_id(id, provider_id)
+            +delete_terminal()
+        }
+        class MachineRepository {
+            +get_available_community()
+            +get_by_id(id)
+            +get_raw_by_ids(ids) : dict<id, machine>
+            +set_processing(id) / set_available(id)
+            +mark_stale(...)
+            +get_failover_candidates(exclude_id)
+        }
+        class UserInputFileRepository {
+            +upsert(...)
+            +list_by_user(user_id)
+            +get_by_id(id, user_id)
+            +rename(id, name)
+            +delete(id, user_id)
+            +backfill_from_groups()
+            +has_active_references(r2_key)
+        }
+    }
+}
+
+' ---------------------------------------------------------------
+' Relationships
+' ---------------------------------------------------------------
+
+' Router fans out to service + upload coordinator
+RenderGroupsRouter --> RenderGroupService : most routes
+RenderGroupsRouter --> UploadCoordinator  : multipart-upload/* routes
+
+' Service composes its repositories
+RenderGroupService --> RenderGroupRepository
+RenderGroupService --> JobRepository
+RenderGroupService --> MachineRepository
+RenderGroupService --> UserInputFileRepository : asset_repo
+
+' Service uses pure helpers
+RenderGroupService ..> serializers              : serialize_task / build_dispatch_task_entry
+RenderGroupService ..> frame_planning           : resolve_frame_range (confirm_upload)
+RenderGroupService ..> group_status_aggregator  : compute_group_status (get_status)
+group_status_aggregator ..> GroupStatusResult   : returns
+
+' Service crosses module boundary
+RenderGroupService --> RenderOrchestrator : plan / execute / cancel
+RenderGroupService --> FleetRegistry      : capability lookup
+RenderGroupService --> OutputsResolver    : list output files
+
+' ---------------------------------------------------------------
+' Hot path callouts — refresh button times out (4-5 minutes).
+' Phase A (write-side ownership) is fixed; Phase B (N+1 read) is next.
+' ---------------------------------------------------------------
+
+note right of RenderGroupsRouter
+  **GET /render-groups  (refresh button)**
+  list_render_groups():
+    SELECT id FROM render_groups WHERE user_id = ?
+    for each group:                     ← N+1 (still — Phase B)
+        get_status(group.id)
+end note
+
+note bottom of RenderGroupService
+  **get_status(group_id)  — pure read (after Phase A):**
+  1) groups.get_by_id(id)
+  2) jobs.get_raw_by_group(id)
+  3) machines.get_raw_by_ids([...])
+  4) return stored group["status"] verbatim
+     (no recompute, no write-back — group state
+      is owned by the orchestrator now)
+  Still N+1 — Phase B will batch this into 3 total queries.
+end note
+
+note bottom of JobRepository
+  jobs.output_files is a JSON array
+  (one filename per rendered frame).
+  Refresh fetches it for every job in
+  every group → can be MB-scale per row.
+end note
+
+note as PhaseANote
+  **Phase A — write-side ownership of group state**
+  Callbacks (success/failure/router) update only the job
+  row, then notify the orchestrator:
+    on_job_succeeded(group_id)
+    on_job_failed_terminal(group_id)
+    on_job_started(group_id)         ← new (pending → running)
+  RenderLifecycle.reconcile_group_status() is the single
+  owner of group-status mutations outside the cancel path.
+end note
+
+' Open with the PlantUML VSCode extension or plantuml.com server.
+@enduml

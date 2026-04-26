@@ -65,6 +65,24 @@ class JobRepository:
             (group_id,),
         )
 
+    def get_raw_by_groups(self, group_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Batched variant of ``get_raw_by_group`` — used by the list endpoint
+        to load all active groups' jobs in one query instead of N.  Returns
+        a dict keyed by group_id so callers can index per-group without a
+        second pass."""
+        if not group_ids:
+            return {}
+        rows = query_all(
+            "SELECT * FROM jobs WHERE group_id = ANY(%s) ORDER BY frame_start ASC",
+            (list(group_ids),),
+        )
+        result: dict[str, list[dict[str, Any]]] = {gid: [] for gid in group_ids}
+        for row in rows:
+            gid = row.get("group_id")
+            if gid in result:
+                result[gid].append(row)
+        return result
+
     def get_active_by_group(self, group_id: str) -> list[dict[str, Any]]:
         return query_all(
             "SELECT * FROM jobs WHERE group_id = %s AND status IN ('pending', 'running')",

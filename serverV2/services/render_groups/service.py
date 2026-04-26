@@ -25,6 +25,7 @@ from serverV2.core.value_objects import (
 )
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firestore_client import write_render_group_record
+from serverV2.orchestrator.allocation import tiers
 from serverV2.services.assets.serializers import serialize_asset
 from serverV2.services.blend_parser.parser import BlendParseError, parse_upload
 from serverV2.services.render_groups.frame_planning import resolve_frame_range
@@ -226,6 +227,11 @@ class RenderGroupService:
         except Exception:
             r2_input_size_bytes = None
 
+        # Tier — user-selected allocation tier, normalised to a known value.
+        # Persisted on the group row so list/detail responses can show it
+        # and so rerenders inherit it by default.
+        resolved_tier = tiers.normalize(getattr(payload, "tier", None))
+
         self._groups.full_update(
             group_id,
             total_frames=plan.total_frames,
@@ -237,6 +243,7 @@ class RenderGroupService:
             analysis_snapshot_json=json.dumps(analysis_snapshot),
             analysis_warnings_json=json.dumps(analysis_warnings),
             r2_input_size_bytes=r2_input_size_bytes,
+            tier=resolved_tier,
             status="pending",
         )
         self._save_asset(group, r2_key, plan, analysis_snapshot, render_overrides, scheduling)
@@ -259,6 +266,7 @@ class RenderGroupService:
             total_frames=plan.total_frames,
             machine_ids=machine_ids,
             heaviness=heaviness,
+            tier=resolved_tier,
             engine=engine,
         )
 
@@ -368,6 +376,11 @@ class RenderGroupService:
             except Exception:
                 r2_input_size_bytes = None
 
+        # Tier — payload override falls back to the original group's tier.
+        resolved_tier = tiers.normalize(
+            getattr(payload, "tier", None) or original.get("tier")
+        )
+
         from serverV2.infrastructure.db import execute
         execute(
             """
@@ -376,9 +389,9 @@ class RenderGroupService:
                 total_frames, frame_start, frame_end, frame_step,
                 render_overrides_json, scheduling_json,
                 analysis_snapshot_json, analysis_warnings_json,
-                status, submitted_at, user_id, source_asset_id
+                status, submitted_at, user_id, source_asset_id, tier
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)
             """,
             (
                 new_group_id, original["input_filename"], r2_key, r2_input_size_bytes,
@@ -386,7 +399,7 @@ class RenderGroupService:
                 json.dumps(render_overrides), json.dumps(scheduling),
                 original.get("analysis_snapshot_json") or "{}",
                 original.get("analysis_warnings_json") or "[]",
-                now, user["uid"], original.get("source_asset_id"),
+                now, user["uid"], original.get("source_asset_id"), resolved_tier,
             ),
         )
 
@@ -409,6 +422,7 @@ class RenderGroupService:
             total_frames=total_frames,
             machine_ids=machine_ids,
             heaviness=heaviness,
+            tier=resolved_tier,
             engine=engine,
         )
 
@@ -562,6 +576,7 @@ class RenderGroupService:
         return {
             "group_id": group["id"],
             "status": overall_status,
+            "tier": tiers.normalize(group.get("tier")),
             "input_filename": group["input_filename"],
             "total_frames": total_frames,
             "frame_start": group["frame_start"],
@@ -610,6 +625,7 @@ class RenderGroupService:
         return {
             "group_id": group["id"],
             "status": group["status"],
+            "tier": tiers.normalize(group.get("tier")),
             "input_filename": group["input_filename"],
             "total_frames": total_frames,
             "frame_start": group["frame_start"],
@@ -629,6 +645,34 @@ class RenderGroupService:
             "latest_output_job_id": group.get("latest_output_job_id"),
             "tasks_count": group.get("tasks_count") or 0,
             "tasks": [],
+        }
+
+    # ------------------------------------------------------------------
+    # cost preview (Phase 9)
+    # ------------------------------------------------------------------
+
+    def estimate_cost(self, group_id: str, user_id: str) -> dict[str, Any]:
+        """Per-tier cost + wall-time estimate for a render group.
+
+        Dry-run dispatch — uses the same orchestrator.plan(...) the real
+        submit will use, then runs the resulting mix through the cost
+        analyzer.  No DB writes.
+        """
+        from serverV2.services.render_groups.cost_preview import estimate as _estimate
+
+        group = self._groups.get_by_id(group_id)
+        if not group:
+            raise RenderGroupServiceError(404, "Render group not found")
+        if user_id and group.get("user_id") and group["user_id"] != user_id:
+            raise RenderGroupServiceError(403, "Forbidden")
+
+        return {
+            "group_id": group_id,
+            "tiers": _estimate(
+                orchestrator=self._orchestrator,
+                group_repo=self._groups,
+                group_id=group_id,
+            ),
         }
 
     # ------------------------------------------------------------------

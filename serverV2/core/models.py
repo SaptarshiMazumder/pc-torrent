@@ -200,6 +200,10 @@ class PlannedTask:
     gpu_type: str | None = None       # serverless fleets only
     chunk_index: int | None = None
     attempt: int = 0
+    # Per-hour rental snapshot, copied from the target (FleetCapability or
+    # CommunityMachine) at allocation time.  Phase 9 cost preview reads
+    # this to build MixSlots without re-looking-up prices.
+    price_per_hour: float = 0.0
 
 
 # ---------------------------------------------------------------------------

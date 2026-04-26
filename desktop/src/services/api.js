@@ -349,6 +349,7 @@ export async function confirmDistributedJob(
   renderOverrides = null,
   scheduling = null,
   analysisSnapshot = null,
+  tier = null,
   signal = null
 ) {
   const body = {};
@@ -363,12 +364,19 @@ export async function confirmDistributedJob(
   if (renderOverrides) body.render_overrides = renderOverrides;
   if (scheduling) body.scheduling = scheduling;
   if (analysisSnapshot) body.analysis_snapshot = analysisSnapshot;
+  if (tier) body.tier = tier;
 
   return apiFetch(baseUrl, `/render-groups/${groupId}/confirm-upload`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal,
+  });
+}
+
+export async function estimateRenderGroup(baseUrl, groupId) {
+  return apiFetch(baseUrl, `/render-groups/${groupId}/estimate`, {
+    method: "POST",
   });
 }
 

@@ -17,6 +17,9 @@ class ConfirmRenderGroupPayload(BaseModel):
     render_overrides: dict[str, Any] | None = None
     scheduling: dict[str, Any] | None = None
     analysis_snapshot: dict[str, Any] | None = None
+    # Phase 8 — user-selected allocation tier ("economy" | "standard").
+    # Server normalises and defaults to "standard" if missing/unknown.
+    tier: str | None = None
 
 
 class ReRenderPayload(BaseModel):
@@ -26,6 +29,7 @@ class ReRenderPayload(BaseModel):
     camera: str | None = None
     render_overrides: dict[str, Any] | None = None
     machine_ids: list[str] | None = None
+    tier: str | None = None
 
 
 class UpdateInputFilePayload(BaseModel):

@@ -286,6 +286,13 @@ def init_db() -> None:
                     "CREATE INDEX IF NOT EXISTS render_telemetry_group_id "
                     "ON render_telemetry (group_id)"
                 )
+                # Phase 8 — tier selection (Economy / Standard / Premium).
+                # Routes a render to the matching allocator and budget.
+                # Default 'standard' for legacy rows; new rows are stamped
+                # by RenderGroupService at create/confirm time.
+                cur.execute(
+                    "ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS tier TEXT"
+                )
         log.info("Database connection pool initialized")
     except Exception as exc:
         log.error("Failed to initialize database: %s", exc)

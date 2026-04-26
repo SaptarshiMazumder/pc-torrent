@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   cancelRenderGroup,
   cancelAllRenderGroups,
   getFirebaseToken,
+  getRenderGroup,
   getRenderGroupOutputs,
 } from "../services/api";
 import { cacheViewerFrame } from "../services/sidecar";
@@ -12,10 +13,16 @@ import {
   resolveJobFilename,
   outputSort,
 } from "../utils/jobUtils";
+import {
+  getTerminalDetailFromCache,
+  setTerminalDetailInCache,
+} from "../utils/terminalDetailCache";
 import JobGrid from "../components/jobs/JobGrid";
 import JobDetailView from "../components/jobs/JobDetailView";
 import FrameViewerModal from "../components/jobs/FrameViewerModal";
 import { useDownloads } from "../contexts/DownloadContext";
+
+const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
 
 export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onReRender, onNavigate }) {
   const [selectedJobId, setSelectedJobId] = useState(null);
@@ -26,6 +33,10 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
   const [authToken, setAuthToken] = useState("");
   const [openingFrameKey, setOpeningFrameKey] = useState("");
   const [frameViewer, setFrameViewer] = useState(null);
+  // Terminal groups come back slim from the list endpoint (no `tasks`, etc.)
+  // — fetch the full DTO via /render-groups/{id} when one is selected,
+  // and cache it in localStorage forever (terminal data never changes).
+  const [terminalDetailJob, setTerminalDetailJob] = useState(null);
   const jobsRef = useRef(jobs);
   const { downloads, startDownload } = useDownloads();
 
@@ -170,6 +181,59 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
   }, [openFrameGalleries, fetchFrameGallery]);
 
   const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId) : null;
+  const selectedStatus = selectedJob?.status;
+  const isTerminalSelection = !!selectedStatus && TERMINAL_STATUSES.has(selectedStatus);
+
+  // Read cache synchronously during render — guarantees no flash of the
+  // slim list DTO before the cache or fetch fills in.  useMemo recomputes
+  // when the selection (or its terminal-ness) changes.
+  const cachedTerminalJob = useMemo(() => {
+    if (!selectedJobId || !isTerminalSelection) return null;
+    return getTerminalDetailFromCache(selectedJobId);
+  }, [selectedJobId, isTerminalSelection]);
+
+  // Network-fetched fallback when cache misses.  Terminal data is immutable,
+  // so we only fetch once per group_id ever (across sessions, thanks to
+  // localStorage).  Active groups never enter this code path.
+  useEffect(() => {
+    if (!selectedJobId || !isTerminalSelection || cachedTerminalJob) {
+      setTerminalDetailJob(null);
+      return;
+    }
+    setTerminalDetailJob(null);
+    let cancelled = false;
+    getRenderGroup(backendUrl, selectedJobId)
+      .then((data) => {
+        if (cancelled) return;
+        setTerminalDetailJob(data);
+        setTerminalDetailInCache(selectedJobId, data);
+      })
+      .catch(() => {
+        // Stays null — spinner stays visible.  User can click "Back to list".
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedJobId, isTerminalSelection, cachedTerminalJob, backendUrl]);
+
+  // Use cached data first; otherwise the network result, but only if it
+  // matches the currently-selected group_id (guards against showing the
+  // previous group's data while a switch is in flight).
+  const terminalData = useMemo(() => {
+    if (!selectedJobId || !isTerminalSelection) return null;
+    if (cachedTerminalJob) return cachedTerminalJob;
+    if (terminalDetailJob && terminalDetailJob.group_id === selectedJobId) {
+      return terminalDetailJob;
+    }
+    return null;
+  }, [selectedJobId, isTerminalSelection, cachedTerminalJob, terminalDetailJob]);
+
+  const jobForDetail = isTerminalSelection
+    ? terminalData || selectedJob
+    : selectedJob;
+  // Spinner shows whenever a terminal group is selected and we haven't
+  // got the rich DTO yet (neither from cache nor from the network).
+  const showTerminalSpinner = !!selectedJob && isTerminalSelection && !terminalData;
 
   const handleSelectJob = useCallback((id) => {
     setSelectedJobId(id);
@@ -254,7 +318,43 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
         />
       )}
 
-      {selectedJob && (() => {
+      {showTerminalSpinner && (
+        <div className="detail-loading">
+          <div className="detail-loading-spinner" aria-hidden="true">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+              <circle
+                cx="16"
+                cy="16"
+                r="12"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeDasharray="20 14"
+                strokeLinecap="round"
+              >
+                <animateTransform
+                  attributeName="transform"
+                  type="rotate"
+                  from="0 16 16"
+                  to="360 16 16"
+                  dur="0.9s"
+                  repeatCount="indefinite"
+                />
+              </circle>
+            </svg>
+          </div>
+          <p className="muted">Loading job details...</p>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={handleBack}
+            style={{ marginTop: 12 }}
+          >
+            Back to list
+          </button>
+        </div>
+      )}
+
+      {jobForDetail && !showTerminalSpinner && (() => {
         const dlState = downloads[selectedJobId];
         const contextDownloadState = dlState ? {
           status: dlState.status === "loading" ? "loading" : dlState.status,
@@ -269,7 +369,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
         } : undefined;
         return (
           <JobDetailView
-            job={selectedJob}
+            job={jobForDetail}
             backendUrl={backendUrl}
             authToken={authToken}
             downloadState={contextDownloadState}
@@ -279,7 +379,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
             galleryState={frameGalleries[selectedJobId]}
             openingFrameKey={openingFrameKey}
             onBack={handleBack}
-            {...getHandlers(selectedJob)}
+            {...getHandlers(jobForDetail)}
           />
         );
       })()}

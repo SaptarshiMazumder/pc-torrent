@@ -233,6 +233,75 @@ def extract_analysis_warnings(analysis_snapshot: dict[str, Any] | None) -> list[
 
 
 # ---------------------------------------------------------------------------
+# Heaviness — Phase 2 of the tiered_allocation_plan.
+#
+# The desktop app's local Blender analyzer writes a ``heaviness`` sub-dict
+# into ``analysis_snapshot`` when a user uploads a .blend.  Cost / time
+# estimators (Phase 3+) read those fields via this helper.
+#
+# Snapshots from older desktop builds, web uploads, or pre-Phase-2 renders
+# don't have the sub-dict — we return safe defaults so consumers can
+# always dot through without None-checks.
+# ---------------------------------------------------------------------------
+
+_HEAVINESS_DEFAULTS: dict[str, Any] = {
+    "render_engine": "",
+    "resolution_x": 1920,
+    "resolution_y": 1080,
+    "resolution_percentage": 100,
+    "effective_pixels": 1920 * 1080,
+    "samples": 0,
+    "vertex_count_total": 0,
+    "object_count": 0,
+    "mesh_count": 0,
+    "material_count": 0,
+    "texture_count": 0,
+    "texture_total_bytes": 0,
+    "shader_node_count_total": 0,
+    "uses_subdivision": False,
+    "uses_displacement": False,
+    "uses_particles": False,
+    "uses_geometry_nodes": False,
+    "geometry_nodes_complexity": 0,
+    "uses_subsurface_scattering": False,
+    "uses_volumetrics": False,
+}
+
+
+def parse_analysis_heaviness(analysis_snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """Pull the ``heaviness`` sub-dict out of an analysis snapshot, filling
+    in defaults for any missing field.  Always returns a complete dict —
+    callers never need to None-check individual keys.
+
+    Used by the cost / time estimators to read render-heaviness signals
+    without re-implementing the defaulting logic at every call site.
+    """
+    out = dict(_HEAVINESS_DEFAULTS)
+    if not isinstance(analysis_snapshot, dict):
+        return out
+    raw = analysis_snapshot.get("heaviness")
+    if not isinstance(raw, dict):
+        return out
+    for key, default in _HEAVINESS_DEFAULTS.items():
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(default, bool):
+            out[key] = bool(value)
+        elif isinstance(default, int):
+            try:
+                out[key] = int(value)
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(default, str):
+            if isinstance(value, str):
+                out[key] = value
+        else:
+            out[key] = value
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Progress calculation
 # ---------------------------------------------------------------------------
 

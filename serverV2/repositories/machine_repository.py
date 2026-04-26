@@ -16,8 +16,12 @@ from serverV2.core.models import CommunityMachine
 
 class MachineRepository:
 
-    def __init__(self, stale_seconds: int = 15) -> None:
+    def __init__(self, stale_seconds: int = 15, community_price_per_hour: float = 1.0) -> None:
         self._stale_seconds = stale_seconds
+        # Injected once at startup from config.json's ``community.price_per_hour``.
+        # Stamped onto every CommunityMachine this repo returns so cost-aware
+        # allocators have a price to read without re-querying config.
+        self._community_price = community_price_per_hour
 
     def get_available_community(self) -> list[CommunityMachine]:
         cutoff = self._cutoff()
@@ -40,14 +44,14 @@ class MachineRepository:
             """,
             (cutoff,),
         )
-        return [CommunityMachine.from_row(r) for r in rows]
+        return [CommunityMachine.from_row(r, price_per_hour=self._community_price) for r in rows]
 
     def get_by_id(self, machine_id: str) -> CommunityMachine | None:
         row = query_one(
             "SELECT * FROM machines WHERE id = %s AND machine_type = 'windows'",
             (machine_id,),
         )
-        return CommunityMachine.from_row(row) if row else None
+        return CommunityMachine.from_row(row, price_per_hour=self._community_price) if row else None
 
     def get_raw_by_ids(self, machine_ids: list[str]) -> dict[str, dict]:
         """Return raw rows keyed by machine id.  Missing ids are omitted.
@@ -90,7 +94,7 @@ class MachineRepository:
             """,
             (exclude_machine_id,),
         )
-        return [CommunityMachine.from_row(r) for r in rows]
+        return [CommunityMachine.from_row(r, price_per_hour=self._community_price) for r in rows]
 
     def _cutoff(self) -> str:
         return (datetime.now(timezone.utc) - timedelta(seconds=self._stale_seconds)).isoformat()

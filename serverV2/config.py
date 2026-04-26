@@ -60,6 +60,7 @@ class VastEndpoint:
     cpu_cores: int
     ram_gb: float
     render_speed: float
+    price_per_hour: float
 
 @dataclass(frozen=True)
 class VastConfig:
@@ -140,6 +141,20 @@ def _load_fleet_max_parallel(
     return max(1, value)
 
 
+def _load_community_price_per_hour(config_json_path: str | None = None) -> float:
+    """Read ``community.price_per_hour`` from config.json.  Default 1.00 if absent.
+    Used by the bootstrap wiring so every CommunityMachine carries a price the
+    cost-aware allocators (Phase 5+) can read.
+    """
+    cfg = _load_config_json(config_json_path)
+    block = cfg.get("community") or {}
+    try:
+        value = float(block.get("price_per_hour", 1.0))
+    except (TypeError, ValueError):
+        value = 1.0
+    return max(0.0, value)
+
+
 def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpoint]:
     cfg = _load_config_json(config_json_path)
     if not cfg:
@@ -151,7 +166,7 @@ def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpo
             raise ValueError(
                 f"vast_instances entry has missing gpu_name: {entry!r}"
             )
-        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed"):
+        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed", "price_per_hour"):
             if required not in entry:
                 raise ValueError(
                     f"vast_instances entry {gpu_name!r} is missing required field {required!r}"
@@ -163,6 +178,7 @@ def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpo
             cpu_cores=int(entry["cpu_cores"]),
             ram_gb=float(entry["ram_gb"]),
             render_speed=float(entry["render_speed"]),
+            price_per_hour=float(entry["price_per_hour"]),
         ))
     return results
 
@@ -179,6 +195,7 @@ class ModalEndpoint:
     cpu_cores: int
     ram_gb: float
     render_speed: float
+    price_per_hour: float
 
 @dataclass(frozen=True)
 class ModalConfig:
@@ -271,7 +288,7 @@ def _parse_modal_endpoints(
             raise ValueError(
                 f"modal_instances entry duplicates gpu_type={gpu_type!r}"
             )
-        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed"):
+        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed", "price_per_hour"):
             if required not in entry:
                 raise ValueError(
                     f"modal_instances entry {gpu_type!r} is missing required field {required!r}"
@@ -287,6 +304,7 @@ def _parse_modal_endpoints(
             cpu_cores=int(entry["cpu_cores"]),
             ram_gb=float(entry["ram_gb"]),
             render_speed=float(entry["render_speed"]),
+            price_per_hour=float(entry["price_per_hour"]),
         ))
         seen.add(gpu_type)
     return results
@@ -304,6 +322,9 @@ class AppConfig:
     min_frames_per_worker: int = 2
     machine_stale_seconds: int = 15
     failover_stale_seconds: int = 30
+    # Per-hour cost stamped on every CommunityMachine.  Read by cost-aware
+    # allocators (Phase 5+).  Loaded from config.json's ``community.price_per_hour``.
+    community_price_per_hour: float = 1.0
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -313,4 +334,5 @@ class AppConfig:
             vast=vast,
             modal=modal,
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
+            community_price_per_hour=_load_community_price_per_hour(),
         )

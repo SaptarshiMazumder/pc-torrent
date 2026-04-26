@@ -1,0 +1,407 @@
+@startuml fleet_allocation_dispatch_retry
+
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam shadowing false
+hide empty members
+
+title Fleet Registration / Frame Allocation / Dispatch / Retry\n— class diagram with flow callouts —
+
+' ---------------------------------------------------------------
+' Boundary: things from other modules we depend on, drawn as
+' <<external>> so the eye skips past them.
+' ---------------------------------------------------------------
+package "Boundary (other modules)" <<Frame>> {
+    class CallbackRouter <<external>> {
+        +route(job_id, outcome, ...)
+    }
+    class SuccessHandler <<external>>
+    class FailureHandler <<external>> {
+        +handle(job_id, error)
+    }
+    class JobRepository <<external>> {
+        +create(...) / mark_done / mark_failed
+        +update_status(job_id, status)
+        +count_active_by_fleet() : dict
+        +get_raw_by_id / get_by_group
+    }
+    class RenderGroupRepository <<external>>
+    class DispatchQueueRepository <<external>> {
+        +enqueue(items)
+        +dequeue_for_fleet(fleet)
+        +drain(group_id)
+    }
+    class InProgressChunkRepository <<external>> {
+        +claim_or_replace(group_id, chunk_index, job_id, attempt)
+        +current_job_for(group_id, chunk_index)
+        +release(group_id, chunk_index)
+    }
+}
+
+' ---------------------------------------------------------------
+' Core data contracts (dataclasses passed across layers)
+' ---------------------------------------------------------------
+package "Data contracts (core/models)" <<Frame>> {
+    class AvailableResources <<dataclass>> {
+        community_machines: list<CommunityMachine>
+        serverless_capabilities: list<FleetCapability>
+        serverless_in_flight: dict<fleet, count>
+    }
+    class CommunityMachine <<dataclass>> {
+        id, label
+        vram_gb, render_speed, cpu_cores, ram_gb
+    }
+    class FleetCapability <<dataclass>> {
+        fleet, gpu_type, label
+        vram_gb, render_speed, cpu_cores, ram_gb
+        fleet_max_parallel
+    }
+    class PlannedTask <<dataclass>> {
+        fleet, label
+        machine_id?  (community)
+        gpu_type?    (serverless)
+        vram_gb, render_speed
+        frame_start, frame_end, frame_step
+        total_frames, chunk_index, attempt
+    }
+    class ChunkRequest <<dataclass>> {
+        group_id, chunk_index
+        frame_start, frame_end, frame_step
+        attempt
+        excluded_machine_ids
+        excluded_serverless_capabilities
+        file_size_bytes?, engine?
+    }
+    class DispatchContext <<dataclass>> {
+        group_id, blend_url
+        input_filename
+        render_overrides_b64
+    }
+    class DispatchResult <<dataclass>> {
+        job_id, status
+        machine_id?, gpu_type?
+        error?
+    }
+}
+
+' ---------------------------------------------------------------
+' Orchestration layer (the brain)
+' ---------------------------------------------------------------
+package "Orchestration" <<Cloud>> {
+
+    class RenderOrchestrator <<facade>> {
+        +plan(...)
+        +execute(group_id, tasks, ...)
+        +cancel_group(group_id)
+        +on_job_failed(job_id, error) : bool
+        +on_job_started(group_id)
+        +on_job_succeeded(group_id)
+        +on_job_failed_terminal(group_id)
+    }
+
+    class RenderLifecycle {
+        +plan(...) : list<PlannedTask>
+        +start_render(group_id, tasks, ...)
+        +handle_chunk_failure(job_id, error) : bool
+        +cancel_render(group_id)
+        +reconcile_group_status(group_id)
+        -_pick_strategy(file_size, total_frames) : FrameAllocator
+        -_exclusions_for(job_row)
+        -_FAST_RENDER_FILE_SIZE_BYTES = 2 GB
+        -_FAST_RENDER_TOTAL_FRAMES = 30
+        -MAX_RETRIES = env(ORCHESTRATOR_MAX_RETRIES, 0)
+    }
+
+    package "Allocation" {
+        interface FrameAllocator {
+            +allocate_initial(...) : list<PlannedTask>
+            +allocate_retry(req, resources) : PlannedTask?
+        }
+        class DefaultAllocationStrategy {
+            +allocate_initial(...)
+            +allocate_retry(...)
+            -_eligible_targets(...)
+            -_share_to_task(...)
+        }
+        class FastRenderAllocationStrategy {
+            -HARD_CAP = 12
+            -_HEAVINESS_BANDS
+            +allocate_initial(...)
+            +allocate_retry(...)
+            -_eligible_targets(vram_floor)
+            -_select_mix(...)
+        }
+
+        interface TargetValidator <<protocol>> {
+            +is_valid(target, ctx) : bool
+        }
+        class ValidationContext <<dataclass>> {
+            engine: str?
+        }
+        class EngineCompatibilityValidator {
+            -_EEVEE_ENGINES = {BLENDER_EEVEE, BLENDER_EEVEE_NEXT}
+            -_FLEETS_WITHOUT_GRAPHICS_CAPS = {modal_serverless}
+            +is_valid(target, ctx)
+        }
+    }
+
+    package "Dispatch" {
+        class DispatchCoordinator {
+            +enqueue_and_flush(group_id, tasks, ctx) : list<DispatchResult>
+            +drain_for_fleet(fleet) : int
+            -_dispatch_queue_item(item, ctx)
+        }
+        class Dispatcher {
+            +dispatch_one(task, ctx, job_id) : DispatchResult
+        }
+    }
+}
+
+' ---------------------------------------------------------------
+' Fleets layer
+' ---------------------------------------------------------------
+package "Fleets" {
+    interface IFleetStrategy <<protocol>> {
+        +fleet : str
+        +min_frames_per_instance : int
+        +is_enabled() : bool
+        +dispatch(task, ctx, job_id) : DispatchResult
+        +cancel(provider_job_id)
+        +stop_monitoring(job_id)
+        +provider_job_id_from_job(job)
+    }
+    class FleetRegistry {
+        +register(strategy)
+        +get(fleet) : IFleetStrategy?
+        +get_or_raise(fleet)
+        +is_enabled(fleet)
+        +min_frames_per_instance(fleet)
+        +enabled_fleets() : set
+        +all_strategies() : list
+    }
+    class CommunityStrategy {
+        fleet = "community"
+        min_frames_per_instance = 2
+        +dispatch(...) : creates job row; agent polls
+    }
+    class ModalFleetStrategy {
+        fleet = "modal_serverless"
+        min_frames_per_instance = 5
+        +dispatch(...) : ModalClient.dispatch_job\n+ start_monitoring thread
+    }
+    class VastFleetStrategy {
+        fleet = "vast_serverless"
+        min_frames_per_instance = 10
+        +dispatch(...) : VastClient.dispatch_job\n(picks EEVEE vs Cycles image)\n+ start_monitoring thread
+    }
+}
+
+' ---------------------------------------------------------------
+' Relationships
+' ---------------------------------------------------------------
+
+' Facade composes lifecycle
+RenderOrchestrator *-- RenderLifecycle
+
+' Lifecycle uses both strategies + the dispatch coordinator + fleet registry
+RenderLifecycle --> DispatchCoordinator : enqueue_and_flush
+RenderLifecycle --> FrameAllocator       : default + fast
+RenderLifecycle --> FleetRegistry        : cancel + min_frames
+RenderLifecycle --> JobRepository
+RenderLifecycle --> RenderGroupRepository
+RenderLifecycle ..> ChunkRequest         : builds on retry
+RenderLifecycle ..> AvailableResources   : reads via picker
+
+' Allocator realizations + their data flow
+DefaultAllocationStrategy     ..|> FrameAllocator
+FastRenderAllocationStrategy  ..|> FrameAllocator
+DefaultAllocationStrategy    --> FleetRegistry
+FastRenderAllocationStrategy --> FleetRegistry
+DefaultAllocationStrategy    --> TargetValidator
+FastRenderAllocationStrategy --> TargetValidator
+EngineCompatibilityValidator ..|> TargetValidator
+FrameAllocator ..> AvailableResources : consumes
+FrameAllocator ..> ChunkRequest       : consumes (retry)
+FrameAllocator ..> PlannedTask        : produces
+TargetValidator ..> ValidationContext : reads engine
+
+' Dispatch internals
+DispatchCoordinator *-- Dispatcher
+DispatchCoordinator --> DispatchQueueRepository
+DispatchCoordinator --> InProgressChunkRepository
+DispatchCoordinator --> JobRepository
+Dispatcher --> FleetRegistry           : routes by task.fleet
+Dispatcher ..> PlannedTask             : consumes
+Dispatcher ..> DispatchResult          : produces
+
+' Fleet registry holds strategies (boundary edge)
+FleetRegistry o-- IFleetStrategy
+CommunityStrategy    ..|> IFleetStrategy
+ModalFleetStrategy   ..|> IFleetStrategy
+VastFleetStrategy    ..|> IFleetStrategy
+
+' Failure path (retry trigger)
+CallbackRouter --> FailureHandler  : outcome=FAILURE
+CallbackRouter --> SuccessHandler  : outcome=SUCCESS
+FailureHandler --> RenderOrchestrator : on_job_failed (asks for retry)
+FailureHandler --> JobRepository      : mark_failed (after retry decision)
+FailureHandler --> DispatchCoordinator : drain_for_fleet (slot freed)
+
+' ---------------------------------------------------------------
+' Sticky notes — the actual flow logic, attached to where
+' it lives in the diagram.
+' ---------------------------------------------------------------
+
+note right of FleetRegistry
+  **Fleet registration (at boot, bootstrap.py)**
+
+  registry.register(CommunityStrategy(...))
+  if MODAL_PROVISIONING_ENABLED:
+      registry.register(ModalFleetStrategy(...))
+  if VAST_PROVISIONING_ENABLED:
+      registry.register(VastFleetStrategy(...))
+
+  Each strategy contributes:
+    * fleet name  (community / modal_serverless / vast_serverless)
+    * min_frames_per_instance  (community=2, modal=5, vast=10)
+    * dispatch + cancel + monitoring lifecycle
+  Disabled fleets are registered but ``is_enabled() = False``;
+  the allocator skips them via FleetRegistry.is_enabled.
+end note
+
+note right of RenderLifecycle
+  **Strategy pick — _pick_strategy(file_size_bytes, total_frames)**
+
+  if  file_size_bytes >= **2 GB**
+   or total_frames    >= **30**:
+      → FastRenderAllocationStrategy
+  else:
+      → DefaultAllocationStrategy
+
+  Same heuristic is used for the **retry path** so a retried
+  chunk lands on a target consistent with how the original
+  chunks were sized.
+end note
+
+note bottom of FastRenderAllocationStrategy
+  **Heaviness bands — _HEAVINESS_BANDS (file_size_bytes)**
+
+  < 500 MB → vram_floor =  8 GB, frames/machine = 8
+  <   2 GB → vram_floor = 16 GB, frames/machine = 5  (fallback when size unknown)
+  <   5 GB → vram_floor = 24 GB, frames/machine = 3
+  ≥   5 GB → vram_floor = 48 GB, frames/machine = 2
+
+  Machine count   = min(**HARD_CAP = 12**, ceil(total_frames / frames/machine))
+  Eligibility     = capability.vram_gb ≥ vram_floor (falls back to vram_floor=0 if none)
+  Mix selection   = speed-first via compute_power_score, respect fleet_max_parallel headroom
+                    (community machines at most once each; serverless multiples allowed up to cap)
+  Frame share     = weighted by compute_power_score (faster cards get more frames)
+end note
+
+note bottom of DefaultAllocationStrategy
+  **Default strategy (small renders)**
+
+  allocate_initial:
+    * eligibles = community machines + one slot per *enabled* serverless capability
+                  (limited by fleet_max_parallel - serverless_in_flight)
+    * filter via TargetValidators (engine compat, etc.)
+    * distribute_frames evenly, respecting min_frames_per_instance
+    * one chunk per target — no fan-out
+
+  allocate_retry:
+    * exclude anti-affinity targets (excluded_machine_ids, excluded_serverless_capabilities)
+    * pick the highest compute_power_score remaining → 1 PlannedTask
+end note
+
+note bottom of DispatchCoordinator
+  **Dispatch happy path — enqueue_and_flush(group_id, tasks, ctx)**
+
+  1. queue_repo.enqueue(all PlannedTasks)              ← persists in DB
+  2. for each task in priority order:
+       in_flight = job_repo.count_active_by_fleet()[task.fleet]
+       if in_flight >= fleet_max_parallel:
+           **leave it in the queue** (drain later, see drain_for_fleet)
+       else:
+           item = queue_repo.dequeue_for_fleet(task.fleet)
+           _dispatch_queue_item(item, ctx)
+  3. _dispatch_queue_item:
+       a) job_id = uuid4()
+       b) in_progress.claim_or_replace(group_id, chunk_index, job_id, attempt)
+          ← stale-retry guard lives here
+       c) dispatcher.dispatch_one(task, ctx, job_id)
+       d) registry.get_or_raise(task.fleet).dispatch(...)
+  4. drain_for_fleet(fleet) is called from SuccessHandler / FailureHandler
+     after a slot frees up, to flush queued tasks for that fleet.
+end note
+
+note left of FailureHandler
+  **Retry path — on chunk failure**
+
+  monitor → CallbackRouter.route(outcome=FAILURE)
+        → FailureHandler.handle(job_id, error):
+
+  1. failed_fleet = job.machine_type        (capture BEFORE retry)
+  2. retried = orchestrator.on_job_failed(job_id, error)
+              → RenderLifecycle.handle_chunk_failure (see note → )
+  3. job_repo.mark_failed(job_id, error)    (always, after retry decision)
+  4. if not retried:
+        orchestrator.on_job_failed_terminal(group_id)
+              → reconcile_group_status (writes terminal snapshot)
+  5. coordinator.drain_for_fleet(failed_fleet)
+              ← slot freed, flush other queued chunks for this fleet
+end note
+
+note right of RenderOrchestrator
+  **handle_chunk_failure(job_id, error) → bool**
+
+  Guards (return False → no retry):
+    1. **stale signal** — in_progress.current_job_for(g, chunk) ≠ job_id
+       → a newer retry already claimed this chunk
+    2. **group terminal** — group.status ∈ {cancelled, done}
+    3. **all frames done** — remaining_frames(group, jobs) is None
+    4. **retries exhausted** — next_attempt > MAX_RETRIES
+       (env: ORCHESTRATOR_MAX_RETRIES, default 0)
+
+  Build ChunkRequest:
+    * frame range = remaining frames only
+    * attempt = next_attempt
+    * excluded_machine_ids / excluded_serverless_capabilities
+        ← _exclusions_for(job_row):
+          - serverless: exclude (fleet, gpu_type)
+          - community : exclude machine_id
+    * file_size_bytes + engine (heaviness band + validators)
+
+  Pick retry strategy (same heuristic as initial — see _pick_strategy).
+  strategy.allocate_retry(req, resources):
+    * filter eligibles by anti-affinity
+    * pick highest compute_power_score → 1 PlannedTask
+    * may return **None** if every alternative was excluded
+  If None: in_progress.release(group, chunk) + return False (permanent fail)
+  Else  : coordinator.enqueue_and_flush([retry_task], ctx) + return True
+end note
+
+note bottom of EngineCompatibilityValidator
+  **Engine-vs-fleet compatibility**
+
+  EEVEE renders need an EGL/OpenGL context.  Modal's serverless
+  GPUs don't expose a usable DRM/EGL device (tested 2026-04-26),
+  so EEVEE jobs are filtered off ``modal_serverless``.  Cycles
+  uses CUDA directly and is unaffected — no filter applied.
+
+  Vast hosts vary; most work, the ones that don't are caught by
+  the EGL watchdog at runtime and the chunk retries on a
+  different host.  Community = full desktop GL stack, always OK.
+end note
+
+note bottom of CommunityStrategy
+  **Community = pull-based**
+
+  dispatch() just writes a job row tagged with machine_id.
+  The agent on the user's PC polls /jobs/claim-next-for-machine
+  and picks it up.  No outbound API call from the backend.
+end note
+
+' Open with the PlantUML VSCode extension or plantuml.com server.
+@enduml

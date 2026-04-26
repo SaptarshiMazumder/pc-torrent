@@ -76,5 +76,9 @@ class CallbackRouter:
                 self._job_repo.update_progress(job_id, rendered_frames, total_frames)
                 if current == "pending":
                     self._job_repo.update_status(job_id, "running")
+                    # Stamp started_at on the first PROGRESS — telemetry
+                    # uses (completed_at - started_at) for wall-time
+                    # measurements.  Idempotent; only the first call wins.
+                    self._job_repo.mark_started(job_id)
                     if group_id and self._orchestrator is not None:
                         self._orchestrator.on_job_started(group_id)

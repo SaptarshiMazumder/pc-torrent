@@ -51,6 +51,7 @@ from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
+from serverV2.repositories.telemetry_repository import TelemetryRepository
 from serverV2.repositories.user_input_file_repository import UserInputFileRepository
 from serverV2.repositories.worker_start_repository import WorkerStartRepository
 from serverV2.services.assets.service import AssetService
@@ -131,6 +132,7 @@ def build(
     progress_repo = ProgressRepository(redis)
     worker_start_repo = WorkerStartRepository(redis)
     in_progress_repo = InProgressChunkRepository()
+    telemetry_repo = TelemetryRepository()
 
     # -- fleet registry --
     registry = FleetRegistry()
@@ -274,7 +276,9 @@ def build(
     # Handlers update only the job; group-level state changes go through the
     # orchestrator (late-bound below to break the construction cycle).
     failure_handler = FailureHandler(job_repo)
-    success_handler = SuccessHandler(job_repo, in_progress_repo)
+    success_handler = SuccessHandler(
+        job_repo, in_progress_repo, group_repo, telemetry_repo,
+    )
     callback_router = CallbackRouter(job_repo, success_handler, failure_handler)
     router_ref[0] = callback_router
 

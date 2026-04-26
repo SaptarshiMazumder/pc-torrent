@@ -260,6 +260,11 @@ class CreateJobParams:
     priority: int = 0
     chunk_index: int | None = None
     attempt: int = 0
+    # Per-hour rental snapshot at dispatch time.  Looked up by the fleet
+    # strategy from its config and stamped here so the SuccessHandler's
+    # telemetry write is immune to later config edits.  None for community
+    # jobs (telemetry is skipped for them in v1).
+    price_per_hour_at_dispatch: float | None = None
 
 
 # ---------------------------------------------------------------------------

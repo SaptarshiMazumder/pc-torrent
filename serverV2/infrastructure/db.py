@@ -241,6 +241,51 @@ def init_db() -> None:
                     cur.execute(
                         f"ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS {column_def}"
                     )
+                # Phase 5 — empirical telemetry.  ``started_at`` is stamped on
+                # the first PROGRESS callback (so wall-time excludes queue +
+                # provisioning).  ``price_per_hour_at_dispatch`` is a snapshot
+                # of the rental rate at job-creation time, immune to later
+                # config edits.  ``render_telemetry`` rows are written once
+                # per successful chunk for future calibration of the
+                # time/cost analyzers.
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMP WITH TIME ZONE"
+                )
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS price_per_hour_at_dispatch NUMERIC(10, 4)"
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS render_telemetry (
+                        id                  TEXT PRIMARY KEY,
+                        job_id              TEXT NOT NULL,
+                        group_id            TEXT NOT NULL,
+                        fleet               TEXT NOT NULL,
+                        gpu_type            TEXT,
+                        machine_id          TEXT,
+                        chunk_size          INTEGER NOT NULL,
+                        rendered_frames     INTEGER NOT NULL,
+                        started_at          TIMESTAMP WITH TIME ZONE NOT NULL,
+                        completed_at        TIMESTAMP WITH TIME ZONE NOT NULL,
+                        seconds_total       INTEGER NOT NULL,
+                        price_per_hour      NUMERIC(10, 4) NOT NULL,
+                        cost_actual_usd     NUMERIC(10, 4) NOT NULL,
+                        seconds_estimated   INTEGER,
+                        cost_estimated_usd  NUMERIC(10, 4),
+                        heaviness_json      JSONB NOT NULL DEFAULT '{}',
+                        file_size_bytes     BIGINT,
+                        created_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS render_telemetry_fleet_gpu "
+                    "ON render_telemetry (fleet, gpu_type)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS render_telemetry_group_id "
+                    "ON render_telemetry (group_id)"
+                )
         log.info("Database connection pool initialized")
     except Exception as exc:
         log.error("Failed to initialize database: %s", exc)

@@ -35,6 +35,7 @@ from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.redis_client import RedisClient
 from serverV2.orchestrator.allocation.default_allocation_strategy import DefaultAllocationStrategy
+from serverV2.orchestrator.allocation.economy_allocation_strategy import EconomyAllocationStrategy
 from serverV2.orchestrator.allocation.fast_render_allocation_strategy import FastRenderAllocationStrategy
 from serverV2.orchestrator.allocation.validators.engine_compatibility_validator import (
     EngineCompatibilityValidator,
@@ -222,6 +223,7 @@ def build(
     target_validators = [EngineCompatibilityValidator()]
     default_strategy = DefaultAllocationStrategy(registry, validators=target_validators)
     fast_render_strategy = FastRenderAllocationStrategy(registry, validators=target_validators)
+    economy_strategy = EconomyAllocationStrategy(registry, validators=target_validators)
     dispatcher = Dispatcher(registry)
 
     # -- dispatch queue (DB-backed) --
@@ -302,6 +304,7 @@ def build(
     lifecycle = RenderLifecycle(
         default_strategy=default_strategy,
         fast_render_strategy=fast_render_strategy,
+        economy_strategy=economy_strategy,
         coordinator=dispatch_coordinator,
         job_repo=job_repo,
         group_repo=group_repo,

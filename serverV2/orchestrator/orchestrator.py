@@ -35,6 +35,7 @@ class RenderOrchestrator:
         machine_ids: list[str] | None = None,
         heaviness: dict | None = None,
         engine: str | None = None,
+        tier: str | None = None,
     ) -> list[PlannedTask]:
         """Plan an initial allocation.
 
@@ -52,6 +53,10 @@ class RenderOrchestrator:
         ``engine``: render engine string ("BLENDER_EEVEE", "CYCLES", ...).
         Forwarded to the strategy's TargetValidators for fleet-compatibility
         filtering.
+
+        ``tier``: user-selected allocation tier ("economy" | "standard" |
+        "premium").  Routes to the matching allocator and (for Standard)
+        derives a soft budget cap.  ``None`` defaults to "standard".
         """
         return self._lifecycle.plan(
             frame_start=frame_start,
@@ -61,6 +66,7 @@ class RenderOrchestrator:
             machine_ids=machine_ids,
             heaviness=heaviness,
             engine=engine,
+            tier=tier,
         )
 
     def execute(

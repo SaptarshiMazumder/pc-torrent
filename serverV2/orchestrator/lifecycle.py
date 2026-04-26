@@ -29,6 +29,11 @@ import logging
 from typing import Any, Callable
 
 from serverV2.callbacks.group_status_aggregator import compute_group_status
+from serverV2.orchestrator.allocation import tiers
+from serverV2.orchestrator.allocation.analyzers.cost_analyzer import (
+    MixSlot,
+    estimate_cost_for_mix,
+)
 from serverV2.core.models import (
     AvailableResources,
     DispatchContext,
@@ -68,6 +73,7 @@ class RenderLifecycle:
         *,
         default_strategy: FrameAllocator,
         fast_render_strategy: FrameAllocator,
+        economy_strategy: FrameAllocator,
         coordinator: DispatchCoordinator,
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
@@ -78,6 +84,7 @@ class RenderLifecycle:
     ) -> None:
         self._default_strategy = default_strategy
         self._fast_render_strategy = fast_render_strategy
+        self._economy_strategy = economy_strategy
         self._coordinator = coordinator
         self._job_repo = job_repo
         self._group_repo = group_repo
@@ -100,12 +107,15 @@ class RenderLifecycle:
         machine_ids: list[str] | None = None,
         heaviness: dict | None = None,
         engine: str | None = None,
+        tier: str | None = None,
     ) -> list[PlannedTask]:
         # File size for strategy selection is carried inside ``heaviness``
         # (see ``parse_analysis_heaviness(snapshot, file_size_bytes=...)``).
         # ``heaviness=None`` is fine — equivalent to a defaulted dict with
         # file_size=0; the picker treats unknown size as "use Default".
         file_size_bytes = int((heaviness or {}).get("file_size_bytes", 0) or 0)
+
+        resolved_tier = tiers.normalize(tier)
 
         resources = self._resource_picker()
         raw_community = len(resources.community_machines)
@@ -124,7 +134,8 @@ class RenderLifecycle:
                 serverless_capabilities=[],
                 serverless_in_flight=resources.serverless_in_flight,
             )
-        strategy = self._pick_strategy(file_size_bytes, total_frames)
+        strategy = self._pick_strategy(resolved_tier, file_size_bytes, total_frames)
+        tier_budget = self._tier_budget(resolved_tier, heaviness, total_frames)
         tasks = strategy.allocate_initial(
             frame_start=frame_start,
             frame_end=frame_end,
@@ -133,27 +144,59 @@ class RenderLifecycle:
             resources=resources,
             engine=engine,
             heaviness=heaviness,
+            tier_budget_usd=tier_budget,
         )
         log.info(
-            "plan: strategy=%s pinned=%s engine=%s raw_community=%d raw_caps=%s "
+            "plan: tier=%s strategy=%s pinned=%s engine=%s raw_community=%d raw_caps=%s "
             "after_filter_community=%d after_filter_caps=%d in_flight=%s "
-            "total_frames=%d file_size_bytes=%s -> tasks=%d",
-            type(strategy).__name__, pinned, engine, raw_community, raw_caps_by_fleet,
-            len(resources.community_machines), len(resources.serverless_capabilities),
-            dict(resources.serverless_in_flight), total_frames, file_size_bytes,
-            len(tasks),
+            "total_frames=%d file_size_bytes=%s tier_budget=%s -> tasks=%d",
+            resolved_tier, type(strategy).__name__, pinned, engine, raw_community,
+            raw_caps_by_fleet, len(resources.community_machines),
+            len(resources.serverless_capabilities), dict(resources.serverless_in_flight),
+            total_frames, file_size_bytes, tier_budget, len(tasks),
         )
         return tasks
 
     def _pick_strategy(
-        self, file_size_bytes: int, total_frames: int,
+        self, tier: str, file_size_bytes: int, total_frames: int,
     ) -> FrameAllocator:
+        """Tier-first strategy routing.  Falls back to the heaviness
+        heuristic for STANDARD (Default vs FastRender)."""
+        if tier == tiers.ECONOMY:
+            return self._economy_strategy
+        if tier == tiers.PREMIUM:
+            # Reserved — UI disables the picker.  If a Premium request
+            # somehow arrives, fall through to STANDARD's selection.
+            log.warning("plan: PREMIUM tier requested but not implemented; falling back to STANDARD")
+        # STANDARD (or unknown / fallback): heaviness heuristic decides
+        # between Default and FastRender (today's behaviour).
         size_known = file_size_bytes > 0
         is_heavy = size_known and file_size_bytes >= self._FAST_RENDER_FILE_SIZE_BYTES
         is_long = total_frames >= self._FAST_RENDER_TOTAL_FRAMES
         if is_heavy or is_long:
             return self._fast_render_strategy
         return self._default_strategy
+
+    def _tier_budget(
+        self, tier: str, heaviness: dict | None, total_frames: int,
+    ) -> float | None:
+        """Per-tier soft budget cap, in USD.
+
+        Derived from "what would a single A6000 cost to render this
+        scene" — scales with scene weight automatically.  None disables
+        the cap (Economy doesn't need one; Premium would also be None).
+        """
+        if tier != tiers.STANDARD or heaviness is None or total_frames <= 0:
+            return None
+        # A6000 reference: speed=1.30, price=$0.55/hr (matches config.json).
+        # Standard's cap = 1.0x A6000-equivalent cost.  With FastRender's
+        # internal BUDGET_CAP_MULTIPLIER=1.5, total headroom is 1.5x.
+        slot = MixSlot(render_speed=1.30, price_per_hour=0.55, frames_assigned=total_frames)
+        try:
+            est = estimate_cost_for_mix(heaviness, [slot])
+        except Exception:
+            return None
+        return est.cost_mid_usd if est.cost_mid_usd > 0 else None
 
     # ------------------------------------------------------------------
     # Story 1: user submitted a render

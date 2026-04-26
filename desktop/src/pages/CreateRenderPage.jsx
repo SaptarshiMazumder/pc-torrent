@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import {
@@ -6,6 +6,7 @@ import {
   confirmDistributedJob,
   rerenderGroup,
   cancelRenderGroup,
+  estimateRenderGroup,
   listInputFiles,
   renameInputFile,
   deleteInputFile,
@@ -201,6 +202,14 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
   const uploadIdRef = useRef("");
   const abortRef = useRef(null);
 
+  // Phase 8 — user-selected allocation tier (Economy / Standard / Premium).
+  // Default Standard.  Premium is disabled in the picker (allocator not built yet).
+  const [tier, setTier] = useState("standard");
+  // Phase 9 — per-tier cost estimate, populated after analysis completes.
+  // Shape: { economy: {cost_low_usd, cost_high_usd, ...}, standard: {...}, premium: null }
+  const [tierEstimate, setTierEstimate] = useState(null);
+  const [tierEstimateLoading, setTierEstimateLoading] = useState(false);
+
   // ── Blender detection ───────────────────────────────────
   useEffect(() => {
     invoke("find_blender")
@@ -312,6 +321,31 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
   const sourceLabel = reRenderFilename || (file ? file.name : resolvedSavedAsset ? (resolvedSavedAsset.display_name || resolvedSavedAsset.input_filename) : "");
   const canStart = stage === STAGE.CONFIGURING && groupId && (cameraMode !== "camera_ranges" || cameraValidation.ok);
   const needsUpload = stage === STAGE.CONFIGURING && !groupId && Boolean(file);
+
+  // Phase 9 — fetch per-tier cost preview once we have a groupId in the
+  // CONFIGURING stage.  The estimate is honest: the backend dry-runs the
+  // same orchestrator.plan() the real submit will use.
+  useEffect(() => {
+    if (!groupId || stage !== STAGE.CONFIGURING) {
+      setTierEstimate(null);
+      return;
+    }
+    let cancelled = false;
+    setTierEstimateLoading(true);
+    estimateRenderGroup(backendUrl, groupId)
+      .then((data) => {
+        if (cancelled) return;
+        setTierEstimate(data?.tiers || null);
+        setTierEstimateLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTierEstimate(null);
+          setTierEstimateLoading(false);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [groupId, stage, backendUrl]);
 
   // ── Helpers ─────────────────────────────────────────────
   function applyAnalysis(parsed) {
@@ -618,7 +652,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
           renderOverrides: overrides,
         });
       } else {
-        result = await confirmDistributedJob(backendUrl, groupId, null, frameRange, overrides, null, analysis, controller.signal);
+        result = await confirmDistributedJob(backendUrl, groupId, null, frameRange, overrides, null, analysis, tier, controller.signal);
         if (result.needs_frame_input) {
           dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
           return;
@@ -713,6 +747,22 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
   // ── Render ──────────────────────────────────────────────
   const totalFrameCount = frameRange ? countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step) : null;
 
+  const formatTierCost = (entry) => {
+    if (!entry) return null;
+    const lo = entry.cost_low_usd ?? 0;
+    const hi = entry.cost_high_usd ?? 0;
+    return `$${lo.toFixed(2)}-$${hi.toFixed(2)}`;
+  };
+  const formatTierTime = (entry) => {
+    if (!entry?.wall_time_seconds) return null;
+    const s = entry.wall_time_seconds;
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.round(s / 60)} min`;
+    const h = Math.floor(s / 3600);
+    const m = Math.round((s % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  };
+
   return (
     <div className="page cr-page">
       <div className="cr-header">
@@ -724,6 +774,42 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
                 Upload
               </button>
+            )}
+            {canStart && (
+              <div className="cr-tier-picker">
+                {[
+                  { key: "economy", label: "Economy", subtitle: "Cheap, slow" },
+                  { key: "standard", label: "Standard", subtitle: "Balanced" },
+                  { key: "premium", label: "Premium", subtitle: "Coming soon", disabled: true },
+                ].map((t) => {
+                  const est = tierEstimate?.[t.key];
+                  const cost = formatTierCost(est);
+                  const time = formatTierTime(est);
+                  return (
+                    <label
+                      key={t.key}
+                      className={`cr-tier-option${tier === t.key ? " selected" : ""}${t.disabled ? " disabled" : ""}`}
+                    >
+                      <input
+                        type="radio"
+                        name="tier"
+                        value={t.key}
+                        checked={tier === t.key}
+                        disabled={t.disabled}
+                        onChange={() => setTier(t.key)}
+                      />
+                      <span className="cr-tier-label">{t.label}</span>
+                      <span className="cr-tier-subtitle">{t.subtitle}</span>
+                      {!t.disabled && (
+                        <span className="cr-tier-est">
+                          {tierEstimateLoading && !est ? "…" : cost ? `${cost}` : "—"}
+                          {time ? ` • ${time}` : ""}
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
             )}
             {canStart && (
               <button className="btn btn-primary cr-start-btn" type="button" onClick={handleStartRender}>

@@ -8,6 +8,7 @@ import SegmentedProgressBar from "./SegmentedProgressBar";
 import VastInstancePanel from "./VastInstancePanel";
 import ModalInstancePanel from "../ModalInstancePanel";
 import FrameGalleryPanel from "./FrameGalleryPanel";
+import HeavinessPanel from "./HeavinessPanel";
 
 function BigGauge({ pct, color, label }) {
   const size = 96;
@@ -112,6 +113,12 @@ function RenderGroupDetail({
       {/* GPU Instances */}
       <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
       <ModalInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
+
+      {/* Scene heaviness — async-friendly: skeleton until analysis_snapshot lands. */}
+      <HeavinessPanel
+        heaviness={job.analysis_snapshot?.heaviness ?? null}
+        loading={!job.analysis_snapshot}
+      />
 
       {/* Frames — collapsible, below GPU instances */}
       {canViewFrames && (

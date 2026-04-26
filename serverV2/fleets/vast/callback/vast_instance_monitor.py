@@ -14,6 +14,8 @@ import threading
 import time
 from typing import Any, Callable
 
+import psycopg2.pool
+
 from serverV2.config import VastConfig
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
@@ -84,6 +86,14 @@ class VastInstanceMonitor:
                 if self._tick():
                     break
                 self._consecutive_api_errors = 0
+            except psycopg2.pool.PoolError as e:
+                # Transient server-internal pressure, not a Vast API issue.
+                # Don't increment the API-error counter — we'd kill healthy
+                # jobs because the local DB pool was briefly full.
+                log.warning(
+                    "Vast poll for job %s skipped — DB pool exhausted: %s",
+                    self._job_id, e,
+                )
             except Exception as e:
                 self._consecutive_api_errors += 1
                 log.error(

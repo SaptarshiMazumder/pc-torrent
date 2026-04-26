@@ -206,6 +206,10 @@ class DispatchContext:
     blend_url: str
     max_retries: int = 0
     priority: int = 0
+    # Render engine ("BLENDER_EEVEE", "CYCLES", ...).  Read by fleet
+    # strategies that need to vary infrastructure by engine — currently
+    # VastFleetStrategy uses it to pick the eevee-vs-cycles docker image.
+    engine: str | None = None
 
 
 @dataclass(frozen=True)

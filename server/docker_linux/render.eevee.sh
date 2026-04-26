@@ -1,4 +1,16 @@
 #!/bin/bash
+# render.eevee.sh — entry point for the EEVEE worker image.
+#
+# Differences vs render.sh (the cycles entry point):
+#   * Hardcodes EGL_PLATFORM=surfaceless (no DISPLAY, no Xvfb).  EEVEE on
+#     a headless GPU needs NVIDIA's surfaceless EGL platform.  The Dockerfile
+#     ships an NVIDIA EGL ICD JSON so GLVND's libEGL dispatcher loads
+#     libEGL_nvidia.so.0 (when host-injected) instead of falling back to Mesa.
+#   * Logs whether libEGL_nvidia.so.0 is actually present so that hosts which
+#     fail to inject NVIDIA graphics caps are obvious from the worker stdout.
+#
+# This script only runs in the EEVEE image.  Cycles renders go through
+# render.sh and are unaffected by anything here.
 set -euo pipefail
 
 BLENDER_BIN="${BLENDER_BIN:-/opt/blender/blender}"
@@ -17,27 +29,17 @@ if ! [[ "$FRAME_STEP" =~ ^[0-9]+$ ]] || [ "$FRAME_STEP" -lt 1 ]; then
 fi
 export OUTPUT_DIR INPUT_DIR FRAME_STEP DEVICE_POLICY
 
-# Start a virtual X11 display for EEVEE (which uses OpenGL/EGL, not CUDA).
-# Without this, Blender falls back to CPU Mesa software rendering on headless
-# containers where /dev/dri device nodes are inaccessible.
-XVFB_PID=""
-if command -v Xvfb &>/dev/null && [ -z "${DISPLAY:-}" ]; then
-    DISPLAY_NUM=99
-    Xvfb ":${DISPLAY_NUM}" -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &>/dev/null &
-    XVFB_PID=$!
-    export DISPLAY=":${DISPLAY_NUM}"
-    echo "Xvfb started on DISPLAY=${DISPLAY} (pid ${XVFB_PID})"
-    sleep 0.5  # give Xvfb a moment to initialise
-else
-    echo "Xvfb not available or DISPLAY already set (DISPLAY=${DISPLAY:-<unset>}); skipping"
-fi
+# EEVEE: surfaceless EGL on NVIDIA.  No DISPLAY, no Xvfb.
+export EGL_PLATFORM=surfaceless
+unset DISPLAY
 
-cleanup_xvfb() {
-    if [ -n "$XVFB_PID" ]; then
-        kill "$XVFB_PID" 2>/dev/null || true
-    fi
-}
-trap cleanup_xvfb EXIT
+echo "=== PC Rent Render (EEVEE image) ==="
+if ldconfig -p 2>/dev/null | grep -q "libEGL_nvidia.so.0"; then
+    echo "libEGL_nvidia.so.0 present — NVIDIA EGL available"
+else
+    echo "WARNING: libEGL_nvidia.so.0 NOT found — host did not inject NVIDIA graphics libs."
+    echo "         GLVND will fall back to Mesa and EEVEE is likely to fail."
+fi
 
 if [ -z "$BLEND_FILE" ]; then
     BLEND_FILE=$(find "$INPUT_DIR" -name "*.blend" -print -quit)
@@ -59,7 +61,6 @@ if [ ! -f "$RENDER_DRIVER_SCRIPT" ]; then
     exit 1
 fi
 
-echo "=== PC Rent Render ==="
 echo "Blend file: $BLEND_FILE"
 echo "Device policy: $DEVICE_POLICY"
 if [ -n "${FRAME_START:-}" ] && [ -n "${FRAME_END:-}" ]; then
@@ -117,8 +118,6 @@ attempt_render() {
                 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
                 device_order=(OPTIX CUDA)
-                # A100 frequently stalls with OPTIX in our Blender path; prefer
-                # CUDA first on that GPU family while keeping OPTIX as fallback.
                 if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -qi "A100"; then
                     echo "A100 detected: trying CUDA before OPTIX."
                     device_order=(CUDA OPTIX)

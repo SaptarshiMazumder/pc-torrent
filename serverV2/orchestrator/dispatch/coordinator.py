@@ -12,6 +12,8 @@ plus capacity gating.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from typing import Callable
 from uuid import uuid4
@@ -134,6 +136,7 @@ class DispatchCoordinator:
             blend_url=blend_url,
             max_retries=item.max_retries,
             priority=item.priority,
+            engine=_engine_from_b64(item.render_overrides_b64),
         )
 
         # Pre-generate job_id + claim the in-progress ledger BEFORE dispatch
@@ -199,3 +202,20 @@ def _task_from_queue_item(item: QueueItem) -> PlannedTask:
     )
 
 
+def _engine_from_b64(render_overrides_b64: str | None) -> str | None:
+    """Decode render_overrides_b64 and return ``render.engine`` if present.
+    Returns None on any decode/parse error or missing value."""
+    if not render_overrides_b64:
+        return None
+    try:
+        raw = base64.b64decode(render_overrides_b64)
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    render_section = parsed.get("render")
+    if not isinstance(render_section, dict):
+        return None
+    engine = render_section.get("engine")
+    return engine if isinstance(engine, str) and engine else None

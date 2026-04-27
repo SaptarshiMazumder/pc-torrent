@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from serverV2.config import ModalConfig
 from serverV2.fleets.instance_registry import InstanceRegistry
@@ -19,9 +19,10 @@ from serverV2.fleets.modal.callback.modal_snapshot_writer import ModalSnapshotWr
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
-from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.progress_repository import ProgressRepository
-from serverV2.repositories.render_group_repository import RenderGroupRepository
+
+if TYPE_CHECKING:
+    from serverV2.orchestrator.orchestrator import RenderOrchestrator
 
 log = logging.getLogger(__name__)
 
@@ -34,8 +35,6 @@ class ModalCallbackHandler:
         self,
         config: ModalConfig,
         client: ModalClient,
-        job_repo: JobRepository,
-        group_repo: RenderGroupRepository,
         heartbeat_repo: HeartbeatRepository,
         progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
@@ -44,8 +43,6 @@ class ModalCallbackHandler:
     ) -> None:
         self._cfg = config
         self._client = client
-        self._job_repo = job_repo
-        self._group_repo = group_repo
         self._heartbeats = heartbeat_repo
         self._progress = progress_repo
         self._on_failure = on_failure
@@ -53,6 +50,12 @@ class ModalCallbackHandler:
         self._registry = registry
         self._monitors: dict[str, threading.Event] = {}
         self._monitors_lock = threading.Lock()
+        self._orchestrator: "RenderOrchestrator | None" = None
+
+    def set_orchestrator(self, orchestrator: "RenderOrchestrator") -> None:
+        """Late-bound to break the orchestrator ↔ fleet construction cycle.
+        Must be called before any ``start_monitoring`` invocation."""
+        self._orchestrator = orchestrator
 
     def start_monitoring(
         self,
@@ -64,6 +67,11 @@ class ModalCallbackHandler:
         render_overrides_b64: str,
         group_id: str,
     ) -> None:
+        if self._orchestrator is None:
+            raise RuntimeError(
+                "ModalCallbackHandler.set_orchestrator must be called before start_monitoring"
+            )
+
         stop_event = threading.Event()
         with self._monitors_lock:
             self._monitors[job_id] = stop_event
@@ -81,8 +89,7 @@ class ModalCallbackHandler:
             group_id=group_id,
             config=self._cfg,
             client=self._client,
-            job_repo=self._job_repo,
-            group_repo=self._group_repo,
+            orchestrator=self._orchestrator,
             counts=counts,
             liveness=liveness,
             snapshot=snapshot,

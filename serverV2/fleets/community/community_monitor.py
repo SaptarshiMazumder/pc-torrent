@@ -1,16 +1,21 @@
-"""CommunityMonitor — daemon that watches community (desktop) jobs.
+"""CommunityMonitor — leader-only scanner for community (desktop) jobs.
 
 Community workers pull jobs from the DB instead of running inside a
 container we dispatched to, so the per-job monitor pattern used by Modal
-and Vast doesn't fit.  Instead, one daemon scans all active community
+and Vast doesn't fit.  Instead, this daemon scans all active community
 jobs every ``interval_sec`` and detects:
 
-    1. Group went terminal while a job is still active — reconcile.
+    1. Group went terminal while a job is still active — route FAILURE
+       so the orchestrator marks the job to match.
     2. Machine went offline (last_seen_at stale) while job is running —
        route FAILURE so the orchestrator can requeue on another machine.
 
-Runs on the leader Cloud Run instance only.  Zero retry logic — that
-belongs to the orchestrator.
+Both detections funnel through ``RenderOrchestrator.on_job_failed``.
+This monitor still reads job/group/machine repositories directly because
+its job is *discovery* — enumerating all candidate jobs — not single-job
+state inspection like Vast/Modal monitors do.
+
+Runs on the leader Cloud Run instance only.
 """
 
 from __future__ import annotations
@@ -21,14 +26,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from serverV2.core.enums import CallbackOutcome
 from serverV2.core.models import RenderJob
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 if TYPE_CHECKING:
-    from serverV2.callbacks.router import CallbackRouter
+    from serverV2.orchestrator.orchestrator import RenderOrchestrator
 
 log = logging.getLogger(__name__)
 
@@ -41,14 +45,14 @@ class CommunityMonitor:
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
-        callback_router: CallbackRouter,
+        orchestrator: "RenderOrchestrator",
         stale_seconds: int = 30,
         interval_sec: int = 10,
     ) -> None:
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._machine_repo = machine_repo
-        self._router = callback_router
+        self._orchestrator = orchestrator
         self._stale_sec = stale_seconds
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
@@ -97,9 +101,10 @@ class CommunityMonitor:
             "Group %s is %s — reconciling community job %s",
             group["id"], group_status, job.job_id,
         )
-        self._job_repo.update_status(
-            job.job_id, group_status,
-            error=f"Group was {group_status}",
+        # Orchestrator marks the job to match the group state
+        # (handle_chunk_failed sees group terminal → skip retry → mark_failed).
+        self._orchestrator.on_job_failed(
+            job.job_id, f"Group was {group_status}",
         )
 
     def _check_machine_offline(
@@ -115,8 +120,4 @@ class CommunityMonitor:
         if job.remaining_frames() is None:
             # All frames already uploaded — let the success path finish.
             return
-        self._router.route(
-            job_id=job.job_id,
-            outcome=CallbackOutcome.FAILURE,
-            error="Machine went offline",
-        )
+        self._orchestrator.on_job_failed(job.job_id, "Machine went offline")

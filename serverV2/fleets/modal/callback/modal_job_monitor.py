@@ -11,15 +11,16 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from serverV2.config import ModalConfig
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.callback.modal_snapshot_writer import ModalSnapshotWriter
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
-from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.render_group_repository import RenderGroupRepository
+
+if TYPE_CHECKING:
+    from serverV2.orchestrator.orchestrator import RenderOrchestrator
 
 log = logging.getLogger(__name__)
 
@@ -34,8 +35,7 @@ class ModalJobMonitor:
         group_id: str,
         config: ModalConfig,
         client: ModalClient,
-        job_repo: JobRepository,
-        group_repo: RenderGroupRepository,
+        orchestrator: "RenderOrchestrator",
         counts: JobCounts,
         liveness: LivenessCheck,
         snapshot: ModalSnapshotWriter,
@@ -48,8 +48,7 @@ class ModalJobMonitor:
         self._group_id = group_id
         self._cfg = config
         self._client = client
-        self._job_repo = job_repo
-        self._group_repo = group_repo
+        self._orchestrator = orchestrator
         self._counts = counts
         self._liveness = liveness
         self._snapshot = snapshot
@@ -81,7 +80,7 @@ class ModalJobMonitor:
     # ------------------------------------------------------------------
 
     def _tick(self) -> bool:
-        job = self._job_repo.get_raw_by_id(self._job_id)
+        job = self._orchestrator.get_job_raw(self._job_id)
         elapsed = time.monotonic() - self._started_at
 
         if not job:
@@ -104,17 +103,18 @@ class ModalJobMonitor:
 
         # Block: Group went terminal while this job was still active.
         if self._group_id:
-            group = self._group_repo.get_by_id(self._group_id)
-            if group and group.get("status") in ("done", "failed", "cancelled"):
-                group_status = group["status"]
+            group_status = self._orchestrator.get_group_status(self._group_id)
+            if group_status in ("done", "failed", "cancelled"):
                 log.info(
                     "Group %s is %s — cleaning up Modal job %s",
                     self._group_id, group_status, self._job_id,
                 )
                 self._client.cancel_job(self._provider_job_id)
-                self._job_repo.update_status(
-                    self._job_id, group_status,
-                    error=f"Group was {group_status}",
+                # Orchestrator handles marking the job to match the group
+                # state (handle_chunk_failed sees group terminal → skip
+                # retry → mark_failed).
+                self._on_failure(
+                    self._job_id, f"Group was {group_status}",
                 )
                 self._snapshot.remove()
                 return True

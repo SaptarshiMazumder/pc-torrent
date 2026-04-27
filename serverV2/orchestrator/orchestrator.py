@@ -84,24 +84,50 @@ class RenderOrchestrator:
             render_overrides_json=render_overrides_json,
         )
 
-    # ---- chunk-level callbacks ----
+    # ---- chunk-level callbacks (full flow — adapters call these) ----
 
-    def on_job_failed(self, job_id: str, error: str) -> bool:
-        """Try to retry the failed chunk; return True if retry dispatched."""
-        return self._lifecycle.handle_chunk_failure(job_id, error)
+    def on_job_failed(self, job_id: str, error: str) -> None:
+        """A job reported failure (worker self-report or monitor detection).
+        Lifecycle decides retry vs terminal, marks the job failed, drains
+        the failed fleet's queue, and rolls the change up to the group.
+        """
+        self._lifecycle.handle_chunk_failed(job_id, error)
 
-    def on_job_started(self, group_id: str) -> None:
-        """A job transitioned pending → running; roll up to the group."""
-        self._lifecycle.reconcile_group_status(group_id)
+    def on_job_succeeded(self, job_id: str) -> None:
+        """A job reported success.  Lifecycle marks it done, releases the
+        in-progress ledger, writes telemetry, drains the fleet's queue,
+        and rolls the change up to the group.
+        """
+        self._lifecycle.handle_chunk_succeeded(job_id)
 
-    def on_job_succeeded(self, group_id: str) -> None:
-        """A job was marked done; roll up to the group (e.g. last child → done)."""
-        self._lifecycle.reconcile_group_status(group_id)
+    def on_job_progress(
+        self, job_id: str, rendered_frames: int, total_frames: int,
+    ) -> None:
+        """Worker pushed a PROGRESS event.  On the first one, transition
+        pending → running and roll up to the group."""
+        self._lifecycle.handle_chunk_progress(job_id, rendered_frames, total_frames)
 
-    def on_job_failed_terminal(self, group_id: str) -> None:
-        """A job was marked failed and retries are exhausted; roll up to
-        the group (e.g. last child → failed)."""
-        self._lifecycle.reconcile_group_status(group_id)
+    def on_job_running(self, job_id: str) -> None:
+        """Fleet monitor saw the container reach 'running' state before
+        the worker had a chance to send PROGRESS — transition the job
+        from pending to running and roll up to the group."""
+        self._lifecycle.handle_chunk_running(job_id)
+
+    # ---- read facade (used by monitors instead of direct repo imports) ----
+
+    def is_job_terminal(self, job_id: str) -> bool:
+        return self._lifecycle.is_job_terminal(job_id)
+
+    def get_job_status(self, job_id: str) -> str | None:
+        return self._lifecycle.get_job_status(job_id)
+
+    def get_group_status(self, group_id: str) -> str | None:
+        return self._lifecycle.get_group_status(group_id)
+
+    def get_job_raw(self, job_id: str) -> dict[str, Any] | None:
+        """Read-only job row for monitors that need fields like
+        ``rendered_frames``, ``machine_type``, ``error``."""
+        return self._lifecycle.get_job_raw(job_id)
 
     # ---- cancellation ----
 

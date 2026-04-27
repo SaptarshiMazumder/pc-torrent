@@ -1,0 +1,164 @@
+@startuml callbacks_orchestrator_refactor
+
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam shadowing false
+hide empty members
+
+title Callback + Monitor to Orchestrator (post-refactor)\nAll Postgres mutations funnel through RenderOrchestrator.\nAdapters hold zero state and touch zero Postgres repositories.
+
+' ===========================================
+' Adapter layer
+' ===========================================
+package "Adapters" {
+
+    class WorkerHttpRoutes <<router>> {
+        +PUT /jobs/id/status
+        +PUT /jobs/id/progress
+        +PUT /jobs/id/heartbeat
+        +PUT /jobs/id/worker-start
+    }
+
+    class CallbackRouter <<adapter>> {
+        +route(job_id, outcome, args)
+    }
+
+    class SuccessHandler <<adapter>> {
+        +handle(job_id, group_id)
+    }
+
+    class FailureHandler <<adapter>> {
+        +handle(job_id, error)
+    }
+
+    class VastInstanceMonitor <<thread>> {
+        +run()
+        -_tick()
+    }
+
+    class ModalJobMonitor <<thread>> {
+        +run()
+        -_tick()
+    }
+
+    class CommunityMonitor <<daemon>> {
+        +start()
+        -_check_group_terminal()
+        -_check_machine_offline()
+    }
+}
+
+' ===========================================
+' Orchestration core
+' ===========================================
+package "Orchestration core" {
+
+    class RenderOrchestrator <<facade>> {
+        +plan()
+        +execute()
+        +cancel_group(group_id)
+        +on_job_succeeded(job_id)
+        +on_job_failed(job_id, error)
+        +on_job_progress(job_id, r, t)
+        +on_job_running(job_id)
+        +is_job_terminal(job_id)
+        +get_job_status(job_id)
+        +get_group_status(group_id)
+        +get_job_raw(job_id)
+    }
+
+    class RenderLifecycle <<work>> {
+        +start_render()
+        +cancel_render(group_id)
+        +reconcile_group_status(group_id)
+        +handle_chunk_succeeded(job_id)
+        +handle_chunk_failed(job_id, error)
+        +handle_chunk_progress(job_id, r, t)
+        +handle_chunk_running(job_id)
+        -_try_dispatch_retry(job_id, error)
+        -_record_telemetry()
+        -_promote_pending_to_running(job_id)
+    }
+
+    class DispatchCoordinator
+    class FleetRegistry
+}
+
+' ===========================================
+' Repositories
+' ===========================================
+package "Repositories" {
+    class JobRepository <<Postgres>>
+    class RenderGroupRepository <<Postgres>>
+    class InProgressChunkRepository <<Postgres>>
+    class TelemetryRepository <<Postgres>>
+    class DispatchQueueRepository <<Postgres>>
+    class HeartbeatRepository <<Redis>>
+    class ProgressRepository <<Redis>>
+}
+
+' ===========================================
+' Edges
+' ===========================================
+
+' Adapters call the orchestrator facade
+WorkerHttpRoutes ..> RenderOrchestrator
+CallbackRouter --> RenderOrchestrator
+SuccessHandler --> RenderOrchestrator
+FailureHandler --> RenderOrchestrator
+VastInstanceMonitor --> RenderOrchestrator
+ModalJobMonitor --> RenderOrchestrator
+CommunityMonitor --> RenderOrchestrator
+
+' Router dispatches to handlers
+CallbackRouter --> SuccessHandler
+CallbackRouter --> FailureHandler
+
+' Per-job monitors fire outcomes via injected closures (which point at router)
+VastInstanceMonitor ..> CallbackRouter
+ModalJobMonitor ..> CallbackRouter
+
+' Orchestrator composes lifecycle (1:1)
+RenderOrchestrator *-- RenderLifecycle
+
+' Lifecycle is the only thing that talks to Postgres-backed repositories
+RenderLifecycle --> JobRepository
+RenderLifecycle --> RenderGroupRepository
+RenderLifecycle --> InProgressChunkRepository
+RenderLifecycle --> TelemetryRepository
+RenderLifecycle --> DispatchQueueRepository
+RenderLifecycle --> DispatchCoordinator
+RenderLifecycle --> FleetRegistry
+
+' Per-job monitors do touch Redis directly via shared helpers
+' (JobCounts uses ProgressRepository, LivenessCheck uses HeartbeatRepository).
+' Worker telemetry channels, not orchestrator state.
+VastInstanceMonitor ..> HeartbeatRepository
+VastInstanceMonitor ..> ProgressRepository
+ModalJobMonitor ..> HeartbeatRepository
+ModalJobMonitor ..> ProgressRepository
+
+' Community scanner keeps direct repo reads for discovery
+' (enumerating active groups + community jobs).  Mutations route via orchestrator.
+CommunityMonitor ..> JobRepository
+CommunityMonitor ..> RenderGroupRepository
+
+note right of RenderLifecycle
+  Single owner of Postgres mutations.
+  Every mark_done / mark_failed /
+  update_progress / mark_started /
+  reconcile-group-status comes
+  through this class, behind the
+  RenderOrchestrator facade.
+  Adapters never touch a repository.
+end note
+
+note bottom of CallbackRouter
+  Translates fleet-monitor outcomes
+  into orchestrator calls.
+  Symmetric with HTTP routes.
+end note
+
+@enduml

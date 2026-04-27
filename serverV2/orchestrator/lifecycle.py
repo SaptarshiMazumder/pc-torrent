@@ -62,6 +62,27 @@ log = logging.getLogger(__name__)
 _TERMINAL_GROUP_STATUSES = frozenset({"done", "failed", "cancelled"})
 
 
+class ManualRetryError(Exception):
+    """User-triggered retry refused.  ``reason`` is a short stable code the
+    router maps to an HTTP status — see ``RETRY_REASON_HTTP_STATUS`` below."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# Stable reason codes for ``ManualRetryError``.  Kept here next to the
+# raise sites so the router translation stays in sync.
+RETRY_REASON_HTTP_STATUS: dict[str, int] = {
+    "not_found": 404,
+    "not_failed": 409,
+    "active_sibling_exists": 409,
+    "group_cancelled": 409,
+    "no_remaining_frames": 409,
+    "no_eligible_target": 503,
+}
+
+
 class RenderLifecycle:
 
     # Heuristic thresholds for picking the FastRender strategy over the
@@ -320,33 +341,7 @@ class RenderLifecycle:
         # community machine that just failed.
         excluded_caps, excluded_ids = self._exclusions_for(raw)
 
-        # Load heaviness signal + engine + tier from the group so the retry
-        # strategy can size + filter + route the same way as initial allocation.
-        file_size_bytes: int | None = None
-        engine: str | None = None
-        tier: str | None = None
-        if grp is not None:
-            raw_size = grp.get("r2_input_size_bytes")
-            if raw_size is not None:
-                try:
-                    file_size_bytes = int(raw_size)
-                except (TypeError, ValueError):
-                    file_size_bytes = None
-            raw_overrides = grp.get("render_overrides_json")
-            if raw_overrides:
-                try:
-                    parsed = json.loads(raw_overrides)
-                    if isinstance(parsed, dict):
-                        render_section = parsed.get("render")
-                        if isinstance(render_section, dict):
-                            engine_value = render_section.get("engine")
-                            if isinstance(engine_value, str):
-                                engine = engine_value
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    engine = None
-            tier_raw = grp.get("tier")
-            if isinstance(tier_raw, str):
-                tier = tier_raw
+        file_size_bytes, engine, tier = self._load_group_dispatch_context(grp)
 
         chunk_request = ChunkRequest(
             group_id=group_id,
@@ -396,6 +391,165 @@ class RenderLifecycle:
         )
         self._coordinator.enqueue_and_flush(group_id, [retry_task], context)
         return True
+
+    # ------------------------------------------------------------------
+    # Story 2d: user-triggered retry of a stuck chunk
+    # ------------------------------------------------------------------
+
+    def retry_chunk_manually(self, job_id: str) -> dict[str, Any]:
+        """User pressed "Retry" on a stuck chunk in the UI.  Resolves the
+        latest attempt for the chunk, validates it's actually stuck (failed
+        + auto-retries exhausted + nothing active), and dispatches a fresh
+        attempt with ``attempt=0`` for the un-uploaded frames only.
+
+        Anti-affinity excludes the latest failed target so we don't retry
+        on the same fleet/GPU that just gave up.
+
+        Group status flips terminal → running automatically via
+        ``reconcile_group_status`` once the new pending job appears.
+
+        Raises ``ManualRetryError`` with a stable reason code on refusal.
+        """
+        raw = self._job_repo.get_raw_by_id(job_id)
+        if not raw:
+            raise ManualRetryError("not_found")
+        group_id = raw.get("group_id") or ""
+        if not group_id:
+            raise ManualRetryError("not_found")
+        chunk_index = raw.get("chunk_index") or 0
+
+        grp = self._group_repo.get_by_id(group_id)
+        if grp and grp.get("status") == "cancelled":
+            raise ManualRetryError("group_cancelled")
+
+        # Already-active retry for this chunk — don't double-fire.
+        if self._in_progress.current_job_for(group_id, chunk_index) is not None:
+            raise ManualRetryError("active_sibling_exists")
+
+        # Resolve the latest attempt for this chunk.  Caller may have passed
+        # an older attempt's job_id; we always operate on the latest so
+        # ``remaining_frames()`` reflects the most-advanced upload state.
+        siblings = [
+            j for j in self._job_repo.get_raw_by_group(group_id)
+            if (j.get("chunk_index") or 0) == chunk_index
+        ]
+        if not siblings:
+            raise ManualRetryError("not_found")
+        latest = max(
+            siblings,
+            key=lambda j: (j.get("attempt") or 0, j.get("submitted_at") or ""),
+        )
+        if (latest.get("status") or "") != "failed":
+            raise ManualRetryError("not_failed")
+
+        rj = RenderJob.from_row(latest)
+        remaining = rj.remaining_frames()
+        if remaining is None:
+            raise ManualRetryError("no_remaining_frames")
+
+        frame_start, frame_end = remaining
+        total_frames = ((frame_end - frame_start) // rj.frame_step) + 1
+
+        # Anti-affinity from the latest failed attempt (per user spec).
+        excluded_caps, excluded_ids = self._exclusions_for(latest)
+
+        file_size_bytes, engine, tier = self._load_group_dispatch_context(grp)
+
+        chunk_request = ChunkRequest(
+            group_id=group_id,
+            chunk_index=chunk_index,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=rj.frame_step,
+            total_frames=total_frames,
+            attempt=0,
+            excluded_machine_ids=excluded_ids,
+            excluded_serverless_capabilities=excluded_caps,
+            file_size_bytes=file_size_bytes,
+            engine=engine,
+        )
+        retry_strategy = self._pick_strategy(
+            tiers.normalize(tier), file_size_bytes or 0, total_frames,
+        )
+        retry_task = retry_strategy.allocate_retry(chunk_request, self._resource_picker())
+        if retry_task is None:
+            raise ManualRetryError("no_eligible_target")
+
+        target_label = (
+            f"{retry_task.fleet}/{retry_task.gpu_type}"
+            if retry_task.gpu_type
+            else f"{retry_task.fleet}/{retry_task.machine_id}"
+        )
+        log.info(
+            "Manual retry for chunk %d (group %s): frames %d-%d on %s "
+            "(attempt reset to 0, latest failed attempt was %d)",
+            chunk_index, group_id, frame_start, frame_end, target_label,
+            rj.attempt or 0,
+        )
+
+        overrides_b64 = base64.b64encode(
+            (rj.render_overrides_json or "{}").encode()
+        ).decode()
+        context = DispatchContext(
+            group_id=group_id,
+            input_filename=rj.input_filename,
+            render_overrides_b64=overrides_b64,
+            blend_url="",
+            max_retries=rj.max_retries,
+            priority=rj.priority,
+            engine=engine,
+        )
+        results = self._coordinator.enqueue_and_flush(group_id, [retry_task], context)
+
+        # Aggregator sees the new pending job and unlocks the group from
+        # any terminal state (failed) back to running.
+        self.reconcile_group_status(group_id)
+
+        new_job_id = results[0].job_id if results else None
+        return {
+            "new_job_id": new_job_id,
+            "frame_start": frame_start,
+            "frame_end": frame_end,
+            "fleet": retry_task.fleet,
+            "gpu_type": retry_task.gpu_type,
+        }
+
+    def _load_group_dispatch_context(
+        self, grp: dict[str, Any] | None,
+    ) -> tuple[int | None, str | None, str | None]:
+        """Pull (file_size_bytes, engine, tier) off a render_groups row for
+        the dispatch path.  Used by both auto-retry and manual-retry."""
+        file_size_bytes: int | None = None
+        engine: str | None = None
+        tier: str | None = None
+        if grp is None:
+            return file_size_bytes, engine, tier
+
+        raw_size = grp.get("r2_input_size_bytes")
+        if raw_size is not None:
+            try:
+                file_size_bytes = int(raw_size)
+            except (TypeError, ValueError):
+                file_size_bytes = None
+
+        raw_overrides = grp.get("render_overrides_json")
+        if raw_overrides:
+            try:
+                parsed = json.loads(raw_overrides)
+                if isinstance(parsed, dict):
+                    render_section = parsed.get("render")
+                    if isinstance(render_section, dict):
+                        engine_value = render_section.get("engine")
+                        if isinstance(engine_value, str):
+                            engine = engine_value
+            except (TypeError, ValueError, json.JSONDecodeError):
+                engine = None
+
+        tier_raw = grp.get("tier")
+        if isinstance(tier_raw, str):
+            tier = tier_raw
+
+        return file_size_bytes, engine, tier
 
     # ------------------------------------------------------------------
     # Story 2b: a chunk succeeded (full flow — DB writes + telemetry + drain + rollup)

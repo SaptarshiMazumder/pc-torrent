@@ -11,6 +11,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+from serverV2.core.models import RenderJob
 from serverV2.core.value_objects import (
     MAX_UPLOAD_BYTES,
     SINGLE_PUT_MAX_BYTES,
@@ -26,6 +27,7 @@ from serverV2.core.value_objects import (
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firestore_client import write_render_group_record
 from serverV2.orchestrator.allocation import tiers
+from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.services.assets.serializers import serialize_asset
 from serverV2.services.blend_parser.parser import BlendParseError, parse_upload
 from serverV2.services.render_groups.frame_planning import resolve_frame_range
@@ -542,8 +544,13 @@ class RenderGroupService:
         analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
         analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 
+        retryable_ids = self._compute_retryable_job_ids(group, jobs)
         tasks = [
-            serialize_task(job, machines_by_id.get(job.get("machine_id")))
+            serialize_task(
+                job,
+                machines_by_id.get(job.get("machine_id")),
+                is_retryable=(job["id"] in retryable_ids),
+            )
             for job in jobs
         ]
 
@@ -599,6 +606,54 @@ class RenderGroupService:
             "tasks_count": len(tasks),
             "tasks": tasks,
         }
+
+    @staticmethod
+    def _compute_retryable_job_ids(
+        group: dict[str, Any], jobs: list[dict[str, Any]],
+    ) -> set[str]:
+        """Identify jobs the user can hit "Retry" on.  A job qualifies when:
+          * status == 'failed'
+          * it's the LATEST attempt for its chunk_index (older attempts have
+            been superseded — only the latest stuck row gets the button)
+          * ``attempt >= MAX_RETRIES`` (auto-retries exhausted, the system
+            won't fire on its own)
+          * no sibling for the same chunk_index is pending or running
+          * the chunk has un-uploaded frames remaining
+          * the parent group isn't cancelled
+
+        With this filter, the frontend gets exactly one retryable row per
+        stuck chunk — no client-side dedupe needed.
+        """
+        if (group.get("status") or "") == "cancelled":
+            return set()
+
+        latest_per_chunk: dict[int, str] = {}
+        latest_submitted: dict[int, str] = {}
+        active_chunks: set[int] = set()
+        for j in jobs:
+            ci = j.get("chunk_index") or 0
+            sub = j.get("submitted_at") or ""
+            if ci not in latest_submitted or sub > latest_submitted[ci]:
+                latest_submitted[ci] = sub
+                latest_per_chunk[ci] = j["id"]
+            if (j.get("status") or "") in ("pending", "running"):
+                active_chunks.add(ci)
+
+        retryable: set[str] = set()
+        for j in jobs:
+            if (j.get("status") or "") != "failed":
+                continue
+            ci = j.get("chunk_index") or 0
+            if latest_per_chunk.get(ci) != j["id"]:
+                continue
+            if (j.get("attempt") or 0) < MAX_RETRIES:
+                continue
+            if ci in active_chunks:
+                continue
+            if RenderJob.from_row(j).remaining_frames() is None:
+                continue
+            retryable.add(j["id"])
+        return retryable
 
     def _build_terminal_status_dto(self, group: dict[str, Any]) -> dict[str, Any]:
         """Slim DTO for a terminal group — every per-chunk-derived field

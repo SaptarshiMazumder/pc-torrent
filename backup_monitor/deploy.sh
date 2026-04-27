@@ -48,6 +48,17 @@ echo "   Scheduler:    $SCHEDULER_NAME ($SCHEDULE)"
 echo "   Service acct: $SCHEDULER_SA"
 echo ""
 
+# Ensure required APIs are enabled.  First-time use of `gcloud scheduler
+# jobs create` will otherwise hang on an interactive prompt asking to
+# enable the API.
+echo "-> Ensuring required APIs are enabled"
+gcloud services enable \
+    run.googleapis.com \
+    cloudscheduler.googleapis.com \
+    cloudbuild.googleapis.com \
+    --quiet
+echo ""
+
 # --- 1. Deploy / update the Cloud Run Job ---
 echo "-> Deploying Cloud Run Job"
 gcloud run jobs deploy "$JOB_NAME" \
@@ -75,20 +86,22 @@ gcloud run jobs add-iam-policy-binding "$JOB_NAME" \
 JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
 echo ""
 echo "-> Configuring Cloud Scheduler trigger"
-if gcloud scheduler jobs describe "$SCHEDULER_NAME" --location "$REGION" >/dev/null 2>&1; then
+if gcloud scheduler jobs describe "$SCHEDULER_NAME" --location "$REGION" --quiet >/dev/null 2>&1; then
     gcloud scheduler jobs update http "$SCHEDULER_NAME" \
         --location "$REGION" \
         --schedule "$SCHEDULE" \
         --uri "$JOB_URI" \
         --http-method POST \
-        --oauth-service-account-email "$SCHEDULER_SA"
+        --oauth-service-account-email "$SCHEDULER_SA" \
+        --quiet
 else
     gcloud scheduler jobs create http "$SCHEDULER_NAME" \
         --location "$REGION" \
         --schedule "$SCHEDULE" \
         --uri "$JOB_URI" \
         --http-method POST \
-        --oauth-service-account-email "$SCHEDULER_SA"
+        --oauth-service-account-email "$SCHEDULER_SA" \
+        --quiet
 fi
 
 echo ""

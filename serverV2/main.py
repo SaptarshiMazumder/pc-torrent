@@ -83,6 +83,7 @@ def _wire_routers(c: Container) -> None:
         debug,
         docker,
         health,
+        internal,
         jobs,
         logs,
         machines,
@@ -94,6 +95,7 @@ def _wire_routers(c: Container) -> None:
     render_groups.init(c.render_group_service, c.upload_coordinator)
     assets.init(c.asset_service)
     debug.init(aggregator=c.status_aggregator)
+    internal.init(c.orchestrator, c.config.orphan_secret)
 
     app.include_router(health.router)
     app.include_router(machines.router)
@@ -103,6 +105,7 @@ def _wire_routers(c: Container) -> None:
     app.include_router(docker.router)
     app.include_router(logs.router)
     app.include_router(debug.router)
+    app.include_router(internal.router)
 
 
 def _run_recovery(c: Container) -> None:

@@ -325,6 +325,10 @@ class AppConfig:
     # Per-hour cost stamped on every CommunityMachine.  Read by cost-aware
     # allocators (Phase 5+).  Loaded from config.json's ``community.price_per_hour``.
     community_price_per_hour: float = 1.0
+    # Shared secret expected by ``POST /internal/orphan/{job_id}``.  The
+    # backup_monitor service sends this header to identify itself.  Empty
+    # string disables the endpoint (returns 503 to all callers).
+    orphan_secret: str = ""
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -335,4 +339,5 @@ class AppConfig:
             modal=modal,
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             community_price_per_hour=_load_community_price_per_hour(),
+            orphan_secret=_env_str("ORPHAN_SECRET", ""),
         )

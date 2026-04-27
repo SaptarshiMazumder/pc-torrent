@@ -118,7 +118,14 @@
       "Bash(node --check c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/pages/CreateRenderPage.jsx)",
       "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/server/docker_linux/render.sh)",
       "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/server/docker_linux/render.eevee.sh)",
-      "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh)"
+      "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(chmod +x c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/backup_monitor/deploy.sh)",
+      "Bash(bash -n c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/backup_monitor/deploy.sh)",
+      "Bash(awk 'NR==18,NR==25 {print NR\": \"$0}' \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/serverV2/.env\")",
+      "Bash(bash -n \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/backup_monitor/deploy.sh\")",
+      "Bash(bash -n deploy.sh)"
     ]
   }
 }

@@ -423,6 +423,10 @@ export async function deleteRenderGroup(baseUrl, groupId) {
   return apiFetch(baseUrl, `/render-groups/${groupId}`, { method: "DELETE" });
 }
 
+export async function retryJobChunk(baseUrl, jobId) {
+  return apiFetch(baseUrl, `/jobs/${jobId}/retry`, { method: "POST" });
+}
+
 export async function getVastInstances(baseUrl) {
   return apiFetch(baseUrl, "/vast/instances");
 }

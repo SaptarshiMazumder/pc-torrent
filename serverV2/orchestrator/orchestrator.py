@@ -129,6 +129,15 @@ class RenderOrchestrator:
         ``rendered_frames``, ``machine_type``, ``error``."""
         return self._lifecycle.get_job_raw(job_id)
 
+    # ---- user-triggered retry of a stuck chunk ----
+
+    def retry_chunk_manually(self, job_id: str) -> dict[str, Any]:
+        """User pressed "Retry" on a stuck chunk.  Validates the chunk is
+        actually stuck (failed + auto-retries exhausted + nothing active)
+        and dispatches a fresh attempt for the un-uploaded frames only.
+        Raises ``ManualRetryError`` on refusal."""
+        return self._lifecycle.retry_chunk_manually(job_id)
+
     # ---- cancellation ----
 
     def cancel_group(self, group_id: str) -> dict[str, Any]:

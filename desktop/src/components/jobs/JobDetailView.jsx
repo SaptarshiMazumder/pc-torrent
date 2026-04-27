@@ -9,6 +9,7 @@ import VastInstancePanel from "./VastInstancePanel";
 import ModalInstancePanel from "../ModalInstancePanel";
 import FrameGalleryPanel from "./FrameGalleryPanel";
 import HeavinessPanel from "./HeavinessPanel";
+import FailedChunksPanel from "./FailedChunksPanel";
 
 function BigGauge({ pct, color, label }) {
   const size = 96;
@@ -109,6 +110,9 @@ function RenderGroupDetail({
         <div className="rentee-job-success">Downloaded to <code>{downloadState.path}</code>{downloadState?.summary ? ` (${downloadState.summary})` : ""}</div>
       )}
       {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
+
+      {/* Stuck chunks the user can manually re-dispatch */}
+      <FailedChunksPanel tasks={job.tasks || []} backendUrl={backendUrl} />
 
       {/* GPU Instances */}
       <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />

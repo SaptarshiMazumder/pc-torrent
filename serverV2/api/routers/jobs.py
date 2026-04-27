@@ -11,22 +11,35 @@ from serverV2.api.schemas.job import (
     UpdateJobProgressPayload,
     UpdateJobStatusPayload,
 )
+from serverV2.orchestrator.lifecycle import (
+    RETRY_REASON_HTTP_STATUS,
+    ManualRetryError,
+)
+from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.services.jobs.service import JobService, JobServiceError
 
 router = APIRouter(tags=["jobs"])
 
 _svc: JobService | None = None
+_orchestrator: RenderOrchestrator | None = None
 
 
-def init(service: JobService) -> None:
-    global _svc
+def init(service: JobService, *, orchestrator: RenderOrchestrator) -> None:
+    global _svc, _orchestrator
     _svc = service
+    _orchestrator = orchestrator
 
 
 def _get() -> JobService:
     if _svc is None:
         raise HTTPException(500, "JobService not initialized")
     return _svc
+
+
+def _get_orchestrator() -> RenderOrchestrator:
+    if _orchestrator is None:
+        raise HTTPException(500, "Orchestrator not initialized")
+    return _orchestrator
 
 
 # ---- status callbacks ----
@@ -162,3 +175,18 @@ def register_outputs(job_id: str, body: dict):
         return _get().register_outputs(job_id, filenames)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
+
+
+# ---- user-triggered manual retry ----
+
+@router.post("/jobs/{job_id}/retry")
+def retry_chunk(job_id: str):
+    """Re-dispatch a stuck chunk's missing frames with a fresh attempt
+    counter.  Refused if the chunk's auto-retries haven't been exhausted,
+    if a sibling is still active, if the group is cancelled, or if no
+    frames are actually missing."""
+    try:
+        return _get_orchestrator().retry_chunk_manually(job_id)
+    except ManualRetryError as e:
+        status = RETRY_REASON_HTTP_STATUS.get(e.reason, 400)
+        raise HTTPException(status, e.reason)

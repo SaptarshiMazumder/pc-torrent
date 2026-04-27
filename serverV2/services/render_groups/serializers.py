@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from serverV2.core.models import RenderJob
 from serverV2.core.value_objects import (
     compute_progress_pct,
     latest_output_filename,
@@ -11,7 +12,12 @@ from serverV2.core.value_objects import (
 )
 
 
-def serialize_task(job: dict[str, Any], machine: dict[str, Any] | None = None) -> dict[str, Any]:
+def serialize_task(
+    job: dict[str, Any],
+    machine: dict[str, Any] | None = None,
+    *,
+    is_retryable: bool = False,
+) -> dict[str, Any]:
     total_frames = job.get("total_frames")
     output_files = parse_output_files(job.get("output_files"))
 
@@ -43,6 +49,15 @@ def serialize_task(job: dict[str, Any], machine: dict[str, Any] | None = None) -
         display_gpu = "Unknown"
         display_vram = 0
 
+    # Verified-upload-based gap.  Frontend uses these to display the
+    # actual missing range on stuck chunks instead of the original
+    # frame_start/end (which double-counts already-uploaded frames).
+    remaining_start: int | None = None
+    remaining_end: int | None = None
+    remaining = RenderJob.from_row(job).remaining_frames()
+    if remaining is not None:
+        remaining_start, remaining_end = remaining
+
     return {
         "job_id": job["id"],
         "machine_id": job["machine_id"],
@@ -65,6 +80,9 @@ def serialize_task(job: dict[str, Any], machine: dict[str, Any] | None = None) -
         "priority": job.get("priority") or 0,
         "output_files_count": len(output_files),
         "latest_output_file": latest_output_filename(output_files),
+        "remaining_frame_start": remaining_start,
+        "remaining_frame_end": remaining_end,
+        "is_retryable": is_retryable,
     }
 
 

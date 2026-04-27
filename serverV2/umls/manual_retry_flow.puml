@@ -1,0 +1,75 @@
+@startuml manual_retry_flow
+
+title Manual Retry of a Stuck Chunk
+
+actor User
+participant "Desktop App" as UI
+participant "jobs router" as Router
+participant "RenderOrchestrator" as Orch
+participant "RenderLifecycle" as Lifecycle
+participant "JobRepository" as Jobs
+participant "InProgressLedger" as Ledger
+participant "DispatchCoordinator" as Coord
+participant "GroupStatusAggregator" as Agg
+participant "RenderGroupRepository" as Groups
+
+== UI surfaces the Retry button ==
+
+User -> UI : Open render group
+UI -> Router : GET /render-groups/{id}
+Router -> Orch : (via RenderGroupService)
+note right of UI : tasks[].is_retryable=true\nonly on latest stuck attempt\nper chunk_index
+
+== User clicks Retry ==
+
+User -> UI : Click Retry
+UI -> Router : POST /jobs/{job_id}/retry
+Router -> Orch : retry_chunk_manually(job_id)
+Orch -> Lifecycle : retry_chunk_manually(job_id)
+
+== Validation ==
+
+Lifecycle -> Jobs : get_raw_by_id(job_id)
+Lifecycle -> Groups : get_by_id(group_id)
+note right of Lifecycle : refuse if group is cancelled
+Lifecycle -> Ledger : current_job_for(group_id, chunk_index)
+note right of Lifecycle : refuse if active sibling exists
+Lifecycle -> Jobs : get_raw_by_group(group_id)
+note right of Lifecycle : pick latest attempt for this chunk
+Lifecycle -> Lifecycle : RenderJob.remaining_frames()
+note right of Lifecycle : refuse if no frames remaining
+
+== Dispatch fresh attempt ==
+
+Lifecycle -> Coord : enqueue_and_flush
+note right of Coord : attempt=0\nframe range = remaining gap\nanti-affinity excludes latest fleet/gpu
+Coord -> Jobs : INSERT new pending job
+Coord -> Ledger : claim chunk_index for new job
+
+== Group transitions back to running ==
+
+Lifecycle -> Lifecycle : reconcile_group_status(group_id)
+Lifecycle -> Jobs : get_by_group(group_id)
+Lifecycle -> Agg : compute_group_status
+note right of Agg : group was failed BUT a pending job exists\nterminal-unlock branch fires\nresult = running
+Lifecycle -> Groups : update_status(group_id, running)
+
+Orch --> Router : new_job_id, frame range, fleet, gpu_type
+Router --> UI : 200 OK
+UI --> User : Group now shows running
+
+== Later: new job's worker reports back ==
+
+participant Worker as W
+
+alt success
+    W -> Router : PUT /jobs/{new_id}/status (done)
+    Router -> Orch : on_job_succeeded
+    note right of Orch : standard success path\nmark done, telemetry, reconcile
+else failure
+    W -> Router : PUT /jobs/{new_id}/status (failed)
+    Router -> Orch : on_job_failed
+    note right of Orch : standard auto-retry path\nattempt was reset to 0\nso MAX_RETRIES kicks in again
+end
+
+@enduml

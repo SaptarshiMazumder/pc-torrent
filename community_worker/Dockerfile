@@ -1,0 +1,27 @@
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+# Install Blender dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget xz-utils libxi6 libxxf86vm1 libxfixes3 \
+    libxrender1 libgl1-mesa-glx libxkbcommon0 \
+    libsm6 libice6 libxrandr2 libxinerama1 libxcursor1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download Blender 5.0.1 portable (headless, no GUI needed)
+RUN wget https://download.blender.org/release/Blender5.0/blender-5.0.1-linux-x64.tar.xz \
+    && tar xf blender-5.0.1-linux-x64.tar.xz \
+    && mv blender-5.0.1-linux-x64 /opt/blender \
+    && rm blender-5.0.1-linux-x64.tar.xz
+
+# Create working directories
+RUN mkdir -p /input /output
+
+# Entry script.  Paths are relative to the project root so the build
+# context used by push-worker.sh (project root) resolves correctly —
+# matches the cloud_worker/ pattern.
+COPY community_worker/render.sh /render.sh
+COPY community_worker/progress_handler.py /progress_handler.py
+COPY community_worker/render_driver.py /render_driver.py
+RUN sed -i 's/\r$//' /render.sh && chmod +x /render.sh
+
+ENTRYPOINT ["/render.sh"]

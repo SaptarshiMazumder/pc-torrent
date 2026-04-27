@@ -42,27 +42,6 @@ def save_machine_id(machine_id):
 
 
 # -----------------------------------------------
-# Docker image hash (tracks cached image version)
-# -----------------------------------------------
-def load_image_sha():
-    path = get_config_path("image.sha256")
-    if path.exists():
-        return path.read_text().strip()
-    return None
-
-
-def save_image_sha(sha):
-    ensure_config_dir()
-    get_config_path("image.sha256").write_text(sha)
-
-
-def clear_image_sha():
-    path = get_config_path("image.sha256")
-    if path.exists():
-        path.unlink()
-
-
-# -----------------------------------------------
 # GPU-in-Docker verification cache
 # -----------------------------------------------
 def load_gpu_check_cache():

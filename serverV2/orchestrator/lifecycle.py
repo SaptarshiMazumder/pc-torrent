@@ -282,7 +282,11 @@ class RenderLifecycle:
         if retried:
             log.info("Job %s failed but retry dispatched: %s", job_id, error)
         else:
-            log.warning("Job %s permanently failed (retries exhausted): %s", job_id, error)
+            # Generic message — the actual reason was logged inside
+            # _try_dispatch_retry (max retries hit / no eligible target /
+            # group cancelled / chunk already complete).  Don't mislabel
+            # them all as "retries exhausted" here.
+            log.warning("Job %s permanently failed (no retry dispatched): %s", job_id, error)
             group_id = (raw.get("group_id") or "") if raw else ""
             if group_id:
                 self.reconcile_group_status(group_id)
@@ -783,7 +787,7 @@ class RenderLifecycle:
             key = output_frame_sort_key(top)
             if latest_key is None or key > latest_key:
                 latest_file = top
-                latest_job_id = j.id
+                latest_job_id = j.job_id
                 latest_key = key
         self._group_repo.update_terminal_snapshot(
             group_id,

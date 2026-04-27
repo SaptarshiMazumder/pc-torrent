@@ -23,12 +23,15 @@ import modal
 app = modal.App("pcrent-render")
 _HERE = Path(__file__).resolve().parent
 _WEB_ENDPOINT = modal.fastapi_endpoint if hasattr(modal, "fastapi_endpoint") else modal.web_endpoint
-WORKER_IMAGE_REF = os.getenv(
-    "MODAL_WORKER_IMAGE",
-    "ghcr.io/saptarshimazumder/pcrent-worker:2.11",
-).strip()
+WORKER_IMAGE_REF = os.environ.get("MODAL_WORKER_IMAGE", "").strip()
 if not WORKER_IMAGE_REF:
-    raise RuntimeError("MODAL_WORKER_IMAGE is empty")
+    # No silent fallback — a stale hardcoded tag here would let a deploy
+    # silently ship the wrong image when the env var is missing.  Force
+    # the operator to set it explicitly.
+    raise RuntimeError(
+        "MODAL_WORKER_IMAGE is required for `modal deploy`.  Set it first:\n"
+        "  set MODAL_WORKER_IMAGE=ghcr.io/saptarshimazumder/pcrent-worker:<tag>"
+    )
 
 # Reuse the existing GHCR worker image (has Blender 5.0.1, CUDA, render scripts).
 # The RunPod 'runpod' pip package is present in the image but harmless — we never

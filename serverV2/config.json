@@ -6,7 +6,7 @@
     "max_parallel": 15
   },
   "community": {
-    "price_per_hour": 1.0
+    "price_per_hour": 0.01
   },
   "vast_instances": [
     {
@@ -34,7 +34,7 @@
       "cpu_cores": 8,
       "ram_gb": 32,
       "render_speed": 1.0,
-      "price_per_hour": 0.30
+      "price_per_hour": 0.3
     },
     {
       "gpu_name": "RTX 3090",
@@ -54,7 +54,7 @@
       "cpu_cores": 8,
       "ram_gb": 32,
       "render_speed": 1.0,
-      "price_per_hour": 1.10
+      "price_per_hour": 1.1
     },
     {
       "gpu_type": "l40s",
@@ -63,7 +63,7 @@
       "cpu_cores": 16,
       "ram_gb": 96,
       "render_speed": 1.7,
-      "price_per_hour": 2.10
+      "price_per_hour": 2.1
     },
     {
       "gpu_type": "h100",
@@ -72,7 +72,7 @@
       "cpu_cores": 16,
       "ram_gb": 192,
       "render_speed": 1.1,
-      "price_per_hour": 4.50
+      "price_per_hour": 4.5
     }
   ]
 }

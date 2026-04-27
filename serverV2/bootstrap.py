@@ -169,8 +169,6 @@ def build(
     vast_client = VastClient(cfg.vast)
     vast_callback = VastCallbackHandler(
         config=cfg.vast, client=vast_client,
-        job_repo=job_repo,
-        group_repo=group_repo,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
         on_failure=_on_failure,
@@ -193,8 +191,6 @@ def build(
     modal_client = ModalClient(cfg.modal)
     modal_callback = ModalCallbackHandler(
         config=cfg.modal, client=modal_client,
-        job_repo=job_repo,
-        group_repo=group_repo,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
         on_failure=_on_failure,
@@ -274,16 +270,6 @@ def build(
         # Use a high number so the coordinator never gates community.
         return 10_000
 
-    # -- callbacks --
-    # Handlers update only the job; group-level state changes go through the
-    # orchestrator (late-bound below to break the construction cycle).
-    failure_handler = FailureHandler(job_repo)
-    success_handler = SuccessHandler(
-        job_repo, in_progress_repo, group_repo, telemetry_repo,
-    )
-    callback_router = CallbackRouter(job_repo, success_handler, failure_handler)
-    router_ref[0] = callback_router
-
     # -- orchestration: DispatchCoordinator (plumbing) + RenderLifecycle
     # (narrative) + RenderOrchestrator (facade).  External callers hold only
     # the facade; lifecycle holds the flow logic; coordinator is thin plumbing.
@@ -296,11 +282,6 @@ def build(
         fleet_cap_lookup=_fleet_cap_lookup,
     )
 
-    # Late-bind the coordinator into the success/failure handlers so they
-    # can drain queued items when slots free up.  Two-phase wiring breaks
-    # the otherwise-circular construction order.
-    success_handler.set_coordinator(dispatch_coordinator)
-    failure_handler.set_coordinator(dispatch_coordinator)
     lifecycle = RenderLifecycle(
         default_strategy=default_strategy,
         fast_render_strategy=fast_render_strategy,
@@ -310,13 +291,28 @@ def build(
         group_repo=group_repo,
         queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
+        telemetry_repo=telemetry_repo,
         fleet_registry=registry,
         resource_picker=_resource_picker,
     )
     orchestrator = RenderOrchestrator(lifecycle)
-    failure_handler.set_orchestrator(orchestrator)
-    success_handler.set_orchestrator(orchestrator)
-    callback_router.set_orchestrator(orchestrator)
+
+    # -- callbacks --
+    # Adapter layer between fleet-monitor outcomes and the orchestrator.
+    # Handlers are thin orchestrator-callers; they hold zero state and
+    # touch zero repositories.  All DB mutations originate inside the
+    # orchestrator → lifecycle path.
+    success_handler = SuccessHandler(orchestrator)
+    failure_handler = FailureHandler(orchestrator)
+    callback_router = CallbackRouter(orchestrator, success_handler, failure_handler)
+    router_ref[0] = callback_router
+
+    # Late-bind orchestrator into fleet callback handlers so the per-job
+    # monitors they spawn can use it for read facade calls.  Two-phase
+    # wiring breaks the otherwise-circular construction order
+    # (orchestrator → registry → strategies → handlers → orchestrator).
+    vast_callback.set_orchestrator(orchestrator)
+    modal_callback.set_orchestrator(orchestrator)
 
     # -- community fleet monitor (machine-offline + group-terminal reconciliation)
     # Modal and Vast own their own health via per-job monitors inside their
@@ -325,7 +321,7 @@ def build(
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,
-        callback_router=callback_router,
+        orchestrator=orchestrator,
         stale_seconds=cfg.failover_stale_seconds,
     )
 

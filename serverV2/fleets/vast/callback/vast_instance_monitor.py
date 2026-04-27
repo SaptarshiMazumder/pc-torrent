@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import psycopg2.pool
 
@@ -22,8 +22,9 @@ from serverV2.fleets.shared.liveness_check import LivenessCheck
 from serverV2.fleets.vast.callback.vast_snapshot_writer import VastSnapshotWriter
 from serverV2.fleets.vast.callback.vast_status_classifier import VastStatusClassifier
 from serverV2.fleets.vast.client import VastClient
-from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.render_group_repository import RenderGroupRepository
+
+if TYPE_CHECKING:
+    from serverV2.orchestrator.orchestrator import RenderOrchestrator
 
 log = logging.getLogger(__name__)
 
@@ -42,8 +43,7 @@ class VastInstanceMonitor:
         group_id: str,
         config: VastConfig,
         client: VastClient,
-        job_repo: JobRepository,
-        group_repo: RenderGroupRepository,
+        orchestrator: "RenderOrchestrator",
         counts: JobCounts,
         liveness: LivenessCheck,
         snapshot: VastSnapshotWriter,
@@ -57,8 +57,7 @@ class VastInstanceMonitor:
         self._group_id = group_id
         self._cfg = config
         self._client = client
-        self._job_repo = job_repo
-        self._group_repo = group_repo
+        self._orchestrator = orchestrator
         self._counts = counts
         self._liveness = liveness
         self._snapshot = snapshot
@@ -128,7 +127,7 @@ class VastInstanceMonitor:
         if self._status.has_fatal_error(actual_status, status_msg):
             return self._on_fatal(inst)
 
-        job = self._job_repo.get_raw_by_id(self._job_id)
+        job = self._orchestrator.get_job_raw(self._job_id)
         if not job:
             self._client.instances.destroy(self._instance_id)
             self._snapshot.remove()
@@ -149,17 +148,18 @@ class VastInstanceMonitor:
 
         # Block: group went terminal while this job was still active.
         if self._group_id:
-            group = self._group_repo.get_by_id(self._group_id)
-            if group and group.get("status") in ("done", "failed", "cancelled"):
-                group_status = group["status"]
+            group_status = self._orchestrator.get_group_status(self._group_id)
+            if group_status in ("done", "failed", "cancelled"):
                 log.info(
                     "Group %s is %s — cleaning up Vast job %s",
                     self._group_id, group_status, self._job_id,
                 )
                 self._client.instances.destroy(self._instance_id)
-                self._job_repo.update_status(
-                    self._job_id, group_status,
-                    error=f"Group was {group_status}",
+                # Orchestrator handles marking the job to match the group
+                # state (handle_chunk_failed sees group terminal → skip
+                # retry → mark_failed).
+                self._on_failure(
+                    self._job_id, f"Group was {group_status}",
                 )
                 self._snapshot.remove()
                 return True
@@ -183,7 +183,7 @@ class VastInstanceMonitor:
                 self._became_running_at = time.monotonic()
                 self._liveness.mark_active()
                 if job["status"] == "pending":
-                    self._job_repo.update_status(self._job_id, "running")
+                    self._orchestrator.on_job_running(self._job_id)
             if self._liveness.is_stale():
                 return self._on_stale()
             if self._liveness.heartbeat_dead(self._job_id):
@@ -201,7 +201,7 @@ class VastInstanceMonitor:
 
     def _on_instance_gone(self) -> bool:
         self._snapshot.remove()
-        job = self._job_repo.get_raw_by_id(self._job_id)
+        job = self._orchestrator.get_job_raw(self._job_id)
         if not job or job["status"] in ("done", "failed", "cancelled"):
             return True
         if self._counts.is_complete(job):
@@ -247,7 +247,7 @@ class VastInstanceMonitor:
 
     def _on_exited(self, actual_status: str) -> bool:
         self._client.instances.destroy(self._instance_id)
-        job = self._job_repo.get_raw_by_id(self._job_id)
+        job = self._orchestrator.get_job_raw(self._job_id)
         if not job:
             self._snapshot.remove()
             return True
@@ -272,8 +272,7 @@ class VastInstanceMonitor:
             self._stop.wait(_EXIT_POLL_SEC)
             if self._stop.is_set():
                 return "cancelled"
-            job = self._job_repo.get_raw_by_id(self._job_id)
-            status = job["status"] if job else "unknown"
+            status = self._orchestrator.get_job_status(self._job_id) or "unknown"
             if status in ("done", "failed", "cancelled"):
                 return status
         return "unknown"

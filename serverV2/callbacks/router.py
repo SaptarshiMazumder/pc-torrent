@@ -1,13 +1,16 @@
-"""CallbackRouter — single gateway for all outcome notifications.
+"""CallbackRouter — single funnel for fleet-monitor outcome events.
 
-Fleet monitors and the failover scanner funnel through here.
-Delegates to SuccessHandler and FailureHandler symmetrically.  On
-progress (first frame for a chunk → pending → running), notifies the
-orchestrator so the group's status can roll up.
+Translates a fleet monitor's `(job_id, outcome, ...)` signal into the
+matching ``RenderOrchestrator`` facade call:
 
-Job-level mutations (status, progress) happen here directly.
-Group-level state changes go through the orchestrator — this router
-never touches ``render_groups``.
+    SUCCESS  → orchestrator.on_job_succeeded(job_id)
+    FAILURE  → orchestrator.on_job_failed(job_id, error)
+    PROGRESS → orchestrator.on_job_progress(job_id, rendered, total)
+
+This layer holds zero state and touches no repositories.  It's the
+adapter between fleet-specific monitor code and the orchestrator,
+analogous to how ``api/routers/`` is the adapter between HTTP and the
+orchestrator.
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ from typing import TYPE_CHECKING
 from serverV2.callbacks.failure_handler import FailureHandler
 from serverV2.callbacks.success_handler import SuccessHandler
 from serverV2.core.enums import CallbackOutcome
-from serverV2.repositories.job_repository import JobRepository
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -30,18 +32,13 @@ class CallbackRouter:
 
     def __init__(
         self,
-        job_repo: JobRepository,
+        orchestrator: "RenderOrchestrator",
         success_handler: SuccessHandler,
         failure_handler: FailureHandler,
     ) -> None:
-        self._job_repo = job_repo
+        self._orchestrator = orchestrator
         self._success = success_handler
         self._failure = failure_handler
-        self._orchestrator: RenderOrchestrator | None = None
-
-    def set_orchestrator(self, orchestrator: "RenderOrchestrator") -> None:
-        """Late-bound to break the circular wiring with the orchestrator."""
-        self._orchestrator = orchestrator
 
     def route(
         self,
@@ -53,32 +50,24 @@ class CallbackRouter:
         total_frames: int | None = None,
         output_files: list[str] | None = None,
     ) -> None:
-        job = self._job_repo.get_raw_by_id(job_id)
-        if not job:
-            log.warning("Callback for unknown job %s", job_id)
+        # Skip already-terminal jobs to avoid double-processing of late
+        # callbacks (e.g. a monitor tick fired between mark_done and the
+        # monitor's own ``snapshot.remove()``).
+        if self._orchestrator.is_job_terminal(job_id):
+            log.info(
+                "Job %s already terminal — ignoring %s callback",
+                job_id, outcome.value,
+            )
             return
-
-        current = str(job.get("status") or "")
-        if current in ("cancelled", "done"):
-            log.info("Job %s already %s — ignoring %s callback", job_id, current, outcome.value)
-            return
-
-        group_id = job.get("group_id", "")
 
         if outcome == CallbackOutcome.SUCCESS:
-            self._success.handle(job_id, group_id)
-
+            # group_id is no longer needed by the handler — orchestrator
+            # looks it up — but keep the signature stable for now.
+            self._success.handle(job_id, "")
         elif outcome == CallbackOutcome.FAILURE:
             self._failure.handle(job_id, error or "Unknown failure")
-
         elif outcome == CallbackOutcome.PROGRESS:
             if rendered_frames is not None and total_frames is not None:
-                self._job_repo.update_progress(job_id, rendered_frames, total_frames)
-                if current == "pending":
-                    self._job_repo.update_status(job_id, "running")
-                    # Stamp started_at on the first PROGRESS — telemetry
-                    # uses (completed_at - started_at) for wall-time
-                    # measurements.  Idempotent; only the first call wins.
-                    self._job_repo.mark_started(job_id)
-                    if group_id and self._orchestrator is not None:
-                        self._orchestrator.on_job_started(group_id)
+                self._orchestrator.on_job_progress(
+                    job_id, rendered_frames, total_frames,
+                )

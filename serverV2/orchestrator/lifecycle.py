@@ -55,6 +55,7 @@ from serverV2.repositories.dispatch_queue_repository import DispatchQueueReposit
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
+from serverV2.repositories.telemetry_repository import TelemetryRepository
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ class RenderLifecycle:
         group_repo: RenderGroupRepository,
         queue_repo: DispatchQueueRepository,
         in_progress_repo: InProgressChunkRepository,
+        telemetry_repo: TelemetryRepository,
         fleet_registry: FleetRegistry,
         resource_picker: Callable[[], AvailableResources],
     ) -> None:
@@ -90,6 +92,7 @@ class RenderLifecycle:
         self._group_repo = group_repo
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
+        self._telemetry = telemetry_repo
         self._fleet = fleet_registry
         self._resource_picker = resource_picker
 
@@ -231,12 +234,47 @@ class RenderLifecycle:
         return self._coordinator.enqueue_and_flush(group_id, tasks, context)
 
     # ------------------------------------------------------------------
-    # Story 2: a chunk failed
+    # Story 2: a chunk failed (full flow — retry decision + DB mutations)
     # ------------------------------------------------------------------
 
-    def handle_chunk_failure(self, job_id: str, error: str) -> bool:
-        """Called BEFORE a job is marked failed.  Returns True if a retry
-        was dispatched, False if the chunk is giving up."""
+    def handle_chunk_failed(self, job_id: str, error: str) -> None:
+        """Single entry point for chunk-failure routing.  Decides whether
+        to retry, marks the original job failed, and drains the failed
+        fleet's queue (a slot just opened up regardless).  On exhausted
+        retries, also rolls the new state up to the parent group.
+
+        Adapters (callbacks, monitors) call ``RenderOrchestrator.on_job_failed``
+        which delegates here — they never touch repositories themselves.
+        """
+        # Capture failed fleet BEFORE retry — the retry may dispatch on a
+        # different fleet (anti-affinity), but the slot we freed is in this
+        # job's fleet.
+        raw = self._job_repo.get_raw_by_id(job_id)
+        failed_fleet = (raw.get("machine_type") or "") if raw else ""
+
+        retried = self._try_dispatch_retry(job_id, error)
+        # Mark failed AFTER the retry attempt so the group always has at
+        # least one active job during the transition (prevents premature
+        # group-failed status flicker in the UI).
+        self._job_repo.mark_failed(job_id, error)
+
+        if retried:
+            log.info("Job %s failed but retry dispatched: %s", job_id, error)
+        else:
+            log.warning("Job %s permanently failed (retries exhausted): %s", job_id, error)
+            group_id = (raw.get("group_id") or "") if raw else ""
+            if group_id:
+                self.reconcile_group_status(group_id)
+
+        if failed_fleet:
+            try:
+                self._coordinator.drain_for_fleet(failed_fleet)
+            except Exception as exc:
+                log.warning("drain_for_fleet(%s) failed: %s", failed_fleet, exc)
+
+    def _try_dispatch_retry(self, job_id: str, error: str) -> bool:
+        """Returns True if a retry was dispatched, False if the chunk is
+        giving up.  Internal — callers go through ``handle_chunk_failed``."""
         raw = self._job_repo.get_raw_by_id(job_id)
         if not raw:
             return False
@@ -358,6 +396,104 @@ class RenderLifecycle:
         )
         self._coordinator.enqueue_and_flush(group_id, [retry_task], context)
         return True
+
+    # ------------------------------------------------------------------
+    # Story 2b: a chunk succeeded (full flow — DB writes + telemetry + drain + rollup)
+    # ------------------------------------------------------------------
+
+    def handle_chunk_succeeded(self, job_id: str) -> None:
+        """Single entry point for chunk-success routing.  Releases the
+        in-progress ledger first (so any late failure signal for this job
+        is recognized as stale), marks the job done, writes a telemetry
+        row, drains the fleet's queue, and rolls the change up to the group.
+
+        Adapters call ``RenderOrchestrator.on_job_succeeded`` which delegates
+        here — they never touch repositories themselves.
+        """
+        raw = self._job_repo.get_raw_by_id(job_id)
+        if raw is None:
+            log.warning("on_job_succeeded for unknown job %s", job_id)
+            return
+
+        fleet = (raw.get("machine_type") or "")
+        group_id = (raw.get("group_id") or "")
+        chunk_index = raw.get("chunk_index") or 0
+
+        if group_id:
+            self._in_progress.release(group_id, chunk_index)
+
+        self._job_repo.mark_done(job_id)
+        log.info("Job %s marked done", job_id)
+
+        try:
+            self._record_telemetry(job_id, group_id, raw)
+        except Exception as exc:
+            # Telemetry must never break the success path.
+            log.warning("Telemetry write failed for job %s: %s", job_id, exc)
+
+        if group_id:
+            self.reconcile_group_status(group_id)
+
+        if fleet:
+            try:
+                self._coordinator.drain_for_fleet(fleet)
+            except Exception as exc:
+                log.warning("drain_for_fleet(%s) failed: %s", fleet, exc)
+
+    # ------------------------------------------------------------------
+    # Story 2c: a chunk reported progress (frame uploaded)
+    # ------------------------------------------------------------------
+
+    def handle_chunk_progress(
+        self, job_id: str, rendered_frames: int, total_frames: int,
+    ) -> None:
+        """Update progress counters; on the first PROGRESS event, transition
+        pending → running, stamp ``started_at`` (telemetry uses it), and
+        roll the change up to the parent group."""
+        self._job_repo.update_progress(job_id, rendered_frames, total_frames)
+        self._promote_pending_to_running(job_id)
+
+    def handle_chunk_running(self, job_id: str) -> None:
+        """Transition pending → running without touching the progress
+        counters.  Used by fleet monitors when the container reaches a
+        running state before the worker has had a chance to send its
+        first PROGRESS event."""
+        self._promote_pending_to_running(job_id)
+
+    def _promote_pending_to_running(self, job_id: str) -> None:
+        raw = self._job_repo.get_raw_by_id(job_id)
+        if raw is None:
+            return
+        if raw.get("status") == "pending":
+            self._job_repo.update_status(job_id, "running")
+            self._job_repo.mark_started(job_id)
+            group_id = raw.get("group_id") or ""
+            if group_id:
+                self.reconcile_group_status(group_id)
+
+    # ------------------------------------------------------------------
+    # Read facade — used by monitors instead of repository imports
+    # ------------------------------------------------------------------
+
+    def is_job_terminal(self, job_id: str) -> bool:
+        raw = self._job_repo.get_raw_by_id(job_id)
+        if raw is None:
+            return True   # unknown job is treated as terminal so monitors stop
+        return str(raw.get("status") or "") in _TERMINAL_GROUP_STATUSES
+
+    def get_job_status(self, job_id: str) -> str | None:
+        raw = self._job_repo.get_raw_by_id(job_id)
+        return str(raw.get("status") or "") if raw else None
+
+    def get_group_status(self, group_id: str) -> str | None:
+        grp = self._group_repo.get_by_id(group_id)
+        return str(grp.get("status") or "") if grp else None
+
+    def get_job_raw(self, job_id: str) -> dict[str, Any] | None:
+        """Read-only job row.  Monitors use this for fields like
+        ``rendered_frames``, ``error``, ``machine_type`` they need per
+        tick — instead of importing JobRepository directly."""
+        return self._job_repo.get_raw_by_id(job_id)
 
     # ------------------------------------------------------------------
     # Story 3: user cancelled the render
@@ -523,6 +659,80 @@ class RenderLifecycle:
             return (), (machine_id,)
         return (), ()
 
+    # ------------------------------------------------------------------
+    # Telemetry — single render_telemetry row per successful chunk.
+    # Skipped silently for community jobs and any chunk missing the
+    # price-per-hour stamp from dispatch (legacy rows, pre-Phase-5).
+    # ------------------------------------------------------------------
+
+    def _record_telemetry(
+        self, job_id: str, group_id: str, raw_pre_done: dict[str, Any],
+    ) -> None:
+        from datetime import datetime, timezone
+        price = raw_pre_done.get("price_per_hour_at_dispatch")
+        started_at = raw_pre_done.get("started_at")
+        if price is None or started_at is None:
+            log.info(
+                "Skipping telemetry for job %s — missing %s",
+                job_id,
+                "price_per_hour_at_dispatch" if price is None else "started_at",
+            )
+            return
+
+        post_done = self._job_repo.get_raw_by_id(job_id) or raw_pre_done
+        completed_at = post_done.get("completed_at") or datetime.now(timezone.utc).isoformat()
+        seconds_total = _seconds_between(started_at, completed_at)
+        chunk_size = _chunk_size_from_row(post_done)
+        rendered_frames = int(post_done.get("rendered_frames") or 0)
+        price_per_hour = float(price)
+        cost_actual = (seconds_total / 3600.0) * price_per_hour
+
+        heaviness = self._fetch_heaviness(group_id) if group_id else {}
+        file_size_bytes = self._fetch_file_size(group_id) if group_id else None
+
+        self._telemetry.record_chunk(
+            job_id=job_id,
+            group_id=group_id,
+            fleet=str(post_done.get("machine_type") or ""),
+            gpu_type=post_done.get("gpu_type"),
+            machine_id=post_done.get("machine_id"),
+            chunk_size=chunk_size,
+            rendered_frames=rendered_frames,
+            started_at=_iso_str(started_at),
+            completed_at=_iso_str(completed_at),
+            seconds_total=seconds_total,
+            price_per_hour=price_per_hour,
+            cost_actual_usd=cost_actual,
+            heaviness=heaviness,
+            file_size_bytes=file_size_bytes,
+            seconds_estimated=None,
+            cost_estimated_usd=None,
+        )
+
+    def _fetch_heaviness(self, group_id: str) -> dict[str, Any]:
+        try:
+            group = self._group_repo.get_by_id(group_id)
+            if not group:
+                return {}
+            raw = group.get("analysis_snapshot_json")
+            if not raw:
+                return {}
+            parsed = json.loads(raw)
+            heaviness = parsed.get("heaviness") if isinstance(parsed, dict) else None
+            return heaviness if isinstance(heaviness, dict) else {}
+        except Exception:
+            return {}
+
+    def _fetch_file_size(self, group_id: str) -> int | None:
+        try:
+            group = self._group_repo.get_by_id(group_id)
+            if not group:
+                return None
+            value = group.get("r2_input_size_bytes")
+            return int(value) if value is not None else None
+        except Exception:
+            return None
+
     @staticmethod
     def _engine_from_overrides_json(raw: str | None) -> str | None:
         """Extract ``render.engine`` from a render-overrides JSON string.
@@ -540,3 +750,46 @@ class RenderLifecycle:
             return None
         engine = render_section.get("engine")
         return engine if isinstance(engine, str) and engine else None
+
+
+# ---------------------------------------------------------------------------
+# Telemetry helpers (module-level — pure functions, no class state)
+# ---------------------------------------------------------------------------
+
+def _iso_str(value: Any) -> str:
+    from datetime import datetime
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _seconds_between(start: Any, end: Any) -> int:
+    try:
+        s = _to_dt(start)
+        e = _to_dt(end)
+        if s is None or e is None:
+            return 0
+        return max(0, int((e - s).total_seconds()))
+    except Exception:
+        return 0
+
+
+def _to_dt(value: Any):
+    from datetime import datetime
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _chunk_size_from_row(row: dict[str, Any]) -> int:
+    start = int(row.get("frame_start") or 0)
+    end = int(row.get("frame_end") or 0)
+    step = max(1, int(row.get("frame_step") or 1))
+    if end < start:
+        return 0
+    return ((end - start) // step) + 1

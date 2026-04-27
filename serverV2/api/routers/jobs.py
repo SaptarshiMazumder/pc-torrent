@@ -74,6 +74,17 @@ def heartbeat(job_id: str, payload: JobHeartbeatPayload | None = None):
         raise HTTPException(e.status, e.message)
 
 
+@router.get("/jobs/{job_id}/cancel-status")
+def cancel_status(job_id: str):
+    """Long-running workers (community renderer) poll this every ~30s to
+    detect server-side cancellation.  Returns true when the orchestrator
+    has marked the job cancelled or failed."""
+    try:
+        return _get().get_cancel_status(job_id)
+    except JobServiceError as e:
+        raise HTTPException(e.status, e.message)
+
+
 @router.put("/jobs/{job_id}/worker-start")
 def worker_start(job_id: str):
     """Serverless worker's first action: claim the start.  Returns 200 to

@@ -208,7 +208,7 @@ def build(
     registry.register(modal_strategy)
 
     # -- community fleet --
-    community_strategy = CommunityStrategy()
+    community_strategy = CommunityStrategy(job_repo=job_repo)
     registry.register(community_strategy)
 
     # -- allocation + dispatch --

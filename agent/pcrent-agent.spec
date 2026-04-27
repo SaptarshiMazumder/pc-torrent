@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['C:\\Users\\googler\\OneDrive\\Desktop\\Projects\\pc-rent\\agent\\sidecar_main.py'],
+    ['C:\\Users\\sapma\\OneDrive\\Desktop\\Projects\\PC_Rent\\pc-torrent\\agent\\sidecar_main.py'],
     pathex=[],
     binaries=[],
     datas=[],

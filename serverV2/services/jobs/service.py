@@ -78,6 +78,22 @@ class JobService:
         self._heartbeats.record(job_id, phase)
         return {"job_id": job_id, "acknowledged": True}
 
+    # ---- cancel-status poll (community workers check this every 30s during render) ----
+
+    _CANCEL_STATUSES = frozenset({"cancelled", "failed"})
+
+    def get_cancel_status(self, job_id: str) -> dict[str, Any]:
+        """Tells a long-running worker whether to abort.  ``cancelled=true``
+        when the orchestrator has marked the job ``cancelled`` (user action)
+        OR ``failed`` (retry exhausted, staleness, etc.).  Either way the
+        worker should stop wasting compute on a job nobody wants anymore.
+        """
+        job = self._jobs.get_raw_by_id(job_id)
+        if not job:
+            raise JobServiceError(404, "Job not found")
+        cancelled = (job.get("status") or "") in self._CANCEL_STATUSES
+        return {"job_id": job_id, "cancelled": cancelled}
+
     # ---- output management ----
 
     def register_outputs(self, job_id: str, files: list[str]) -> dict[str, Any]:

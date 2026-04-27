@@ -1,4 +1,15 @@
-"""Docker image version + download endpoints."""
+"""Docker / installer download endpoints.
+
+The community render image used to live in R2 and was served by this
+router via ``/docker/image`` + ``/docker/image/version``.  After the
+GHCR migration, agents pull directly from
+``ghcr.io/saptarshimazumder/pcrent-community-worker`` via
+``docker pull`` — same path Vast and Modal use for their images — so
+that machinery has been removed.  What's left here:
+
+* ``/docker/version`` — agent self-update version check
+* ``/docker/download/{windows,linux}`` — installer artifacts (still in R2)
+"""
 
 from __future__ import annotations
 

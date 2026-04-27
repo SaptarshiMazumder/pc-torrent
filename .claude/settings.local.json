@@ -128,7 +128,10 @@
       "Bash(bash -n deploy.sh)",
       "Bash(npx --no-install vite build --logLevel error --mode development)",
       "Bash(npx --no-install esbuild --bundle src/components/jobs/FailedChunksPanel.jsx --outfile=/dev/null --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:../../services/api)",
-      "Bash(npx --no-install esbuild --bundle src/components/jobs/JobDetailView.jsx --outfile=/dev/null --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:./SegmentedProgressBar --external:./VastInstancePanel --external:../ModalInstancePanel --external:./FrameGalleryPanel --external:./HeavinessPanel --external:./FailedChunksPanel --external:../../utils/jobUtils)"
+      "Bash(npx --no-install esbuild --bundle src/components/jobs/JobDetailView.jsx --outfile=/dev/null --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:./SegmentedProgressBar --external:./VastInstancePanel --external:../ModalInstancePanel --external:./FrameGalleryPanel --external:./HeavinessPanel --external:./FailedChunksPanel --external:../../utils/jobUtils)",
+      "Bash(bash -n \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/community_worker/build.sh\")",
+      "Bash(bash -n \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh\")",
+      "Bash(\"C:/Users/sapma/AppData/Local/Programs/Python/Python310/python.exe\" -m pip install pyinstaller)"
     ]
   }
 }

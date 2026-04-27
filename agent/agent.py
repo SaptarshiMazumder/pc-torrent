@@ -24,9 +24,6 @@ import requests
 from config import (
     load_machine_id,
     save_machine_id,
-    load_image_sha,
-    save_image_sha,
-    clear_image_sha,
     ensure_config_dir,
 )
 from system_check import check_requirements, get_windows_version, check_nvidia_gpu
@@ -83,7 +80,7 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 FIREBASE_TOKEN = ""  # set by sidecar on connect
 POLL_INTERVAL = 5  # seconds between job polls
 RENDER_TIMEOUT = 4 * 3600  # 4 hours max per render
-DOCKER_IMAGE = "pcrent-render:latest"
+DOCKER_IMAGE = "ghcr.io/saptarshimazumder/pcrent-community-worker:latest"
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_OUTPUT_ROOT = os.path.join(AGENT_DIR, "output")
 SUPPORTED_INPUT_EXTENSIONS = {".blend", ".zip"}
@@ -99,6 +96,7 @@ MISSING_ASSETS_WARNING = (
 PROGRESS_EVENT_PREFIX = "PCR_PROGRESS "
 BACKEND_PROGRESS_MIN_INTERVAL = 1.0
 HEARTBEAT_INTERVAL = 5.0
+CANCEL_CHECK_INTERVAL = 30.0
 HTTP_CONNECT_TIMEOUT = 10
 HTTP_READ_TIMEOUT = 30
 HTTP_STATUS_READ_TIMEOUT = 120
@@ -288,7 +286,16 @@ def poll_for_job(mid):
     _ensure_http_success(resp, f"Poll next job for machine {mid}")
     if not resp.content:
         return None
-    return resp.json()
+    # serverV2 wraps the job dict in {"job": <row|null>}.  Unwrap so
+    # callers can do `if job: job["id"]` instead of stumbling over the
+    # truthy {"job": null} envelope.
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data.get("job") or None
 
 
 def update_job_status(job_id, status, error=None, output_files=None):
@@ -320,6 +327,29 @@ def update_job_progress(job_id, rendered_frames, total_frames=None):
         retries=2,
     )
     _ensure_http_success(resp, f"Update job {job_id} progress")
+
+
+def check_job_cancel_status(job_id):
+    """Returns True iff the orchestrator has marked this job cancelled or
+    failed and the worker should abort.  Network errors return False —
+    don't kill a running render because of a transient hiccup; the next
+    poll (30s later) will catch a real cancel.
+    """
+    try:
+        resp = _request_with_retries(
+            "GET",
+            f"{BACKEND_URL}/jobs/{job_id}/cancel-status",
+            timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT),
+            retries=1,
+        )
+    except Exception:
+        return False
+    if resp.status_code != 200:
+        return False
+    try:
+        return bool(resp.json().get("cancelled"))
+    except Exception:
+        return False
 
 
 def send_machine_heartbeat(mid):
@@ -944,26 +974,18 @@ def operator_command_loop():
 # DOCKER IMAGE MANAGEMENT
 # -----------------------------------------------
 def check_image_loaded():
-    """Check if pcrent-render image is loaded in Docker."""
+    """Returns True iff the configured render image is present in the
+    local Docker daemon.  Uses the full image reference (registry + tag)
+    so it doesn't false-positive on stale legacy images with the same
+    short name."""
     try:
         result = subprocess.run(
-            ["docker", "images", "pcrent-render", "--format", "{{.ID}}"],
+            ["docker", "images", "-q", DOCKER_IMAGE],
             capture_output=True, text=True, timeout=10,
         )
         return result.returncode == 0 and result.stdout.strip() != ""
     except Exception:
         return False
-
-
-def get_server_image_version():
-    """Get the current image version/hash from server."""
-    try:
-        resp = requests.get(f"{BACKEND_URL}/docker/image/version", timeout=10)
-        if resp.status_code == 200:
-            return resp.json()
-        return None
-    except Exception:
-        return None
 
 
 def get_runtime_status():
@@ -1012,7 +1034,6 @@ def remove_docker_image():
             "image_present": True,
         }
 
-    tmp_path = os.path.join(tempfile.gettempdir(), "pcrent-render.tar.gz")
     docker_installed = check_docker_installed()
     docker_running = check_docker_running() if docker_installed else False
     if docker_installed and not docker_running:
@@ -1046,14 +1067,6 @@ def remove_docker_image():
                 "image_present": True,
             }
 
-    clear_image_sha()
-    try:
-        os.remove(tmp_path)
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-
     still_present = check_image_loaded() if docker_running else False
     return {
         "ok": not still_present,
@@ -1063,108 +1076,59 @@ def remove_docker_image():
 
 
 def ensure_docker_image(on_stage=None, on_progress=None):
-    """
-    Make sure the render image is loaded and up to date.
-    Downloads from server if needed.
+    """Pulls the render image from GHCR if it's not already present.
+
+    Lets Docker handle staleness and layer caching natively — no SHA
+    cache file, no full-tarball downloads.  ``docker pull`` is a no-op
+    when the local image already matches the remote digest, so calling
+    this on every job is cheap.
     """
     def stage(stage_name, message, **extra):
         if on_stage:
             on_stage(stage_name, message, **extra)
 
     stage("checking", "Checking render image...")
-    server_version = get_server_image_version()
-    if not server_version:
-        # Server doesn't have an image yet - check if we have one locally
-        if check_image_loaded():
-            stage("ready", "Using locally cached render image.")
-            _log("[IMAGE] Using locally cached image (server has no image info).")
-            return True
-        stage("missing", "No render image available on server or locally.")
-        _log("[IMAGE] No render image available on server or locally.")
-        return False
-
-    server_sha = server_version.get("sha256", "")
-    local_sha = load_image_sha() or ""
-
-    if check_image_loaded() and server_sha == local_sha:
-        stage("ready", "Render image is up to date.")
-        _log("[IMAGE] Render image is up to date.")
-        return True
-
-    # Need to download
-    stage("downloading", "Downloading render image from server...", progress=0)
-    _log("[IMAGE] Downloading render image from server...")
-    tmp_path = os.path.join(tempfile.gettempdir(), "pcrent-render.tar.gz")
+    _log(f"[IMAGE] Pulling {DOCKER_IMAGE} ...")
+    stage("downloading", "Pulling render image from registry...", progress=0)
 
     try:
-        resp = requests.get(f"{BACKEND_URL}/docker/image", stream=True, timeout=600)
-        resp.raise_for_status()
-
-        total = int(resp.headers.get("content-length", 0))
-        downloaded = 0
-        last_pct = -1
-        last_logged_pct = -5
-
-        with open(tmp_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total > 0:
-                    pct = int(downloaded / total * 100)
-                    if pct != last_pct and on_progress:
-                        on_progress(downloaded, total, pct)
-                        last_pct = pct
-                    if pct >= last_logged_pct + 5 or pct == 100:
-                        _log(f"[IMAGE] Downloading... {pct}% ({downloaded // (1024*1024)}MB)")
-                        last_logged_pct = pct
-
-        stage("installing", "Installing render image into Docker...")
-        _log("[IMAGE] Loading image into Docker (this may take several minutes)...")
+        proc = subprocess.Popen(
+            ["docker", "pull", DOCKER_IMAGE],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        # Stream docker pull's per-layer status so the user sees progress.
+        # docker pull's own output is the source of truth; we don't try
+        # to translate "Pulling fs layer / Downloading / Extracting" lines
+        # into a single percentage — too lossy.
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                _log(f"[IMAGE] {line}")
+        proc.wait(timeout=1800)  # 30 min for first pull on slow links
+    except subprocess.TimeoutExpired:
         try:
-            proc = subprocess.Popen(
-                ["docker", "load", "-i", tmp_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            # Stream docker load output so the user sees progress (e.g. "Loaded image: ...")
-            load_output = []
-            for line in proc.stdout:
-                line = line.rstrip()
-                if line:
-                    _log(f"[IMAGE] {line}")
-                    load_output.append(line)
-            proc.wait(timeout=1200)  # 20 min — large images on slow disks can take time
-        except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            stage("error", "Failed to install render image into Docker.")
-            _log("[IMAGE] docker load timed out after 20 minutes. Disk may be too slow or image is corrupt.")
-            return False
-
-        if proc.returncode != 0:
-            stage("error", "Failed to install render image into Docker.")
-            _log(f"[IMAGE] Failed to load image (exit code {proc.returncode}): {' '.join(load_output[-3:])}")
-            return False
-
-        stage("ready", "Render image installed.")
-        _log("[IMAGE] Image loaded successfully.")
-        save_image_sha(server_sha)
-
-        # Cleanup temp file
-        try:
-            os.remove(tmp_path)
         except Exception:
             pass
-
-        return True
-
-    except Exception as e:
-        stage("error", f"Failed to download render image: {e}")
-        _log(f"[IMAGE] Failed to download image: {e}")
+        stage("error", "docker pull timed out.")
+        _log("[IMAGE] docker pull timed out after 30 minutes.")
         return False
+    except Exception as e:
+        stage("error", f"Failed to pull render image: {e}")
+        _log(f"[IMAGE] docker pull failed: {e}")
+        return False
+
+    if proc.returncode != 0:
+        stage("error", "Failed to pull render image.")
+        _log(f"[IMAGE] docker pull exited with code {proc.returncode}")
+        return False
+
+    stage("ready", "Render image is ready.")
+    _log("[IMAGE] Image pull complete.")
+    return True
 
 
 # -----------------------------------------------
@@ -1173,8 +1137,14 @@ def ensure_docker_image(on_stage=None, on_progress=None):
 def execute_job(job):
     """Execute a render job inside a Docker container with GPU access."""
     job_id = job["id"]
-    input_url = job["input_url"]
     input_filename = job["input_filename"]
+    # serverV2's next-for-machine response doesn't include a presigned
+    # input_url (Vast/Modal get theirs via BlendUrlResolver server-side).
+    # Agents can hit the public download endpoint instead — it 302s to
+    # a fresh presigned R2 URL each call.
+    input_url = job.get("input_url") or (
+        f"{BACKEND_URL}/render-groups/{job['group_id']}/input/{input_filename}"
+    )
     active_machine_id = machine_id
     final_status = "failed"
     final_error = None
@@ -1189,6 +1159,8 @@ def execute_job(job):
     begin_active_job(job_id, work_dir)
     heartbeat_stop = threading.Event()
     heartbeat_thread = None
+    cancel_check_stop = threading.Event()
+    cancel_check_thread = None
     output_uploader = IncrementalOutputUploader(job_id, output_dir)
     progress_state = {
         "current_frame": None,
@@ -1221,6 +1193,27 @@ def execute_job(job):
             _log(f"[AGENT] Initial heartbeat failed for job {job_id}: {exc}", level="warn")
 
         thread = threading.Thread(target=heartbeat_loop, daemon=True)
+        thread.start()
+        return thread
+
+    def start_cancel_check_loop():
+        """Polls the server every CANCEL_CHECK_INTERVAL to detect a server-
+        side cancel while Blender is mid-render.  On detected cancel, asks
+        the local stop machinery to kill the container — same path the
+        sidecar UI's Stop button takes.  Network errors are ignored; the
+        next tick retries.
+        """
+
+        def cancel_check_loop():
+            while not cancel_check_stop.wait(CANCEL_CHECK_INTERVAL):
+                if check_job_cancel_status(job_id):
+                    _log(
+                        f"[JOB] Server reported cancel for job {job_id} — stopping render",
+                    )
+                    request_stop_current_job("Cancelled by server")
+                    return
+
+        thread = threading.Thread(target=cancel_check_loop, daemon=True)
         thread.start()
         return thread
 
@@ -1311,6 +1304,7 @@ def execute_job(job):
 
     try:
         heartbeat_thread = start_heartbeat_loop()
+        cancel_check_thread = start_cancel_check_loop()
 
         # 1. Download blend file
         blend_file = os.path.join(input_dir, input_filename)
@@ -1494,6 +1488,9 @@ def execute_job(job):
         heartbeat_stop.set()
         if heartbeat_thread and heartbeat_thread.is_alive():
             heartbeat_thread.join(timeout=1)
+        cancel_check_stop.set()
+        if cancel_check_thread and cancel_check_thread.is_alive():
+            cancel_check_thread.join(timeout=1)
         try:
             output_uploader.stop()
             output_uploader.flush_final()

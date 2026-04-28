@@ -314,6 +314,35 @@ def update_job_status(job_id, status, error=None, output_files=None):
     _ensure_http_success(resp, f"Update job {job_id} status to {status}")
 
 
+def notify_orchestrator_failure(job_id, error):
+    """Tell the orchestrator this community job failed so the retry /
+    drain / reconcile flow fires.  The agent plays the role Vast/Modal
+    monitors play in-process: it observes its own render outcome and
+    notifies the orchestrator over HTTP.  Pairs with
+    ``update_job_status(job_id, "failed", ...)`` — that one writes the
+    DB row, this one triggers the orchestration side-effects.
+
+    Network failures are swallowed — the heartbeat-staleness path via
+    ``CommunityMonitor`` is the eventual safety net if this notify
+    can't get through.
+    """
+    try:
+        resp = _request_with_retries(
+            "POST",
+            f"{BACKEND_URL}/jobs/{job_id}/agent-failure",
+            json={"error": error or "Agent reported failure"},
+            timeout=(HTTP_CONNECT_TIMEOUT, HTTP_STATUS_READ_TIMEOUT),
+            retries=2,
+        )
+        if resp.status_code != 200:
+            _log(
+                f"[JOB] Orchestrator failure notify for {job_id} returned HTTP {resp.status_code}",
+                level="warn",
+            )
+    except Exception as exc:
+        _log(f"[JOB] Orchestrator failure notify failed for {job_id}: {exc}", level="warn")
+
+
 def update_job_progress(job_id, rendered_frames, total_frames=None):
     payload = {
         "rendered_frames": rendered_frames,
@@ -1136,173 +1165,191 @@ def ensure_docker_image(on_stage=None, on_progress=None):
 # -----------------------------------------------
 def execute_job(job):
     """Execute a render job inside a Docker container with GPU access."""
-    job_id = job["id"]
-    input_filename = job["input_filename"]
-    # serverV2's next-for-machine response doesn't include a presigned
-    # input_url (Vast/Modal get theirs via BlendUrlResolver server-side).
-    # Agents can hit the public download endpoint instead — it 302s to
-    # a fresh presigned R2 URL each call.
-    input_url = job.get("input_url") or (
-        f"{BACKEND_URL}/render-groups/{job['group_id']}/input/{input_filename}"
-    )
-    active_machine_id = machine_id
-    final_status = "failed"
-    final_error = None
-
-    work_dir = os.path.join(tempfile.gettempdir(), f"pcrent_{job_id}")
-    input_dir = os.path.join(work_dir, "input")
-    output_dir = os.path.join(work_dir, "output")
-    container_name = None
-    process = None
-    os.makedirs(input_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
-    begin_active_job(job_id, work_dir)
+    # Pre-try defaults — anything the ``finally`` block touches must
+    # exist whether or not the body got past field extraction.  Without
+    # this, a malformed job dict (missing ``id`` / ``input_filename`` /
+    # ``group_id``) would raise out of execute_job entirely and the
+    # caller's poll loop would silently swallow the exception, leaving
+    # the row stuck at ``status='running'`` until heartbeat staleness
+    # eventually kicked in.
+    job_id = "<unknown>"
+    work_dir = None
+    output_dir = None
     heartbeat_stop = threading.Event()
     heartbeat_thread = None
     cancel_check_stop = threading.Event()
     cancel_check_thread = None
-    output_uploader = IncrementalOutputUploader(job_id, output_dir)
-    progress_state = {
-        "current_frame": None,
-        "rendered_frames": 0,
-        "total_frames": None,
-        "last_backend_push_at": 0.0,
-        "last_reported_rendered_frames": None,
-        "last_reported_total_frames": None,
-    }
-
-    def start_heartbeat_loop():
-        if not active_machine_id:
-            return None
-
-        failed_log_at = {"value": 0.0}
-
-        def heartbeat_loop():
-            while not heartbeat_stop.wait(HEARTBEAT_INTERVAL):
-                try:
-                    send_machine_heartbeat(active_machine_id)
-                except Exception as exc:
-                    now = time.monotonic()
-                    if now - failed_log_at["value"] >= 30.0:
-                        _log(f"[AGENT] Heartbeat failed during job {job_id}: {exc}", level="warn")
-                        failed_log_at["value"] = now
-
-        try:
-            send_machine_heartbeat(active_machine_id)
-        except Exception as exc:
-            _log(f"[AGENT] Initial heartbeat failed for job {job_id}: {exc}", level="warn")
-
-        thread = threading.Thread(target=heartbeat_loop, daemon=True)
-        thread.start()
-        return thread
-
-    def start_cancel_check_loop():
-        """Polls the server every CANCEL_CHECK_INTERVAL to detect a server-
-        side cancel while Blender is mid-render.  On detected cancel, asks
-        the local stop machinery to kill the container — same path the
-        sidecar UI's Stop button takes.  Network errors are ignored; the
-        next tick retries.
-        """
-
-        def cancel_check_loop():
-            while not cancel_check_stop.wait(CANCEL_CHECK_INTERVAL):
-                if check_job_cancel_status(job_id):
-                    _log(
-                        f"[JOB] Server reported cancel for job {job_id} — stopping render",
-                    )
-                    request_stop_current_job("Cancelled by server")
-                    return
-
-        thread = threading.Thread(target=cancel_check_loop, daemon=True)
-        thread.start()
-        return thread
-
-    def emit_progress_update():
-        total_frames = progress_state["total_frames"]
-        rendered_frames = progress_state["rendered_frames"]
-        if total_frames and total_frames > 0:
-            rendered_frames = min(rendered_frames, total_frames)
-        _emit_job_progress(
-            job_id=job_id,
-            filename=input_filename,
-            current_frame=progress_state["current_frame"],
-            rendered_frames=rendered_frames,
-            total_frames=total_frames,
-            progress_pct=compute_progress_pct(rendered_frames, total_frames),
-        )
-
-    def push_progress_to_backend(force=False):
-        total_frames = progress_state["total_frames"]
-        rendered_frames = progress_state["rendered_frames"]
-        if total_frames and total_frames > 0:
-            rendered_frames = min(rendered_frames, total_frames)
-
-        if (
-            progress_state["last_reported_rendered_frames"] == rendered_frames
-            and progress_state["last_reported_total_frames"] == total_frames
-        ):
-            return
-
-        now = time.monotonic()
-        if not force and (now - progress_state["last_backend_push_at"]) < BACKEND_PROGRESS_MIN_INTERVAL:
-            return
-
-        try:
-            update_job_progress(
-                job_id,
-                rendered_frames=rendered_frames,
-                total_frames=total_frames,
-            )
-        except Exception as exc:
-            progress_state["last_backend_push_at"] = now
-            _log(f"[JOB] Failed to report progress: {exc}", level="warn")
-            return
-
-        progress_state["last_backend_push_at"] = now
-        progress_state["last_reported_rendered_frames"] = rendered_frames
-        progress_state["last_reported_total_frames"] = total_frames
-
-    def apply_progress_event(event):
-        total_frames = event.get("total_frames")
-        if total_frames is not None:
-            existing_total = progress_state["total_frames"]
-            progress_state["total_frames"] = (
-                total_frames
-                if existing_total is None
-                else max(existing_total, total_frames)
-            )
-
-        progress_state["rendered_frames"] = max(
-            progress_state["rendered_frames"],
-            event.get("rendered_frames") or 0,
-        )
-
-        if progress_state["total_frames"] and progress_state["total_frames"] > 0:
-            progress_state["rendered_frames"] = min(
-                progress_state["rendered_frames"],
-                progress_state["total_frames"],
-            )
-
-        if event.get("current_frame") is not None:
-            progress_state["current_frame"] = event["current_frame"]
-
-        emit_progress_update()
-        push_progress_to_backend(force=event["kind"] == "meta")
-
-    def finalize_progress(force_complete=False):
-        total_frames = progress_state["total_frames"]
-        if force_complete and total_frames and total_frames > 0:
-            progress_state["rendered_frames"] = total_frames
-        emit_progress_update()
-        push_progress_to_backend(force=True)
-
-    def with_partial_recovery_hint(message):
-        uploaded_count = len(output_uploader.uploaded_files)
-        if uploaded_count <= 0:
-            return message
-        return f"{message}. {uploaded_count} frame(s) already uploaded and recoverable."
+    output_uploader = None
+    setup_complete = False
+    final_status = "failed"
+    final_error = None
+    container_name = None
+    process = None
 
     try:
+        job_id = job["id"]
+        input_filename = job["input_filename"]
+        # serverV2's next-for-machine response doesn't include a presigned
+        # input_url (Vast/Modal get theirs via BlendUrlResolver server-side).
+        # Agents can hit the public download endpoint instead — it 302s to
+        # a fresh presigned R2 URL each call.
+        input_url = job.get("input_url") or (
+            f"{BACKEND_URL}/render-groups/{job['group_id']}/input/{input_filename}"
+        )
+        active_machine_id = machine_id
+
+        work_dir = os.path.join(tempfile.gettempdir(), f"pcrent_{job_id}")
+        input_dir = os.path.join(work_dir, "input")
+        output_dir = os.path.join(work_dir, "output")
+        os.makedirs(input_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+        begin_active_job(job_id, work_dir)
+        output_uploader = IncrementalOutputUploader(job_id, output_dir)
+        progress_state = {
+            "current_frame": None,
+            "rendered_frames": 0,
+            "total_frames": None,
+            "last_backend_push_at": 0.0,
+            "last_reported_rendered_frames": None,
+            "last_reported_total_frames": None,
+        }
+
+        def start_heartbeat_loop():
+            if not active_machine_id:
+                return None
+
+            failed_log_at = {"value": 0.0}
+
+            def heartbeat_loop():
+                while not heartbeat_stop.wait(HEARTBEAT_INTERVAL):
+                    try:
+                        send_machine_heartbeat(active_machine_id)
+                    except Exception as exc:
+                        now = time.monotonic()
+                        if now - failed_log_at["value"] >= 30.0:
+                            _log(f"[AGENT] Heartbeat failed during job {job_id}: {exc}", level="warn")
+                            failed_log_at["value"] = now
+
+            try:
+                send_machine_heartbeat(active_machine_id)
+            except Exception as exc:
+                _log(f"[AGENT] Initial heartbeat failed for job {job_id}: {exc}", level="warn")
+
+            thread = threading.Thread(target=heartbeat_loop, daemon=True)
+            thread.start()
+            return thread
+
+        def start_cancel_check_loop():
+            """Polls the server every CANCEL_CHECK_INTERVAL to detect a server-
+            side cancel while Blender is mid-render.  On detected cancel, asks
+            the local stop machinery to kill the container — same path the
+            sidecar UI's Stop button takes.  Network errors are ignored; the
+            next tick retries.
+            """
+
+            def cancel_check_loop():
+                while not cancel_check_stop.wait(CANCEL_CHECK_INTERVAL):
+                    if check_job_cancel_status(job_id):
+                        _log(
+                            f"[JOB] Server reported cancel for job {job_id} — stopping render",
+                        )
+                        request_stop_current_job("Cancelled by server")
+                        return
+
+            thread = threading.Thread(target=cancel_check_loop, daemon=True)
+            thread.start()
+            return thread
+
+        def emit_progress_update():
+            total_frames = progress_state["total_frames"]
+            rendered_frames = progress_state["rendered_frames"]
+            if total_frames and total_frames > 0:
+                rendered_frames = min(rendered_frames, total_frames)
+            _emit_job_progress(
+                job_id=job_id,
+                filename=input_filename,
+                current_frame=progress_state["current_frame"],
+                rendered_frames=rendered_frames,
+                total_frames=total_frames,
+                progress_pct=compute_progress_pct(rendered_frames, total_frames),
+            )
+
+        def push_progress_to_backend(force=False):
+            total_frames = progress_state["total_frames"]
+            rendered_frames = progress_state["rendered_frames"]
+            if total_frames and total_frames > 0:
+                rendered_frames = min(rendered_frames, total_frames)
+
+            if (
+                progress_state["last_reported_rendered_frames"] == rendered_frames
+                and progress_state["last_reported_total_frames"] == total_frames
+            ):
+                return
+
+            now = time.monotonic()
+            if not force and (now - progress_state["last_backend_push_at"]) < BACKEND_PROGRESS_MIN_INTERVAL:
+                return
+
+            try:
+                update_job_progress(
+                    job_id,
+                    rendered_frames=rendered_frames,
+                    total_frames=total_frames,
+                )
+            except Exception as exc:
+                progress_state["last_backend_push_at"] = now
+                _log(f"[JOB] Failed to report progress: {exc}", level="warn")
+                return
+
+            progress_state["last_backend_push_at"] = now
+            progress_state["last_reported_rendered_frames"] = rendered_frames
+            progress_state["last_reported_total_frames"] = total_frames
+
+        def apply_progress_event(event):
+            total_frames = event.get("total_frames")
+            if total_frames is not None:
+                existing_total = progress_state["total_frames"]
+                progress_state["total_frames"] = (
+                    total_frames
+                    if existing_total is None
+                    else max(existing_total, total_frames)
+                )
+
+            progress_state["rendered_frames"] = max(
+                progress_state["rendered_frames"],
+                event.get("rendered_frames") or 0,
+            )
+
+            if progress_state["total_frames"] and progress_state["total_frames"] > 0:
+                progress_state["rendered_frames"] = min(
+                    progress_state["rendered_frames"],
+                    progress_state["total_frames"],
+                )
+
+            if event.get("current_frame") is not None:
+                progress_state["current_frame"] = event["current_frame"]
+
+            emit_progress_update()
+            push_progress_to_backend(force=event["kind"] == "meta")
+
+        def finalize_progress(force_complete=False):
+            total_frames = progress_state["total_frames"]
+            if force_complete and total_frames and total_frames > 0:
+                progress_state["rendered_frames"] = total_frames
+            emit_progress_update()
+            push_progress_to_backend(force=True)
+
+        def with_partial_recovery_hint(message):
+            uploaded_count = len(output_uploader.uploaded_files)
+            if uploaded_count <= 0:
+                return message
+            return f"{message}. {uploaded_count} frame(s) already uploaded and recoverable."
+
+        # All helpers defined and all setup state populated — anything from
+        # this point on can rely on output_uploader / progress_state /
+        # finalize_progress / with_partial_recovery_hint being callable.
+        setup_complete = True
+
         heartbeat_thread = start_heartbeat_loop()
         cancel_check_thread = start_cancel_check_loop()
 
@@ -1467,6 +1514,7 @@ def execute_job(job):
         final_error = with_partial_recovery_hint(str(e))
         finalize_progress()
         update_job_status(job_id, "failed", error=final_error)
+        notify_orchestrator_failure(job_id, final_error)
 
     except subprocess.TimeoutExpired:
         _log(f"[JOB] Render timed out after {RENDER_TIMEOUT}s, killing container...")
@@ -1477,12 +1525,28 @@ def execute_job(job):
         final_error = with_partial_recovery_hint("Render timed out")
         finalize_progress()
         update_job_status(job_id, "failed", error=final_error)
+        notify_orchestrator_failure(job_id, final_error)
 
     except Exception as e:
-        _log(f"[JOB] Error: {e}")
-        final_error = with_partial_recovery_hint(str(e))
-        finalize_progress()
-        update_job_status(job_id, "failed", error=final_error)
+        _log(f"[JOB] Error: {e}", level="error")
+        # Helpers (with_partial_recovery_hint, finalize_progress) only
+        # exist if setup got past their def lines.  For early failures
+        # (malformed job dict, mkdir refused, etc.), fall back to the
+        # raw error message and skip the progress flush.
+        if setup_complete:
+            try:
+                final_error = with_partial_recovery_hint(str(e))
+                finalize_progress()
+            except Exception as helper_exc:
+                _log(f"[JOB] Cleanup helpers failed: {helper_exc}", level="warn")
+                final_error = str(e)
+        else:
+            final_error = str(e)
+        try:
+            update_job_status(job_id, "failed", error=final_error)
+        except Exception as report_exc:
+            _log(f"[JOB] Could not report failure for {job_id}: {report_exc}", level="warn")
+        notify_orchestrator_failure(job_id, final_error)
 
     finally:
         heartbeat_stop.set()
@@ -1491,18 +1555,21 @@ def execute_job(job):
         cancel_check_stop.set()
         if cancel_check_thread and cancel_check_thread.is_alive():
             cancel_check_thread.join(timeout=1)
-        try:
-            output_uploader.stop()
-            output_uploader.flush_final()
-        except Exception as exc:
-            _log(f"[JOB] Failed to finalize incremental output uploader: {exc}", level="warn")
+        if output_uploader is not None:
+            try:
+                output_uploader.stop()
+                output_uploader.flush_final()
+            except Exception as exc:
+                _log(f"[JOB] Failed to finalize incremental output uploader: {exc}", level="warn")
 
-        persist_job_outputs(job_id, output_dir, final_status, final_error)
+        if output_dir is not None:
+            persist_job_outputs(job_id, output_dir, final_status, final_error)
         clear_active_job(job_id)
         if pause_event.is_set() or shutdown_event.is_set():
             if machine_id:
                 set_idle(machine_id)
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # -----------------------------------------------
@@ -1639,6 +1706,7 @@ def main():
                         if not ensure_docker_image():
                             _log("[AGENT] Cannot load render image, failing job.")
                             update_job_status(job["id"], "failed", error="Render image not available")
+                            notify_orchestrator_failure(job["id"], "Render image not available")
                             continue
 
                     execute_job(job)

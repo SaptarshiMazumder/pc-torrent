@@ -129,6 +129,15 @@ class RenderOrchestrator:
         ``rendered_frames``, ``machine_type``, ``error``."""
         return self._lifecycle.get_job_raw(job_id)
 
+    # ---- community machine reports idle (post-register / post-job) ----
+
+    def handle_community_machine_idle(self, machine_id: str) -> None:
+        """Community PC just signalled it's idle and ready for work.  Any
+        running jobs still assigned to it must be from a prior session
+        the agent lost (sidecar rebuild, crash, etc.) — fail them so
+        retries fire."""
+        self._lifecycle.handle_community_machine_idle(machine_id)
+
     # ---- user-triggered retry of a stuck chunk ----
 
     def retry_chunk_manually(self, job_id: str) -> dict[str, Any]:

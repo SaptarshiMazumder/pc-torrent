@@ -249,6 +249,16 @@ class JobRepository:
 
     # ---- next for machine (desktop agent polling) ----
 
+    def get_running_for_machine(self, machine_id: str) -> list[dict[str, Any]]:
+        """All ``status='running'`` rows assigned to this machine.  Used by
+        the community-idle path to spot jobs the agent abandoned across a
+        restart.  ``machine_id`` is only populated for community jobs;
+        Vast/Modal rows have it null."""
+        return query_all(
+            "SELECT * FROM jobs WHERE machine_id = %s AND status = 'running'",
+            (machine_id,),
+        )
+
     def claim_next_for_machine(self, machine_id: str) -> dict[str, Any] | None:
         from serverV2.infrastructure.db import execute_returning
         execute(

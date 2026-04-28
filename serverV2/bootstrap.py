@@ -358,7 +358,11 @@ def build(
         outputs_resolver=outputs_resolver,
     )
 
-    machine_service = MachineService(vast_config=cfg.vast, modal_config=cfg.modal)
+    machine_service = MachineService(
+        orchestrator=orchestrator,
+        vast_config=cfg.vast,
+        modal_config=cfg.modal,
+    )
 
     asset_service = AssetService(asset_repo=asset_repo)
 

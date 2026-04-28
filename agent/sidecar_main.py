@@ -537,6 +537,7 @@ def run_connect_flow():
                             if not agent.ensure_docker_image(on_stage=on_image_stage, on_progress=on_image_progress):
                                 emit_error("Cannot load render image")
                                 agent.update_job_status(job_id, "failed", error="Render image not available")
+                                agent.notify_orchestrator_failure(job_id, "Render image not available")
                                 image_stage = runtime_state["image_stage"] if runtime_state["image_stage"] == "error" else "missing"
                                 image_status = runtime_state["image_status"] if image_stage == "error" else "Render image not available."
                                 update_runtime(

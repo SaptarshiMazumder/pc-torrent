@@ -74,6 +74,23 @@ def heartbeat(job_id: str, payload: JobHeartbeatPayload | None = None):
         raise HTTPException(e.status, e.message)
 
 
+@router.post("/jobs/{job_id}/agent-failure")
+def agent_failure(job_id: str, body: dict):
+    """Community-agent monitor-equivalent path.  The agent is its own
+    monitor — when its local render fails, it tells the orchestrator
+    here so the standard retry / drain / reconcile flow fires.  Vast
+    and Modal don't call this; their in-process monitors call
+    ``orchestrator.on_job_failed`` directly.
+
+    Pairs with ``PUT /jobs/{job_id}/status`` (which the agent also
+    calls to update the DB row) — both are needed: status writes the
+    DB, agent-failure triggers the orchestration side-effects.
+    """
+    error = str(body.get("error") or "Agent reported failure")
+    _get_orchestrator().on_job_failed(job_id, error)
+    return {"job_id": job_id, "accepted": True}
+
+
 @router.get("/jobs/{job_id}/cancel-status")
 def cancel_status(job_id: str):
     """Long-running workers (community renderer) poll this every ~30s to

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 from serverV2.core.value_objects import now_iso
 from serverV2.infrastructure.db import execute, query_one, query_all
+
+if TYPE_CHECKING:
+    from serverV2.orchestrator.orchestrator import RenderOrchestrator
 
 log = logging.getLogger(__name__)
 
@@ -21,7 +24,14 @@ class MachineServiceError(Exception):
 
 class MachineService:
 
-    def __init__(self, vast_config=None, modal_config=None) -> None:
+    def __init__(
+        self,
+        *,
+        orchestrator: "RenderOrchestrator",
+        vast_config=None,
+        modal_config=None,
+    ) -> None:
+        self._orchestrator = orchestrator
         self._vast_cfg = vast_config
         self._modal_cfg = modal_config
 
@@ -94,6 +104,13 @@ class MachineService:
         machine = query_one("SELECT id FROM machines WHERE id = %s", (machine_id,))
         if not machine:
             raise MachineServiceError(404, "Machine not found")
+        # Going-idle implies the agent has nothing in flight.  Any
+        # ``status='running'`` jobs still tied to this machine are
+        # leftovers from a prior session (sidecar rebuild, crash,
+        # network blip).  Route them through the orchestrator's
+        # standard failure path so retries fire — same flow Vast/Modal
+        # use when their per-job monitor sees a container disappear.
+        self._orchestrator.handle_community_machine_idle(machine_id)
         execute(
             "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
             (now_iso(), machine_id),

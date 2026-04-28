@@ -397,6 +397,41 @@ class RenderLifecycle:
         return True
 
     # ------------------------------------------------------------------
+    # Story 2c1: community machine reports idle (post-register / post-job)
+    # ------------------------------------------------------------------
+
+    def handle_community_machine_idle(self, machine_id: str) -> None:
+        """A community machine just signalled "I'm idle, ready for work"
+        (via ``PUT /machines/{id}/available``).  Going-idle implies the
+        agent has nothing in flight, so any ``status='running'`` jobs
+        still tied to this machine are abandoned — the agent restarted
+        across a sidecar rebuild, OOM, network blip, etc., losing local
+        state — and need to be marked failed so the standard retry path
+        can pick them up.
+
+        Vast/Modal don't need this: their per-job monitors observe
+        provider-side container death directly.  Community has no
+        per-job monitor; the sidecar restart is otherwise invisible
+        until heartbeat staleness triggers (which doesn't fire if the
+        agent comes back online quickly).
+        """
+        if not machine_id:
+            return
+        abandoned = self._job_repo.get_running_for_machine(machine_id)
+        for row in abandoned:
+            job_id = row.get("id")
+            if not job_id:
+                continue
+            log.info(
+                "Reclaiming abandoned community job %s on machine %s",
+                job_id, machine_id,
+            )
+            self.handle_chunk_failed(
+                job_id,
+                "Agent went idle while job was running — previous session lost",
+            )
+
+    # ------------------------------------------------------------------
     # Story 2d: user-triggered retry of a stuck chunk
     # ------------------------------------------------------------------
 

@@ -73,7 +73,7 @@ class ModalFleetStrategy:
             frame_start=task.frame_start,
             frame_end=task.frame_end,
             frame_step=task.frame_step,
-            render_overrides_json=context.render_overrides_b64,
+            render_overrides_json=context.render_overrides_json,
             max_retries=context.max_retries,
             priority=context.priority,
             chunk_index=task.chunk_index,
@@ -89,7 +89,7 @@ class ModalFleetStrategy:
                 frame_start=task.frame_start,
                 frame_end=task.frame_end,
                 frame_step=task.frame_step,
-                render_overrides_b64=context.render_overrides_b64,
+                render_overrides_json=context.render_overrides_json,
             )
             self._job_repo.save_provider_job_id(
                 job_id, provider_job_id=provider_job_id, column="modal_function_call_id",
@@ -108,7 +108,7 @@ class ModalFleetStrategy:
             provider_job_id=provider_job_id,
             machine_id="",
             blend_url=context.blend_url,
-            render_overrides_b64=context.render_overrides_b64,
+            render_overrides_json=context.render_overrides_json,
             group_id=context.group_id,
         )
 

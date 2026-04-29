@@ -58,7 +58,7 @@ class CommunityStrategy:
             frame_start=task.frame_start,
             frame_end=task.frame_end,
             frame_step=task.frame_step,
-            render_overrides_json=context.render_overrides_b64,
+            render_overrides_json=context.render_overrides_json,
             max_retries=context.max_retries,
             priority=context.priority,
             chunk_index=task.chunk_index,

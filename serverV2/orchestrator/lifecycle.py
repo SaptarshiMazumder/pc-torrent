@@ -23,7 +23,6 @@ Open THIS file to understand what happens during a render.
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from typing import Any, Callable
@@ -241,12 +240,11 @@ class RenderLifecycle:
             log.info("Group %s is %s — refusing to dispatch", group_id, grp["status"])
             return []
 
-        overrides_b64 = base64.b64encode(render_overrides_json.encode()).decode()
         engine = self._engine_from_overrides_json(render_overrides_json)
         context = DispatchContext(
             group_id=group_id,
             input_filename=input_filename,
-            render_overrides_b64=overrides_b64,
+            render_overrides_json=render_overrides_json,
             blend_url="",
             max_retries=MAX_RETRIES,
             priority=0,
@@ -381,13 +379,14 @@ class RenderLifecycle:
             job_id, frame_start, frame_end, next_attempt, MAX_RETRIES, target_label,
         )
 
-        overrides_b64 = base64.b64encode(
-            (rj.render_overrides_json or "{}").encode()
-        ).decode()
+        if not rj.render_overrides_json:
+            raise RuntimeError(
+                f"job {rj.id} has no render_overrides_json — cannot retry"
+            )
         context = DispatchContext(
             group_id=group_id,
             input_filename=rj.input_filename,
-            render_overrides_b64=overrides_b64,
+            render_overrides_json=rj.render_overrides_json,
             blend_url="",
             max_retries=rj.max_retries,
             priority=rj.priority,
@@ -526,13 +525,14 @@ class RenderLifecycle:
             rj.attempt or 0,
         )
 
-        overrides_b64 = base64.b64encode(
-            (rj.render_overrides_json or "{}").encode()
-        ).decode()
+        if not rj.render_overrides_json:
+            raise RuntimeError(
+                f"job {rj.id} has no render_overrides_json — cannot manually retry"
+            )
         context = DispatchContext(
             group_id=group_id,
             input_filename=rj.input_filename,
-            render_overrides_b64=overrides_b64,
+            render_overrides_json=rj.render_overrides_json,
             blend_url="",
             max_retries=rj.max_retries,
             priority=rj.priority,
@@ -573,16 +573,31 @@ class RenderLifecycle:
 
         raw_overrides = grp.get("render_overrides_json")
         if raw_overrides:
-            try:
-                parsed = json.loads(raw_overrides)
-                if isinstance(parsed, dict):
-                    render_section = parsed.get("render")
-                    if isinstance(render_section, dict):
-                        engine_value = render_section.get("engine")
-                        if isinstance(engine_value, str):
-                            engine = engine_value
-            except (TypeError, ValueError, json.JSONDecodeError):
-                engine = None
+            parsed = json.loads(raw_overrides)
+            if isinstance(parsed, dict):
+                render_section = parsed.get("render")
+                if isinstance(render_section, dict):
+                    engine_value = render_section.get("engine")
+                    if isinstance(engine_value, str):
+                        engine = engine_value
+
+        # Old rows submitted before the boundary fix at confirm_upload /
+        # rerender don't have engine baked into render_overrides_json.
+        # Mirror the same resolution rule the worker uses: fall back to
+        # the analyzer's detected engine.  Same logic as
+        # _engine_from_snapshot in render_groups.service — duplicated
+        # here because importing across the orchestrator/service line
+        # would invert the dependency.
+        if engine is None:
+            raw_snapshot = grp.get("analysis_snapshot_json")
+            if raw_snapshot:
+                snapshot = json.loads(raw_snapshot)
+                if isinstance(snapshot, dict):
+                    heaviness = snapshot.get("heaviness")
+                    if isinstance(heaviness, dict):
+                        snapshot_engine = heaviness.get("render_engine")
+                        if isinstance(snapshot_engine, str) and snapshot_engine:
+                            engine = snapshot_engine
 
         tier_raw = grp.get("tier")
         if isinstance(tier_raw, str):

@@ -6,6 +6,7 @@ No DB, no threads, no business logic.
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from typing import Any
@@ -59,9 +60,15 @@ class ModalHttpDispatcher:
         frame_start: int,
         frame_end: int,
         frame_step: int,
-        render_overrides_b64: str,
+        render_overrides_json: str,
     ) -> str:
         url = self._cfg.endpoint_url(gpu_type)
+        # Wire-format boundary: the Modal endpoint's input contract takes
+        # render_overrides_b64.  Encoding belongs HERE, not upstream — the
+        # rest of the server operates on the JSON form.
+        render_overrides_b64 = base64.b64encode(
+            (render_overrides_json or "{}").encode("utf-8")
+        ).decode("ascii")
         payload = {
             "input": {
                 "job_id": job_id,
@@ -140,12 +147,12 @@ class ModalClient:
         frame_start: int,
         frame_end: int,
         frame_step: int,
-        render_overrides_b64: str,
+        render_overrides_json: str,
     ) -> str:
         return self._dispatcher.dispatch(
             gpu_type, job_id, blend_url,
             frame_start, frame_end, frame_step,
-            render_overrides_b64,
+            render_overrides_json,
         )
 
     def cancel_job(self, provider_job_id: str) -> None:

@@ -149,16 +149,7 @@ export function useJobs(backendUrl) {
               setJobs((cur) =>
                 cur.map((existing) =>
                   existing.group_id === job.group_id
-                    ? {
-                        ...existing,
-                        ...updated,
-                        tasks:
-                          updated.tasks?.length > 0
-                            ? updated.tasks
-                            : Array.isArray(existing.tasks)
-                            ? existing.tasks
-                            : [],
-                      }
+                    ? { ...existing, ...updated }
                     : existing
                 )
               );

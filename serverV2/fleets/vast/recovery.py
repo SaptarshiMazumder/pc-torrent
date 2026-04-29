@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import logging
 
 from serverV2.core.value_objects import now_iso
@@ -51,15 +50,25 @@ class VastRecovery:
     def _recover_single(self, row: dict) -> None:
         job_id = row["id"]
         instance_id_raw = row["runpod_job_id"]
-        group_id = row.get("group_id") or ""
-        overrides_json = row.get("render_overrides_json") or "{}"
-        overrides_b64 = base64.b64encode(overrides_json.encode()).decode()
-
-        fname = row.get("rg_input_filename") or row.get("input_filename") or ""
-        blend_url = (
-            f"{self._cfg.public_backend_url}/render-groups/{group_id}/input/{fname}"
-            if group_id and fname else ""
-        )
+        # Recovery only ever runs against rows that were dispatched —
+        # group_id, render_overrides_json, and input_filename are all
+        # populated by dispatch.  If any are missing, the row is corrupt
+        # and the right answer is to surface that, not default-and-pray.
+        group_id = row.get("group_id")
+        if not group_id:
+            raise RuntimeError(f"Vast recovery: job {job_id} has no group_id")
+        overrides_json = row.get("render_overrides_json")
+        if not overrides_json:
+            raise RuntimeError(
+                f"Vast recovery: job {job_id} has no render_overrides_json"
+            )
+        fname = row.get("rg_input_filename") or row.get("input_filename")
+        if not fname:
+            raise RuntimeError(
+                f"Vast recovery: job {job_id} has no input filename "
+                "(neither render_groups.input_filename nor jobs.input_filename)"
+            )
+        blend_url = f"{self._cfg.public_backend_url}/render-groups/{group_id}/input/{fname}"
 
         try:
             vast_id = int(instance_id_raw)
@@ -85,7 +94,7 @@ class VastRecovery:
                 provider_job_id=str(vast_id),
                 machine_id=row["machine_id"],
                 blend_url=blend_url,
-                render_overrides_b64=overrides_b64,
+                render_overrides_json=overrides_json,
                 group_id=group_id,
             )
 

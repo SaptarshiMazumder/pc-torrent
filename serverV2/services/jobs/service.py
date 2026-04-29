@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 import logging
 import zipfile
-from typing import Any
+from typing import Any, Callable
 
 from serverV2.core.value_objects import parse_output_files, sanitize_filename
 from serverV2.infrastructure import storage
@@ -36,6 +36,7 @@ class JobService:
         progress_repo,
         worker_start_repo,
         outputs_resolver: OutputsResolver,
+        success_notifier: Callable[[str], None],
     ) -> None:
         self._jobs = job_repo
         self._machines = machine_repo
@@ -43,6 +44,13 @@ class JobService:
         self._progress = progress_repo
         self._worker_start = worker_start_repo
         self._outputs = outputs_resolver
+        # Called when ``register_outputs`` observes that the verified
+        # upload count meets total_frames.  Wired to CallbackRouter in
+        # bootstrap so completion routes through the standard success
+        # path (handle_chunk_succeeded → mark_done, telemetry, drain,
+        # group reconcile).  No worker self-report of "done"; no monitor
+        # poll race — the data is the success signal.
+        self._success_notifier = success_notifier
 
     # ---- duplicate-start guard for serverless containers ----
 
@@ -101,6 +109,17 @@ class JobService:
         if not job:
             raise JobServiceError(404, "Job not found")
         merged = self._jobs.merge_output_files(job_id, files)
+
+        # Completion is owned by the data: the moment registered output
+        # count meets total_frames, the chunk is done.  No monitor races,
+        # no worker self-report.  CallbackRouter has its own
+        # ``is_job_terminal`` short-circuit so a duplicate notify (e.g.
+        # the in-process fleet monitor's _on_exited path racing this)
+        # collapses to a single transition.
+        total = job.get("total_frames") or 0
+        if total > 0 and len(merged) >= total:
+            self._success_notifier(job_id)
+
         return {"job_id": job_id, "output_files": merged}
 
     def get_outputs(self, job_id: str) -> dict[str, Any]:

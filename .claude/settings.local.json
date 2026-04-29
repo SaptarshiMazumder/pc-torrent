@@ -131,7 +131,15 @@
       "Bash(npx --no-install esbuild --bundle src/components/jobs/JobDetailView.jsx --outfile=/dev/null --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:./SegmentedProgressBar --external:./VastInstancePanel --external:../ModalInstancePanel --external:./FrameGalleryPanel --external:./HeavinessPanel --external:./FailedChunksPanel --external:../../utils/jobUtils)",
       "Bash(bash -n \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/community_worker/build.sh\")",
       "Bash(bash -n \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh\")",
-      "Bash(\"C:/Users/sapma/AppData/Local/Programs/Python/Python310/python.exe\" -m pip install pyinstaller)"
+      "Bash(\"C:/Users/sapma/AppData/Local/Programs/Python/Python310/python.exe\" -m pip install pyinstaller)",
+      "Bash(git mv *)",
+      "Bash(bash -n push-worker.sh)",
+      "Bash(npx --no-install esbuild --bundle src/components/jobs/CommunityInstancePanel.jsx --outfile=/dev/null --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:./InstancePanel)",
+      "Bash(npx --no-install esbuild --bundle src/components/jobs/JobDetailView.jsx --outfile=/dev/null --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:./SegmentedProgressBar --external:./VastInstancePanel --external:../ModalInstancePanel --external:./CommunityInstancePanel --external:./FrameGalleryPanel --external:./HeavinessPanel --external:./FailedChunksPanel --external:../../utils/jobUtils)",
+      "Bash(bash -n \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/community_worker/render.eevee.sh\")",
+      "Bash(git rm *)",
+      "Bash(bash -n \"/c/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/community_worker/render.eevee.sh\")",
+      "Bash(bash -n \"/c/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh\")"
     ]
   }
 }

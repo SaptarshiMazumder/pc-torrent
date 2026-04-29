@@ -39,7 +39,7 @@ class QueueItem:
     gpu_type: str | None = None
     machine_id: str | None = None
     input_filename: str = ""
-    render_overrides_b64: str = ""
+    render_overrides_json: str = ""
     max_retries: int = 0
     priority: int = 0
     attempt: int = 0
@@ -59,7 +59,7 @@ class DispatchQueueRepository:
                (group_id, frame_start, frame_end, frame_step,
                 total_frames, attempt, chunk_index,
                 fleet, gpu_type, machine_id,
-                input_filename, render_overrides_b64,
+                input_filename, render_overrides_json,
                 max_retries, priority,
                 created_at)
                VALUES (%s, %s, %s, %s,
@@ -72,7 +72,7 @@ class DispatchQueueRepository:
                 group_id, item.frame_start, item.frame_end, item.frame_step,
                 item.total_frames, item.attempt, item.chunk_index,
                 item.fleet, item.gpu_type, item.machine_id,
-                item.input_filename, item.render_overrides_b64,
+                item.input_filename, item.render_overrides_json,
                 item.max_retries, item.priority,
                 _now_iso(),
             ),
@@ -157,7 +157,7 @@ def _row_to_item(row: dict) -> QueueItem:
         gpu_type=row.get("gpu_type"),
         machine_id=row.get("machine_id"),
         input_filename=row.get("input_filename") or "",
-        render_overrides_b64=row.get("render_overrides_b64") or "",
+        render_overrides_json=row.get("render_overrides_json") or "",
         max_retries=int(row.get("max_retries") or 0),
         priority=int(row.get("priority") or 0),
         attempt=int(row.get("attempt") or 0),

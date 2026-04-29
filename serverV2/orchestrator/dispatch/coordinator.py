@@ -12,7 +12,6 @@ plus capacity gating.
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from typing import Callable
@@ -132,11 +131,11 @@ class DispatchCoordinator:
         dispatch_ctx = DispatchContext(
             group_id=group_id,
             input_filename=item.input_filename,
-            render_overrides_b64=item.render_overrides_b64,
+            render_overrides_json=item.render_overrides_json,
             blend_url=blend_url,
             max_retries=item.max_retries,
             priority=item.priority,
-            engine=_engine_from_b64(item.render_overrides_b64),
+            engine=_engine_from_json(item.render_overrides_json),
         )
 
         # Pre-generate job_id + claim the in-progress ledger BEFORE dispatch
@@ -177,7 +176,7 @@ def _queue_item_for(task: PlannedTask, context: DispatchContext) -> QueueItem:
         gpu_type=task.gpu_type,
         machine_id=task.machine_id,
         input_filename=context.input_filename,
-        render_overrides_b64=context.render_overrides_b64,
+        render_overrides_json=context.render_overrides_json,
         max_retries=context.max_retries,
         priority=context.priority,
         attempt=task.attempt,
@@ -202,16 +201,14 @@ def _task_from_queue_item(item: QueueItem) -> PlannedTask:
     )
 
 
-def _engine_from_b64(render_overrides_b64: str | None) -> str | None:
-    """Decode render_overrides_b64 and return ``render.engine`` if present.
-    Returns None on any decode/parse error or missing value."""
-    if not render_overrides_b64:
+def _engine_from_json(render_overrides_json: str | None) -> str | None:
+    """Return ``render.engine`` from a JSON-encoded overrides payload, or
+    None if the payload is empty.  Raises on malformed JSON — at this
+    point in the pipeline the payload was produced by trusted upstream
+    code, so a parse failure is a real bug and should surface."""
+    if not render_overrides_json:
         return None
-    try:
-        raw = base64.b64decode(render_overrides_b64)
-        parsed = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
+    parsed = json.loads(render_overrides_json)
     if not isinstance(parsed, dict):
         return None
     render_section = parsed.get("render")

@@ -5,6 +5,7 @@ Responsibilities: HTTP calls.  No DB, no threads, no business logic.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import Any
@@ -67,9 +68,17 @@ class VastInstanceManager:
         frame_start: int,
         frame_end: int,
         frame_step: int,
-        render_overrides_b64: str,
+        render_overrides_json: str,
         image: str | None = None,
     ) -> int:
+        # Wire-format boundary: the worker container reads the override
+        # payload from the RENDER_OVERRIDES_B64 env var.  Base64 keeps
+        # the value shell-safe across any docker/runtime quoting layer.
+        # Encoding belongs HERE, not upstream — the rest of the server
+        # operates on the JSON form.
+        render_overrides_b64 = base64.b64encode(
+            (render_overrides_json or "{}").encode("utf-8")
+        ).decode("ascii")
         env_vars = {
             "JOB_ID": job_id,
             "BLEND_URL": blend_url,
@@ -155,7 +164,7 @@ class VastClient:
         frame_start: int,
         frame_end: int,
         frame_step: int,
-        render_overrides_b64: str,
+        render_overrides_json: str,
         gpu_name: str,
         image: str | None = None,
     ) -> int:
@@ -171,7 +180,7 @@ class VastClient:
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
-            render_overrides_b64=render_overrides_b64,
+            render_overrides_json=render_overrides_json,
             image=image,
         )
 

@@ -27,8 +27,18 @@ _FLEETS_WITHOUT_GRAPHICS_CAPS = frozenset({"modal_serverless"})
 class EngineCompatibilityValidator:
 
     def is_valid(self, target, context: ValidationContext) -> bool:
-        engine = (context.engine or "").upper()
-        if not engine or engine not in _EEVEE_ENGINES:
+        engine = context.engine
+        if not engine:
+            # Required upstream invariant: engine MUST be set before
+            # allocation runs.  Falling back silently masks a real bug
+            # (e.g. Modal getting EEVEE jobs because the validator can't
+            # decide).  Crash loud so the missing plumbing is visible.
+            raise ValueError(
+                "EngineCompatibilityValidator requires context.engine to be set. "
+                "Upstream did not plumb the render engine through "
+                "(check lifecycle.plan -> ChunkRequest.engine -> ValidationContext.engine)."
+            )
+        if engine.upper() not in _EEVEE_ENGINES:
             return True
         if isinstance(target, FleetCapability):
             return target.fleet not in _FLEETS_WITHOUT_GRAPHICS_CAPS

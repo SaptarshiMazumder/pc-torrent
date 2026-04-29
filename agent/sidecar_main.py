@@ -454,32 +454,28 @@ def run_connect_flow():
         agent.pause_event.clear()
         agent.shutdown_event.clear()
 
-        emit_status("downloading_image", "Checking render image...")
-        if not agent.ensure_docker_image(on_stage=on_image_stage, on_progress=on_image_progress):
-            emit_log(
-                "No render image available. Will retry when jobs arrive.",
-                source="setup",
-                level="warn",
-            )
-            image_present = agent.check_image_loaded()
-            image_stage = runtime_state["image_stage"] if runtime_state["image_stage"] == "error" else "missing"
-            image_status = runtime_state["image_status"] if image_stage == "error" else "Render image not available yet."
+        # Render images are engine-specific (cycles vs eevee).  We don't
+        # know which one the next job will need until it's claimed, so
+        # skip the connect-time pre-pull.  ``execute_job`` lazily pulls
+        # the right variant when a job arrives.
+        emit_status("downloading_image", "Checking render image cache...")
+        if agent.any_community_image_loaded():
             update_runtime(
-                image_present=image_present,
-                image_stage=image_stage,
-                image_status=image_status,
-                image_downloaded_bytes=None,
-                image_total_bytes=None,
-                image_progress_pct=None,
-            )
-        else:
-            update_runtime(
-                image_present=agent.check_image_loaded(),
+                image_present=True,
                 image_stage="ready",
-                image_status="Render image ready.",
+                image_status="Render image cached.",
                 image_downloaded_bytes=None,
                 image_total_bytes=None,
                 image_progress_pct=100,
+            )
+        else:
+            update_runtime(
+                image_present=False,
+                image_stage="missing",
+                image_status="No render image cached yet — will pull on first job.",
+                image_downloaded_bytes=None,
+                image_total_bytes=None,
+                image_progress_pct=None,
             )
 
         if agent.shutdown_event.is_set():
@@ -532,9 +528,12 @@ def run_connect_flow():
                         emit_log(f"Got job: {job_id} ({filename})", source="agent")
                         agent.update_job_status(job_id, "running")
 
-                        if not agent.check_image_loaded():
-                            emit_log("Render image not loaded, downloading...", source="agent")
-                            if not agent.ensure_docker_image(on_stage=on_image_stage, on_progress=on_image_progress):
+                        # Engine-aware: pull the variant this job needs
+                        # (cycles or eevee), not a single hardcoded image.
+                        job_image = agent.image_for_engine(agent.engine_for_job(job))
+                        if not agent.check_image_loaded(job_image):
+                            emit_log(f"Render image {job_image} not loaded, downloading...", source="agent")
+                            if not agent.ensure_docker_image(job_image, on_stage=on_image_stage, on_progress=on_image_progress):
                                 emit_error("Cannot load render image")
                                 agent.update_job_status(job_id, "failed", error="Render image not available")
                                 agent.notify_orchestrator_failure(job_id, "Render image not available")

@@ -64,7 +64,7 @@ class ModalCallbackHandler:
         provider_job_id: str,
         machine_id: str,
         blend_url: str,
-        render_overrides_b64: str,
+        render_overrides_json: str,
         group_id: str,
     ) -> None:
         if self._orchestrator is None:

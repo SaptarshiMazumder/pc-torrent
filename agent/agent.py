@@ -20,6 +20,9 @@ import threading
 import zipfile
 import json
 import requests
+from datetime import datetime, timezone, timedelta
+
+_JST = timezone(timedelta(hours=9))
 
 from config import (
     load_machine_id,
@@ -61,11 +64,15 @@ def set_sidecar_mode(enabled):
 
 
 def _log(message, source="agent", level="info"):
-    """Log a message. In sidecar mode, emits JSON; in console mode, prints."""
+    """Log a message. In sidecar mode, emits JSON; in console mode, prints.
+    Every line is stamped with a JST HH:MM:SS.mmm prefix so cross-referencing
+    against server-side / container logs is trivial."""
+    ts = datetime.now(_JST).strftime("%H:%M:%S.%f")[:-3]
+    stamped = f"[{ts} JST] {message}"
     if _sidecar_mode_active and _has_ipc:
-        _ipc_log(message, source=source, level=level)
+        _ipc_log(stamped, source=source, level=level)
     else:
-        print(message)
+        print(stamped)
 
 
 def _emit_job_progress(**payload):
@@ -80,38 +87,8 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 FIREBASE_TOKEN = ""  # set by sidecar on connect
 POLL_INTERVAL = 5  # seconds between job polls
 RENDER_TIMEOUT = 4 * 3600  # 4 hours max per render
-COMMUNITY_IMAGE_PREFIX = "ghcr.io/saptarshimazumder/pcrent-community-worker"
+COMMUNITY_IMAGE = "ghcr.io/saptarshimazumder/pcrent-community-worker-cycles:latest"
 
-
-def image_for_engine(engine):
-    """Pick the GHCR ref for a render engine.
-
-    EEVEE needs the OpenGL/EGL stack (libegl1-mesa / libgles2-mesa);
-    Cycles doesn't.  Separate images keep each variant lean — the
-    cycles image is ~150 MB smaller.
-
-    Unknown or missing engine falls back to the EEVEE image because
-    it's the broader superset (has every Cycles dep plus the GL stack).
-    """
-    eng = (engine or "").strip().upper()
-    if eng == "CYCLES":
-        return f"{COMMUNITY_IMAGE_PREFIX}-cycles:latest"
-    return f"{COMMUNITY_IMAGE_PREFIX}-eevee:latest"
-
-
-def engine_for_job(job):
-    """Read ``render.engine`` out of a job's ``render_overrides_json``.
-    Returns the raw string (e.g. 'BLENDER_EEVEE', 'CYCLES') or None."""
-    overrides = parse_job_render_overrides(job)
-    if not isinstance(overrides, dict):
-        return None
-    render_section = overrides.get("render")
-    if not isinstance(render_section, dict):
-        return None
-    engine = render_section.get("engine")
-    if isinstance(engine, str) and engine.strip():
-        return engine.strip()
-    return None
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_OUTPUT_ROOT = os.path.join(AGENT_DIR, "output")
 SUPPORTED_INPUT_EXTENSIONS = {".blend", ".zip"}
@@ -135,20 +112,6 @@ HTTP_RETRIES = 3
 HTTP_RETRY_BACKOFF_SEC = 1.5
 
 
-def _read_positive_int_env(name, default):
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        parsed = int(raw)
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
-
-
-# Keep each multipart upload below typical platform request limits (e.g. Cloud Run).
-OUTPUT_UPLOAD_MAX_REQUEST_MB = _read_positive_int_env("OUTPUT_UPLOAD_MAX_REQUEST_MB", 24)
-OUTPUT_UPLOAD_MAX_FILES_PER_REQUEST = _read_positive_int_env("OUTPUT_UPLOAD_MAX_FILES_PER_REQUEST", 50)
 OUTPUT_INCREMENTAL_SCAN_INTERVAL = float(os.environ.get("OUTPUT_INCREMENTAL_SCAN_INTERVAL", "1.0"))
 
 machine_id = None
@@ -424,6 +387,10 @@ def send_machine_heartbeat(mid):
 
 
 def upload_output_files(job_id, output_dir, filenames=None):
+    """Upload rendered frames via the server's presigned-URL flow:
+    request URLs → PUT each file directly to GCS → register filenames.
+    Mirrors cloud_worker/scripts/handler.py._upload_outputs.
+    """
     if filenames is None:
         files_found = [
             f for f in os.listdir(output_dir)
@@ -438,79 +405,38 @@ def upload_output_files(job_id, output_dir, filenames=None):
     if not files_found:
         return []
 
-    files_with_sizes = []
+    resp = requests.post(
+        f"{BACKEND_URL}/jobs/{job_id}/request-upload-urls",
+        json={"filenames": files_found},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    urls = resp.json().get("urls", {})
+
+    uploaded = []
     for filename in files_found:
+        url = urls.get(filename)
+        if not url:
+            raise RuntimeError(f"No presigned URL returned for {filename}")
         file_path = os.path.join(output_dir, filename)
-        files_with_sizes.append((filename, file_path, os.path.getsize(file_path)))
-
-    max_request_bytes = OUTPUT_UPLOAD_MAX_REQUEST_MB * 1024 * 1024
-    batches = []
-    current_batch = []
-    current_batch_bytes = 0
-
-    for item in files_with_sizes:
-        _, _, file_size = item
-        exceeds_size_limit = current_batch and (current_batch_bytes + file_size > max_request_bytes)
-        exceeds_file_count = current_batch and (len(current_batch) >= OUTPUT_UPLOAD_MAX_FILES_PER_REQUEST)
-        if exceeds_size_limit or exceeds_file_count:
-            batches.append((current_batch, current_batch_bytes))
-            current_batch = []
-            current_batch_bytes = 0
-
-        current_batch.append(item)
-        current_batch_bytes += file_size
-
-    if current_batch:
-        batches.append((current_batch, current_batch_bytes))
-
-    if len(batches) > 1:
-        _log(
-            f"[JOB] Uploading {len(files_found)} output files in {len(batches)} batches "
-            f"(limit {OUTPUT_UPLOAD_MAX_REQUEST_MB} MB/request)..."
-        )
-
-    for idx, (batch, batch_bytes) in enumerate(batches, start=1):
-        if len(batches) > 1:
-            _log(
-                f"[JOB] Upload batch {idx}/{len(batches)}: {len(batch)} files "
-                f"({batch_bytes / (1024 * 1024):.1f} MB)"
-            )
-
-        file_handles = []
-        file_tuples = []
-        try:
-            for filename, file_path, _ in batch:
-                fobj = open(file_path, "rb")
-                file_handles.append(fobj)
-                file_tuples.append(("files", (filename, fobj)))
-
-            timeout = max(120, min(900, 60 + int(batch_bytes / (1024 * 1024)) * 10))
-            resp = requests.post(
-                f"{BACKEND_URL}/jobs/{job_id}/output",
-                files=file_tuples,
+        file_size = os.path.getsize(file_path)
+        timeout = max(120, min(900, 60 + int(file_size / (1024 * 1024)) * 10))
+        with open(file_path, "rb") as fh:
+            put_resp = requests.put(
+                url,
+                data=fh,
+                headers={"Content-Type": "application/octet-stream"},
                 timeout=timeout,
             )
-            try:
-                resp.raise_for_status()
-            except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 413:
-                    if len(batch) == 1:
-                        filename = batch[0][0]
-                        raise RuntimeError(
-                            f"Output upload rejected (413): '{filename}' "
-                            f"is {batch_bytes / (1024 * 1024):.1f} MB, above server request limits. "
-                            "Render to a smaller file or use a compression/output format with smaller frames."
-                        ) from exc
-                    raise RuntimeError(
-                        "Output upload rejected (413): request payload exceeded server request limits. "
-                        "Set OUTPUT_UPLOAD_MAX_REQUEST_MB lower to force smaller upload batches."
-                    ) from exc
-                raise
-        finally:
-            for fobj in file_handles:
-                fobj.close()
+            put_resp.raise_for_status()
+        uploaded.append(filename)
 
-    return files_found
+    requests.post(
+        f"{BACKEND_URL}/jobs/{job_id}/register-outputs",
+        json={"filenames": uploaded},
+        timeout=30,
+    ).raise_for_status()
+    return uploaded
 
 
 class IncrementalOutputUploader:
@@ -789,17 +715,23 @@ def parse_progress_event_line(line):
 
 
 def parse_job_render_overrides(job):
+    """Parse the job's render-override payload (JSON string from the
+    server) into a dict.  Returns ``{}`` only when the field is genuinely
+    empty/None (the legitimate "no overrides" case).  Raises if the field
+    is present but unparseable — silently defaulting to ``{}`` on a parse
+    failure would hide real corruption (the same pattern that masked the
+    EEVEE-instead-of-Cycles bug for community renders)."""
     raw = job.get("render_overrides_json")
     if isinstance(raw, dict):
         return raw
-    if isinstance(raw, str) and raw.strip():
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            return {}
-    return {}
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            f"render_overrides_json parsed to non-object: {type(parsed).__name__}"
+        )
+    return parsed
 
 
 def persist_job_outputs(job_id, source_output_dir, status, error=None):
@@ -1036,32 +968,20 @@ def operator_command_loop():
 # -----------------------------------------------
 # DOCKER IMAGE MANAGEMENT
 # -----------------------------------------------
-def check_image_loaded(image_ref):
-    """Returns True iff the given render image is present in the local
-    Docker daemon.  Uses the full image reference (registry + tag) so it
-    doesn't false-positive on stale legacy images with the same short
-    name.  Caller passes the engine-specific ref via ``image_for_engine``.
-    """
+def check_image_loaded():
+    """Returns True iff the community render image is present in the
+    local Docker daemon.  Uses the full image reference (registry + tag)
+    so it doesn't false-positive on stale legacy images with the same
+    short name."""
     try:
         result = subprocess.run(
-            ["docker", "images", "-q", image_ref],
+            ["docker", "images", "-q", COMMUNITY_IMAGE],
             capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace",
         )
         return result.returncode == 0 and result.stdout.strip() != ""
     except Exception:
         return False
-
-
-def any_community_image_loaded():
-    """Cheap "is *some* render image cached locally" probe used for the
-    sidecar's runtime-status display.  We don't know which engine the
-    next job will need until it arrives, so just check if either variant
-    is already present."""
-    return (
-        check_image_loaded(image_for_engine("CYCLES"))
-        or check_image_loaded(image_for_engine("BLENDER_EEVEE"))
-    )
 
 
 def get_runtime_status():
@@ -1079,7 +999,7 @@ def get_runtime_status():
         image_stage = "idle"
         image_status = "Start Docker to inspect the render image."
     else:
-        image_present = any_community_image_loaded()
+        image_present = check_image_loaded()
         image_stage = "ready" if image_present else "missing"
         image_status = "Render image is installed." if image_present else "Render image not installed."
 
@@ -1119,29 +1039,25 @@ def remove_docker_image():
             "image_present": None,
         }
 
-    image_present = any_community_image_loaded() if docker_running else False
+    image_present = check_image_loaded() if docker_running else False
 
     if image_present:
-        # Remove both engine variants — user-facing UX is "clear the
-        # render image", they don't care which engine the cached image
-        # was for.
-        for ref in (image_for_engine("CYCLES"), image_for_engine("BLENDER_EEVEE")):
-            try:
-                subprocess.run(
-                    ["docker", "image", "rm", "-f", ref],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8", errors="replace",
-                    timeout=60,
-                )
-            except Exception as exc:
-                return {
-                    "ok": False,
-                    "message": f"Failed to remove the render image: {exc}",
-                    "image_present": True,
-                }
+        try:
+            subprocess.run(
+                ["docker", "image", "rm", "-f", COMMUNITY_IMAGE],
+                capture_output=True,
+                text=True,
+                encoding="utf-8", errors="replace",
+                timeout=60,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "message": f"Failed to remove the render image: {exc}",
+                "image_present": True,
+            }
 
-    still_present = any_community_image_loaded() if docker_running else False
+    still_present = check_image_loaded() if docker_running else False
     return {
         "ok": not still_present,
         "message": "Render image removed." if image_present else "Render image was already absent.",
@@ -1149,29 +1065,24 @@ def remove_docker_image():
     }
 
 
-def ensure_docker_image(image_ref, on_stage=None, on_progress=None):
-    """Pulls the given render image from GHCR if it's not already present.
-
-    Lets Docker handle staleness and layer caching natively — no SHA
-    cache file, no full-tarball downloads.  ``docker pull`` is a no-op
-    when the local image already matches the remote digest, so calling
-    this on every job is cheap.
-
-    Engine-aware: caller passes the ref via ``image_for_engine(engine)``
-    so EEVEE jobs pull the EEVEE variant and Cycles jobs pull the lean
-    Cycles variant.
+def ensure_docker_image(on_stage=None, on_progress=None):
+    """Pulls the community render image from GHCR if it's not already
+    present.  Lets Docker handle staleness and layer caching natively —
+    no SHA cache file, no full-tarball downloads.  ``docker pull`` is a
+    no-op when the local image already matches the remote digest, so
+    calling this on every job is cheap.
     """
     def stage(stage_name, message, **extra):
         if on_stage:
             on_stage(stage_name, message, **extra)
 
     stage("checking", "Checking render image...")
-    _log(f"[IMAGE] Pulling {image_ref} ...")
+    _log(f"[IMAGE] Pulling {COMMUNITY_IMAGE} ...")
     stage("downloading", "Pulling render image from registry...", progress=0)
 
     try:
         proc = subprocess.Popen(
-            ["docker", "pull", image_ref],
+            ["docker", "pull", COMMUNITY_IMAGE],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1463,13 +1374,9 @@ def execute_job(job):
             if isinstance(device_policy, str) and device_policy.strip():
                 cmd.extend(["-e", f"DEVICE_POLICY={device_policy.strip().upper()}"])
 
-        # Pick the engine-specific image (cycles vs eevee).  EEVEE needs
-        # libEGL; Cycles doesn't.  Falls back to the EEVEE image if the
-        # job doesn't specify an engine — it's the broader superset.
-        job_image = image_for_engine(engine_for_job(job))
-        cmd.append(job_image)
+        cmd.append(COMMUNITY_IMAGE)
 
-        _log(f"[JOB] Starting Docker render container ({job_image})...")
+        _log(f"[JOB] Starting Docker render container ({COMMUNITY_IMAGE})...")
         _log(f"[JOB] Command: {' '.join(cmd)}")
 
         process = subprocess.Popen(
@@ -1553,14 +1460,17 @@ def execute_job(job):
                 )
             raise RuntimeError("Render produced no output files")
 
-        # 5. Mark done
+        # The server marks the job done when /register-outputs receives
+        # the final frame (see JobService.register_outputs).  Workers
+        # cannot self-report "done" — the schema rejects it
+        # (UpdateJobStatusPayload accepts only "running" / "failed").
+        # By the time we reach this line, the chunk is already terminal
+        # on the server side.
         if missing_assets:
             final_error = MISSING_ASSETS_WARNING
-            update_job_status(job_id, "done", error=final_error, output_files=output_files)
             _log(f"[JOB] Done with warnings! Files: {output_files}")
             _log(f"[JOB] Warning: {final_error}")
         else:
-            update_job_status(job_id, "done", output_files=output_files)
             _log(f"[JOB] Done! Files: {output_files}")
         final_status = "done"
 
@@ -1688,7 +1598,7 @@ def main():
     # don't know which one the next job will need until it arrives, so
     # skip the connect-time pre-pull.  ``execute_job`` lazily pulls the
     # right variant when a job is claimed.
-    if any_community_image_loaded():
+    if check_image_loaded():
         _log("[AGENT] At least one render image is cached locally.")
     else:
         _log("[AGENT] No render image cached yet — will pull on first job.")
@@ -1759,13 +1669,9 @@ def main():
                     _log(f"[AGENT] Got job: {job['id']} ({job['input_filename']})")
                     update_job_status(job["id"], "running")
 
-                    # Ensure the engine-specific image is loaded before
-                    # running.  Cycles and EEVEE have separate images;
-                    # we pull the one this job needs.
-                    job_image = image_for_engine(engine_for_job(job))
-                    if not check_image_loaded(job_image):
-                        _log(f"[AGENT] Render image {job_image} not loaded, downloading...")
-                        if not ensure_docker_image(job_image):
+                    if not check_image_loaded():
+                        _log(f"[AGENT] Render image {COMMUNITY_IMAGE} not loaded, downloading...")
+                        if not ensure_docker_image():
                             _log("[AGENT] Cannot load render image, failing job.")
                             update_job_status(job["id"], "failed", error="Render image not available")
                             notify_orchestrator_failure(job["id"], "Render image not available")

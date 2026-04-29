@@ -28,20 +28,13 @@ The remaining work falls into three buckets:
 
 ## A. Correctness
 
-### A1 · Engine-aware Docker images for community ✅ DONE
+### A1 · Engine-aware Docker images for community ❌ ABANDONED
 
-> Cycles and EEVEE need different system libraries. The current single image lacks `libegl1-mesa`, so every EEVEE community render crashes.
+> Premise was: split the community image into Cycles / EEVEE variants so EEVEE renders get the libEGL/Vulkan stack they need.  After building both an EGL variant and a Vulkan variant, we proved empirically that **Docker Desktop + WSL2 + NVIDIA Container Toolkit ships only compute libraries to containers** — no EGL, no GLX, no Vulkan ICD, regardless of `NVIDIA_DRIVER_CAPABILITIES`.  Diagnostic from `nvidia/cuda:12.2.0` with `--gpus all` and `NVIDIA_DRIVER_CAPABILITIES=all`: `find / -iname '*vulkan*'` and `find / -iname 'libGLX*'` both returned **zero matches**.
 
-**Approach.** Split the community image like `cloud_worker/` already does — separate Cycles / EEVEE Dockerfiles, separate GHCR tags, agent pulls the right one on demand based on the job's engine.
+**Decision.** Community = Cycles only.  EEVEE for community is gated off in `EngineCompatibilityValidator` alongside Modal.  The Cycles-only image (`pcrent-community-worker-cycles`) is the single image the agent pulls.  Native-Windows Blender (out of Docker, with a separate security stack) is a future option but out of scope here.
 
-| Change | File |
-|---|---|
-| Rename existing Dockerfile to `Dockerfile.cycles` | `community_worker/Dockerfile` |
-| New EEVEE variant adding `libegl1-mesa libgles2-mesa` and `COPY pre_load.py` | `community_worker/Dockerfile.eevee` |
-| Add `community-cycles` + `community-eevee` build variants | `push-worker.sh` |
-| Replace `DOCKER_IMAGE` constant with `image_for_engine(engine)` helper. `ensure_docker_image(engine)` pulls only what the current job needs. `check_image_loaded()` becomes engine-parameterized. | `agent/agent.py` |
-
-**Outcome.** Community handles Cycles AND EEVEE without bloating either image with the other's dependencies.
+**Cleanup performed when this was abandoned:** `community_worker/Dockerfile.eevee` deleted, `community_worker/render.eevee.sh` deleted, `push-worker.sh` `community-eevee` variant removed, `agent.py` `image_for_engine` / `engine_for_job` helpers removed in favor of a single `COMMUNITY_IMAGE` constant.
 
 ### A2 · Lock community machine on claim
 

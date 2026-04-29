@@ -214,7 +214,7 @@ class PlannedTask:
 class DispatchContext:
     group_id: str
     input_filename: str
-    render_overrides_b64: str
+    render_overrides_json: str
     blend_url: str
     max_retries: int = 0
     priority: int = 0

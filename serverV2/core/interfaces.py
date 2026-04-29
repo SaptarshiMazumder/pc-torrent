@@ -56,7 +56,7 @@ class IFleetClient(Protocol):
         frame_start: int,
         frame_end: int,
         frame_step: int,
-        render_overrides_b64: str,
+        render_overrides_json: str,
     ) -> str: ...
 
     def cancel_job(self, provider_job_id: str) -> None: ...
@@ -78,7 +78,7 @@ class ICallbackHandler(Protocol):
         provider_job_id: str,
         machine_id: str,
         blend_url: str,
-        render_overrides_b64: str,
+        render_overrides_json: str,
         group_id: str,
     ) -> None: ...
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import logging
 
 from serverV2.infrastructure.db import query_all
@@ -43,27 +42,40 @@ class ModalRecovery:
 
     def _recover_single(self, row: dict) -> None:
         job_id = row["id"]
-        group_id = row.get("group_id") or ""
+        # Recovery only ever runs against rows that were dispatched —
+        # group_id, modal_function_call_id, render_overrides_json, and
+        # input_filename are all populated by dispatch.  If any are
+        # missing the row is corrupt; fail loud rather than fabricate
+        # placeholders (the previous "modal-{job_id[:12]}" placeholder
+        # silently masked monitor failures because the fake call-id
+        # never matched anything in Modal's API).
+        group_id = row.get("group_id")
+        if not group_id:
+            raise RuntimeError(f"Modal recovery: job {job_id} has no group_id")
         provider_job_id = (row.get("modal_function_call_id") or "").strip()
         if not provider_job_id:
-            provider_job_id = f"modal-{job_id[:12]}"
-
-        input_filename = row.get("rg_input_filename") or row.get("input_filename") or ""
-        if group_id and input_filename:
-            blend_url = f"{self._cfg.public_backend_url}/render-groups/{group_id}/input/{input_filename}"
-        elif input_filename:
-            blend_url = f"{self._cfg.public_backend_url}/jobs/{job_id}/input/{input_filename}"
-        else:
-            blend_url = ""
-
-        overrides_json = row.get("render_overrides_json") or "{}"
-        overrides_b64 = base64.b64encode(overrides_json.encode()).decode()
+            raise RuntimeError(
+                f"Modal recovery: job {job_id} has no modal_function_call_id "
+                "(dispatch likely crashed before save_provider_job_id ran)"
+            )
+        input_filename = row.get("rg_input_filename") or row.get("input_filename")
+        if not input_filename:
+            raise RuntimeError(
+                f"Modal recovery: job {job_id} has no input filename "
+                "(neither render_groups.input_filename nor jobs.input_filename)"
+            )
+        overrides_json = row.get("render_overrides_json")
+        if not overrides_json:
+            raise RuntimeError(
+                f"Modal recovery: job {job_id} has no render_overrides_json"
+            )
+        blend_url = f"{self._cfg.public_backend_url}/render-groups/{group_id}/input/{input_filename}"
 
         self._callback_handler.start_monitoring(
             job_id=job_id,
             provider_job_id=provider_job_id,
             machine_id=row["machine_id"],
             blend_url=blend_url,
-            render_overrides_b64=overrides_b64,
+            render_overrides_json=overrides_json,
             group_id=group_id,
         )

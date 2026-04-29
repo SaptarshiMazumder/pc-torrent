@@ -217,7 +217,7 @@ def init_db() -> None:
                     "gpu_type TEXT",
                     "machine_id TEXT",
                     "input_filename TEXT",
-                    "render_overrides_b64 TEXT",
+                    "render_overrides_json TEXT",
                     "max_retries INTEGER DEFAULT 0",
                     "priority INTEGER DEFAULT 0",
                 ):

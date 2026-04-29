@@ -459,7 +459,7 @@ def run_connect_flow():
         # skip the connect-time pre-pull.  ``execute_job`` lazily pulls
         # the right variant when a job arrives.
         emit_status("downloading_image", "Checking render image cache...")
-        if agent.any_community_image_loaded():
+        if agent.check_image_loaded():
             update_runtime(
                 image_present=True,
                 image_stage="ready",
@@ -528,12 +528,9 @@ def run_connect_flow():
                         emit_log(f"Got job: {job_id} ({filename})", source="agent")
                         agent.update_job_status(job_id, "running")
 
-                        # Engine-aware: pull the variant this job needs
-                        # (cycles or eevee), not a single hardcoded image.
-                        job_image = agent.image_for_engine(agent.engine_for_job(job))
-                        if not agent.check_image_loaded(job_image):
-                            emit_log(f"Render image {job_image} not loaded, downloading...", source="agent")
-                            if not agent.ensure_docker_image(job_image, on_stage=on_image_stage, on_progress=on_image_progress):
+                        if not agent.check_image_loaded():
+                            emit_log(f"Render image {agent.COMMUNITY_IMAGE} not loaded, downloading...", source="agent")
+                            if not agent.ensure_docker_image(on_stage=on_image_stage, on_progress=on_image_progress):
                                 emit_error("Cannot load render image")
                                 agent.update_job_status(job_id, "failed", error="Render image not available")
                                 agent.notify_orchestrator_failure(job_id, "Render image not available")

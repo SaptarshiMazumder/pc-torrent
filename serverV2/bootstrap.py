@@ -356,6 +356,9 @@ def build(
         progress_repo=progress_repo,
         worker_start_repo=worker_start_repo,
         outputs_resolver=outputs_resolver,
+        success_notifier=lambda jid: callback_router.route(
+            job_id=jid, outcome=CallbackOutcome.SUCCESS,
+        ),
     )
 
     machine_service = MachineService(

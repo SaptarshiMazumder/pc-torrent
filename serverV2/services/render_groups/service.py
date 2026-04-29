@@ -193,6 +193,27 @@ class RenderGroupService:
         analysis_snapshot = analysis_snapshot if isinstance(analysis_snapshot, dict) else {}
         analysis_warnings = extract_analysis_warnings(analysis_snapshot)
 
+        # Engine resolution at the submission boundary.  User override
+        # wins; otherwise fall back to whatever the analyzer detected
+        # from the .blend itself.  Resolved here, BEFORE any persistence,
+        # and written back into render_overrides so every downstream
+        # serialization (group row, job rows, asset cache) carries the
+        # engine.  Single source of truth for both initial dispatch and
+        # retry — the retry path reads engine from render_overrides_json
+        # alone, so this is what makes retry work.
+        engine = (
+            (render_overrides.get("render") or {}).get("engine")
+            or _engine_from_snapshot(analysis_snapshot)
+        )
+        if not engine:
+            raise RenderGroupServiceError(
+                400,
+                "Render engine could not be determined. Set render.engine in "
+                "render_overrides, or ensure the analyzer populated "
+                "analysis_snapshot.heaviness.render_engine.",
+            )
+        render_overrides.setdefault("render", {})["engine"] = engine
+
         timeline = render_overrides.get("timeline", {})
 
         plan = resolve_frame_range(
@@ -266,22 +287,6 @@ class RenderGroupService:
         self._save_asset(group, r2_key, plan, analysis_snapshot, render_overrides, scheduling)
 
         machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
-        # Engine resolution at the submission boundary.  User override
-        # wins; otherwise fall back to whatever the analyzer detected
-        # from the .blend itself.  If neither source has it, the upload
-        # is broken — fail at the boundary so the validator's strict
-        # check downstream never sees a missing engine.
-        engine = (
-            (render_overrides.get("render") or {}).get("engine")
-            or _engine_from_snapshot(analysis_snapshot)
-        )
-        if not engine:
-            raise RenderGroupServiceError(
-                400,
-                "Render engine could not be determined. Set render.engine in "
-                "render_overrides, or ensure the analyzer populated "
-                "analysis_snapshot.heaviness.render_engine.",
-            )
 
         # Build the heaviness dict once from the analyzer's snapshot + the
         # server-side file size; cost-aware strategies read everything they
@@ -397,6 +402,27 @@ class RenderGroupService:
         render_overrides = normalize_render_overrides(base_overrides)
         scheduling = parse_json_object(original.get("scheduling_json"), {})
 
+        # Engine resolution at the rerender boundary — same single-source
+        # rule as confirm_upload.  Resolved BEFORE any persistence and
+        # written back into render_overrides so the new group's
+        # render_overrides_json (and every job row built from it) carries
+        # the engine for both initial dispatch and any later retry.
+        original_snapshot = parse_json_object(
+            original.get("analysis_snapshot_json") or "{}", {},
+        )
+        engine = (
+            (render_overrides.get("render") or {}).get("engine")
+            or _engine_from_snapshot(original_snapshot)
+        )
+        if not engine:
+            raise RenderGroupServiceError(
+                400,
+                "Render engine could not be determined for rerender. The "
+                "original group's analysis_snapshot.heaviness.render_engine "
+                "is missing — set render.engine in render_overrides instead.",
+            )
+        render_overrides.setdefault("render", {})["engine"] = engine
+
         new_group_id = str(uuid4())
         now = now_iso()
 
@@ -436,26 +462,6 @@ class RenderGroupService:
         )
 
         machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
-
-        # Snapshot parsed up front so it can serve both the engine
-        # fallback and the heaviness build below.
-        original_snapshot_raw = original.get("analysis_snapshot_json") or "{}"
-        original_snapshot = parse_json_object(original_snapshot_raw, {})
-
-        # Engine resolution at the rerender boundary.  Same fallback
-        # rule as the initial confirm_upload path: explicit override
-        # wins, otherwise use what the analyzer detected from the .blend.
-        engine = (
-            (render_overrides.get("render") or {}).get("engine")
-            or _engine_from_snapshot(original_snapshot)
-        )
-        if not engine:
-            raise RenderGroupServiceError(
-                400,
-                "Render engine could not be determined for rerender. The "
-                "original group's analysis_snapshot.heaviness.render_engine "
-                "is missing — set render.engine in render_overrides instead.",
-            )
 
         # Build heaviness once for the rerender (analysis snapshot copied
         # from the original group) + the new r2 file size.

@@ -42,6 +42,7 @@ def check_docker_installed():
             ["docker", "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8", errors="replace",
             timeout=10,
         )
         if result.returncode == 0:
@@ -70,6 +71,7 @@ def check_docker_running():
             ["docker", "info"],
             capture_output=True,
             text=True,
+            encoding="utf-8", errors="replace",
             timeout=15,
         )
         return result.returncode == 0
@@ -314,6 +316,7 @@ def _check_nvidia_runtime_in_docker():
         result = subprocess.run(
             ["docker", "info", "--format", "{{json .Runtimes}}"],
             capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         stderr = (result.stderr or "").strip()
         stdout = (result.stdout or "").strip()
@@ -364,12 +367,14 @@ def verify_gpu_in_docker(on_status=None):
         check = subprocess.run(
             ["docker", "image", "inspect", image],
             capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         if check.returncode != 0:
             status(f"[SETUP] Pulling GPU test image ({image})...")
             subprocess.run(
                 ["docker", "pull", image],
                 capture_output=True, text=True, timeout=300,
+                encoding="utf-8", errors="replace",
             )
     except Exception:
         pass
@@ -389,6 +394,7 @@ def verify_gpu_in_docker(on_status=None):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8", errors="replace",
                 timeout=120,
             )
             if result.returncode == 0 and result.stdout.strip():

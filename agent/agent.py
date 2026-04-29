@@ -80,7 +80,38 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 FIREBASE_TOKEN = ""  # set by sidecar on connect
 POLL_INTERVAL = 5  # seconds between job polls
 RENDER_TIMEOUT = 4 * 3600  # 4 hours max per render
-DOCKER_IMAGE = "ghcr.io/saptarshimazumder/pcrent-community-worker:latest"
+COMMUNITY_IMAGE_PREFIX = "ghcr.io/saptarshimazumder/pcrent-community-worker"
+
+
+def image_for_engine(engine):
+    """Pick the GHCR ref for a render engine.
+
+    EEVEE needs the OpenGL/EGL stack (libegl1-mesa / libgles2-mesa);
+    Cycles doesn't.  Separate images keep each variant lean — the
+    cycles image is ~150 MB smaller.
+
+    Unknown or missing engine falls back to the EEVEE image because
+    it's the broader superset (has every Cycles dep plus the GL stack).
+    """
+    eng = (engine or "").strip().upper()
+    if eng == "CYCLES":
+        return f"{COMMUNITY_IMAGE_PREFIX}-cycles:latest"
+    return f"{COMMUNITY_IMAGE_PREFIX}-eevee:latest"
+
+
+def engine_for_job(job):
+    """Read ``render.engine`` out of a job's ``render_overrides_json``.
+    Returns the raw string (e.g. 'BLENDER_EEVEE', 'CYCLES') or None."""
+    overrides = parse_job_render_overrides(job)
+    if not isinstance(overrides, dict):
+        return None
+    render_section = overrides.get("render")
+    if not isinstance(render_section, dict):
+        return None
+    engine = render_section.get("engine")
+    if isinstance(engine, str) and engine.strip():
+        return engine.strip()
+    return None
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_OUTPUT_ROOT = os.path.join(AGENT_DIR, "output")
 SUPPORTED_INPUT_EXTENSIONS = {".blend", ".zip"}
@@ -183,6 +214,7 @@ def get_ram_gb():
         result = subprocess.run(
             ["wmic", "computersystem", "get", "TotalPhysicalMemory"],
             capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip().isdigit()]
         if lines:
@@ -862,6 +894,7 @@ def _stop_active_job_runtime(snapshot):
                 ["docker", "stop", "-t", "10", container_name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8", errors="replace",
                 timeout=20,
             )
         except Exception:
@@ -872,6 +905,7 @@ def _stop_active_job_runtime(snapshot):
                 ["docker", "kill", container_name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8", errors="replace",
                 timeout=10,
             )
         except Exception:
@@ -1002,19 +1036,32 @@ def operator_command_loop():
 # -----------------------------------------------
 # DOCKER IMAGE MANAGEMENT
 # -----------------------------------------------
-def check_image_loaded():
-    """Returns True iff the configured render image is present in the
-    local Docker daemon.  Uses the full image reference (registry + tag)
-    so it doesn't false-positive on stale legacy images with the same
-    short name."""
+def check_image_loaded(image_ref):
+    """Returns True iff the given render image is present in the local
+    Docker daemon.  Uses the full image reference (registry + tag) so it
+    doesn't false-positive on stale legacy images with the same short
+    name.  Caller passes the engine-specific ref via ``image_for_engine``.
+    """
     try:
         result = subprocess.run(
-            ["docker", "images", "-q", DOCKER_IMAGE],
+            ["docker", "images", "-q", image_ref],
             capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         return result.returncode == 0 and result.stdout.strip() != ""
     except Exception:
         return False
+
+
+def any_community_image_loaded():
+    """Cheap "is *some* render image cached locally" probe used for the
+    sidecar's runtime-status display.  We don't know which engine the
+    next job will need until it arrives, so just check if either variant
+    is already present."""
+    return (
+        check_image_loaded(image_for_engine("CYCLES"))
+        or check_image_loaded(image_for_engine("BLENDER_EEVEE"))
+    )
 
 
 def get_runtime_status():
@@ -1032,7 +1079,7 @@ def get_runtime_status():
         image_stage = "idle"
         image_status = "Start Docker to inspect the render image."
     else:
-        image_present = check_image_loaded()
+        image_present = any_community_image_loaded()
         image_stage = "ready" if image_present else "missing"
         image_status = "Render image is installed." if image_present else "Render image not installed."
 
@@ -1072,31 +1119,29 @@ def remove_docker_image():
             "image_present": None,
         }
 
-    image_present = check_image_loaded() if docker_running else False
+    image_present = any_community_image_loaded() if docker_running else False
 
     if image_present:
-        try:
-            result = subprocess.run(
-                ["docker", "image", "rm", "-f", DOCKER_IMAGE],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
-                stderr = (result.stderr or result.stdout or "").strip()
+        # Remove both engine variants — user-facing UX is "clear the
+        # render image", they don't care which engine the cached image
+        # was for.
+        for ref in (image_for_engine("CYCLES"), image_for_engine("BLENDER_EEVEE")):
+            try:
+                subprocess.run(
+                    ["docker", "image", "rm", "-f", ref],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8", errors="replace",
+                    timeout=60,
+                )
+            except Exception as exc:
                 return {
                     "ok": False,
-                    "message": stderr or "Failed to remove the render image from Docker.",
+                    "message": f"Failed to remove the render image: {exc}",
                     "image_present": True,
                 }
-        except Exception as exc:
-            return {
-                "ok": False,
-                "message": f"Failed to remove the render image: {exc}",
-                "image_present": True,
-            }
 
-    still_present = check_image_loaded() if docker_running else False
+    still_present = any_community_image_loaded() if docker_running else False
     return {
         "ok": not still_present,
         "message": "Render image removed." if image_present else "Render image was already absent.",
@@ -1104,28 +1149,33 @@ def remove_docker_image():
     }
 
 
-def ensure_docker_image(on_stage=None, on_progress=None):
-    """Pulls the render image from GHCR if it's not already present.
+def ensure_docker_image(image_ref, on_stage=None, on_progress=None):
+    """Pulls the given render image from GHCR if it's not already present.
 
     Lets Docker handle staleness and layer caching natively — no SHA
     cache file, no full-tarball downloads.  ``docker pull`` is a no-op
     when the local image already matches the remote digest, so calling
     this on every job is cheap.
+
+    Engine-aware: caller passes the ref via ``image_for_engine(engine)``
+    so EEVEE jobs pull the EEVEE variant and Cycles jobs pull the lean
+    Cycles variant.
     """
     def stage(stage_name, message, **extra):
         if on_stage:
             on_stage(stage_name, message, **extra)
 
     stage("checking", "Checking render image...")
-    _log(f"[IMAGE] Pulling {DOCKER_IMAGE} ...")
+    _log(f"[IMAGE] Pulling {image_ref} ...")
     stage("downloading", "Pulling render image from registry...", progress=0)
 
     try:
         proc = subprocess.Popen(
-            ["docker", "pull", DOCKER_IMAGE],
+            ["docker", "pull", image_ref],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8", errors="replace",
         )
         # Stream docker pull's per-layer status so the user sees progress.
         # docker pull's own output is the source of truth; we don't try
@@ -1413,9 +1463,13 @@ def execute_job(job):
             if isinstance(device_policy, str) and device_policy.strip():
                 cmd.extend(["-e", f"DEVICE_POLICY={device_policy.strip().upper()}"])
 
-        cmd.append(DOCKER_IMAGE)
+        # Pick the engine-specific image (cycles vs eevee).  EEVEE needs
+        # libEGL; Cycles doesn't.  Falls back to the EEVEE image if the
+        # job doesn't specify an engine — it's the broader superset.
+        job_image = image_for_engine(engine_for_job(job))
+        cmd.append(job_image)
 
-        _log(f"[JOB] Starting Docker render container...")
+        _log(f"[JOB] Starting Docker render container ({job_image})...")
         _log(f"[JOB] Command: {' '.join(cmd)}")
 
         process = subprocess.Popen(
@@ -1423,6 +1477,7 @@ def execute_job(job):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8", errors="replace",
         )
         update_active_job(job_id=job_id, process=process)
         output_uploader.start()
@@ -1629,10 +1684,14 @@ def main():
         gpu_error = docker_result.get("gpu_error", "GPU verification failed.")
         _log(f"[AGENT] WARNING: GPU not accessible in Docker. {gpu_error}")
 
-    # Step 3: Ensure render image is loaded
-    _log("[AGENT] Checking render image...")
-    if not ensure_docker_image():
-        _log("[AGENT] WARNING: No render image available. Will retry when jobs arrive.")
+    # Step 3: Render image is engine-specific (cycles vs eevee) — we
+    # don't know which one the next job will need until it arrives, so
+    # skip the connect-time pre-pull.  ``execute_job`` lazily pulls the
+    # right variant when a job is claimed.
+    if any_community_image_loaded():
+        _log("[AGENT] At least one render image is cached locally.")
+    else:
+        _log("[AGENT] No render image cached yet — will pull on first job.")
 
     # Step 4: Detect hardware specs
     _log("[AGENT] Detecting hardware specs...")
@@ -1700,10 +1759,13 @@ def main():
                     _log(f"[AGENT] Got job: {job['id']} ({job['input_filename']})")
                     update_job_status(job["id"], "running")
 
-                    # Ensure image is loaded before running
-                    if not check_image_loaded():
-                        _log("[AGENT] Render image not loaded, downloading...")
-                        if not ensure_docker_image():
+                    # Ensure the engine-specific image is loaded before
+                    # running.  Cycles and EEVEE have separate images;
+                    # we pull the one this job needs.
+                    job_image = image_for_engine(engine_for_job(job))
+                    if not check_image_loaded(job_image):
+                        _log(f"[AGENT] Render image {job_image} not loaded, downloading...")
+                        if not ensure_docker_image(job_image):
                             _log("[AGENT] Cannot load render image, failing job.")
                             update_job_status(job["id"], "failed", error="Render image not available")
                             notify_orchestrator_failure(job["id"], "Render image not available")

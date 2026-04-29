@@ -7,6 +7,7 @@ import {
 import SegmentedProgressBar from "./SegmentedProgressBar";
 import VastInstancePanel from "./VastInstancePanel";
 import ModalInstancePanel from "../ModalInstancePanel";
+import CommunityInstancePanel from "./CommunityInstancePanel";
 import FrameGalleryPanel from "./FrameGalleryPanel";
 import HeavinessPanel from "./HeavinessPanel";
 import FailedChunksPanel from "./FailedChunksPanel";
@@ -117,6 +118,7 @@ function RenderGroupDetail({
       {/* GPU Instances */}
       <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
       <ModalInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
+      <CommunityInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
 
       {/* Scene heaviness — async-friendly: skeleton until analysis_snapshot lands. */}
       <HeavinessPanel

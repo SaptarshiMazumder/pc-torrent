@@ -34,15 +34,23 @@ case "$VARIANT" in
         IMAGE_NAME="pcrent-worker-eevee"
         DOCKERFILE="$PROJECT_ROOT/cloud_worker/Dockerfile.eevee"
         ;;
-    community)
-        # Thin renderer for community PCs — agent orchestrates I/O, this
-        # image just runs Blender against /input and /output mounts.
-        IMAGE_NAME="pcrent-community-worker"
-        DOCKERFILE="$PROJECT_ROOT/community_worker/Dockerfile"
+    community-cycles)
+        # Thin renderer for community PCs (Cycles) — agent orchestrates
+        # I/O, this image just runs Blender against /input and /output
+        # mounts.
+        IMAGE_NAME="pcrent-community-worker-cycles"
+        DOCKERFILE="$PROJECT_ROOT/community_worker/Dockerfile.cycles"
+        ;;
+    community-eevee)
+        # Same as community-cycles but with libegl1-mesa / libgles2-mesa
+        # for EEVEE's OpenGL pipeline.  Larger image; only pulled by
+        # agents when they claim an EEVEE job.
+        IMAGE_NAME="pcrent-community-worker-eevee"
+        DOCKERFILE="$PROJECT_ROOT/community_worker/Dockerfile.eevee"
         ;;
     *)
-        echo "ERROR: unknown variant '$VARIANT'.  Expected 'cycles', 'eevee', or 'community'."
-        echo "Usage: $0 <tag> [cycles|eevee|community]"
+        echo "ERROR: unknown variant '$VARIANT'.  Expected one of: cycles, eevee, community-cycles, community-eevee."
+        echo "Usage: $0 <tag> [cycles|eevee|community-cycles|community-eevee]"
         exit 1
         ;;
 esac

@@ -71,6 +71,7 @@ def check_nvidia_gpu():
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8", errors="replace",
             timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():

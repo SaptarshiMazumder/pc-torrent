@@ -22,4 +22,11 @@ class UpdateJobProgressPayload(BaseModel):
 
 
 class JobHeartbeatPayload(BaseModel):
+    # All optional -- backwards-compatible with workers that pre-date
+    # the A3.2 telemetry fields.  Server's stall detector treats missing
+    # fields as no-signal (skips the rule that needs them).
     phase: str | None = None
+    cpu_percent: float | None = None
+    rss_bytes: int | None = None
+    bytes_progressed: int | None = None
+    total_bytes: int | None = None

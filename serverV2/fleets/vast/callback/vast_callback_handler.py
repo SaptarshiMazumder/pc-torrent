@@ -15,6 +15,7 @@ from serverV2.config import VastConfig
 from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
+from serverV2.fleets.shared.pre_render_stall_detector import IPreRenderStallDetector
 from serverV2.fleets.vast.callback.vast_instance_monitor import VastInstanceMonitor
 from serverV2.fleets.vast.callback.vast_snapshot_writer import VastSnapshotWriter
 from serverV2.fleets.vast.callback.vast_status_classifier import VastStatusClassifier
@@ -38,6 +39,7 @@ class VastCallbackHandler:
         progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
+        stall_detector_factory: Callable[[], IPreRenderStallDetector],
         registry: InstanceRegistry | None = None,
     ) -> None:
         self._cfg = config
@@ -46,6 +48,7 @@ class VastCallbackHandler:
         self._progress = progress_repo
         self._on_failure = on_failure
         self._on_success = on_success
+        self._stall_detector_factory = stall_detector_factory
         self._registry = registry
         self._monitors: dict[str, threading.Event] = {}
         self._monitors_lock = threading.Lock()
@@ -85,6 +88,7 @@ class VastCallbackHandler:
         )
         snapshot = VastSnapshotWriter(job_id=job_id, registry=self._registry)
         status = VastStatusClassifier()
+        stall_detector = self._stall_detector_factory()
         monitor = VastInstanceMonitor(
             job_id=job_id,
             instance_id=instance_id,
@@ -96,6 +100,8 @@ class VastCallbackHandler:
             liveness=liveness,
             snapshot=snapshot,
             status=status,
+            stall_detector=stall_detector,
+            heartbeat_repo=self._heartbeats,
             on_failure=self._on_failure,
             on_success=self._on_success,
             stop_event=stop_event,

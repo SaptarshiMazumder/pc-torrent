@@ -19,9 +19,15 @@ import psycopg2.pool
 from serverV2.config import VastConfig
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
+from serverV2.fleets.shared.pre_render_stall_detector import (
+    HeartbeatWindow,
+    IPreRenderStallDetector,
+    StallReason,
+)
 from serverV2.fleets.vast.callback.vast_snapshot_writer import VastSnapshotWriter
 from serverV2.fleets.vast.callback.vast_status_classifier import VastStatusClassifier
 from serverV2.fleets.vast.client import VastClient
+from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -48,6 +54,8 @@ class VastInstanceMonitor:
         liveness: LivenessCheck,
         snapshot: VastSnapshotWriter,
         status: VastStatusClassifier,
+        stall_detector: IPreRenderStallDetector,
+        heartbeat_repo: HeartbeatRepository,
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
         stop_event: threading.Event,
@@ -62,6 +70,8 @@ class VastInstanceMonitor:
         self._liveness = liveness
         self._snapshot = snapshot
         self._status = status
+        self._stall_detector = stall_detector
+        self._heartbeat_repo = heartbeat_repo
         self._on_failure = on_failure
         self._on_success = on_success
         self._stop = stop_event
@@ -188,6 +198,9 @@ class VastInstanceMonitor:
                 return self._on_stale()
             if self._liveness.heartbeat_dead(self._job_id):
                 return self._on_heartbeat_dead()
+            stall = self._evaluate_stall()
+            if stall is not None:
+                return self._on_stall(stall)
 
         # Block: container exited / stopped / offline.
         if self._status.is_exited(actual_status):
@@ -240,6 +253,22 @@ class VastInstanceMonitor:
 
     def _on_heartbeat_dead(self) -> bool:
         err = "Worker heartbeat stopped while Vast instance shows running"
+        self._client.instances.destroy(self._instance_id)
+        self._snapshot.remove()
+        self._on_failure(self._job_id, err)
+        return True
+
+    def _evaluate_stall(self) -> StallReason | None:
+        samples = self._heartbeat_repo.get_recent(self._job_id, n=30)
+        if not samples:
+            return None
+        window = HeartbeatWindow.from_raw(samples)
+        elapsed = time.monotonic() - self._started_at
+        return self._stall_detector.evaluate(window, elapsed)
+
+    def _on_stall(self, reason: StallReason) -> bool:
+        err = f"Pre-render stall ({reason.rule}): {reason.message}"
+        log.warning("Job %s stalled: %s", self._job_id, err)
         self._client.instances.destroy(self._instance_id)
         self._snapshot.remove()
         self._on_failure(self._job_id, err)

@@ -139,7 +139,8 @@
       "Bash(bash -n \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/community_worker/render.eevee.sh\")",
       "Bash(git rm *)",
       "Bash(bash -n \"/c/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/community_worker/render.eevee.sh\")",
-      "Bash(bash -n \"/c/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh\")"
+      "Bash(bash -n \"/c/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh\")",
+      "Bash(git checkout *)"
     ]
   }
 }

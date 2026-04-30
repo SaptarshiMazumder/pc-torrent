@@ -26,6 +26,10 @@ from serverV2.fleets.modal.endpoint_validator import validate_modal_endpoints
 from serverV2.fleets.modal.recovery import ModalRecovery
 from serverV2.fleets.modal.strategy import ModalFleetStrategy
 from serverV2.fleets.registry import FleetRegistry
+from serverV2.fleets.shared.pre_render_stall_detector import (
+    IPreRenderStallDetector,
+    PreRenderStallDetectorBuilder,
+)
 from serverV2.fleets.status_aggregator import InstanceStatusAggregator
 from serverV2.fleets.status_provider import ModalStatusProvider, VastStatusProvider
 from serverV2.fleets.vast.callback import VastCallbackHandler
@@ -165,6 +169,27 @@ def build(
                 outcome=CallbackOutcome.SUCCESS,
             )
 
+    # -- pre-render stall detector factory --
+    # One builder shape today; per-fleet builders can diverge later if
+    # community needs different thresholds (slower download tolerance,
+    # longer hard ceiling, etc.).  Each call returns a fresh detector.
+    #
+    # CpuStallRule intentionally OFF: the worker's ProcessSampler reads
+    # CPU% off the handler process, not the Blender subprocess.  Handler
+    # is idle during render so the metric reads ~0% and the rule
+    # false-positives.  Re-enable once ProcessSampler walks children.
+    def _make_pre_render_stall_detector() -> IPreRenderStallDetector:
+        s = cfg.stall
+        return (PreRenderStallDetectorBuilder()
+            .with_bytes_stall(stall_sec=s.download_bytes_stall_sec)
+            .with_download_ceiling(
+                secs_per_gb=s.download_secs_per_gb,
+                min_sec=s.download_phase_min_sec,
+                max_sec=s.download_phase_max_sec,
+            )
+            .with_hard_ceiling(max_sec=s.hard_max_chunk_sec)
+            .build())
+
     # -- vast fleet --
     # No machine registrar — Vast capabilities live in config.json.
     # Strategy reads task.gpu_type at dispatch time.
@@ -175,6 +200,7 @@ def build(
         progress_repo=progress_repo,
         on_failure=_on_failure,
         on_success=_on_success,
+        stall_detector_factory=_make_pre_render_stall_detector,
         registry=vast_instance_registry,
     )
     vast_strategy = VastFleetStrategy(
@@ -197,6 +223,7 @@ def build(
         progress_repo=progress_repo,
         on_failure=_on_failure,
         on_success=_on_success,
+        stall_detector_factory=_make_pre_render_stall_detector,
         registry=modal_instance_registry,
     )
     modal_strategy = ModalFleetStrategy(
@@ -324,7 +351,9 @@ def build(
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,
+        heartbeat_repo=heartbeat_repo,
         on_failure=_on_failure,
+        stall_detector=_make_pre_render_stall_detector(),
         stale_seconds=cfg.failover_stale_seconds,
     )
 

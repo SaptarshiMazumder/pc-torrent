@@ -18,6 +18,7 @@ from serverV2.fleets.modal.callback.modal_job_monitor import ModalJobMonitor
 from serverV2.fleets.modal.callback.modal_snapshot_writer import ModalSnapshotWriter
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
+from serverV2.fleets.shared.pre_render_stall_detector import IPreRenderStallDetector
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 
@@ -39,6 +40,7 @@ class ModalCallbackHandler:
         progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
+        stall_detector_factory: Callable[[], IPreRenderStallDetector],
         registry: InstanceRegistry | None = None,
     ) -> None:
         self._cfg = config
@@ -47,6 +49,7 @@ class ModalCallbackHandler:
         self._progress = progress_repo
         self._on_failure = on_failure
         self._on_success = on_success
+        self._stall_detector_factory = stall_detector_factory
         self._registry = registry
         self._monitors: dict[str, threading.Event] = {}
         self._monitors_lock = threading.Lock()
@@ -83,6 +86,7 @@ class ModalCallbackHandler:
             heartbeat_grace_sec=_HEARTBEAT_GRACE_SEC,
         )
         snapshot = ModalSnapshotWriter(job_id=job_id, registry=self._registry)
+        stall_detector = self._stall_detector_factory()
         monitor = ModalJobMonitor(
             job_id=job_id,
             provider_job_id=provider_job_id,
@@ -93,6 +97,8 @@ class ModalCallbackHandler:
             counts=counts,
             liveness=liveness,
             snapshot=snapshot,
+            stall_detector=stall_detector,
+            heartbeat_repo=self._heartbeats,
             on_failure=self._on_failure,
             on_success=self._on_success,
             stop_event=stop_event,

@@ -48,8 +48,9 @@ COPY cloud_worker/scripts/pre_load.py /scripts/pre_load.py
 RUN sed -i 's/\r$//' /scripts/render.sh && chmod +x /scripts/render.sh
 
 # Handler deps
-RUN pip3 install --no-cache-dir requests==2.32.3
+RUN pip3 install --no-cache-dir requests==2.32.3 psutil==5.9.8
 
 COPY cloud_worker/scripts/handler.py /handler.py
+COPY cloud_worker/scripts/workflow/ /workflow/
 
 CMD ["python3", "-u", "/handler.py"]

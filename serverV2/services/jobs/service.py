@@ -82,8 +82,24 @@ class JobService:
         self._progress.record(job_id, rendered_frames, total_frames)
         return {"job_id": job_id, "rendered_frames": rendered_frames, "total_frames": total_frames}
 
-    def heartbeat(self, job_id: str, phase: str | None = None) -> dict[str, Any]:
-        self._heartbeats.record(job_id, phase)
+    def heartbeat(
+        self,
+        job_id: str,
+        *,
+        phase: str | None = None,
+        cpu_percent: float | None = None,
+        rss_bytes: int | None = None,
+        bytes_progressed: int | None = None,
+        total_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        self._heartbeats.record(
+            job_id,
+            phase=phase,
+            cpu_percent=cpu_percent,
+            rss_bytes=rss_bytes,
+            bytes_progressed=bytes_progressed,
+            total_bytes=total_bytes,
+        )
         return {"job_id": job_id, "acknowledged": True}
 
     # ---- cancel-status poll (community workers check this every 30s during render) ----
@@ -105,22 +121,36 @@ class JobService:
     # ---- output management ----
 
     def register_outputs(self, job_id: str, files: list[str]) -> dict[str, Any]:
+        """Pure DB work: append filenames, return the merged list and a
+        flag telling the caller whether this registration completed the
+        chunk.  The downstream side-effects (telemetry, group reconcile,
+        drain queue, possibly new dispatch HTTP calls) are NOT fired
+        here — the route schedules :meth:`notify_completion` as a
+        background task so the worker's HTTP response doesn't block on
+        them.  Keeping the response under 100ms prevents the catch-up
+        path from misclassifying a slow side-effect chain as a failed
+        upload."""
         job = self._jobs.get_raw_by_id(job_id)
         if not job:
             raise JobServiceError(404, "Job not found")
         merged = self._jobs.merge_output_files(job_id, files)
-
-        # Completion is owned by the data: the moment registered output
-        # count meets total_frames, the chunk is done.  No monitor races,
-        # no worker self-report.  CallbackRouter has its own
-        # ``is_job_terminal`` short-circuit so a duplicate notify (e.g.
-        # the in-process fleet monitor's _on_exited path racing this)
-        # collapses to a single transition.
         total = job.get("total_frames") or 0
-        if total > 0 and len(merged) >= total:
-            self._success_notifier(job_id)
+        completion_reached = total > 0 and len(merged) >= total
+        return {
+            "job_id": job_id,
+            "output_files": merged,
+            "completion_reached": completion_reached,
+        }
 
-        return {"job_id": job_id, "output_files": merged}
+    def notify_completion(self, job_id: str) -> None:
+        """Run the success-notifier chain (handle_chunk_succeeded ->
+        telemetry, ledger release, group reconcile, drain).  Idempotent
+        via ``handle_chunk_succeeded``'s ``status==done`` short-circuit,
+        so duplicate fires (e.g. background task + a parallel monitor
+        observing completion via JobCounts) collapse to one transition.
+        Called as a FastAPI BackgroundTask from the register-outputs
+        route after the worker's HTTP response has been sent."""
+        self._success_notifier(job_id)
 
     def get_outputs(self, job_id: str) -> dict[str, Any]:
         job = self._jobs.get_raw_by_id(job_id)

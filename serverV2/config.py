@@ -315,6 +315,34 @@ def _parse_modal_endpoints(
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class StallDetectionConfig:
+    """Thresholds for the pre-render stall detector.  Identical across
+    fleets today; the per-fleet builder lets us split later if Vast and
+    community need different timeouts."""
+    cpu_stall_threshold_pct: float = 5.0
+    cpu_stall_window_sec: float = 180.0
+    rss_noise_bytes: int = 64 * 1024 * 1024
+    download_bytes_stall_sec: float = 300.0
+    download_secs_per_gb: float = 120.0
+    download_phase_min_sec: float = 300.0
+    download_phase_max_sec: float = 1800.0
+    hard_max_chunk_sec: float = 4 * 60 * 60.0
+
+    @classmethod
+    def from_env(cls) -> StallDetectionConfig:
+        return cls(
+            cpu_stall_threshold_pct=_env_float("STALL_CPU_PCT", 5.0),
+            cpu_stall_window_sec=_env_float("STALL_WINDOW_SEC", 180.0),
+            rss_noise_bytes=_env_int("STALL_RSS_NOISE_BYTES", 64 * 1024 * 1024),
+            download_bytes_stall_sec=_env_float("STALL_DOWNLOAD_BYTES_SEC", 300.0),
+            download_secs_per_gb=_env_float("STALL_DOWNLOAD_SECS_PER_GB", 120.0),
+            download_phase_min_sec=_env_float("STALL_DOWNLOAD_PHASE_MIN_SEC", 300.0),
+            download_phase_max_sec=_env_float("STALL_DOWNLOAD_PHASE_MAX_SEC", 1800.0),
+            hard_max_chunk_sec=_env_float("STALL_HARD_MAX_CHUNK_SEC", 4 * 60 * 60.0),
+        )
+
+
+@dataclass(frozen=True)
 class AppConfig:
     vast: VastConfig
     modal: ModalConfig
@@ -329,6 +357,7 @@ class AppConfig:
     # backup_monitor service sends this header to identify itself.  Empty
     # string disables the endpoint (returns 503 to all callers).
     orphan_secret: str = ""
+    stall: StallDetectionConfig = field(default_factory=StallDetectionConfig)
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -340,4 +369,5 @@ class AppConfig:
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             community_price_per_hour=_load_community_price_per_hour(),
             orphan_secret=_env_str("ORPHAN_SECRET", ""),
+            stall=StallDetectionConfig.from_env(),
         )

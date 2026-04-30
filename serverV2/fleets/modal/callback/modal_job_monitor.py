@@ -18,6 +18,12 @@ from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.callback.modal_snapshot_writer import ModalSnapshotWriter
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
+from serverV2.fleets.shared.pre_render_stall_detector import (
+    HeartbeatWindow,
+    IPreRenderStallDetector,
+    StallReason,
+)
+from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -39,6 +45,8 @@ class ModalJobMonitor:
         counts: JobCounts,
         liveness: LivenessCheck,
         snapshot: ModalSnapshotWriter,
+        stall_detector: IPreRenderStallDetector,
+        heartbeat_repo: HeartbeatRepository,
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
         stop_event: threading.Event,
@@ -52,6 +60,8 @@ class ModalJobMonitor:
         self._counts = counts
         self._liveness = liveness
         self._snapshot = snapshot
+        self._stall_detector = stall_detector
+        self._heartbeat_repo = heartbeat_repo
         self._on_failure = on_failure
         self._on_success = on_success
         self._stop = stop_event
@@ -92,10 +102,17 @@ class ModalJobMonitor:
         self._snapshot.write(job, elapsed)
 
         # Block: DB says this job is already over.
+        # Always force-cancel the Modal FunctionCall.  The worker is
+        # supposed to exit on its own after rendering, but if it gets
+        # stuck (mark_failed retry loop, hang, race with the data-driven
+        # success path that marks the row done before the worker has a
+        # chance to react), this prevents Modal from continuing to bill
+        # us for the dead chunk.  cancel_job is idempotent — safe even
+        # if the worker already exited cleanly.  Mirrors Vast's behavior
+        # which destroys the rented box on any terminal local_status.
         if local_status in ("done", "failed", "cancelled"):
-            if local_status == "cancelled":
-                self._client.cancel_job(self._provider_job_id)
-            elif local_status == "failed":
+            self._client.cancel_job(self._provider_job_id)
+            if local_status == "failed":
                 error = str(job.get("error") or "Worker reported failure")
                 self._on_failure(self._job_id, error)
             self._snapshot.remove()
@@ -153,7 +170,24 @@ class ModalJobMonitor:
             )
             return True
 
+        # Block: pre-render stall (CPU idle, byte stall, download/hard ceiling).
+        if local_status == "running":
+            stall = self._evaluate_stall()
+            if stall is not None:
+                self._handle_failure(
+                    f"Pre-render stall ({stall.rule}): {stall.message}"
+                )
+                return True
+
         return False
+
+    def _evaluate_stall(self) -> StallReason | None:
+        samples = self._heartbeat_repo.get_recent(self._job_id, n=30)
+        if not samples:
+            return None
+        window = HeartbeatWindow.from_raw(samples)
+        elapsed = time.monotonic() - self._started_at
+        return self._stall_detector.evaluate(window, elapsed)
 
     # ------------------------------------------------------------------
     # Terminal plumbing

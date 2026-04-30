@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
 
 from serverV2.api.dependencies import get_current_user
@@ -82,9 +82,15 @@ def update_progress(job_id: str, payload: UpdateJobProgressPayload):
 
 @router.put("/jobs/{job_id}/heartbeat")
 def heartbeat(job_id: str, payload: JobHeartbeatPayload | None = None):
-    phase = payload.phase if payload else None
     try:
-        return _get().heartbeat(job_id, phase)
+        return _get().heartbeat(
+            job_id,
+            phase=payload.phase if payload else None,
+            cpu_percent=payload.cpu_percent if payload else None,
+            rss_bytes=payload.rss_bytes if payload else None,
+            bytes_progressed=payload.bytes_progressed if payload else None,
+            total_bytes=payload.total_bytes if payload else None,
+        )
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
 
@@ -217,14 +223,24 @@ def download_zip(job_id: str):
 
 
 @router.post("/jobs/{job_id}/register-outputs")
-def register_outputs(job_id: str, body: dict):
+def register_outputs(
+    job_id: str, body: dict, background_tasks: BackgroundTasks,
+):
+    """Worker tells us a file is in R2.  We record it and return 200 fast.
+    The success-notifier chain (telemetry, group reconcile, drain queue,
+    possibly a new dispatch) runs as a BackgroundTask AFTER the response
+    is flushed, so the worker's catch-up POST doesn't block on heavy
+    server-side side-effects and time out client-side."""
     filenames = body.get("filenames", [])
     if not filenames:
         raise HTTPException(400, "No filenames provided")
     try:
-        return _get().register_outputs(job_id, filenames)
+        result = _get().register_outputs(job_id, filenames)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
+    if result.get("completion_reached"):
+        background_tasks.add_task(_get().notify_completion, job_id)
+    return result
 
 
 # ---- user-triggered manual retry ----

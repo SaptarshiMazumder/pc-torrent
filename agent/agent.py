@@ -36,6 +36,8 @@ from docker_setup import (
     check_docker_running,
     get_cached_gpu_verification,
 )
+from pipeline.download import RangeResumer
+from pipeline.heartbeat import BytesProgress, JobHeartbeatSender, PhaseTracker
 
 
 # -----------------------------------------------
@@ -533,12 +535,13 @@ class IncrementalOutputUploader:
         self._scan_once(require_stable=False)
 
 
-def download_input_file(input_url, dest_path):
-    resp = requests.get(input_url, stream=True, timeout=60)
-    resp.raise_for_status()
-    with open(dest_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            f.write(chunk)
+def download_input_file(input_url, dest_path, *, on_bytes=None):
+    """Download the blend / asset bundle.  Uses RangeResumer so a
+    mid-stream connection drop (R2 hiccup, network blip) resumes from
+    the byte that was last on disk instead of restarting from zero.
+    ``on_bytes(n)`` is invoked per chunk and is wired to BytesProgress
+    in execute_job so heartbeats carry bytes_progressed."""
+    RangeResumer().download(input_url, dest_path, on_progress=on_bytes)
 
 
 def validate_input_filename(filename):
@@ -1314,11 +1317,34 @@ def execute_job(job):
         heartbeat_thread = start_heartbeat_loop()
         cancel_check_thread = start_cancel_check_loop()
 
-        # 1. Download blend file
+        # Per-job heartbeat: phase + bytes_progressed signals for the
+        # server's stall detector.  Lives alongside the machine-level
+        # heartbeat (start_heartbeat_loop above) -- different endpoint,
+        # different payload, different concern.
+        phase_tracker = PhaseTracker()
+        bytes_progress = BytesProgress()
+        job_heartbeat = JobHeartbeatSender(
+            backend_url=BACKEND_URL,
+            job_id=job_id,
+            phase_tracker=phase_tracker,
+            bytes_progress=bytes_progress,
+            interval_sec=HEARTBEAT_INTERVAL,
+            on_error=lambda exc: _log(
+                f"[JOB] Job heartbeat push failed: {exc}", level="warn",
+            ),
+        )
+        job_heartbeat.start()
+
+        # 1. Download blend file (range-resume on connection drops)
         blend_file = os.path.join(input_dir, input_filename)
         _log(f"[JOB] Downloading: {input_filename}")
-        download_input_file(input_url, blend_file)
+        job_heartbeat.set_phase("download")
+        download_input_file(input_url, blend_file, on_bytes=bytes_progress.add)
         blend_file = prepare_job_input(blend_file, input_dir)
+        # Download phase done -- reset the counter so the "running"
+        # phase doesn't carry stale bytes_progressed.
+        bytes_progress.reset()
+        job_heartbeat.set_phase("running")
 
         stop_reason = get_active_job_stop_reason(job_id)
         if stop_reason:
@@ -1517,6 +1543,13 @@ def execute_job(job):
         heartbeat_stop.set()
         if heartbeat_thread and heartbeat_thread.is_alive():
             heartbeat_thread.join(timeout=1)
+        try:
+            job_heartbeat.stop()
+        except NameError:
+            # job_heartbeat is created inside the try block; if execute_job
+            # raised before that point (malformed job dict, etc.) the name
+            # won't exist.  Nothing to stop.
+            pass
         cancel_check_stop.set()
         if cancel_check_thread and cancel_check_thread.is_alive():
             cancel_check_thread.join(timeout=1)

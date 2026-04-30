@@ -265,7 +265,7 @@ class JobRepository:
             "UPDATE machines SET last_seen_at = %s WHERE id = %s",
             (_now_iso(), machine_id),
         )
-        return execute_returning(
+        job = execute_returning(
             """
             UPDATE jobs SET status = 'running', last_heartbeat_at = %s
             WHERE id = (
@@ -278,6 +278,16 @@ class JobRepository:
             """,
             (_now_iso(), machine_id),
         )
+        if job:
+            # Lock the machine so the allocator stops returning it as
+            # available for the next dispatch.  Released in lifecycle on
+            # success/failure/cancel; auto-demoted to 'idle' by the
+            # stale-sweep in MachineRepository if the agent crashes.
+            execute(
+                "UPDATE machines SET status = 'processing' WHERE id = %s",
+                (machine_id,),
+            )
+        return job
 
     # ---- user-scoped reads ----
 

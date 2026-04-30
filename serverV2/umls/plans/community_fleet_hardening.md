@@ -48,32 +48,104 @@ The remaining work falls into three buckets:
 
 **Outcome.** Two simultaneous renders with one community PC online → the second routes to Vast/Modal instead of stacking on the same PC.
 
-### A3 · Download-phase timeout (file-size proportional)
+### A3 · Stuck-worker detection (process-activity-based, phase-aware)
 
-> Worker stuck on download / scene-prep is invisible to the system because `is_stale()` returns False until the first frame uploads. Affects all fleets — the Vast container that hung for 35 min was this exact case.
+> Worker stuck pre-first-frame is invisible because `is_stale()` returns False until frames upload. Heartbeats prove the python loop is alive but DON'T prove the work is progressing — a 50-min scene load on a heavy blend looks identical to a Python deadlock from the heartbeat alone. The earlier file-size timeout was a heuristic that false-positives on slow R2. The right architecture is to base the decision on **whether the worker process is actively doing work**, with phase context.
 
-**Approach.** Not a hard global timeout. Compute the timeout from `r2_input_size_bytes` on the render group, so a 5 GB blend gets ~10 min, a 50 MB blend gets the floor (~2 min), a 50 GB blend caps at the ceiling. The check only applies pre-first-frame — once frames are uploading the existing `is_stale()` logic takes over.
+**Approach.** Worker self-samples its own process activity (CPU%, RSS, plus a phase-specific progress counter) and includes those in every heartbeat. The server's `LivenessCheck` examines a sliding window of recent heartbeats and decides "stuck" from real signals, not from elapsed-time heuristics.
 
-**Formula:**
+The worker progresses through known phases: `download` → `extract` (zip only) → `loading` (Blender opening the file) → `rendering` (frames). Each phase has its own progress signal:
 
+| Phase | Healthy signal | Stuck signal |
+|---|---|---|
+| `download` | `bytes_progressed` strictly increasing | counter flat for `DOWNLOAD_BYTES_STALL_SEC` |
+| `extract` | `cpu_percent` non-trivial | CPU near zero for `CPU_STALL_SEC` |
+| `loading` | `cpu_percent` non-trivial OR `rss_bytes` growing | CPU near zero AND RSS unchanged for `CPU_STALL_SEC` |
+| `rendering` | existing `rendered_frames` increases (current logic) | existing `is_stale()` check |
+
+**Three detection rules.** Run by `LivenessCheck` against the last N heartbeats (sliding window):
+
+**Rule 1 — CPU-stall (universal, all pre-rendering phases):**
 ```
-DOWNLOAD_SECS_PER_GB    = 120     # assumes ~8 MB/s worst-case bandwidth
-MIN_DOWNLOAD_TIMEOUT_S  = 120     # 2-min floor for tiny files
-MAX_DOWNLOAD_TIMEOUT_S  = 1800    # 30-min ceiling for huge files
-
-timeout = clamp(file_size_gb * 120, MIN, MAX)
+window      = last STALL_WINDOW_SEC of heartbeats (e.g., 120s)
+avg_cpu     = mean(cpu_percent over window)
+rss_changed = max(rss_bytes in window) - min(rss_bytes in window) > RSS_NOISE_BYTES
+if avg_cpu < CPU_STALL_THRESHOLD_PCT and not rss_changed:
+    → stuck
 ```
+Catches Python deadlocks, kernel syscall hangs, container OS-level freezes. A heavy 50-min scene load passes this trivially because Blender is at 60-100% CPU during BVH build / shader compile / mesh load.
 
-Examples: 5 GB → 600 s (10 min); 100 MB → 120 s; 50 GB → 1800 s (30 min cap).
+**Rule 2 — Download bytes-stall (only when `phase=download`):**
+```
+if phase == "download" and bytes_progressed unchanged for DOWNLOAD_BYTES_STALL_SEC (e.g., 60s):
+    → stuck
+```
+Catches TCP-level network blocks where the connection is up but no bytes flow. Range-resume in the worker handles connection drops; this rule catches the slower "connection alive but pipe dead" case.
+
+**Rule 3 — Download outer ceiling (file-size-proportional, only when `phase=download`):**
+```
+DOWNLOAD_SECS_PER_GB        = 120     # assumes ~8 MB/s worst-case
+MIN_DOWNLOAD_PHASE_TIMEOUT  = 120     # 2-min floor
+MAX_DOWNLOAD_PHASE_TIMEOUT  = 1800    # 30-min ceiling
+download_max_sec = clamp(file_size_gb * 120, MIN, MAX)
+
+if phase == "download" for longer than download_max_sec:
+    → stuck
+```
+Catches the case where bytes ARE flowing but at a rate too slow to ever complete (drip-feed at 100 KB/s on a 5 GB file would take 14 hours and never trigger Rule 2). This is the original A3 logic, retained but now scoped specifically to the download phase — we know we're in download because the worker tells us so. For other phases (loading, rendering), there's no file-size-derived ceiling because their duration isn't bounded by file size.
+
+Outside the rules: a hard outer per-chunk ceiling (`HARD_MAX_CHUNK_SEC`, e.g., 6 hours) catches anything not covered by the three rules. Last-resort sanity, not a primary detector.
+
+**Worker-side changes.**
 
 | Change | File |
 |---|---|
-| `LivenessCheck` accepts `download_timeout_sec` (computed per-job at construction). Pre-first-frame `is_stale()` returns True when `time - _grace_anchor > download_timeout_sec`. | `serverV2/fleets/shared/liveness_check.py` |
-| Vast/Modal callback handlers read `r2_input_size_bytes` from the group at monitor-start, compute the timeout, pass it into `LivenessCheck`. | `serverV2/fleets/{vast,modal}/callback/*_callback_handler.py` |
-| Constants for the formula. Override-able via env if needed (`DOWNLOAD_SECS_PER_GB`, `MIN_DOWNLOAD_TIMEOUT_SEC`, `MAX_DOWNLOAD_TIMEOUT_SEC`). | `serverV2/config.py` |
-| Optional: same formula on the worker side as a `requests.get(... timeout=N)` so the container fails loudly on its own. | `cloud_worker/scripts/handler.py` |
+| New thread / module that samples `psutil.Process().cpu_percent(interval=...)` and `memory_info().rss` once per heartbeat, tracks `phase` explicitly, exposes a `bytes_progressed` counter that download / extract code increments. | `cloud_worker/scripts/heartbeat.py` (new helper) and `cloud_worker/scripts/handler.py` (sets phase + increments counter) |
+| Heartbeat HTTP payload extended to include `phase`, `cpu_percent`, `rss_bytes`, `bytes_progressed`. Backwards-compatible — server treats missing fields as no-signal (skip rule). | `cloud_worker/scripts/heartbeat.py`, agent equivalent in `agent/agent.py` |
+| Add `psutil` to worker images (cloud_worker/Dockerfile.* and community_worker/Dockerfile.cycles). It's already a transitive dep of some Blender tooling but explicit pin is safer. | `cloud_worker/Dockerfile.{cycles,eevee}`, `community_worker/Dockerfile.cycles` |
+| **Range-resume on download.** Wrap the `iter_content` loop in a try/except that catches `ChunkedEncodingError`/`ConnectionError`, retries the GET with `Range: bytes={downloaded}-`, appends to the existing file, max `DOWNLOAD_RETRY_ATTEMPTS` (e.g., 5). Same pattern in agent.py. | `cloud_worker/scripts/handler.py`, `agent/agent.py` |
 
-**Note.** Community coverage requires extending `CommunityMonitor` to track first-frame time per job using the same formula. Deferred — Vast/Modal is the bigger value.
+**Server-side changes.**
+
+| Change | File |
+|---|---|
+| Heartbeat schema in Pydantic accepts the new optional fields. | `serverV2/api/schemas/job.py` `JobHeartbeatPayload` |
+| Heartbeat repository stores last N heartbeats per job (Redis list with TTL) instead of just a single key. Used by the sliding-window stall detector. Cap the list length so memory bounded. | `serverV2/repositories/heartbeat_repository.py` |
+| `LivenessCheck` extends with `is_stalled()` that runs Rules 1, 2, 3 against the heartbeat window. Existing `is_stale()` (frame-count-based) stays for the `rendering` phase. | `serverV2/fleets/shared/liveness_check.py` |
+| Vast/Modal callback handlers and `CommunityMonitor` invoke `is_stalled()` once per poll tick. On stall → `on_failure(job_id, "stalled in phase=X")`. | `serverV2/fleets/{vast,modal}/callback/*_callback_handler.py`, `serverV2/fleets/community/community_monitor.py` |
+| Tunable constants exposed via env (`CPU_STALL_THRESHOLD_PCT`, `STALL_WINDOW_SEC`, `DOWNLOAD_BYTES_STALL_SEC`, `DOWNLOAD_SECS_PER_GB`, `MIN_DOWNLOAD_PHASE_TIMEOUT`, `MAX_DOWNLOAD_PHASE_TIMEOUT`, `HARD_MAX_CHUNK_SEC`). | `serverV2/config.py` |
+
+**Why this beats the old A3 timeout.**
+
+| Failure mode | Old A3 (file-size timeout) | New A3 (process-activity) |
+|---|---|---|
+| Download connection drops mid-stream | Range-resume catches in worker; old A3 redundant timeout | Range-resume catches in worker; Rule 2 covers if drops repeat |
+| Download stuck in TCP backoff (no bytes flowing) | timeout fires only after MAX_DOWNLOAD time | Rule 2 fires in 60s |
+| Download dripping slowly (1 MB/s on 5 GB file) | timeout fires at 10 min (correct catch) | Rule 3 fires at 10 min (same catch — Rule 3 IS the old A3 logic, scoped to the right phase) |
+| Heavy 50-min scene load | false positive — old A3 fires even though Blender is healthy | passes — high CPU, growing RSS, no rule triggers |
+| Blender python deadlock during scene-prep | old A3 catches via outer timeout (eventually) | Rule 1 fires within 2 min |
+| Container kernel-level wedge | not caught by old A3 unless before first frame | Rule 1 fires within 2 min |
+| R2 genuinely slow but blend completes | false positive — old A3 fires | passes — bytes still flowing → no rule triggers |
+
+**Phase ordering and rule applicability.**
+
+```
+download  → Rule 1 (CPU stall)  + Rule 2 (bytes stall)  + Rule 3 (file-size ceiling)
+extract   → Rule 1
+loading   → Rule 1
+rendering → existing is_stale() (frame-count-based) — A3 rules don't run here
+```
+
+Once `phase=rendering` arrives the existing logic handles staleness. A3 only governs pre-first-frame.
+
+**Community coverage.** The `CommunityMonitor` (single scanning daemon, not per-job threads like Vast/Modal) needs the same `is_stalled()` invocation against community heartbeats. Same code, just plumbed through the scanning loop. Not deferred — community is a fleet that contributes most of the chunk volume; missing this catches bugs cheaper.
+
+**Verification.**
+- Submit a render with a 10 GB blend on a Vast host with throttled network; observe Rule 3 fire at the file-size-derived ceiling.
+- Run a render against a host with a stub `time.sleep(99999)` injected pre-render; Rule 1 fires within `STALL_WINDOW_SEC + heartbeat interval`.
+- Disconnect the worker's network mid-download; Rule 2 fires within `DOWNLOAD_BYTES_STALL_SEC`.
+- Run a render with a heavy scene that legitimately takes 30+ min in `phase=loading`; observe NO rule fires (CPU stays non-trivial throughout).
+- Run a normal render end-to-end; no spurious failures, completes through `rendering`.
 
 ### A4 · Smarter ledger check on manual retry
 
@@ -173,33 +245,45 @@ cancel_one_job(job_id):
 
 ---
 
-## Execution order (approved)
+## Status snapshot
 
-1. ✅ **A1** — engine-aware images. Unblocks EEVEE rendering. *Done.*
-2. ✅ **B1** — community instance panel. UI visibility. *Done (re-prioritized ahead of A2).*
-3. **A2** — machine locking. Prevents double-assignment.
-4. **B3** — community success path. Closes the symmetric gap to A's failure work.
-5. **C1** — `CallbackRouter` routing. Bundle with B3 since both touch agent-callback endpoints.
-6. **B2** — per-card cancel. Biggest single change, has DB migration.
-7. **A4** — smarter ledger check. Small.
-8. **A3** — download-phase timeout. Independent; slots in last.
+### Done
+
+- ❌ **A1** — engine-aware community images. **Abandoned.** Empirically proved Docker Desktop + WSL2 + NVCT ships only compute libs to containers (no EGL, no GLX, no Vulkan ICD). Community = Cycles only; EEVEE for community gated off in `EngineCompatibilityValidator`. Native-Windows Blender is the long-term path, out of scope here.
+- ✅ **B1** — community instance panel. Render-detail page shows community machines alongside Vast/Modal panels.
+- ✅ **B3 (re-shaped)** — community success path. Implemented via a cleaner mechanism than the original endpoint-pair plan: `JobService.register_outputs` detects `len(output_files) >= total_frames` and fires `success_notifier(job_id)` → `CallbackRouter.route(SUCCESS)` → `handle_chunk_succeeded`. The data-write IS the success signal — no worker-side `update_job_status("done")` call exists anymore (the schema rejects it; UpdateJobStatusPayload is restricted to `running` / `failed`). Same path serves Vast/Modal; in-process monitors collapse to no-ops on already-terminal jobs via `is_job_terminal` short-circuit.
+- ✅ **C1 (success half)** — success callbacks route through `CallbackRouter` automatically as a side effect of B3-reshaped. Failure half still pending (see below).
+- ✅ **Mid-cycle: engine resolution boundary fix** — at submission (`confirm_upload` and `rerender`), the resolved engine is written into `render_overrides` BEFORE persistence. `_load_group_dispatch_context` reads engine from `render_overrides_json` with fallback to `analysis_snapshot_json` for pre-fix rows. Initial dispatch and retry now read engine from the same persisted source.
+- ✅ **Mid-cycle: render_overrides_b64 → render_overrides_json refactor** — base64 encoding pushed down to the wire boundary (only inside `vast/client.py` + `modal/client.py` + agent's docker-run env-var construction). DispatchContext, all interfaces, all strategies, both recoveries, both callback handlers, lifecycle, coordinator, and the `dispatch_queue` column now use canonical JSON. Naming and content match end-to-end.
+- ✅ **Mid-cycle: defensive code purge** — silent `try/except → return {}` patterns removed from agent's `parse_job_render_overrides`, lifecycle's retry path, and Vast/Modal recovery. They now raise loud on missing-but-required fields. Boundary code (network/SDK calls) stays defensive.
+- ✅ **Mid-cycle: dead code removal** — `agent/ssh_agent.py`, `agent/provisioner.py`, `agent/provisioner_state.json` deleted (legacy SSH-based path, ~2400 lines).
+
+### Pending — current priorities
+
+1. **A3** — stuck-worker detection (process-activity-based, phase-aware) + range-resume on download. **Re-designed this session** — see the A3 section above. Replaces the old file-size-only timeout with a robust process-metric-based detector that doesn't false-positive on slow R2 or heavy scene loads.
+2. **A2** — machine locking on community claim. Prevents double-assignment.
+3. **A4** — smarter ledger check on manual retry. Small.
+4. **C1 (failure half)** — route `agent-failure` endpoint through `CallbackRouter` for symmetry. Currently calls `orchestrator.on_job_failed` directly. Easy.
+5. **B2** — per-card cancel. Biggest remaining change, has DB migration. Defer until A3/A2/A4 ship.
 
 ## Verification
 
 | Item | Test |
 |---|---|
-| **A1** | Submit EEVEE render → community pulls `pcrent-community-worker-eevee` → frames produced. |
+| **A1** | n/a — abandoned. Validator gates EEVEE off community; submit an EEVEE render and confirm it allocates to Vast only (Modal also gated). |
 | **A2** | Two simultaneous renders with one community PC online → second routes to Vast/Modal. SQL: `machines.status='processing'` while a job is in flight. |
-| **A3** | Stub a Vast container that hangs in download for >10 min → monitor fires failure within `IN_PROGRESS_FIRST_FRAME_SEC + interval`. |
+| **A3** | (1) Submit a render against a host with throttled network (drip-feed below `1 / DOWNLOAD_SECS_PER_GB` rate) → Rule 3 fires at the file-size-derived ceiling. (2) Inject a `time.sleep(99999)` pre-render in the worker → Rule 1 fires within `STALL_WINDOW_SEC + heartbeat interval`. (3) Disconnect worker network mid-download → Rule 2 fires within `DOWNLOAD_BYTES_STALL_SEC`. (4) Render a heavy scene that genuinely takes 30+ min in `loading` phase → no rule fires (CPU stays non-trivial). (5) Normal render end-to-end → no spurious failures. |
 | **A4** | Click Retry on an existing stuck chunk → succeeds (currently fails with `active_sibling_exists`). |
-| **B1** | Render with a community chunk in flight → Community Instances panel appears with an active card. |
+| **B1** | Render with a community chunk in flight → Community Instances panel appears with an active card. ✅ verified shipping. |
 | **B2** | Click a Vast card's Cancel button → instance destroyed within seconds, job `cancelled`, no retry fires. Repeat for Modal and community. |
-| **B3** | Submit a community-only render → group transitions to `done`. |
-| **C1** | Same as B3 — endpoints go through `CallbackRouter`, double-fire from monitor + worker is filtered by terminal-guard. |
+| **B3** | Submit a community-only render → group transitions to `done`. ✅ verified shipping (via register-outputs path). |
+| **C1 (failure)** | After failure-half ships: agent-failure goes through `CallbackRouter`, double-fire from monitor + worker is filtered by terminal-guard. |
 
 ## Resolved decisions
 
-- **B2 schema** — DB column `jobs.cancelled_at` (survives restart, single source of truth).
-- **A1 image naming** — rename `pcrent-community-worker` → `pcrent-community-worker-cycles`; new `pcrent-community-worker-eevee`.
-- **A3 timeout style** — file-size proportional, NOT a hard 10-min check. Formula above.
-- **A3 community first-frame coverage** — deferred to a later round.
+- **A1 outcome** — abandoned. WSL2 + NVCT does not expose graphics libraries to containers regardless of `NVIDIA_DRIVER_CAPABILITIES`. Community is Cycles-only at the validator level.
+- **A3 architecture** — process-activity-based (CPU + RSS + bytes-progressed) with phase-aware rules. The original file-size-only timeout retained as Rule 3 but scoped to `phase=download` only, where its assumptions hold.
+- **A3 community coverage** — included in scope, not deferred. Community contributes too much chunk volume to be skipped.
+- **B3 mechanism** — server-side success detection from `register_outputs` instead of a worker-call sibling endpoint. Schema (`UpdateJobStatusPayload` restricted to `running` / `failed`) confirmed correct as designed; agent's `update_job_status("done", ...)` calls removed.
+- **B2 schema** — DB column `jobs.cancelled_at` (survives restart, single source of truth). Unchanged.
+- **Render-overrides format** — JSON everywhere upstream of the wire boundary. Base64 only inside the env-var/Modal-payload encoders. Column names match content (`render_overrides_json` is JSON; the `render_overrides_b64` local variable is the only b64-named identifier and lives only inside the encoders).

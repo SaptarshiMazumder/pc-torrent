@@ -289,6 +289,7 @@ def build(
         coordinator=dispatch_coordinator,
         job_repo=job_repo,
         group_repo=group_repo,
+        machine_repo=machine_repo,
         queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
         telemetry_repo=telemetry_repo,

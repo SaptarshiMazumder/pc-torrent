@@ -1,0 +1,79 @@
+@startuml a2_machine_locking
+title A2 -- Community machine status state transitions
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam state {
+    BackgroundColor #fafafa
+    BorderColor #555555
+    FontSize 13
+}
+
+' ============================================================
+' States
+' ============================================================
+state "available" as available
+state "processing" as processing
+state "idle" as idle
+
+' ============================================================
+' Existing transitions (black)
+' ============================================================
+[*] --> available : agent registers\n/ set_available
+
+available --> idle : last_seen_at stale\n(auto, in get_available_community)
+idle --> available : reconnect + heartbeat
+
+' ============================================================
+' NEW transitions added by A2 (green, bold)
+' ============================================================
+available -[#009900,bold]-> processing : claim_next_for_machine\n[NEW: SQL also writes\nmachines.status='processing']
+
+processing -[#009900,bold]-> available : handle_chunk_succeeded\nhandle_chunk_failed\ncancel_render\n[NEW: lifecycle calls\nset_available on terminal]
+
+processing -[#009900,bold]-> idle : last_seen_at stale\n[NEW: stale-sweep WHERE\nclause now covers\n'processing' too]
+
+' ============================================================
+' Notes
+' ============================================================
+note right of processing
+  Allocator's get_available_community()
+  filters status='available' only.
+  Machines in 'processing' are excluded
+  from new dispatches.
+  Bug fixed: no more double-assignment.
+end note
+
+note left of available
+  Before A2:
+  Machine stays here for the entire
+  duration of a job. Allocator returns
+  it to a second concurrent render
+  -- same PC tries to run two jobs.
+end note
+
+note as ImplNote #fffbe6
+  **Files touched (4 files, ~25 lines)**
+
+  serverV2/repositories/job_repository.py
+    claim_next_for_machine: add third SQL
+    UPDATE machines SET status='processing'
+    conditional on a job row being returned
+
+  serverV2/repositories/machine_repository.py
+    get_available_community + mark_stale:
+    extend WHERE clause from
+    status='available' to
+    status IN ('available','processing')
+
+  serverV2/orchestrator/lifecycle.py
+    constructor accepts machine_repo
+    handle_chunk_succeeded / _failed / cancel_render:
+    if machine_type=='windows' and machine_id:
+        machine_repo.set_available(machine_id)
+
+  serverV2/bootstrap.py
+    pass machine_repo into RenderLifecycle()
+end note
+
+@enduml

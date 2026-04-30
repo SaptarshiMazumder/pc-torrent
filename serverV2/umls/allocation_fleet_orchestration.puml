@@ -1,0 +1,421 @@
+@startuml allocation_fleet_orchestration
+title Allocation, Fleet, and Orchestration Layers -- class structure and dependencies\n(green sticky notes mark recent work from this session)
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam noteBackgroundColor #ffffd0
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+' ============================================================
+' Layer 1 -- API (HTTP routes)
+' ============================================================
+package "API (api/routers)" <<Frame>> {
+    class JobsRouter {
+        + agent_failure(job_id, error)
+        + register_outputs(job_id, files)
+        + update_status(job_id, payload)
+        + next_for_machine(machine_id)
+        + retry(job_id)
+    }
+    class RenderGroupsRouter {
+        + confirm_upload(group_id, payload)
+        + rerender(group_id, payload)
+        + cancel(group_id)
+    }
+    class InternalRouter {
+        + report_orphan(job_id, payload)
+    }
+}
+
+' ============================================================
+' Layer 2 -- Service (workflow + boundary validation)
+' ============================================================
+package "Service (services)" <<Frame>> {
+    class RenderGroupService {
+        + confirm_upload()
+        + rerender()
+        + cancel()
+    }
+    class JobService {
+        + next_for_machine(machine_id)
+        + register_outputs(job_id, files)
+        + update_status(...)
+    }
+
+    note right of RenderGroupService #ddffdd
+      RECENT (engine-boundary fix)
+      ----
+      confirm_upload + rerender now resolve
+      engine = override OR snapshot, then
+      WRITE it back into render_overrides
+      BEFORE serializing to JSON.
+      Single source of truth for both initial
+      dispatch AND retry paths.
+    end note
+
+    note right of JobService #ddffdd
+      RECENT (B3 re-shaped)
+      ----
+      register_outputs detects when
+      output_files reaches total_frames
+      and fires success_notifier ->
+      CallbackRouter.route(SUCCESS).
+      Workers cannot self-report "done";
+      the data IS the success signal.
+    end note
+}
+
+' ============================================================
+' Layer 3 -- Orchestration (the brain)
+' ============================================================
+package "Orchestration (orchestrator)" <<Frame>> {
+    class RenderOrchestrator <<facade>> {
+        + plan(engine, ...)
+        + execute(render_overrides_json, ...)
+        + on_job_failed(job_id, error)
+        + on_job_succeeded(job_id)
+        + on_job_progress(...)
+        + cancel_group(group_id)
+    }
+
+    class RenderLifecycle {
+        + plan(engine, ...)
+        + start_render(...)
+        + handle_chunk_failed(job_id, error)
+        + handle_chunk_succeeded(job_id)
+        + cancel_render(group_id)
+        - _try_dispatch_retry(job_id, error)
+        - _load_group_dispatch_context(grp)
+        - _record_telemetry(...)
+    }
+
+    class DispatchCoordinator {
+        + enqueue_and_flush(group_id, tasks, ctx)
+        - _dispatch_one(item)
+    }
+
+    class Dispatcher {
+        + dispatch_one(task, context, job_id)
+    }
+
+    note right of RenderLifecycle #ddffdd
+      RECENT (multiple)
+      ----
+      Phase B: retry path strict-checks
+        rj.render_overrides_json
+        (no silent fallback)
+      Engine fix: _load_group_dispatch_context
+        falls back to analysis_snapshot for
+        rows missing engine in overrides
+      A2: handle_chunk_succeeded/failed and
+        cancel_render now call
+        machine_repo.set_available() to
+        release the community lock on terminal
+    end note
+
+    note right of DispatchCoordinator #ddffdd
+      RECENT (Phase A)
+      ----
+      _engine_from_b64 -> _engine_from_json.
+      Reads engine from queue item's
+      render_overrides_json directly --
+      no base64 decode needed because the
+      column is now actually JSON.
+    end note
+}
+
+' ============================================================
+' Layer 4 -- Callbacks (single funnel for outcomes)
+' ============================================================
+package "Callbacks (callbacks)" <<Frame>> {
+    class CallbackRouter {
+        + route(job_id, outcome, ...)
+    }
+
+    class SuccessHandler {
+        + handle(job_id, group_id)
+    }
+    class FailureHandler {
+        + handle(job_id, error)
+    }
+
+    note right of CallbackRouter #ddffdd
+      ROLE
+      ----
+      Single funnel for monitor/agent
+      outcome events. Has is_job_terminal
+      short-circuit guard so duplicate
+      success/failure signals collapse to
+      a single transition.
+
+      RECENT (B3 re-shape):
+      JobService.register_outputs now
+      routes SUCCESS through here on
+      verified completion.
+
+      PENDING (C2):
+      agent_failure endpoint will be moved
+      onto this layer instead of calling
+      orchestrator.on_job_failed directly.
+    end note
+}
+
+' ============================================================
+' Layer 5 -- Allocation (target picking)
+' ============================================================
+package "Allocation (orchestrator/allocation)" <<Frame>> {
+    interface FrameAllocator <<protocol>> {
+        + allocate(...)
+        + allocate_retry(chunk_request, resources)
+    }
+
+    class DefaultAllocationStrategy
+    class EconomyAllocationStrategy
+    class FastRenderAllocationStrategy
+
+    DefaultAllocationStrategy     ..|> FrameAllocator
+    EconomyAllocationStrategy     ..|> FrameAllocator
+    FastRenderAllocationStrategy  ..|> FrameAllocator
+
+    class ChunkRequest <<dataclass>> {
+        + group_id, chunk_index
+        + frame_start, frame_end
+        + total_frames, attempt
+        + excluded_machine_ids
+        + excluded_serverless_capabilities
+        + file_size_bytes
+        + engine
+    }
+
+    class ValidationContext <<dataclass>> {
+        + engine
+    }
+
+    interface TargetValidator <<protocol>> {
+        + is_valid(target, ctx)
+    }
+
+    class EngineCompatibilityValidator
+    EngineCompatibilityValidator ..|> TargetValidator
+
+    note right of EngineCompatibilityValidator #ddffdd
+      RECENT (Phase B)
+      ----
+      Strict: raises ValueError when
+      ctx.engine is None (was previously
+      a silent return-True fallback).
+
+      Gates EEVEE off:
+        modal_serverless (no graphics caps)
+        community (proved empirically
+          WSL2 + NVCT ships only compute
+          libs to containers)
+      Allows: vast_serverless
+    end note
+}
+
+' ============================================================
+' Layer 6 -- Fleet (per-provider dispatch + monitoring)
+' ============================================================
+package "Fleet (fleets)" <<Frame>> {
+    class FleetRegistry {
+        + register(strategy)
+        + get(fleet)
+    }
+
+    interface IFleetStrategy <<protocol>> {
+        + dispatch(task, context, job_id)
+        + cancel(provider_job_id)
+        + stop_monitoring(job_id)
+        + provider_job_id_from_job(job)
+    }
+
+    package "vast" <<Frame>> {
+        class VastFleetStrategy
+        class VastClient
+        class VastCallbackHandler
+        class VastInstanceMonitor
+        class VastRecovery
+    }
+
+    package "modal" <<Frame>> {
+        class ModalFleetStrategy
+        class ModalClient
+        class ModalCallbackHandler
+        class ModalJobMonitor
+        class ModalRecovery
+    }
+
+    package "community" <<Frame>> {
+        class CommunityStrategy
+        class CommunityMonitor
+    }
+
+    VastFleetStrategy      ..|> IFleetStrategy
+    ModalFleetStrategy     ..|> IFleetStrategy
+    CommunityStrategy      ..|> IFleetStrategy
+
+    note right of VastClient #ddffdd
+      RECENT (Phase A)
+      ----
+      Accepts render_overrides_json.
+      Encodes to base64 ONLY here, right
+      before setting RENDER_OVERRIDES_B64
+      env var on the docker container.
+      Same pattern in modal/client.py.
+    end note
+
+    note right of CommunityStrategy
+      No provider API call. Dispatch is
+      just a JobRepository insert -- the
+      DB row IS the message to the agent
+      (which polls /jobs/next-for-machine).
+    end note
+
+    note right of CommunityMonitor #ffd0d0
+      Pre-existing inconsistency:
+      reports failures by calling
+      orchestrator.on_job_failed
+      directly (Vast/Modal go through
+      CallbackRouter via _on_failure
+      callback). Out of C2 scope but
+      noted as follow-up.
+    end note
+}
+
+' ============================================================
+' Layer 7 -- Repositories (DB I/O only)
+' ============================================================
+package "Repositories (repositories)" <<Frame>> {
+    class JobRepository {
+        --table jobs--
+        + claim_next_for_machine
+        + create / mark_done / mark_failed
+        + merge_output_files
+        + get_raw_by_id
+    }
+    class MachineRepository {
+        --table machines--
+        + set_processing
+        + set_available
+        + get_available_community
+        + mark_stale
+    }
+    class RenderGroupRepository {
+        --table render_groups--
+        + get_by_id
+        + full_update
+    }
+    class DispatchQueueRepository {
+        --table dispatch_queue--
+        + enqueue / dequeue / drain
+    }
+    class InProgressChunkRepository {
+        --in-memory ledger--
+        + claim_or_replace
+        + release / current_job_for
+    }
+
+    note right of JobRepository #ddffdd
+      RECENT (A2)
+      ----
+      claim_next_for_machine atomically
+      writes machines.status='processing'
+      alongside the job claim.
+
+      RECENT (Phase A)
+      ----
+      jobs.render_overrides_json column
+      now actually contains JSON. The
+      column name and content match
+      end-to-end (was previously holding
+      base64 -- the lie that started
+      the engine-override bug chain).
+    end note
+
+    note right of MachineRepository #ddffdd
+      RECENT (A2)
+      ----
+      Stale-sweep WHERE clause now covers
+      'processing' too. Crashed-agent locks
+      self-heal on the next allocator query.
+    end note
+
+    note right of DispatchQueueRepository #ddffdd
+      RECENT (Phase A)
+      ----
+      Column renamed render_overrides_b64
+      -> render_overrides_json. Holds JSON
+      end-to-end like the jobs table.
+    end note
+}
+
+' ============================================================
+' Cross-layer dependencies
+' ============================================================
+
+' API -> Service / Orchestrator / Callbacks
+JobsRouter           --> JobService            : status, register, claim
+JobsRouter           --> RenderOrchestrator    : agent_failure (direct, until C2)
+RenderGroupsRouter   --> RenderGroupService    : delegate
+InternalRouter       --> RenderOrchestrator    : orphan reports
+
+' Service -> Orchestrator + Callbacks
+RenderGroupService   --> RenderOrchestrator    : plan + execute + cancel
+JobService           --> CallbackRouter        : success_notifier (B3)
+
+' Orchestrator composition
+RenderOrchestrator   *-- RenderLifecycle       : facades over
+RenderLifecycle      *-- DispatchCoordinator   : enqueue + drain
+DispatchCoordinator  *-- Dispatcher
+
+' Lifecycle -> Allocation
+RenderLifecycle      ..> FrameAllocator        : picks strategy by tier
+RenderLifecycle      ..> ChunkRequest          : builds for retry
+
+' Lifecycle -> Repositories
+RenderLifecycle      --> JobRepository         : writes terminal state
+RenderLifecycle      --> MachineRepository     : NEW(A2) -- release on terminal
+RenderLifecycle      --> RenderGroupRepository : reads on retry
+RenderLifecycle      --> InProgressChunkRepository : ledger ops
+
+' Allocation -> Validators
+FrameAllocator       ..> ValidationContext     : per-allocation
+FrameAllocator       ..> TargetValidator       : filter targets
+
+' Dispatcher -> Fleet
+Dispatcher           --> FleetRegistry         : strategy lookup
+FleetRegistry        ..> IFleetStrategy        : dispatch + cancel
+
+' Fleet inner wiring
+VastFleetStrategy    --> VastClient
+VastFleetStrategy    --> VastCallbackHandler
+VastCallbackHandler  *-- VastInstanceMonitor
+VastRecovery         --> VastCallbackHandler
+
+ModalFleetStrategy   --> ModalClient
+ModalFleetStrategy   --> ModalCallbackHandler
+ModalCallbackHandler *-- ModalJobMonitor
+ModalRecovery        --> ModalCallbackHandler
+
+CommunityStrategy    --> JobRepository
+CommunityMonitor     --> RenderOrchestrator : direct (out of CallbackRouter)
+
+' Fleet strategies write job rows
+VastFleetStrategy    --> JobRepository         : create job
+ModalFleetStrategy   --> JobRepository
+CommunityStrategy    --> JobRepository
+
+' Callbacks -> Orchestrator
+CallbackRouter       --> SuccessHandler
+CallbackRouter       --> FailureHandler
+SuccessHandler       --> RenderOrchestrator    : on_job_succeeded
+FailureHandler       --> RenderOrchestrator    : on_job_failed
+
+' In-process monitors -> CallbackRouter (via _on_failure / _on_success closures)
+VastInstanceMonitor  ..> CallbackRouter        : via on_failure / on_success
+ModalJobMonitor      ..> CallbackRouter        : via on_failure / on_success
+
+@enduml

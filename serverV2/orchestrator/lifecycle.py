@@ -53,6 +53,7 @@ from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
 
@@ -98,6 +99,7 @@ class RenderLifecycle:
         coordinator: DispatchCoordinator,
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
+        machine_repo: MachineRepository,
         queue_repo: DispatchQueueRepository,
         in_progress_repo: InProgressChunkRepository,
         telemetry_repo: TelemetryRepository,
@@ -110,6 +112,7 @@ class RenderLifecycle:
         self._coordinator = coordinator
         self._job_repo = job_repo
         self._group_repo = group_repo
+        self._machine_repo = machine_repo
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
         self._telemetry = telemetry_repo
@@ -276,6 +279,13 @@ class RenderLifecycle:
         # least one active job during the transition (prevents premature
         # group-failed status flicker in the UI).
         self._job_repo.mark_failed(job_id, error)
+
+        # Release the community machine lock so the allocator can return
+        # this PC for the next dispatch (or the just-queued retry, if it
+        # landed on this PC).  Vast/Modal have no machines row.
+        machine_id = (raw.get("machine_id") if raw else None)
+        if failed_fleet == "windows" and machine_id:
+            self._machine_repo.set_available(machine_id)
 
         if retried:
             log.info("Job %s failed but retry dispatched: %s", job_id, error)
@@ -581,24 +591,6 @@ class RenderLifecycle:
                     if isinstance(engine_value, str):
                         engine = engine_value
 
-        # Old rows submitted before the boundary fix at confirm_upload /
-        # rerender don't have engine baked into render_overrides_json.
-        # Mirror the same resolution rule the worker uses: fall back to
-        # the analyzer's detected engine.  Same logic as
-        # _engine_from_snapshot in render_groups.service — duplicated
-        # here because importing across the orchestrator/service line
-        # would invert the dependency.
-        if engine is None:
-            raw_snapshot = grp.get("analysis_snapshot_json")
-            if raw_snapshot:
-                snapshot = json.loads(raw_snapshot)
-                if isinstance(snapshot, dict):
-                    heaviness = snapshot.get("heaviness")
-                    if isinstance(heaviness, dict):
-                        snapshot_engine = heaviness.get("render_engine")
-                        if isinstance(snapshot_engine, str) and snapshot_engine:
-                            engine = snapshot_engine
-
         tier_raw = grp.get("tier")
         if isinstance(tier_raw, str):
             tier = tier_raw
@@ -632,6 +624,13 @@ class RenderLifecycle:
 
         self._job_repo.mark_done(job_id)
         log.info("Job %s marked done", job_id)
+
+        # Release the community machine lock so the allocator can return
+        # this PC for the next dispatch.  Vast/Modal jobs have no
+        # machines row, so this is a community-only side effect.
+        machine_id = raw.get("machine_id")
+        if fleet == "windows" and machine_id:
+            self._machine_repo.set_available(machine_id)
 
         try:
             self._record_telemetry(job_id, group_id, raw)
@@ -711,11 +710,17 @@ class RenderLifecycle:
         """Mark cancelled → stop monitors → drain queue + ledger → cancel
         provider-side jobs.  Order matters: marking the group cancelled
         first blocks any in-flight requeues via the DB guard."""
-        # 1. Mark group + active jobs cancelled in the DB
+        # 1. Mark group + active jobs cancelled in the DB.  Also release
+        # any community machine locks so the freed PCs become available
+        # for new dispatches immediately (auto-demotion would catch them
+        # eventually via heartbeat-stale, but this is faster and clean).
         self._group_repo.update_status(group_id, "cancelled")
         jobs = self._job_repo.get_active_by_group(group_id)
         for job in jobs:
             self._job_repo.update_status(job["id"], "cancelled", error="Cancelled by user")
+            machine_id = job.get("machine_id")
+            if (job.get("machine_type") or "") == "windows" and machine_id:
+                self._machine_repo.set_available(machine_id)
 
         # 2. Stop monitor threads so they stop acting on this group
         for job in jobs:

@@ -28,7 +28,7 @@ class MachineRepository:
         execute(
             """
             UPDATE machines SET status = 'idle'
-            WHERE status = 'available'
+            WHERE status IN ('available', 'processing')
               AND machine_type = 'windows'
               AND (last_seen_at IS NULL OR last_seen_at < %s)
             """,
@@ -78,7 +78,7 @@ class MachineRepository:
         execute(
             """
             UPDATE machines SET status = 'idle'
-            WHERE status = 'available'
+            WHERE status IN ('available', 'processing')
               AND machine_type = 'windows'
               AND (last_seen_at IS NULL OR last_seen_at < %s)
             """,

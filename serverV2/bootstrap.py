@@ -72,6 +72,7 @@ class Container:
         self,
         config: AppConfig,
         orchestrator: RenderOrchestrator,
+        callback_router: CallbackRouter,
         dispatch_coordinator: DispatchCoordinator,
         fleet_registry: FleetRegistry,
         community_monitor: CommunityMonitor,
@@ -90,6 +91,7 @@ class Container:
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
+        self.callback_router = callback_router
         self.dispatch_coordinator = dispatch_coordinator
         self.fleet_registry = fleet_registry
         self.community_monitor = community_monitor
@@ -322,7 +324,7 @@ def build(
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,
-        orchestrator=orchestrator,
+        on_failure=_on_failure,
         stale_seconds=cfg.failover_stale_seconds,
     )
 
@@ -373,6 +375,7 @@ def build(
     return Container(
         config=cfg,
         orchestrator=orchestrator,
+        callback_router=callback_router,
         dispatch_coordinator=dispatch_coordinator,
         fleet_registry=registry,
         community_monitor=community_monitor,

@@ -1,48 +1,55 @@
 @startuml c2_agent_failure_routing
-title C2 -- agent-failure routing through CallbackRouter
+title C2 -- ALL failure sources now funnel through CallbackRouter
 
 skinparam shadowing false
 skinparam BackgroundColor white
 skinparam sequenceArrowThickness 1.2
 
-actor "community agent" as Agent
-participant "POST /jobs/{id}/agent-failure\n(api/routers/jobs.py)" as API
+note as Sources #ddffdd
+  **Failure sources -- all migrated post-C2**
+  ----
+  1. Community agent (HTTP, external)
+       POST /jobs/{id}/agent-failure
+       -> _get_callback_router().route(FAILURE)
+
+  2. Backup monitor / Cloud Run Job (HTTP, internal)
+       POST /internal/orphan/{id}
+       -> _callback_router.route(FAILURE)
+
+  3. Vast in-process monitor (thread)
+       -> _on_failure closure
+       -> callback_router.route(FAILURE)
+
+  4. Modal in-process monitor (thread)
+       -> _on_failure closure
+       -> callback_router.route(FAILURE)
+
+  5. CommunityMonitor (leader thread)
+       Detects: group-terminal,
+                machine-offline
+       -> _on_failure closure
+       -> callback_router.route(FAILURE)
+end note
+
+participant "any failure source\n(see list)" as Source
 participant "CallbackRouter\n(callbacks/router.py)" as CR
 participant "FailureHandler\n(callbacks/failure_handler.py)" as FH
 participant "RenderOrchestrator" as RO
 participant "RenderLifecycle\n.handle_chunk_failed" as LC
 
-Agent -> API : POST agent-failure(job_id, error)
-
-note over API #ffe5e5
-  BEFORE C2 (current):
-  agent_failure() calls
-  RenderOrchestrator.on_job_failed
-  DIRECTLY. Skips CallbackRouter
-  and its is_job_terminal guard.
-end note
-
-note over API #ddffdd
-  AFTER C2:
-  agent_failure() calls
-  callback_router.route(
-      job_id, FAILURE, error)
-  Same path Vast/Modal monitors
-  already use via _on_failure.
-end note
-
-API -[#009900,bold]-> CR : route(job_id, FAILURE, error)
+Source -> CR : route(job_id, FAILURE, error)
 CR -> CR : is_job_terminal(job_id)?
 
 alt job already terminal (idempotent skip)
-    CR -[#888888]-> API : log + return
-    API -[#888888]-> Agent : 200 (no-op)
+    CR -[#888888]-> Source : log + return (no-op)
     note right of CR
-      Filters double-fire from
-      retried HTTP calls or
-      future failure sources.
-      Same guard Vast/Modal
-      already get.
+      Filters double-fire:
+      retried HTTP calls,
+      multiple sources signalling
+      the same job's failure,
+      or a late signal after the
+      job has already gone terminal
+      via another source.
     end note
 else job still active
     CR -> FH : handle(job_id, error)
@@ -52,32 +59,22 @@ else job still active
     LC --> RO : ok
     RO --> FH : ok
     FH --> CR : ok
-    CR --> API : ok
-    API --> Agent : 200
+    CR --> Source : ok
 end
 
 legend right
-  Files touched (3 files, ~10 lines)
+  Architectural rule (post-C2):
+  No caller reaches RenderOrchestrator.on_job_failed
+  directly. The only legitimate consumer of that method
+  is FailureHandler.handle, which itself only gets called
+  from inside CallbackRouter.route after the
+  is_job_terminal short-circuit.
   ----
-  serverV2/bootstrap.py
-    Container.__init__ adds callback_router field;
-    build_container stores the router on the container
-    (currently constructed but not exposed).
-
-  serverV2/main.py
-    jobs.init(c.job_service,
-             orchestrator=c.orchestrator,
-             callback_router=c.callback_router)
-
-  serverV2/api/routers/jobs.py
-    init() accepts callback_router; stores in
-    module-level _callback_router.
-    agent_failure body becomes:
-      _get_callback_router().route(
-        job_id=job_id,
-        outcome=CallbackOutcome.FAILURE,
-        error=error,
-      )
+  This was the agent-failure migration's natural extension:
+  if the rule is "every failure path goes through the guard,"
+  then EVERY direct caller had to go too -- not just
+  agent-failure. The orphan endpoint and CommunityMonitor
+  followed in the same change.
 end legend
 
 @enduml

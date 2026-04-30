@@ -11,7 +11,7 @@ function rangeLabel(task) {
   return start === end ? `Frame ${start}` : `Frames ${start}-${end}`;
 }
 
-function FailedChunkRow({ task, backendUrl }) {
+function FailedChunkRow({ task, backendUrl, onRefresh }) {
   const [retrying, setRetrying] = useState(false);
   const [showError, setShowError] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -22,8 +22,13 @@ function FailedChunkRow({ task, backendUrl }) {
     setActionError("");
     try {
       await retryJobChunk(backendUrl, task.job_id);
-      // Stay disabled until the next poll removes this row from the panel
-      // (is_retryable flips to false once the new sibling is pending).
+      // Server flipped the group from 'failed' back to 'running' inside
+      // retry_chunk_manually -> reconcile_group_status.  Force a refetch
+      // so the local cached status updates from 'failed' to 'running' --
+      // otherwise useJobs's polling filter (which excludes terminal
+      // groups) never refreshes this view and the new dispatched
+      // instance never appears.
+      if (onRefresh) onRefresh();
     } catch (e) {
       setRetrying(false);
       setActionError(e?.message || "Retry failed");
@@ -75,7 +80,7 @@ function FailedChunkRow({ task, backendUrl }) {
   );
 }
 
-export default function FailedChunksPanel({ tasks, backendUrl }) {
+export default function FailedChunksPanel({ tasks, backendUrl, onRefresh }) {
   const retryable = (tasks || []).filter((t) => t.is_retryable === true);
   if (retryable.length === 0) return null;
 
@@ -102,7 +107,7 @@ export default function FailedChunksPanel({ tasks, backendUrl }) {
 
       <div className="inst-fin-list">
         {retryable.map((task) => (
-          <FailedChunkRow key={task.job_id} task={task} backendUrl={backendUrl} />
+          <FailedChunkRow key={task.job_id} task={task} backendUrl={backendUrl} onRefresh={onRefresh} />
         ))}
       </div>
     </div>

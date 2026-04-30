@@ -91,11 +91,11 @@ def _wire_routers(c: Container) -> None:
     )
 
     machines.init(c.machine_service, machine_repo=c.machine_repo)
-    jobs.init(c.job_service, orchestrator=c.orchestrator)
+    jobs.init(c.job_service, orchestrator=c.orchestrator, callback_router=c.callback_router)
     render_groups.init(c.render_group_service, c.upload_coordinator)
     assets.init(c.asset_service)
     debug.init(aggregator=c.status_aggregator)
-    internal.init(c.orchestrator, c.config.orphan_secret)
+    internal.init(c.callback_router, c.config.orphan_secret)
 
     app.include_router(health.router)
     app.include_router(machines.router)

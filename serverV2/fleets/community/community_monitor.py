@@ -10,10 +10,12 @@ jobs every ``interval_sec`` and detects:
     2. Machine went offline (last_seen_at stale) while job is running —
        route FAILURE so the orchestrator can requeue on another machine.
 
-Both detections funnel through ``RenderOrchestrator.on_job_failed``.
-This monitor still reads job/group/machine repositories directly because
-its job is *discovery* — enumerating all candidate jobs — not single-job
-state inspection like Vast/Modal monitors do.
+Both detections funnel through the ``on_failure`` callback wired in
+bootstrap, which routes via ``CallbackRouter`` — same path Vast/Modal
+in-process monitors take.  This monitor still reads job/group/machine
+repositories directly because its job is *discovery* — enumerating all
+candidate jobs — not single-job state inspection like Vast/Modal
+monitors do.
 
 Runs on the leader Cloud Run instance only.
 """
@@ -24,15 +26,12 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import Callable
 
 from serverV2.core.models import RenderJob
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
-
-if TYPE_CHECKING:
-    from serverV2.orchestrator.orchestrator import RenderOrchestrator
 
 log = logging.getLogger(__name__)
 
@@ -45,14 +44,14 @@ class CommunityMonitor:
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
-        orchestrator: "RenderOrchestrator",
+        on_failure: Callable[[str, str], None],
         stale_seconds: int = 30,
         interval_sec: int = 10,
     ) -> None:
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._machine_repo = machine_repo
-        self._orchestrator = orchestrator
+        self._on_failure = on_failure
         self._stale_sec = stale_seconds
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
@@ -101,11 +100,10 @@ class CommunityMonitor:
             "Group %s is %s — reconciling community job %s",
             group["id"], group_status, job.job_id,
         )
-        # Orchestrator marks the job to match the group state
-        # (handle_chunk_failed sees group terminal → skip retry → mark_failed).
-        self._orchestrator.on_job_failed(
-            job.job_id, f"Group was {group_status}",
-        )
+        # CallbackRouter -> handle_chunk_failed sees group terminal
+        # -> skip retry -> mark_failed.  Idempotency guard filters
+        # double-fires (this scan + a parallel signal from elsewhere).
+        self._on_failure(job.job_id, f"Group was {group_status}")
 
     def _check_machine_offline(
         self, group: dict, job: RenderJob, stale_cutoff: str,
@@ -120,4 +118,4 @@ class CommunityMonitor:
         if job.remaining_frames() is None:
             # All frames already uploaded — let the success path finish.
             return
-        self._orchestrator.on_job_failed(job.job_id, "Machine went offline")
+        self._on_failure(job.job_id, "Machine went offline")

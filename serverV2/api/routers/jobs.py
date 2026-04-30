@@ -11,6 +11,8 @@ from serverV2.api.schemas.job import (
     UpdateJobProgressPayload,
     UpdateJobStatusPayload,
 )
+from serverV2.callbacks.router import CallbackRouter
+from serverV2.core.enums import CallbackOutcome
 from serverV2.orchestrator.lifecycle import (
     RETRY_REASON_HTTP_STATUS,
     ManualRetryError,
@@ -22,12 +24,19 @@ router = APIRouter(tags=["jobs"])
 
 _svc: JobService | None = None
 _orchestrator: RenderOrchestrator | None = None
+_callback_router: CallbackRouter | None = None
 
 
-def init(service: JobService, *, orchestrator: RenderOrchestrator) -> None:
-    global _svc, _orchestrator
+def init(
+    service: JobService,
+    *,
+    orchestrator: RenderOrchestrator,
+    callback_router: CallbackRouter,
+) -> None:
+    global _svc, _orchestrator, _callback_router
     _svc = service
     _orchestrator = orchestrator
+    _callback_router = callback_router
 
 
 def _get() -> JobService:
@@ -40,6 +49,12 @@ def _get_orchestrator() -> RenderOrchestrator:
     if _orchestrator is None:
         raise HTTPException(500, "Orchestrator not initialized")
     return _orchestrator
+
+
+def _get_callback_router() -> CallbackRouter:
+    if _callback_router is None:
+        raise HTTPException(500, "CallbackRouter not initialized")
+    return _callback_router
 
 
 # ---- status callbacks ----
@@ -78,16 +93,23 @@ def heartbeat(job_id: str, payload: JobHeartbeatPayload | None = None):
 def agent_failure(job_id: str, body: dict):
     """Community-agent monitor-equivalent path.  The agent is its own
     monitor — when its local render fails, it tells the orchestrator
-    here so the standard retry / drain / reconcile flow fires.  Vast
-    and Modal don't call this; their in-process monitors call
-    ``orchestrator.on_job_failed`` directly.
+    here so the standard retry / drain / reconcile flow fires.
+
+    Routes through CallbackRouter so the ``is_job_terminal`` short-
+    circuit guard kicks in for free — duplicate failure reports
+    (retried HTTP calls, late signals from a job already terminal via
+    another path) collapse to a single transition.  Same path Vast and
+    Modal in-process monitors take via the ``_on_failure`` closure
+    wired in bootstrap.
 
     Pairs with ``PUT /jobs/{job_id}/status`` (which the agent also
     calls to update the DB row) — both are needed: status writes the
     DB, agent-failure triggers the orchestration side-effects.
     """
     error = str(body.get("error") or "Agent reported failure")
-    _get_orchestrator().on_job_failed(job_id, error)
+    _get_callback_router().route(
+        job_id=job_id, outcome=CallbackOutcome.FAILURE, error=error,
+    )
     return {"job_id": job_id, "accepted": True}
 
 

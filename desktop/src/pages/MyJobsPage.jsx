@@ -379,6 +379,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
             galleryState={frameGalleries[selectedJobId]}
             openingFrameKey={openingFrameKey}
             onBack={handleBack}
+            onRefresh={onRefresh}
             {...getHandlers(jobForDetail)}
           />
         );

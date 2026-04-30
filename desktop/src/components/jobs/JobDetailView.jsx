@@ -57,6 +57,7 @@ function RenderGroupDetail({
   job, backendUrl, authToken, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
   onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove, onReRender,
+  onRefresh,
 }) {
   const id = job.group_id;
   const rawPct = typeof job.overall_progress_pct === "number" ? Math.max(0, Math.min(100, job.overall_progress_pct)) : null;
@@ -113,7 +114,7 @@ function RenderGroupDetail({
       {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
 
       {/* Stuck chunks the user can manually re-dispatch */}
-      <FailedChunksPanel tasks={job.tasks || []} backendUrl={backendUrl} />
+      <FailedChunksPanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
 
       {/* GPU Instances */}
       <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
@@ -248,6 +249,7 @@ export default function JobDetailView({
   job, backendUrl, authToken, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
   onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove, onReRender,
+  onRefresh,
 }) {
   const isGroup = !!job?.group_id;
   const displayName = resolveJobFilename(job);
@@ -301,6 +303,7 @@ export default function JobDetailView({
           galleryOpen={galleryOpen} galleryState={galleryState} openingFrameKey={openingFrameKey}
           onDownload={onDownload} onCancel={onCancel} onToggleGallery={onToggleGallery}
           onOpenFrame={onOpenFrame} onRemove={onRemove} onReRender={onReRender}
+          onRefresh={onRefresh}
         />
       ) : (
         <SingleJobDetail

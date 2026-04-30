@@ -249,22 +249,25 @@ cancel_one_job(job_id):
 
 ### Done
 
-- ❌ **A1** — engine-aware community images. **Abandoned.** Empirically proved Docker Desktop + WSL2 + NVCT ships only compute libs to containers (no EGL, no GLX, no Vulkan ICD). Community = Cycles only; EEVEE for community gated off in `EngineCompatibilityValidator`. Native-Windows Blender is the long-term path, out of scope here.
-- ✅ **B1** — community instance panel. Render-detail page shows community machines alongside Vast/Modal panels.
-- ✅ **B3 (re-shaped)** — community success path. Implemented via a cleaner mechanism than the original endpoint-pair plan: `JobService.register_outputs` detects `len(output_files) >= total_frames` and fires `success_notifier(job_id)` → `CallbackRouter.route(SUCCESS)` → `handle_chunk_succeeded`. The data-write IS the success signal — no worker-side `update_job_status("done")` call exists anymore (the schema rejects it; UpdateJobStatusPayload is restricted to `running` / `failed`). Same path serves Vast/Modal; in-process monitors collapse to no-ops on already-terminal jobs via `is_job_terminal` short-circuit.
-- ✅ **C1 (success half)** — success callbacks route through `CallbackRouter` automatically as a side effect of B3-reshaped. Failure half still pending (see below).
-- ✅ **Mid-cycle: engine resolution boundary fix** — at submission (`confirm_upload` and `rerender`), the resolved engine is written into `render_overrides` BEFORE persistence. `_load_group_dispatch_context` reads engine from `render_overrides_json` with fallback to `analysis_snapshot_json` for pre-fix rows. Initial dispatch and retry now read engine from the same persisted source.
-- ✅ **Mid-cycle: render_overrides_b64 → render_overrides_json refactor** — base64 encoding pushed down to the wire boundary (only inside `vast/client.py` + `modal/client.py` + agent's docker-run env-var construction). DispatchContext, all interfaces, all strategies, both recoveries, both callback handlers, lifecycle, coordinator, and the `dispatch_queue` column now use canonical JSON. Naming and content match end-to-end.
-- ✅ **Mid-cycle: defensive code purge** — silent `try/except → return {}` patterns removed from agent's `parse_job_render_overrides`, lifecycle's retry path, and Vast/Modal recovery. They now raise loud on missing-but-required fields. Boundary code (network/SDK calls) stays defensive.
-- ✅ **Mid-cycle: dead code removal** — `agent/ssh_agent.py`, `agent/provisioner.py`, `agent/provisioner_state.json` deleted (legacy SSH-based path, ~2400 lines).
+| Item | What |
+|---|---|
+| ❌ **A1** | Abandoned — WSL2 + NVCT ships only compute libs to containers. Community = Cycles-only; EEVEE for community gated off in `EngineCompatibilityValidator`. |
+| ✅ **B1** | Community instance panel on render-detail page. |
+| ✅ **A2** | Community machine locked to `'processing'` on claim, released on terminal. Stale-sweep covers `'processing'` for crashed-agent recovery. No more double-assignment. |
+| ✅ **B3 (re-shaped)** | `JobService.register_outputs` detects `output_files >= total_frames` → fires `success_notifier` → `CallbackRouter.route(SUCCESS)`. Workers can't self-report `done`; the schema rejects it. |
+| ✅ **C1 / C2** | Every failure entry point routes through `CallbackRouter` + `is_job_terminal` guard. Migrated: `agent-failure`, `internal/orphan`, `CommunityMonitor`. Only `FailureHandler.handle` calls `orchestrator.on_job_failed` directly now. |
+| ✅ Engine boundary fix | Resolved engine written into `render_overrides_json` at `confirm_upload` / `rerender` before persistence. Lifecycle reads strict, no fallback. |
+| ✅ overrides_b64 → overrides_json | Base64 only inside `vast/client.py`, `modal/client.py`, and the agent's docker-run env. JSON everywhere upstream. `dispatch_queue` column renamed. |
+| ✅ Defensive-code purge | Silent `except: return {}` patterns gone from agent's `parse_job_render_overrides`, lifecycle retry, recovery paths. Boundary code (HTTP/SDK) stays defensive. |
+| ✅ Dead-code removal | `agent/ssh_agent.py`, `agent/provisioner.py`, `agent/provisioner_state.json` deleted (~2400 lines, legacy SSH path). |
+| ✅ Frontend retry-refresh | Clicking Retry on a failed chunk now triggers `onRefresh` through `MyJobsPage → JobDetailView → RenderGroupDetail → FailedChunksPanel`. Local cache flips `failed → running`, polling resumes. |
+| ✅ UML refresh | `allocation_fleet_orchestration.puml` color-coded by source module. `c2_agent_failure_routing.puml` shows all 5 failure sources. |
 
 ### Pending — current priorities
 
 1. **A3** — stuck-worker detection (process-activity-based, phase-aware) + range-resume on download. **Re-designed this session** — see the A3 section above. Replaces the old file-size-only timeout with a robust process-metric-based detector that doesn't false-positive on slow R2 or heavy scene loads.
-2. **A2** — machine locking on community claim. Prevents double-assignment.
-3. **A4** — smarter ledger check on manual retry. Small.
-4. **C1 (failure half)** — route `agent-failure` endpoint through `CallbackRouter` for symmetry. Currently calls `orchestrator.on_job_failed` directly. Easy.
-5. **B2** — per-card cancel. Biggest remaining change, has DB migration. Defer until A3/A2/A4 ship.
+2. **A4** — smarter ledger check on manual retry. Small.
+3. **B2** — per-card cancel. Biggest remaining change, has DB migration. Defer until A3/A4 ship.
 
 ## Verification
 

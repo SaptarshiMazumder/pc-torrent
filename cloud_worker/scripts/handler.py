@@ -29,6 +29,14 @@ import time
 
 import requests
 
+from workflow.download import BlendDownloader
+from workflow.heartbeat import (
+    BytesProgress,
+    HeartbeatSender,
+    PhaseTracker,
+    ProcessSampler,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -55,61 +63,6 @@ RENDER_WEDGE_PATTERNS = (
     "EGL_NOT_INITIALIZED",
     "Failed to create OpenGL context",
 )
-
-
-# ---------------------------------------------------------------------------
-# Worker heartbeat
-# ---------------------------------------------------------------------------
-
-class WorkerHeartbeat:
-    """Sends periodic heartbeats to the backend so the server can detect stalls."""
-
-    def __init__(self, backend_url: str, job_id: str):
-        self.backend_url = backend_url.rstrip("/")
-        self.job_id = job_id
-        self._phase = "initializing"
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(
-            target=self._run, daemon=True,
-            name=f"heartbeat-{self.job_id[:8]}",
-        )
-        self._thread.start()
-        self._push()
-
-    def stop(self):
-        self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
-
-    def set_phase(self, phase: str):
-        with self._lock:
-            self._phase = phase
-        self._push()
-
-    def _payload(self) -> dict:
-        with self._lock:
-            return {"phase": self._phase}
-
-    def _push(self):
-        try:
-            requests.put(
-                f"{self.backend_url}/jobs/{self.job_id}/heartbeat",
-                json=self._payload(),
-                timeout=15,
-            ).raise_for_status()
-        except Exception as e:
-            log.warning(f"Heartbeat push failed for {self.job_id}: {e}")
-
-    def _run(self):
-        while not self._stop.is_set():
-            self._push()
-            self._stop.wait(HEARTBEAT_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +421,18 @@ def main() -> int:
         return 1
 
     log.info(f"Job {job_id}: frames {frame_start}-{frame_end} step {frame_step}")
-    heartbeat = WorkerHeartbeat(backend_url, job_id)
+
+    phase_tracker = PhaseTracker()
+    process_sampler = ProcessSampler()
+    bytes_progress = BytesProgress()
+    heartbeat = HeartbeatSender(
+        backend_url=backend_url,
+        job_id=job_id,
+        phase_tracker=phase_tracker,
+        process_sampler=process_sampler,
+        bytes_progress=bytes_progress,
+        interval_sec=HEARTBEAT_INTERVAL,
+    )
     heartbeat.start()
 
     try:
@@ -480,36 +444,28 @@ def main() -> int:
 
             # 1. Mark running
             _mark_running(backend_url, job_id)
-            heartbeat.set_phase("downloading")
 
-            # 2. Download .blend
-            log.info(f"Downloading blend from {blend_url}")
+            # 2. Download .blend (range-resume on connection drops)
+            heartbeat.set_phase("download")
+            filename = blend_url.rstrip("/").split("/")[-1]
             try:
-                r = requests.get(blend_url, timeout=300, allow_redirects=True, stream=True)
-                r.raise_for_status()
+                BlendDownloader().fetch(
+                    url=blend_url,
+                    input_dir=input_dir,
+                    filename=filename,
+                    on_bytes=bytes_progress.add,
+                )
             except Exception as e:
                 err = f"Failed to download blend file: {e}"
                 log.error(err)
                 _mark_failed(backend_url, job_id, err)
                 return 1
 
-            filename = blend_url.rstrip("/").split("/")[-1]
-            raw_path = os.path.join(input_dir, filename)
-            downloaded_bytes = 0
-            with open(raw_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
-                    f.write(chunk)
-                    downloaded_bytes += len(chunk)
-            log.info(f"File saved: {filename} ({downloaded_bytes / 1024 / 1024:.1f} MB)")
-
+            # bytes_progress is a download-phase signal; reset before
+            # leaving the phase so subsequent rules don't see stale data.
+            bytes_progress.reset()
             if filename.lower().endswith(".zip"):
-                import zipfile as _zf
-                heartbeat.set_phase("extracting")
-                log.info("Extracting zip archive...")
-                with _zf.ZipFile(raw_path, "r") as zf:
-                    zf.extractall(input_dir)
-                os.remove(raw_path)
-                log.info(f"Extracted contents: {os.listdir(input_dir)}")
+                heartbeat.set_phase("extract")
 
             blend_files = _find_blend_files(input_dir)
             if not blend_files:
@@ -555,7 +511,7 @@ def main() -> int:
                 "RENDER_DRIVER_SCRIPT": RENDER_DRIVER_SCRIPT,
             }
 
-            heartbeat.set_phase("starting_blender")
+            heartbeat.set_phase("loading")
             log.info(f"Starting render: {RENDER_SH}")
             proc = subprocess.Popen(
                 ["bash", RENDER_SH],

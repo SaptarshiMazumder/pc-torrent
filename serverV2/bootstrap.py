@@ -52,12 +52,13 @@ from serverV2.orchestrator.lifecycle_cancel import JobCanceler, RenderCanceler
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
-from serverV2.repositories.machine_heartbeat_repository import (
-    MachineHeartbeatRepository,
-)
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.services.machines.machine_heartbeat_repository import (
+    MachineHeartbeatRepository,
+)
+from serverV2.services.machines.machine_repository import MachineRepository
+from serverV2.services.machines.machine_state_writer import MachineStateWriter
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
@@ -142,6 +143,12 @@ def build(
     asset_repo = UserInputFileRepository()
     heartbeat_repo = HeartbeatRepository(redis)
     machine_heartbeat_repo = MachineHeartbeatRepository(redis)
+    # Single writer for the machines.status field -- every status
+    # mutation goes through here so PG and Redis stay in lockstep.
+    machine_state_writer = MachineStateWriter(
+        machine_repo=machine_repo,
+        machine_heartbeat_repo=machine_heartbeat_repo,
+    )
     progress_repo = ProgressRepository(redis)
     worker_start_repo = WorkerStartRepository(redis)
     in_progress_repo = InProgressChunkRepository()
@@ -265,12 +272,19 @@ def build(
 
     # -- resource picker: builds AvailableResources per allocation --
     def _resource_picker() -> AvailableResources:
-        # Liveness signal lives in Redis (sorted set written by the
-        # /machines/{id}/heartbeat route).  Postgres returns the static
-        # row data; we intersect with the alive cohort from Redis to
-        # filter out PCs whose agents have stopped pinging.  Falls back
-        # to the Postgres last_seen_at column if Redis is unavailable.
-        community = machine_repo.get_available_community()
+        # Two Redis signals, both consulted:
+        #   1. machines:status hash -- which agents have status='available'
+        #   2. machines:alive sorted set -- which agents are recently pinging
+        # Available community pool = (status=available) ∩ (alive within window).
+        # PG fallback per signal if Redis is down: status filter via
+        # SELECT WHERE status='available'; liveness intersect via PG's
+        # last_seen_at is no longer used -- Redis-down means we serve a
+        # stale alive picture for one tick, which is fine.
+        available_ids = machine_heartbeat_repo.available_ids()
+        if available_ids is not None:
+            community = machine_repo.get_community_by_ids(available_ids)
+        else:
+            community = machine_repo.get_available_community()
         alive_ids = machine_heartbeat_repo.alive_ids(cfg.machine_stale_seconds)
         if alive_ids is not None:
             community = [m for m in community if m.id in alive_ids]
@@ -331,7 +345,7 @@ def build(
     # -- cancellation: per-job atom + group-level multi-pass --
     job_canceler = JobCanceler(
         job_repo=job_repo,
-        machine_repo=machine_repo,
+        machine_state_writer=machine_state_writer,
         in_progress_repo=in_progress_repo,
         fleet_registry=registry,
     )
@@ -351,6 +365,7 @@ def build(
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,
+        machine_state_writer=machine_state_writer,
         queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
         telemetry_repo=telemetry_repo,
@@ -425,6 +440,7 @@ def build(
         machine_repo=machine_repo,
         heartbeat_repo=heartbeat_repo,
         machine_heartbeat_repo=machine_heartbeat_repo,
+        machine_state_writer=machine_state_writer,
         progress_repo=progress_repo,
         worker_start_repo=worker_start_repo,
         outputs_resolver=outputs_resolver,
@@ -437,6 +453,7 @@ def build(
     machine_service = MachineService(
         orchestrator=orchestrator,
         machine_heartbeat_repo=machine_heartbeat_repo,
+        state_writer=machine_state_writer,
         vast_config=cfg.vast,
         modal_config=cfg.modal,
     )

@@ -50,7 +50,8 @@ from serverV2.orchestrator.lifecycle_cancel import JobCanceler, RenderCanceler
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.services.machines.machine_repository import MachineRepository
+from serverV2.services.machines.machine_state_writer import MachineStateWriter
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
@@ -100,6 +101,7 @@ class RenderLifecycle:
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
+        machine_state_writer: MachineStateWriter,
         queue_repo: DispatchQueueRepository,
         in_progress_repo: InProgressChunkRepository,
         telemetry_repo: TelemetryRepository,
@@ -116,6 +118,7 @@ class RenderLifecycle:
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._machine_repo = machine_repo
+        self._state_writer = machine_state_writer
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
         self._telemetry = telemetry_repo
@@ -306,7 +309,7 @@ class RenderLifecycle:
             # Mark this row failed for state hygiene; do NOT retry.
             self._job_repo.mark_failed(job_id, error)
             if failed_fleet == "windows" and machine_id:
-                self._machine_repo.set_available(machine_id)
+                self._state_writer.set_status(machine_id, "available")
             log.info(
                 "handle_chunk_failed: signal for job %s superseded "
                 "(chunk %s ledger no longer points at this job)",
@@ -329,7 +332,7 @@ class RenderLifecycle:
         # this PC for the next dispatch (or the just-queued retry, if it
         # landed on this PC).  Vast/Modal have no machines row.
         if failed_fleet == "windows" and machine_id:
-            self._machine_repo.set_available(machine_id)
+            self._state_writer.set_status(machine_id, "available")
 
         if retried:
             log.info("Job %s failed but retry dispatched: %s", job_id, error)
@@ -696,7 +699,7 @@ class RenderLifecycle:
         # machines row, so this is a community-only side effect.
         machine_id = raw.get("machine_id")
         if fleet == "windows" and machine_id:
-            self._machine_repo.set_available(machine_id)
+            self._state_writer.set_status(machine_id, "available")
 
         try:
             self._record_telemetry(job_id, group_id, raw)

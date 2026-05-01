@@ -38,10 +38,10 @@ from serverV2.fleets.shared.pre_render_stall_detector import (
 )
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.machine_heartbeat_repository import (
+from serverV2.services.machines.machine_heartbeat_repository import (
     MachineHeartbeatRepository,
 )
-from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.services.machines.machine_repository import MachineRepository
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 

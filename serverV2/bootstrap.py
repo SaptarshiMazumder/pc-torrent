@@ -51,6 +51,9 @@ from serverV2.orchestrator.lifecycle import RenderLifecycle
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
+from serverV2.repositories.machine_heartbeat_repository import (
+    MachineHeartbeatRepository,
+)
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
@@ -136,6 +139,7 @@ def build(
     group_repo = RenderGroupRepository()
     asset_repo = UserInputFileRepository()
     heartbeat_repo = HeartbeatRepository(redis)
+    machine_heartbeat_repo = MachineHeartbeatRepository(redis)
     progress_repo = ProgressRepository(redis)
     worker_start_repo = WorkerStartRepository(redis)
     in_progress_repo = InProgressChunkRepository()
@@ -256,7 +260,15 @@ def build(
 
     # -- resource picker: builds AvailableResources per allocation --
     def _resource_picker() -> AvailableResources:
+        # Liveness signal lives in Redis (sorted set written by the
+        # /machines/{id}/heartbeat route).  Postgres returns the static
+        # row data; we intersect with the alive cohort from Redis to
+        # filter out PCs whose agents have stopped pinging.  Falls back
+        # to the Postgres last_seen_at column if Redis is unavailable.
         community = machine_repo.get_available_community()
+        alive_ids = machine_heartbeat_repo.alive_ids(cfg.machine_stale_seconds)
+        if alive_ids is not None:
+            community = [m for m in community if m.id in alive_ids]
         capabilities: list[FleetCapability] = []
         for ep in cfg.modal.endpoints:
             capabilities.append(FleetCapability(
@@ -352,9 +364,11 @@ def build(
         group_repo=group_repo,
         machine_repo=machine_repo,
         heartbeat_repo=heartbeat_repo,
+        machine_heartbeat_repo=machine_heartbeat_repo,
         on_failure=_on_failure,
         stall_detector=_make_pre_render_stall_detector(),
         stale_seconds=cfg.failover_stale_seconds,
+        demote_seconds=cfg.community_machine_demote_seconds,
     )
 
     # -- status providers + aggregator --
@@ -395,6 +409,7 @@ def build(
 
     machine_service = MachineService(
         orchestrator=orchestrator,
+        machine_heartbeat_repo=machine_heartbeat_repo,
         vast_config=cfg.vast,
         modal_config=cfg.modal,
     )

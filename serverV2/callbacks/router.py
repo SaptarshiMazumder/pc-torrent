@@ -5,7 +5,6 @@ matching ``RenderOrchestrator`` facade call:
 
     SUCCESS  → orchestrator.on_job_succeeded(job_id)
     FAILURE  → orchestrator.on_job_failed(job_id, error)
-    PROGRESS → orchestrator.on_job_progress(job_id, rendered, total)
 
 This layer holds zero state and touches no repositories.  It's the
 adapter between fleet-specific monitor code and the orchestrator,
@@ -46,9 +45,6 @@ class CallbackRouter:
         job_id: str,
         outcome: CallbackOutcome,
         error: str | None = None,
-        rendered_frames: int | None = None,
-        total_frames: int | None = None,
-        output_files: list[str] | None = None,
     ) -> None:
         # Skip already-terminal jobs to avoid double-processing of late
         # callbacks (e.g. a monitor tick fired between mark_done and the
@@ -66,8 +62,3 @@ class CallbackRouter:
             self._success.handle(job_id, "")
         elif outcome == CallbackOutcome.FAILURE:
             self._failure.handle(job_id, error or "Unknown failure")
-        elif outcome == CallbackOutcome.PROGRESS:
-            if rendered_frames is not None and total_frames is not None:
-                self._orchestrator.on_job_progress(
-                    job_id, rendered_frames, total_frames,
-                )

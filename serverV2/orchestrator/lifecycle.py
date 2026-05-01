@@ -692,19 +692,6 @@ class RenderLifecycle:
             except Exception as exc:
                 log.warning("drain_for_fleet(%s) failed: %s", fleet, exc)
 
-    # ------------------------------------------------------------------
-    # Story 2c: a chunk reported progress (frame uploaded)
-    # ------------------------------------------------------------------
-
-    def handle_chunk_progress(
-        self, job_id: str, rendered_frames: int, total_frames: int,
-    ) -> None:
-        """Update progress counters; on the first PROGRESS event, transition
-        pending → running, stamp ``started_at`` (telemetry uses it), and
-        roll the change up to the parent group."""
-        self._job_repo.update_progress(job_id, rendered_frames, total_frames)
-        self._promote_pending_to_running(job_id)
-
     def handle_chunk_running(self, job_id: str) -> None:
         """Transition pending → running without touching the progress
         counters.  Used by fleet monitors when the container reaches a

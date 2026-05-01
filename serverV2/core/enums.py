@@ -38,7 +38,6 @@ SERVERLESS_TYPE_VALUES: frozenset[str] = frozenset({t.value for t in _SERVERLESS
 class CallbackOutcome(str, Enum):
     SUCCESS = "success"
     FAILURE = "failure"
-    PROGRESS = "progress"
 
 
 class GroupStatus(str, Enum):

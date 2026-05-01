@@ -33,8 +33,11 @@ class MachineRepository:
 
     def get_available_community(self) -> list[CommunityMachine]:
         """All community machines whose persistent status is ``available``.
-        Caller (``_resource_picker``) intersects with Redis liveness to
-        filter for actually-online agents."""
+        PG-only path -- used as the fallback when the Redis status
+        cache is unavailable.  When Redis is up, the resource picker
+        prefers ``MachineHeartbeatRepository.available_ids()`` paired
+        with ``get_community_by_ids`` to avoid this WHERE-status scan.
+        """
         rows = query_all(
             """
             SELECT * FROM machines
@@ -42,6 +45,26 @@ class MachineRepository:
               AND machine_type = 'windows'
             ORDER BY gpu_vram_gb DESC
             """,
+        )
+        return [CommunityMachine.from_row(r, price_per_hour=self._community_price) for r in rows]
+
+    def get_community_by_ids(self, machine_ids: set[str] | list[str]) -> list[CommunityMachine]:
+        """Fetch full community-machine rows for the given ids.  Used by
+        the resource picker after it gets the available-ids set from
+        the Redis status cache.  Filters to machine_type='windows' so
+        a stale Redis entry pointing at a non-community row never
+        slips through."""
+        ids_list = list(machine_ids)
+        if not ids_list:
+            return []
+        rows = query_all(
+            """
+            SELECT * FROM machines
+            WHERE id = ANY(%s)
+              AND machine_type = 'windows'
+            ORDER BY gpu_vram_gb DESC
+            """,
+            (ids_list,),
         )
         return [CommunityMachine.from_row(r, price_per_hour=self._community_price) for r in rows]
 
@@ -72,6 +95,32 @@ class MachineRepository:
             "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
             (now, machine_id),
         )
+
+    def update_status(self, machine_id: str, status: str) -> None:
+        """Generic status mutation.  Used by ``MachineStateWriter`` so
+        every status change flows through one place (and gets mirrored
+        to Redis).  Stamps last_seen_at on flips to 'available' so the
+        legacy column stays informative."""
+        if status == "available":
+            now = datetime.now(timezone.utc).isoformat()
+            execute(
+                "UPDATE machines SET status = %s, last_seen_at = %s WHERE id = %s",
+                (status, now, machine_id),
+            )
+        else:
+            execute(
+                "UPDATE machines SET status = %s WHERE id = %s",
+                (status, machine_id),
+            )
+
+    def get_status(self, machine_id: str) -> str | None:
+        """Fallback for when the Redis status cache is unavailable.
+        Returns the row's ``status`` column or None if no such machine."""
+        row = query_one(
+            "SELECT status FROM machines WHERE id = %s",
+            (machine_id,),
+        )
+        return row["status"] if row else None
 
     def demote_ghosts(self, alive_ids: set[str]) -> int:
         """Demote 'available' community machines whose ids are NOT in

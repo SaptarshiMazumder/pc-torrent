@@ -37,7 +37,7 @@ from typing import Any
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.services.machines.machine_state_writer import MachineStateWriter
 
 log = logging.getLogger(__name__)
 
@@ -48,12 +48,12 @@ class JobCanceler:
         self,
         *,
         job_repo: JobRepository,
-        machine_repo: MachineRepository,
+        machine_state_writer: MachineStateWriter,
         in_progress_repo: InProgressChunkRepository,
         fleet_registry: FleetRegistry,
     ) -> None:
         self._job_repo = job_repo
-        self._machine_repo = machine_repo
+        self._state_writer = machine_state_writer
         self._in_progress = in_progress_repo
         self._fleet = fleet_registry
 
@@ -73,7 +73,7 @@ class JobCanceler:
         machine_id = raw.get("machine_id")
         fleet = (raw.get("machine_type") or "").strip()
         if fleet == "windows" and machine_id:
-            self._machine_repo.set_available(machine_id)
+            self._state_writer.set_status(machine_id, "available")
 
     def stop_monitoring(self, raw: dict[str, Any]) -> None:
         """Step 2.  Halt the per-job monitor thread (Vast/Modal).

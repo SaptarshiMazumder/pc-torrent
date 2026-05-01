@@ -15,6 +15,7 @@ from serverV2.core.value_objects import sanitize_filename
 from serverV2.infrastructure import storage
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
+from serverV2.services.machines.machine_state_writer import MachineStateWriter
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class JobService:
         machine_repo,
         heartbeat_repo,
         machine_heartbeat_repo,
+        machine_state_writer: MachineStateWriter,
         progress_repo,
         worker_start_repo,
         outputs_resolver: OutputsResolver,
@@ -45,6 +47,7 @@ class JobService:
         self._machines = machine_repo
         self._heartbeats = heartbeat_repo
         self._machine_hb = machine_heartbeat_repo
+        self._state_writer = machine_state_writer
         self._progress = progress_repo
         self._worker_start = worker_start_repo
         self._outputs = outputs_resolver
@@ -225,11 +228,33 @@ class JobService:
     # ---- next for machine (desktop agent polling) ----
 
     def next_for_machine(self, machine_id: str) -> dict[str, Any] | None:
-        # The poll IS the agent's idle-phase liveness signal.  ZADD on
-        # every poll keeps the machine in machines:alive without requiring
-        # a separate /machines/{id}/heartbeat call.  During a render the
+        # 1. The poll IS the agent's idle-phase liveness signal.  ZADD
+        # on every poll keeps the machine in machines:alive without a
+        # separate /machines/{id}/heartbeat call.  During a render the
         # agent isn't polling -- liveness flows through the per-job
         # heartbeat (Redis job:{id}:hb) instead.
         self._machine_hb.record(machine_id)
-        return self._jobs.claim_next_for_machine(machine_id)
+
+        # 2. Self-heal: a polling agent is by definition alive AND not
+        # rendering, so the machine row should say 'available'.  If a
+        # demote_ghosts sweep clobbered it (status='idle') because the
+        # set_available -> first-poll window left machines:alive empty,
+        # this flip undoes the false demote.  Read Redis first; fall
+        # back to PG if the cache is missing or unavailable.
+        cached = self._machine_hb.get_status(machine_id)
+        if cached is None:
+            cached = self._machines.get_status(machine_id)
+        if cached == "idle":
+            self._state_writer.set_status(machine_id, "available")
+
+        # 3. Try to claim a pending job for this machine.
+        job = self._jobs.claim_next_for_machine(machine_id)
+        if job is not None:
+            # 4. Lock the machine -- allocator stops returning it as
+            # available for the next dispatch.  Write goes through the
+            # state writer so PG and Redis stay in sync.  Released by
+            # the lifecycle on success/failure/cancel; auto-demoted by
+            # the stale-sweep if the agent crashes.
+            self._state_writer.set_status(machine_id, "processing")
+        return job
 

@@ -8,9 +8,10 @@ from uuid import uuid4
 
 from serverV2.core.value_objects import now_iso
 from serverV2.infrastructure.db import execute, query_one, query_all
-from serverV2.repositories.machine_heartbeat_repository import (
+from serverV2.services.machines.machine_heartbeat_repository import (
     MachineHeartbeatRepository,
 )
+from serverV2.services.machines.machine_state_writer import MachineStateWriter
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -32,11 +33,13 @@ class MachineService:
         *,
         orchestrator: "RenderOrchestrator",
         machine_heartbeat_repo: MachineHeartbeatRepository,
+        state_writer: MachineStateWriter,
         vast_config=None,
         modal_config=None,
     ) -> None:
         self._orchestrator = orchestrator
         self._machine_hb = machine_heartbeat_repo
+        self._state_writer = state_writer
         self._vast_cfg = vast_config
         self._modal_cfg = modal_config
 
@@ -103,6 +106,10 @@ class MachineService:
                 ),
             )
 
+        # Mirror the freshly-written 'idle' status into Redis so the
+        # allocator's read path and the heartbeat self-heal don't see
+        # a missing entry on first sight.
+        self._machine_hb.set_status(machine_id, "idle")
         return {"machine_id": machine_id}
 
     def set_available(self, machine_id: str) -> dict[str, bool]:
@@ -116,10 +123,14 @@ class MachineService:
         # standard failure path so retries fire — same flow Vast/Modal
         # use when their per-job monitor sees a container disappear.
         self._orchestrator.handle_community_machine_idle(machine_id)
-        execute(
-            "UPDATE machines SET status = 'available', last_seen_at = %s WHERE id = %s",
-            (now_iso(), machine_id),
-        )
+        # Write-through PG + Redis so demote_ghosts can never see a
+        # status='available' machine without a corresponding entry in
+        # the Redis status cache.
+        self._state_writer.set_status(machine_id, "available")
+        # Also seed the Redis machines:alive sorted set so the agent
+        # is considered live from this instant -- the next poll's
+        # ZADD just refreshes the same entry.
+        self._machine_hb.record(machine_id)
         return {"success": True}
 
     def set_idle(self, machine_id: str) -> dict[str, bool]:
@@ -129,10 +140,7 @@ class MachineService:
         # Drop the agent from the alive set in Redis -- the allocator's
         # liveness intersect should immediately stop returning this PC.
         self._machine_hb.clear(machine_id)
-        execute(
-            "UPDATE machines SET status = 'idle' WHERE id = %s",
-            (machine_id,),
-        )
+        self._state_writer.set_status(machine_id, "idle")
         return {"success": True}
 
     def list_all(self) -> list[dict[str, Any]]:

@@ -216,11 +216,14 @@ class JobRepository:
         )
 
     def claim_next_for_machine(self, machine_id: str) -> dict[str, Any] | None:
+        """Claim the oldest pending job for this machine and flip it to
+        'running'.  Does NOT touch the machines row -- the caller
+        (``JobService.next_for_machine``) routes the
+        machines.status='processing' write through ``MachineStateWriter``
+        so PG and Redis stay in sync.
+        """
         from serverV2.infrastructure.db import execute_returning
-        # Liveness signal lives in Redis (MachineHeartbeatRepository).  The
-        # /machines/{id}/heartbeat route writes there; no need to update
-        # machines.last_seen_at on every poll.
-        job = execute_returning(
+        return execute_returning(
             """
             UPDATE jobs SET status = 'running', last_heartbeat_at = %s
             WHERE id = (
@@ -233,16 +236,6 @@ class JobRepository:
             """,
             (_now_iso(), machine_id),
         )
-        if job:
-            # Lock the machine so the allocator stops returning it as
-            # available for the next dispatch.  Released in lifecycle on
-            # success/failure/cancel; auto-demoted to 'idle' by the
-            # stale-sweep in MachineRepository if the agent crashes.
-            execute(
-                "UPDATE machines SET status = 'processing' WHERE id = %s",
-                (machine_id,),
-            )
-        return job
 
     # ---- user-scoped reads ----
 

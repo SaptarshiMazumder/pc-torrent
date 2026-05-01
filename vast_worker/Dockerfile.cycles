@@ -1,0 +1,25 @@
+FROM ghcr.io/saptarshimazumder/pcrent-blender-base-cycles:5.0.1
+
+# Vast worker -- cycles variant.  The base image owns Blender install
+# and apt deps; this image adds the protocol library + render scripts
+# + Vast handler.
+
+# Render scripts
+COPY vast_worker/scripts/render.sh /scripts/render.sh
+COPY vast_worker/scripts/progress_handler.py /scripts/progress_handler.py
+COPY vast_worker/scripts/render_driver.py /scripts/render_driver.py
+COPY vast_worker/scripts/pre_load.py /scripts/pre_load.py
+RUN sed -i 's/\r$//' /scripts/render.sh && chmod +x /scripts/render.sh
+
+# Shared protocol library (BackendClient, HeartbeatSender,
+# BlendDownloader, IncrementalOutputUploader, RangeResumer).
+COPY worker_core/ /worker_core/
+
+# Install worker_core's runtime deps from its own requirements file --
+# single source of truth shared with modal_worker's pip_install_from_requirements.
+RUN pip3 install --no-cache-dir -r /worker_core/requirements.txt
+
+# Vast handler entry point (reads JOB_ID/BLEND_URL/etc. from env).
+COPY vast_worker/scripts/handler.py /handler.py
+
+CMD ["python3", "-u", "/handler.py"]

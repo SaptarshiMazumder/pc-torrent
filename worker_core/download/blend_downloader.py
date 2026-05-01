@@ -1,8 +1,8 @@
 """BlendDownloader -- orchestrate URL -> file -> (extract zip if needed).
 
 Doesn't pick which .blend to render against if the bundle has many --
-that's _choose_render_target_blend's job in handler.py.  This module
-only owns "fetch the bytes and lay them out on disk".
+that's the fleet handler's job.  This module only owns "fetch the
+bytes and lay them out on disk".
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 import zipfile
 from typing import Callable
 
-from .range_resumer import RangeResumer
+from worker_core.download.range_resumer import RangeResumer
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class BlendDownloader:
         filename: str,
         on_bytes: Callable[[int], None] | None = None,
     ) -> str:
-        """Download `url` into `input_dir/filename`.  If filename ends
+        """Download ``url`` into ``input_dir/filename``.  If filename ends
         in ``.zip``, extract into ``input_dir`` and remove the archive.
 
         ``on_bytes(n)`` -- per-chunk progress callback (n = chunk size,

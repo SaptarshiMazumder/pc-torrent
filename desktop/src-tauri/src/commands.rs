@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 
 // Embed the prepare script at compile time so it ships inside the binary
-const PREPARE_BLEND_PY: &str = include_str!("../../../cloud_worker/scripts/prepare_blend.py");
+const PREPARE_BLEND_PY: &str = include_str!("../../../vast_worker/scripts/prepare_blend.py");
 const ANALYZE_BLEND_PY: &str = r#"
 import json
 import bpy

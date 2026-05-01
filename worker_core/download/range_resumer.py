@@ -48,11 +48,11 @@ class RangeResumer:
         *,
         on_progress: Callable[[int], None] | None = None,
     ) -> int:
-        """Download `url` to `dest_path`.  Returns total bytes written.
+        """Download ``url`` to ``dest_path``.  Returns total bytes written.
 
-        ``on_progress(n)`` is invoked after every chunk write, where
-        ``n`` is the byte count of THIS chunk (not cumulative).  Caller
-        decides whether to accumulate.  Optional.
+        ``on_progress(n)`` invoked after every chunk write, where ``n`` is
+        the byte count of THIS chunk (not cumulative).  Caller decides
+        whether to accumulate.  Optional.
 
         Raises RuntimeError after ``max_attempts`` consecutive failures.
         """

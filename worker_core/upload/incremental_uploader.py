@@ -1,15 +1,16 @@
-"""IncrementalOutputUploader — upload output frames to R2 as soon as they
-appear on disk, so already-rendered frames are safe if the render later
-fails.
+"""IncrementalOutputUploader — upload output frames as they appear.
 
 Scans ``output_dir`` every ``OUTPUT_SCAN_INTERVAL`` seconds.  A file is
-"ready" after we observe it with the same size on two consecutive scans
-(Blender finishes writing a frame before we see its final size).  Ready
-files are uploaded via :meth:`BackendClient.request_upload_urls` and
-registered via :meth:`BackendClient.register_outputs`.
+"ready" after we observe it with the same size on two consecutive
+scans (Blender finishes writing a frame before we see its final size).
+Ready files are uploaded via :meth:`BackendClient.request_upload_urls`
++ direct R2 PUT, then registered via :meth:`BackendClient.register_outputs`.
 
-:meth:`flush_final` runs two non-stability-gated scans to upload any
+:meth:`flush_final` runs one non-stability-gated scan to upload any
 trailing frames after the render has stopped.
+
+Idempotent w.r.t. duplicate uploads — already-uploaded filenames are
+tracked and skipped.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import threading
 
 import requests
 
-from modal_worker.backend_client import BackendClient
+from worker_core.backend_client import BackendClient
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +30,9 @@ class IncrementalOutputUploader:
 
     OUTPUT_SCAN_INTERVAL_SEC = float(os.getenv("OUTPUT_SCAN_INTERVAL", "1.0"))
 
-    def __init__(self, client: BackendClient, job_id: str, output_dir: str) -> None:
+    def __init__(
+        self, client: BackendClient, job_id: str, output_dir: str,
+    ) -> None:
         self._client = client
         self._job_id = job_id
         self._output_dir = output_dir
@@ -59,9 +62,8 @@ class IncrementalOutputUploader:
             self._thread.join(timeout=5)
 
     def flush_final(self) -> None:
-        """Render process has stopped — upload everything remaining without
-        waiting for size-stability."""
-        self._scan_once(require_stable=False)
+        """Render process has stopped — upload everything remaining
+        without waiting for size-stability."""
         self._scan_once(require_stable=False)
 
     # ------------------------------------------------------------------

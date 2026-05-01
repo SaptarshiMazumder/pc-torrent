@@ -19,6 +19,9 @@ def build():
     print("Building PC Rent Agent sidecar...")
 
     # Run PyInstaller
+    # -p PROJECT_ROOT puts the repo root on the import path so worker_core/
+    # (shared protocol library) is resolvable; --collect-submodules makes
+    # PyInstaller bundle every worker_core.* module into the .exe.
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",
@@ -27,6 +30,8 @@ def build():
         "--workpath", os.path.join(AGENT_DIR, "build"),
         "--specpath", AGENT_DIR,
         "--clean",
+        "-p", PROJECT_ROOT,
+        "--collect-submodules", "worker_core",
         os.path.join(AGENT_DIR, "sidecar_main.py"),
     ]
 

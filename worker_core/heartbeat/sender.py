@@ -1,21 +1,25 @@
 """HeartbeatSender -- periodic HTTP heartbeat composing phase + activity.
 
-Replaces the inline WorkerHeartbeat class that used to live in handler.py.
 Composition over inheritance: takes a PhaseTracker plus optional
 ProcessSampler and BytesProgress (either may be None when the caller
-doesn't want that signal in the payload).
+doesn't want that signal in the payload).  A fleet that doesn't have
+a useful CPU/RSS signal (e.g. the agent runs the actual render in a
+child docker container, not in its own process) just omits the
+sampler -- the server's stall detector treats missing fields as
+no-signal and skips the rule that needs them.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from typing import Callable
 
 import requests
 
-from .bytes_progress import BytesProgress
-from .phase_tracker import PhaseTracker
-from .process_sampler import ProcessSampler
+from worker_core.heartbeat.bytes_progress import BytesProgress
+from worker_core.heartbeat.phase_tracker import PhaseTracker
+from worker_core.heartbeat.process_sampler import ProcessSampler
 
 log = logging.getLogger(__name__)
 
@@ -33,12 +37,17 @@ class HeartbeatSender:
         process_sampler: ProcessSampler | None = None,
         bytes_progress: BytesProgress | None = None,
         interval_sec: float = _DEFAULT_INTERVAL_SEC,
+        on_error: Callable[[Exception], None] | None = None,
     ) -> None:
+        # ``on_error(exc)`` lets a caller route push failures through its
+        # own logging pipeline (e.g. the agent's sidecar-IPC log bridge)
+        # instead of the default module logger.  Defaults to log.warning.
         self._url = f"{backend_url.rstrip('/')}/jobs/{job_id}/heartbeat"
         self._phase = phase_tracker
         self._sampler = process_sampler
         self._bytes = bytes_progress
         self._interval = interval_sec
+        self._on_error = on_error
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -58,9 +67,9 @@ class HeartbeatSender:
             self._thread.join(timeout=5)
 
     def set_phase(self, phase: str) -> None:
-        """Convenience pass-through so callers don't need to keep a
-        separate reference to the PhaseTracker.  Triggers an immediate
-        beat at the new phase rather than waiting for the next tick."""
+        """Pass-through so callers don't need a separate PhaseTracker
+        reference.  Triggers an immediate beat at the new phase rather
+        than waiting for the next tick."""
         self._phase.set(phase)
         self._push()
 
@@ -78,7 +87,10 @@ class HeartbeatSender:
                 self._url, json=self._payload(), timeout=15,
             ).raise_for_status()
         except Exception as e:
-            log.warning(f"Heartbeat push failed: {e}")
+            if self._on_error is not None:
+                self._on_error(e)
+            else:
+                log.warning(f"Heartbeat push failed: {e}")
 
     def _run(self) -> None:
         while not self._stop.is_set():

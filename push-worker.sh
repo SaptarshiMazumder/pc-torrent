@@ -26,25 +26,48 @@ TAG="${1:-latest}"
 VARIANT="${2:-cycles}"
 
 case "$VARIANT" in
-    cycles)
-        IMAGE_NAME="pcrent-worker"
-        DOCKERFILE="$PROJECT_ROOT/cloud_worker/Dockerfile.cycles"
+    # Shared Blender base.  Build + push these FIRST -- the per-fleet
+    # variants below FROM these images.  Tag with the Blender version
+    # (e.g. 5.0.1).
+    base-cycles)
+        IMAGE_NAME="pcrent-blender-base-cycles"
+        DOCKERFILE="$PROJECT_ROOT/blender_base/Dockerfile.cycles"
         ;;
-    eevee)
-        IMAGE_NAME="pcrent-worker-eevee"
-        DOCKERFILE="$PROJECT_ROOT/cloud_worker/Dockerfile.eevee"
+    base-eevee)
+        IMAGE_NAME="pcrent-blender-base-eevee"
+        DOCKERFILE="$PROJECT_ROOT/blender_base/Dockerfile.eevee"
         ;;
+    # Vast worker -- env-driven container, runs vast_worker/scripts/handler.py.
+    vast-cycles)
+        IMAGE_NAME="pcrent-vast-worker-cycles"
+        DOCKERFILE="$PROJECT_ROOT/vast_worker/Dockerfile.cycles"
+        ;;
+    vast-eevee)
+        IMAGE_NAME="pcrent-vast-worker-eevee"
+        DOCKERFILE="$PROJECT_ROOT/vast_worker/Dockerfile.eevee"
+        ;;
+    # Modal worker -- self-contained image pulled by Modal at function-spawn
+    # time.  No more copy_local_dir mounting at deploy time.
+    modal-cycles)
+        IMAGE_NAME="pcrent-modal-worker-cycles"
+        DOCKERFILE="$PROJECT_ROOT/modal_worker/Dockerfile.cycles"
+        ;;
+    # Community worker -- thin renderer for community PCs.  Agent
+    # (running on user's PC) orchestrates I/O; this image just runs
+    # Blender against /input and writes to /output.
     community-cycles)
-        # Thin renderer for community PCs (Cycles only — community can't
-        # do EEVEE; see EngineCompatibilityValidator for why).  The agent
-        # orchestrates I/O, this image just runs Blender against /input
-        # and /output mounts.
         IMAGE_NAME="pcrent-community-worker-cycles"
         DOCKERFILE="$PROJECT_ROOT/community_worker/Dockerfile.cycles"
         ;;
     *)
-        echo "ERROR: unknown variant '$VARIANT'.  Expected one of: cycles, eevee, community-cycles."
-        echo "Usage: $0 <tag> [cycles|eevee|community-cycles]"
+        echo "ERROR: unknown variant '$VARIANT'."
+        echo "Usage: $0 <tag> <variant>"
+        echo ""
+        echo "Variants:"
+        echo "  base-cycles, base-eevee           shared Blender base (build first)"
+        echo "  vast-cycles, vast-eevee           Vast worker (FROM blender-base)"
+        echo "  modal-cycles                      Modal worker (FROM blender-base)"
+        echo "  community-cycles                  Community worker (FROM blender-base)"
         exit 1
         ;;
 esac

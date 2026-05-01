@@ -10,3 +10,4 @@ Pillow
 pydantic
 zstandard
 redis
+modal

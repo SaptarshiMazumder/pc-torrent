@@ -11,8 +11,9 @@ import logging
 import zipfile
 from typing import Any, Callable
 
-from serverV2.core.value_objects import parse_output_files, sanitize_filename
+from serverV2.core.value_objects import sanitize_filename
 from serverV2.infrastructure import storage
+from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
 
 log = logging.getLogger(__name__)
@@ -33,17 +34,21 @@ class JobService:
         job_repo,
         machine_repo,
         heartbeat_repo,
+        machine_heartbeat_repo,
         progress_repo,
         worker_start_repo,
         outputs_resolver: OutputsResolver,
+        output_frame_repo: OutputFrameRepository,
         success_notifier: Callable[[str], None],
     ) -> None:
         self._jobs = job_repo
         self._machines = machine_repo
         self._heartbeats = heartbeat_repo
+        self._machine_hb = machine_heartbeat_repo
         self._progress = progress_repo
         self._worker_start = worker_start_repo
         self._outputs = outputs_resolver
+        self._output_frames = output_frame_repo
         # Called when ``register_outputs`` observes that the verified
         # upload count meets total_frames.  Wired to CallbackRouter in
         # bootstrap so completion routes through the standard success
@@ -121,19 +126,23 @@ class JobService:
     # ---- output management ----
 
     def register_outputs(self, job_id: str, files: list[str]) -> dict[str, Any]:
-        """Pure DB work: append filenames, return the merged list and a
-        flag telling the caller whether this registration completed the
-        chunk.  The downstream side-effects (telemetry, group reconcile,
-        drain queue, possibly new dispatch HTTP calls) are NOT fired
-        here — the route schedules :meth:`notify_completion` as a
-        background task so the worker's HTTP response doesn't block on
-        them.  Keeping the response under 100ms prevents the catch-up
-        path from misclassifying a slow side-effect chain as a failed
+        """Pure DB work: insert into ``output_frames`` (PK on
+        (group_id, filename) silently dedupes sibling-retry duplicates),
+        return this job's full filename list and a flag telling the
+        caller whether this registration completed the chunk.  The
+        downstream side-effects (telemetry, group reconcile, drain
+        queue, possibly new dispatch HTTP calls) are NOT fired here —
+        the route schedules :meth:`notify_completion` as a background
+        task so the worker's HTTP response doesn't block on them.
+        Keeping the response under 100ms prevents the catch-up path
+        from misclassifying a slow side-effect chain as a failed
         upload."""
         job = self._jobs.get_raw_by_id(job_id)
         if not job:
             raise JobServiceError(404, "Job not found")
-        merged = self._jobs.merge_output_files(job_id, files)
+        group_id = job.get("group_id") or job_id
+        self._output_frames.add_many(group_id, job_id, files)
+        merged = self._output_frames.list_for_job(job_id)
         total = job.get("total_frames") or 0
         completion_reached = total > 0 and len(merged) >= total
         return {
@@ -197,7 +206,7 @@ class JobService:
         if not job:
             raise JobServiceError(404, "Job not found")
         group_id = job.get("group_id") or job_id
-        output_files = parse_output_files(job.get("output_files"))
+        output_files = self._output_frames.list_for_job(job_id)
         if not output_files:
             raise JobServiceError(404, "No output files available")
 
@@ -216,5 +225,11 @@ class JobService:
     # ---- next for machine (desktop agent polling) ----
 
     def next_for_machine(self, machine_id: str) -> dict[str, Any] | None:
+        # The poll IS the agent's idle-phase liveness signal.  ZADD on
+        # every poll keeps the machine in machines:alive without requiring
+        # a separate /machines/{id}/heartbeat call.  During a render the
+        # agent isn't polling -- liveness flows through the per-job
+        # heartbeat (Redis job:{id}:hb) instead.
+        self._machine_hb.record(machine_id)
         return self._jobs.claim_next_for_machine(machine_id)
 

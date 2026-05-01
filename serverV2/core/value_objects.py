@@ -86,16 +86,6 @@ def _coerce_bool(value: Any) -> bool | None:
 # JSON parsing
 # ---------------------------------------------------------------------------
 
-def parse_output_files(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, list) else []
-    except json.JSONDecodeError:
-        return []
-
-
 def parse_json_object(raw: str | None, default: dict[str, Any] | None = None) -> dict[str, Any]:
     if not raw:
         return default.copy() if default else {}

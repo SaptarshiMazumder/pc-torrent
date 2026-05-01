@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from serverV2.infrastructure.db import execute, query_one
+from serverV2.infrastructure.db import execute, query_all, query_one
 
 
 class InProgressChunkRepository:
@@ -56,6 +56,32 @@ class InProgressChunkRepository:
             "DELETE FROM in_progress_chunks WHERE group_id = %s AND chunk_index = %s",
             (group_id, chunk_index),
         )
+
+    def release_if_owner(
+        self, group_id: str, chunk_index: int, expected_job_id: str,
+    ) -> bool:
+        """Atomically delete the ledger row only if it still points at
+        ``expected_job_id``.  Returns True if the row was deleted, False
+        if it didn't exist or pointed at a different job.
+
+        This is the dedup primitive for concurrent failure signals: when
+        N callers all try to handle the same job's failure, the DB
+        serializes the DELETEs and only one gets a returned row.  The
+        others see 0 rows and bail without retrying -- the winner's
+        retry dispatch path (which re-claims the slot via
+        ``claim_or_replace``) is the only one that proceeds.
+        """
+        rows = query_all(
+            """
+            DELETE FROM in_progress_chunks
+             WHERE group_id      = %s
+               AND chunk_index   = %s
+               AND current_job_id = %s
+            RETURNING current_job_id
+            """,
+            (group_id, chunk_index, expected_job_id),
+        )
+        return bool(rows)
 
     def release_all(self, group_id: str) -> None:
         execute(

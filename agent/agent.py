@@ -388,16 +388,6 @@ def check_job_cancel_status(job_id):
         return False
 
 
-def send_machine_heartbeat(mid):
-    resp = _request_with_retries(
-        "PUT",
-        f"{BACKEND_URL}/machines/{mid}/heartbeat",
-        timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT),
-        retries=2,
-    )
-    _ensure_http_success(resp, f"Heartbeat machine {mid}")
-
-
 def upload_output_files(job_id, output_dir, filenames=None):
     """Upload rendered frames via the server's presigned-URL flow:
     request URLs → PUT each file directly to GCS → register filenames.
@@ -1149,8 +1139,6 @@ def execute_job(job):
     job_id = "<unknown>"
     work_dir = None
     output_dir = None
-    heartbeat_stop = threading.Event()
-    heartbeat_thread = None
     cancel_check_stop = threading.Event()
     cancel_check_thread = None
     output_uploader = None
@@ -1187,31 +1175,6 @@ def execute_job(job):
             "last_reported_rendered_frames": None,
             "last_reported_total_frames": None,
         }
-
-        def start_heartbeat_loop():
-            if not active_machine_id:
-                return None
-
-            failed_log_at = {"value": 0.0}
-
-            def heartbeat_loop():
-                while not heartbeat_stop.wait(HEARTBEAT_INTERVAL):
-                    try:
-                        send_machine_heartbeat(active_machine_id)
-                    except Exception as exc:
-                        now = time.monotonic()
-                        if now - failed_log_at["value"] >= 30.0:
-                            _log(f"[AGENT] Heartbeat failed during job {job_id}: {exc}", level="warn")
-                            failed_log_at["value"] = now
-
-            try:
-                send_machine_heartbeat(active_machine_id)
-            except Exception as exc:
-                _log(f"[AGENT] Initial heartbeat failed for job {job_id}: {exc}", level="warn")
-
-            thread = threading.Thread(target=heartbeat_loop, daemon=True)
-            thread.start()
-            return thread
 
         def start_cancel_check_loop():
             """Polls the server every CANCEL_CHECK_INTERVAL to detect a server-
@@ -1324,13 +1287,14 @@ def execute_job(job):
         # finalize_progress / with_partial_recovery_hint being callable.
         setup_complete = True
 
-        heartbeat_thread = start_heartbeat_loop()
         cancel_check_thread = start_cancel_check_loop()
 
         # Per-job heartbeat: phase + bytes_progressed signals for the
-        # server's stall detector.  Lives alongside the machine-level
-        # heartbeat (start_heartbeat_loop above) -- different endpoint,
-        # different payload, different concern.
+        # server's stall detector.  Server-side, this writes Redis
+        # job:{id}:hb (TTL key + sliding window) -- and the same key
+        # is what CommunityMonitor reads to detect a mid-render
+        # machine-offline event.  No separate machine-level heartbeat;
+        # the per-job one carries that signal too.
         phase_tracker = PhaseTracker(
             allowed=_AGENT_PHASES, initial="initializing",
         )
@@ -1552,9 +1516,6 @@ def execute_job(job):
         notify_orchestrator_failure(job_id, final_error)
 
     finally:
-        heartbeat_stop.set()
-        if heartbeat_thread and heartbeat_thread.is_alive():
-            heartbeat_thread.join(timeout=1)
         try:
             job_heartbeat.stop()
         except NameError:

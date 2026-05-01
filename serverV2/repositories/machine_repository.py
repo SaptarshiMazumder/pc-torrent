@@ -74,10 +74,16 @@ class MachineRepository:
         )
 
     def demote_ghosts(self, alive_ids: set[str]) -> int:
-        """Demote 'available'/'processing' community machines whose ids are
-        NOT in ``alive_ids`` (Redis liveness set) back to 'idle'.  Catches
-        agents that crashed without calling set_idle, so the status column
-        doesn't permanently lie about reality.
+        """Demote 'available' community machines whose ids are NOT in
+        ``alive_ids`` (Redis liveness set) back to 'idle'.  Catches
+        agents that crashed without calling set_idle, so the status
+        column doesn't permanently lie about reality.
+
+        Only ``status='available'`` machines are touched.  ``processing``
+        machines are exempt because their liveness during render flows
+        through the active job's heartbeat (Redis ``job:{id}:hb``), not
+        through ``machines:alive``.  Demoting them here would clobber a
+        currently-rendering machine's status mid-job.
 
         Called periodically by CommunityMonitor.  Returns count demoted.
         """
@@ -88,7 +94,7 @@ class MachineRepository:
         result = query_all(
             """
             UPDATE machines SET status = 'idle'
-            WHERE status IN ('available', 'processing')
+            WHERE status = 'available'
               AND machine_type = 'windows'
               AND id != ALL(%s)
             RETURNING id

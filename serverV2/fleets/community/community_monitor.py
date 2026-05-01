@@ -42,6 +42,7 @@ from serverV2.repositories.machine_heartbeat_repository import (
     MachineHeartbeatRepository,
 )
 from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 log = logging.getLogger(__name__)
@@ -57,9 +58,9 @@ class CommunityMonitor:
         machine_repo: MachineRepository,
         heartbeat_repo: HeartbeatRepository,
         machine_heartbeat_repo: MachineHeartbeatRepository,
+        output_frame_repo: OutputFrameRepository,
         on_failure: Callable[[str, str], None],
         stall_detector: IPreRenderStallDetector,
-        stale_seconds: int = 30,
         demote_seconds: int = 90,
         interval_sec: int = 10,
     ) -> None:
@@ -68,15 +69,15 @@ class CommunityMonitor:
         self._machine_repo = machine_repo
         self._heartbeat_repo = heartbeat_repo
         self._machine_hb = machine_heartbeat_repo
+        self._output_frames = output_frame_repo
         self._on_failure = on_failure
         self._stall_detector = stall_detector
-        # ``stale_seconds`` (~30s): mid-render machine-offline detection.
-        # ``demote_seconds`` (~90s): "agent has crashed and isn't coming
-        # back" threshold for flipping Postgres status back to idle.
-        # Wider so a normally-connecting agent (between /available and
-        # its first heartbeat ZADD landing) can't be demoted in the
-        # race window.
-        self._stale_sec = stale_seconds
+        # ``demote_seconds`` (~90s): how long without an idle-phase
+        # heartbeat (machines:alive ZADD) before we flip a status=
+        # 'available' machine to 'idle'.  Wider than the agent's poll
+        # interval so a normally-polling agent can't be demoted in a
+        # race window.  Render-phase liveness goes through the per-job
+        # heartbeat directly, not this threshold.
         self._demote_sec = demote_seconds
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
@@ -89,8 +90,8 @@ class CommunityMonitor:
         )
         self._thread.start()
         log.info(
-            "CommunityMonitor started (interval=%ds, stale=%ds, demote=%ds)",
-            self._interval, self._stale_sec, self._demote_sec,
+            "CommunityMonitor started (interval=%ds, demote=%ds)",
+            self._interval, self._demote_sec,
         )
 
     def _loop(self) -> None:
@@ -102,17 +103,6 @@ class CommunityMonitor:
             time.sleep(self._interval)
 
     def _tick(self) -> None:
-        # Two Redis snapshots, two thresholds:
-        # - alive_ids_recent (stale_sec ~30s): used by per-job offline
-        #   detection -- flag a running chunk's machine as offline if
-        #   it's missed heartbeats for ~30s.
-        # - alive_ids_demote (demote_sec ~90s): used by the ghost-demote
-        #   pass below.  Wider so a freshly-connected agent (in the
-        #   /available -> first-heartbeat race window) is never
-        #   demoted to 'idle' by this loop.
-        alive_ids_recent = self._machine_hb.alive_ids(self._stale_sec)
-        alive_ids_demote = self._machine_hb.alive_ids(self._demote_sec)
-
         for group in self._group_repo.get_active_groups():
             try:
                 jobs = self._job_repo.get_by_group(group["id"])
@@ -120,17 +110,18 @@ class CommunityMonitor:
                     if job.is_serverless:
                         continue
                     self._check_group_terminal(group, job)
-                    self._check_machine_offline(group, job, alive_ids_recent)
+                    self._check_machine_offline(group, job)
                     self._check_pre_render_stall(job)
             except Exception:
                 log.exception("CommunityMonitor error for group %s", group["id"])
 
-        # Demote ghost machines: status='available'/'processing' in
-        # Postgres but absent from the WIDE liveness window (90s).
-        # Skip if Redis is down -- demoting based on missing data could
-        # mass-demote real machines.  Prune stale entries from the
-        # sorted set with the same wide threshold so it doesn't grow
-        # unboundedly.
+        # Demote ghost machines: status='available' in Postgres but
+        # absent from the WIDE liveness window (90s).  Only 'available'
+        # -- 'processing' machines are exempt because their liveness
+        # flows through the active job's heartbeat, not machines:alive.
+        # Skip if Redis is down (mass-demote risk).  Prune stale entries
+        # from the sorted set so it doesn't grow unboundedly.
+        alive_ids_demote = self._machine_hb.alive_ids(self._demote_sec)
         if alive_ids_demote is not None:
             try:
                 demoted = self._machine_repo.demote_ghosts(alive_ids_demote)
@@ -156,19 +147,32 @@ class CommunityMonitor:
         self._on_failure(job.job_id, f"Group was {group_status}")
 
     def _check_machine_offline(
-        self, group: dict, job: RenderJob, alive_ids: set[str] | None,
+        self, group: dict, job: RenderJob,
     ) -> None:
+        """During render, machine liveness IS job heartbeat liveness:
+        the worker pushes /jobs/{id}/heartbeat every ~5-10s, which
+        writes the Redis job:{id}:hb TTL key.  If that key expired,
+        the worker has stopped pinging -- the machine has gone offline
+        mid-render.
+
+        machines:alive (idle-phase signal) is intentionally NOT checked
+        here: a rendering machine is in status='processing', not
+        polling for new work, so it has no entries there.  Its
+        liveness during render flows through the job's heartbeat."""
         if job.status != "running":
             return
-        if alive_ids is None:
-            # Redis unavailable -- can't reliably detect offline machines.
-            # Skip this check; backup_monitor (cron) catches absolute
-            # orphans via Redis job-heartbeat TTL eventually.
+        alive = self._heartbeat_repo.is_alive(job.job_id)
+        if alive is None:
+            # Redis unavailable -- can't reliably detect.  backup_monitor
+            # (cron, every 60s) catches absolute orphans independently.
             return
-        if job.machine_id in alive_ids:
+        if alive:
             return
-        if job.remaining_frames() is None:
-            # All frames already uploaded — let the success path finish.
+        # Suppress the offline signal if every frame in this job's range
+        # is already uploaded — let the success path finish naturally.
+        uploaded = self._output_frames.count_for_job(job.job_id)
+        expected = ((job.frame_end - job.frame_start) // job.frame_step) + 1
+        if uploaded >= expected:
             return
         self._on_failure(job.job_id, "Machine went offline")
 

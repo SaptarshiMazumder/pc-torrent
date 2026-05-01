@@ -26,13 +26,13 @@ class JobRepository:
             INSERT INTO jobs (
                 id, machine_id, machine_type, gpu_type,
                 group_id, input_filename, status,
-                total_frames, rendered_frames, output_files,
+                total_frames, rendered_frames,
                 frame_start, frame_end, frame_step,
                 render_overrides_json, attempt, max_retries, priority,
                 chunk_index, submitted_at,
                 price_per_hour_at_dispatch
             )
-            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 params.job_id, params.machine_id, params.fleet, params.gpu_type,
@@ -171,12 +171,12 @@ class JobRepository:
             INSERT INTO jobs (
                 id, machine_id, machine_type,
                 group_id, input_filename, status,
-                total_frames, rendered_frames, output_files,
+                total_frames, rendered_frames,
                 frame_start, frame_end, frame_step,
                 render_overrides_json, attempt, max_retries, priority,
                 chunk_index, submitted_at
             )
-            VALUES (%s,%s,'windows',%s,%s,'pending',%s,0,'[]',%s,%s,%s,%s,0,%s,%s,%s,%s)
+            VALUES (%s,%s,'windows',%s,%s,'pending',%s,0,%s,%s,%s,%s,0,%s,%s,%s,%s)
             """,
             (
                 new_job_id, failover_machine_id, group_id, input_filename,
@@ -185,29 +185,6 @@ class JobRepository:
                 chunk_index, _now_iso(),
             ),
         )
-
-    # ---- output files ----
-
-    def get_output_files(self, job_id: str) -> list[str]:
-        row = query_one("SELECT output_files FROM jobs WHERE id = %s", (job_id,))
-        if not row:
-            return []
-        import json
-        try:
-            parsed = json.loads(row.get("output_files") or "[]")
-            return parsed if isinstance(parsed, list) else []
-        except (json.JSONDecodeError, TypeError):
-            return []
-
-    def merge_output_files(self, job_id: str, new_files: list[str]) -> list[str]:
-        import json
-        existing = self.get_output_files(job_id)
-        merged = list(dict.fromkeys(existing + new_files))
-        execute(
-            "UPDATE jobs SET output_files = %s WHERE id = %s",
-            (json.dumps(merged), job_id),
-        )
-        return merged
 
     # ---- start timestamp (for telemetry) ----
 
@@ -301,10 +278,10 @@ class JobRepository:
             """
             INSERT INTO jobs (
                 id, machine_id, input_filename, status,
-                total_frames, rendered_frames, output_files,
+                total_frames, rendered_frames,
                 submitted_at, user_id
             )
-            VALUES (%s,%s,%s,'uploading',0,0,'[]',%s,%s)
+            VALUES (%s,%s,%s,'uploading',0,0,%s,%s)
             """,
             (job_id, machine_id, input_filename, _now_iso(), user_id),
         )

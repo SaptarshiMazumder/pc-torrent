@@ -13,7 +13,8 @@ from __future__ import annotations
 from typing import Any, Callable
 from urllib.parse import quote
 
-from serverV2.core.value_objects import output_frame_sort_key, parse_output_files
+from serverV2.core.value_objects import output_frame_sort_key
+from serverV2.repositories.output_frame_repository import OutputFrameRepository
 
 
 # (r2_key, download_name) -> presigned URL
@@ -22,7 +23,13 @@ PresignerFn = Callable[[str, str], str]
 
 class OutputsResolver:
 
-    def __init__(self, presigner: PresignerFn) -> None:
+    def __init__(
+        self,
+        *,
+        output_frame_repo: OutputFrameRepository,
+        presigner: PresignerFn,
+    ) -> None:
+        self._output_frames = output_frame_repo
         self._presigner = presigner
 
     def entries(self, jobs: list[dict[str, Any]], scope_id: str) -> list[dict[str, Any]]:
@@ -37,9 +44,11 @@ class OutputsResolver:
         return result
 
     def _for_job(self, job: dict[str, Any], scope_id: str) -> list[dict[str, Any]]:
-        output_files = parse_output_files(job.get("output_files"))
-        sorted_files = sorted(output_files, key=output_frame_sort_key)
         job_id = job["id"]
+        # Per-job filenames come straight from the output_frames table.
+        sorted_files = sorted(
+            self._output_frames.list_for_job(job_id), key=output_frame_sort_key,
+        )
         entries: list[dict[str, Any]] = []
         for filename in sorted_files:
             encoded = quote(filename, safe="")

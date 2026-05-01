@@ -33,6 +33,7 @@ class QueueItem:
     frame_step: int
     total_frames: int
     fleet: str
+    chunk_index: int
     label: str = ""
     vram_gb: float = 0.0
     render_speed: float = 1.0
@@ -43,7 +44,6 @@ class QueueItem:
     max_retries: int = 0
     priority: int = 0
     attempt: int = 0
-    chunk_index: int | None = None
     group_id: str = ""    # populated when read back from DB
 
 
@@ -54,6 +54,12 @@ class DispatchQueueRepository:
     # ------------------------------------------------------------------
 
     def enqueue(self, group_id: str, item: QueueItem) -> None:
+        # ON CONFLICT DO NOTHING is the DB-level safety net for the
+        # duplicate-dispatch race: the coordinator's app-level check
+        # against in_progress_chunks already filters most duplicates,
+        # but if two enqueues somehow race past it, the UNIQUE
+        # constraint on (group_id, chunk_index) keeps the queue at
+        # exactly one row per chunk.
         execute(
             """INSERT INTO dispatch_queue
                (group_id, frame_start, frame_end, frame_step,
@@ -67,7 +73,8 @@ class DispatchQueueRepository:
                        %s, %s, %s,
                        %s, %s,
                        %s, %s,
-                       %s)""",
+                       %s)
+               ON CONFLICT (group_id, chunk_index) DO NOTHING""",
             (
                 group_id, item.frame_start, item.frame_end, item.frame_step,
                 item.total_frames, item.attempt, item.chunk_index,

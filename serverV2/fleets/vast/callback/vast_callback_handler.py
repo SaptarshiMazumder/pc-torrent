@@ -21,6 +21,7 @@ from serverV2.fleets.vast.callback.vast_snapshot_writer import VastSnapshotWrite
 from serverV2.fleets.vast.callback.vast_status_classifier import VastStatusClassifier
 from serverV2.fleets.vast.client import VastClient
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
+from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ class VastCallbackHandler:
         client: VastClient,
         heartbeat_repo: HeartbeatRepository,
         progress_repo: ProgressRepository,
+        output_frame_repo: OutputFrameRepository,
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
         stall_detector_factory: Callable[[], IPreRenderStallDetector],
@@ -46,6 +48,7 @@ class VastCallbackHandler:
         self._client = client
         self._heartbeats = heartbeat_repo
         self._progress = progress_repo
+        self._output_frames = output_frame_repo
         self._on_failure = on_failure
         self._on_success = on_success
         self._stall_detector_factory = stall_detector_factory
@@ -79,7 +82,7 @@ class VastCallbackHandler:
             self._monitors[job_id] = stop_event
 
         instance_id = int(provider_job_id)
-        counts = JobCounts(self._progress)
+        counts = JobCounts(self._progress, self._output_frames)
         liveness = LivenessCheck(
             heartbeat_repo=self._heartbeats,
             stale_sec=self._cfg.in_progress_stale_sec,

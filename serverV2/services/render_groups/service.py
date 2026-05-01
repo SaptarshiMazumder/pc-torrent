@@ -11,12 +11,10 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from serverV2.core.models import RenderJob
 from serverV2.core.value_objects import (
     MAX_UPLOAD_BYTES,
     SINGLE_PUT_MAX_BYTES,
     extract_analysis_warnings,
-    latest_output_filename,
     normalize_render_overrides,
     now_iso,
     parse_analysis_heaviness,
@@ -28,12 +26,13 @@ from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firestore_client import write_render_group_record
 from serverV2.orchestrator.allocation import tiers
 from serverV2.orchestrator.config import MAX_RETRIES
+from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.services.assets.serializers import serialize_asset
 from serverV2.services.blend_parser.parser import BlendParseError, parse_upload
 from serverV2.services.render_groups.frame_planning import resolve_frame_range
 from serverV2.services.render_groups.serializers import (
+    RenderGroupSerializer,
     build_dispatch_task_entry,
-    serialize_task,
 )
 
 log = logging.getLogger(__name__)
@@ -75,6 +74,7 @@ class RenderGroupService:
         orchestrator,
         fleet_registry,
         outputs_resolver,
+        output_frame_repo: OutputFrameRepository,
     ) -> None:
         self._groups = group_repo
         self._jobs = job_repo
@@ -83,6 +83,8 @@ class RenderGroupService:
         self._orchestrator = orchestrator
         self._fleet = fleet_registry
         self._outputs = outputs_resolver
+        self._output_frames = output_frame_repo
+        self._serializer = RenderGroupSerializer(output_frame_repo=output_frame_repo)
 
     # ------------------------------------------------------------------
     # create
@@ -599,7 +601,7 @@ class RenderGroupService:
 
         retryable_ids = self._compute_retryable_job_ids(group, jobs)
         tasks = [
-            serialize_task(
+            self._serializer.serialize_task(
                 job,
                 machines_by_id.get(job.get("machine_id")),
                 is_retryable=(job["id"] in retryable_ids),
@@ -607,11 +609,13 @@ class RenderGroupService:
             for job in jobs
         ]
 
+        # Group-level frame counts come from output_frames (already
+        # dedup'd at INSERT time via PK on (group_id, filename)).  Don't
+        # sum task counts -- sibling retries that uploaded the same
+        # frame would inflate the total.
         total_frames = group.get("total_frames") or 0
-        total_rendered = min(
-            total_frames,
-            sum(t["rendered_frames"] or 0 for t in tasks),
-        )
+        unique_rendered = self._output_frames.count_for_group(group["id"])
+        total_rendered = min(total_frames, unique_rendered)
 
         # Group status is owned by write-side callbacks (success/failure
         # handlers + CallbackRouter on pending→running).  Read endpoints
@@ -624,14 +628,9 @@ class RenderGroupService:
         if overall_status == "done":
             overall_pct = 100.0
 
-        latest_candidates = [t["latest_output_file"] for t in tasks if t.get("latest_output_file")]
-        latest_output = latest_output_filename(latest_candidates) if latest_candidates else None
-        latest_output_job_id: str | None = None
-        if latest_output:
-            for t in tasks:
-                if t.get("latest_output_file") == latest_output:
-                    latest_output_job_id = t.get("job_id")
-                    break
+        latest = self._output_frames.latest_for_group(group["id"])
+        latest_output = latest[0] if latest else None
+        latest_output_job_id = latest[1] if latest else None
 
         return {
             "group_id": group["id"],
@@ -651,14 +650,34 @@ class RenderGroupService:
             "analysis_warnings": analysis_warnings,
             "overall_rendered_frames": total_rendered,
             "overall_progress_pct": overall_pct,
-            "available_output_files_count": min(
-                total_frames, sum(t.get("output_files_count") or 0 for t in tasks),
-            ),
+            "available_output_files_count": min(total_frames, unique_rendered),
             "latest_output_file": latest_output,
             "latest_output_job_id": latest_output_job_id,
             "tasks_count": len(tasks),
             "tasks": tasks,
         }
+
+    def download_all_as_zip(self, group_id: str):
+        """Stream every uploaded frame for the group into a single ZIP.
+        Filenames come from the ``output_frames`` table — no scanning of
+        per-job JSON, no double-counting sibling-retry duplicates."""
+        import io
+        import zipfile
+        group = self._groups.get_by_id(group_id)
+        if not group:
+            raise RenderGroupServiceError(404, "Group not found")
+        filenames = self._output_frames.list_for_group(group_id)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fname in filenames:
+                key = f"jobs/{group_id}/output/{fname}"
+                try:
+                    data = storage.download_file(key)
+                    zf.writestr(fname, data)
+                except Exception as exc:
+                    log.warning("Skipping %s in ZIP for group %s: %s", fname, group_id, exc)
+        buf.seek(0)
+        return buf
 
     @staticmethod
     def _compute_retryable_job_ids(
@@ -703,7 +722,11 @@ class RenderGroupService:
                 continue
             if ci in active_chunks:
                 continue
-            if RenderJob.from_row(j).remaining_frames() is None:
+            # Skip if this job already uploaded every frame in its range.
+            uploaded = self._output_frames.count_for_job(j["id"])
+            step = j.get("frame_step") or 1
+            expected = ((j.get("frame_end") or 0) - (j.get("frame_start") or 0)) // step + 1
+            if uploaded >= expected:
                 continue
             retryable.add(j["id"])
         return retryable

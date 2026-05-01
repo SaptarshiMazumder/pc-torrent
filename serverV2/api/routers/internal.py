@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 
 from serverV2.callbacks.router import CallbackRouter
 from serverV2.core.enums import CallbackOutcome
@@ -31,16 +31,16 @@ def init(callback_router: CallbackRouter, orphan_secret: str) -> None:
     _orphan_secret = orphan_secret
 
 
-@router.post("/internal/orphan/{job_id}")
+@router.post("/internal/orphan/{job_id}", status_code=202)
 def report_orphan(
     job_id: str,
     payload: dict[str, Any],
+    background: BackgroundTasks,
     x_orphan_secret: str | None = Header(default=None, alias="X-Orphan-Secret"),
 ) -> dict[str, Any]:
     """Backup monitor reports a job whose heartbeat has gone dead.
-    Routes through CallbackRouter (same path Vast/Modal monitors and
-    the community agent take) so the ``is_job_terminal`` short-circuit
-    guard filters duplicate signals.
+    Returns 202 immediately; the CallbackRouter chain runs in a
+    background task so the cron caller doesn't block on orchestration.
     """
     if not _orphan_secret:
         # Endpoint disabled when no secret is configured.
@@ -52,7 +52,8 @@ def report_orphan(
 
     error = str(payload.get("error") or "Backup monitor: orphan detected")
     log.info("Orphan reported via backup monitor for job %s: %s", job_id, error)
-    _callback_router.route(
+    background.add_task(
+        _callback_router.route,
         job_id=job_id, outcome=CallbackOutcome.FAILURE, error=error,
     )
     return {"job_id": job_id, "accepted": True}

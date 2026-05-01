@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable
 
 from serverV2.callbacks.group_status_aggregator import compute_group_status
@@ -40,23 +41,20 @@ from serverV2.core.models import (
     PlannedTask,
     RenderJob,
 )
-from serverV2.core.value_objects import (
-    latest_output_filename,
-    output_frame_sort_key,
-    parse_output_files,
-)
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
 from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
-from serverV2.orchestrator.lifecycle_output import LifecycleFramesDeduplication
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
+
+_FRAME_FILENAME_RE = re.compile(r"frame(\d+)\.")
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +102,7 @@ class RenderLifecycle:
         queue_repo: DispatchQueueRepository,
         in_progress_repo: InProgressChunkRepository,
         telemetry_repo: TelemetryRepository,
+        output_frame_repo: OutputFrameRepository,
         fleet_registry: FleetRegistry,
         resource_picker: Callable[[], AvailableResources],
     ) -> None:
@@ -117,13 +116,9 @@ class RenderLifecycle:
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
         self._telemetry = telemetry_repo
+        self._output_frames = output_frame_repo
         self._fleet = fleet_registry
         self._resource_picker = resource_picker
-        # Output-layer helper: authoritative rendered-frame accounting via
-        # set-union of output_files across sibling attempts.  Preparation
-        # for the broader RenderLifecycle SRP refactor -- the lifecycle's
-        # job is narrative orchestration, not data-shape computation.
-        self._dedup = LifecycleFramesDeduplication(job_repo=job_repo)
 
     # ------------------------------------------------------------------
     # Planning — split frames across fleet targets (no dispatch)
@@ -273,14 +268,53 @@ class RenderLifecycle:
 
         Adapters (callbacks, monitors) call ``RenderOrchestrator.on_job_failed``
         which delegates here — they never touch repositories themselves.
+
+        **Atomic dedup**: the first thing we do is
+        ``in_progress.release_if_owner(...)``.  Multiple failure signals
+        for the same job (worker callback + monitor heartbeat-stale +
+        backup_monitor sweep) race here — the DB serializes the DELETE
+        and only one returns a row.  The losers see 0 rows and bail
+        without calling ``_try_dispatch_retry`` at all, so duplicate
+        retries cannot be dispatched.  See lifecycle.handle_chunk_failed
+        in dispatch_dedup_and_output_frames.puml for the full flow.
         """
         # Capture failed fleet BEFORE retry — the retry may dispatch on a
         # different fleet (anti-affinity), but the slot we freed is in this
         # job's fleet.
         raw = self._job_repo.get_raw_by_id(job_id)
-        failed_fleet = (raw.get("machine_type") or "") if raw else ""
+        if raw is None:
+            log.info("handle_chunk_failed: job %s not found, skipping", job_id)
+            return
+        failed_fleet = raw.get("machine_type") or ""
+        group_id = raw.get("group_id") or ""
+        chunk_index = raw.get("chunk_index") or 0
+        machine_id = raw.get("machine_id")
 
-        retried = self._try_dispatch_retry(job_id, error)
+        # Atomic claim of the right-to-retry.  Lose the race → bail.
+        we_own_retry = self._in_progress.release_if_owner(
+            group_id, chunk_index, expected_job_id=job_id,
+        ) if group_id else False
+
+        if not we_own_retry:
+            # Either the chunk already succeeded (ledger empty), or another
+            # retry path already advanced the ledger to a different job.
+            # Mark this row failed for state hygiene; do NOT retry.
+            self._job_repo.mark_failed(job_id, error)
+            if failed_fleet == "windows" and machine_id:
+                self._machine_repo.set_available(machine_id)
+            log.info(
+                "handle_chunk_failed: signal for job %s superseded "
+                "(chunk %s ledger no longer points at this job)",
+                job_id, chunk_index,
+            )
+            if failed_fleet:
+                try:
+                    self._coordinator.drain_for_fleet(failed_fleet)
+                except Exception as exc:
+                    log.warning("drain_for_fleet(%s) failed: %s", failed_fleet, exc)
+            return
+
+        retried = self._try_dispatch_retry(job_id, raw, error)
         # Mark failed AFTER the retry attempt so the group always has at
         # least one active job during the transition (prevents premature
         # group-failed status flicker in the UI).
@@ -289,7 +323,6 @@ class RenderLifecycle:
         # Release the community machine lock so the allocator can return
         # this PC for the next dispatch (or the just-queued retry, if it
         # landed on this PC).  Vast/Modal have no machines row.
-        machine_id = (raw.get("machine_id") if raw else None)
         if failed_fleet == "windows" and machine_id:
             self._machine_repo.set_available(machine_id)
 
@@ -301,7 +334,6 @@ class RenderLifecycle:
             # group cancelled / chunk already complete).  Don't mislabel
             # them all as "retries exhausted" here.
             log.warning("Job %s permanently failed (no retry dispatched): %s", job_id, error)
-            group_id = (raw.get("group_id") or "") if raw else ""
             if group_id:
                 self.reconcile_group_status(group_id)
 
@@ -311,27 +343,18 @@ class RenderLifecycle:
             except Exception as exc:
                 log.warning("drain_for_fleet(%s) failed: %s", failed_fleet, exc)
 
-    def _try_dispatch_retry(self, job_id: str, error: str) -> bool:
+    def _try_dispatch_retry(
+        self, job_id: str, raw: dict[str, Any], error: str,
+    ) -> bool:
         """Returns True if a retry was dispatched, False if the chunk is
-        giving up.  Internal — callers go through ``handle_chunk_failed``."""
-        raw = self._job_repo.get_raw_by_id(job_id)
-        if not raw:
-            return False
+        giving up.  Internal — callers go through ``handle_chunk_failed``,
+        which already won the atomic CAS for retry ownership.
 
+        ``raw`` is the failing job row, passed in so we don't refetch.
+        """
         rj = RenderJob.from_row(raw)
         group_id = rj.group_id
         chunk_index = rj.chunk_index or 0
-
-        # Stale-signal guard: if the failing job is no longer the active
-        # attempt for its chunk, a retry has already been dispatched and
-        # we must not spawn another one.
-        current_job_for_chunk = self._in_progress.current_job_for(group_id, chunk_index)
-        if current_job_for_chunk is not None and current_job_for_chunk != job_id:
-            log.info(
-                "Stale failure signal for job %s (chunk %s now owned by %s)",
-                job_id, chunk_index, current_job_for_chunk,
-            )
-            return False
 
         grp = self._group_repo.get_by_id(group_id)
         if grp and grp.get("status") in ("cancelled", "done"):
@@ -339,15 +362,11 @@ class RenderLifecycle:
             return False
 
         # Compute remaining frames from the union of ALL sibling attempts'
-        # outputs, not just this failing job's.  Defends against the
-        # auto-retry / manual-retry / duplicate-dispatch edge cases where
-        # earlier or parallel attempts already rendered some frames in
-        # this chunk's range.  See _compute_dedup_remaining_for_chunk.
-        dedup_remaining = self._dedup.compute_remaining_for_chunk(
-            group_id, chunk_index,
-        )
+        # outputs (the output_frames table is self-deduplicating via PK
+        # on (group_id, filename) — sibling retries that uploaded the
+        # same frame collapse to one row).
+        dedup_remaining = self._compute_remaining_for_chunk(group_id, chunk_index)
         if dedup_remaining is None:
-            self._in_progress.release(group_id, chunk_index)
             return False
 
         next_attempt = (rj.attempt or 0) + 1
@@ -356,7 +375,6 @@ class RenderLifecycle:
                 "Job %s: max retries (%d) exhausted for frames %d-%d",
                 job_id, MAX_RETRIES, dedup_remaining[0], dedup_remaining[1],
             )
-            self._in_progress.release(group_id, chunk_index)
             return False
 
         frame_start, frame_end, frame_step = dedup_remaining
@@ -507,9 +525,7 @@ class RenderLifecycle:
             raise ManualRetryError("not_failed")
 
         rj = RenderJob.from_row(latest)
-        dedup_remaining = self._dedup.compute_remaining_for_chunk(
-            group_id, chunk_index,
-        )
+        dedup_remaining = self._compute_remaining_for_chunk(group_id, chunk_index)
         if dedup_remaining is None:
             raise ManualRetryError("no_remaining_frames")
 
@@ -811,7 +827,7 @@ class RenderLifecycle:
             total_frames = group.get("total_frames") or 0
             total_rendered = min(
                 total_frames,
-                self._dedup.compute_total_rendered(all_jobs),
+                self._output_frames.count_for_group(group_id),
             )
             self._write_terminal_snapshot(group_id, all_jobs, total_rendered)
 
@@ -838,7 +854,7 @@ class RenderLifecycle:
         total_frames = group["total_frames"] or 0
         total_rendered = min(
             total_frames,
-            self._dedup.compute_total_rendered(jobs),
+            self._output_frames.count_for_group(group_id),
         )
         result = compute_group_status(
             current_group_status=group["status"],
@@ -858,24 +874,13 @@ class RenderLifecycle:
         jobs: list[RenderJob],
         total_rendered: int,
     ) -> None:
-        """Snapshot the per-group fields that the list view needs.  Picked
-        from the children once, persisted to ``render_groups``.  See
-        ``RenderGroupRepository.update_terminal_snapshot``."""
-        latest_file: str | None = None
-        latest_job_id: str | None = None
-        latest_key: tuple[int, str] | None = None
-        available = 0
-        for j in jobs:
-            files = parse_output_files(j.output_files)
-            available += len(files)
-            top = latest_output_filename(files)
-            if not top:
-                continue
-            key = output_frame_sort_key(top)
-            if latest_key is None or key > latest_key:
-                latest_file = top
-                latest_job_id = j.job_id
-                latest_key = key
+        """Snapshot the per-group fields that the list view needs.  All
+        frame-related fields come from the ``output_frames`` table —
+        single SQL query per field, no per-job parsing."""
+        latest = self._output_frames.latest_for_group(group_id)
+        latest_file = latest[0] if latest else None
+        latest_job_id = latest[1] if latest else None
+        available = self._output_frames.count_for_group(group_id)
         self._group_repo.update_terminal_snapshot(
             group_id,
             tasks_count=len(jobs),
@@ -888,6 +893,51 @@ class RenderLifecycle:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    def _compute_remaining_for_chunk(
+        self, group_id: str, chunk_index: int,
+    ) -> tuple[int, int, int] | None:
+        """Returns ``(frame_start, frame_end, frame_step)`` of the actually-
+        missing frame range for this chunk, or None if every frame in the
+        original range has already been rendered (by any sibling).
+
+        The canonical chunk range is taken from the lowest-attempt sibling
+        job's row.  Already-rendered filenames come straight from the
+        ``output_frames`` table (PK on (group_id, filename) makes the
+        contents self-deduplicating across siblings — we never have to
+        union JSON arrays in Python).
+
+        The returned range is contiguous from the earliest missing frame
+        to the chunk's end.  Mid-chunk gaps (rare in practice — workers
+        render sequentially) get included via this contiguous shape rather
+        than scattered into N parallel single-frame retries.
+        """
+        siblings = [
+            j for j in self._job_repo.get_raw_by_group(group_id)
+            if (j.get("chunk_index") or 0) == chunk_index
+        ]
+        if not siblings:
+            return None
+
+        original = min(siblings, key=lambda j: j.get("attempt") or 0)
+        chunk_start = int(original.get("frame_start") or 0)
+        chunk_end = int(original.get("frame_end") or 0)
+        step = int(original.get("frame_step") or 1)
+
+        rendered_filenames = self._output_frames.unique_filenames_for_chunk(
+            group_id, chunk_index,
+        )
+        rendered: set[int] = set()
+        for fname in rendered_filenames:
+            match = _FRAME_FILENAME_RE.match(fname)
+            if match:
+                rendered.add(int(match.group(1)))
+
+        all_chunk_frames = set(range(chunk_start, chunk_end + 1, step))
+        missing = sorted(all_chunk_frames - rendered)
+        if not missing:
+            return None
+        return (missing[0], chunk_end, step)
 
     @staticmethod
     def _exclusions_for(

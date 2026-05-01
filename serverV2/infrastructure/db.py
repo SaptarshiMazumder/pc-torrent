@@ -297,6 +297,50 @@ def init_db() -> None:
                 cur.execute(
                     "ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS tier TEXT"
                 )
+                # Phase 9 — output frames as their own table.  Replaces the
+                # jobs.output_files JSON column.  PRIMARY KEY (group_id,
+                # filename) enforces frame uniqueness at the DB level:
+                # sibling retries that uploaded the same frame collapse to
+                # one row at INSERT time, so any caller can count or list
+                # frames with straight SQL and never double-count.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS output_frames (
+                        group_id   TEXT        NOT NULL,
+                        filename   TEXT        NOT NULL,
+                        job_id     TEXT        NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        PRIMARY KEY (group_id, filename)
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS output_frames_job_idx "
+                    "ON output_frames (job_id)"
+                )
+                # Phase 9 — dispatch_queue uniqueness.  Two concurrent
+                # retry signals for the same chunk used to insert two
+                # rows; with this constraint the second INSERT is a
+                # no-op (paired with ON CONFLICT DO NOTHING in
+                # DispatchQueueRepository.enqueue).
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ALTER COLUMN chunk_index SET NOT NULL"
+                )
+                cur.execute(
+                    """
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                             WHERE conname = 'dispatch_queue_chunk_unique'
+                        ) THEN
+                            ALTER TABLE dispatch_queue
+                              ADD CONSTRAINT dispatch_queue_chunk_unique
+                              UNIQUE (group_id, chunk_index);
+                        END IF;
+                    END $$
+                    """
+                )
         log.info("Database connection pool initialized")
     except Exception as exc:
         log.error("Failed to initialize database: %s", exc)

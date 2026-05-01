@@ -57,6 +57,7 @@ from serverV2.repositories.machine_heartbeat_repository import (
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.machine_repository import MachineRepository
+from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
@@ -144,6 +145,7 @@ def build(
     worker_start_repo = WorkerStartRepository(redis)
     in_progress_repo = InProgressChunkRepository()
     telemetry_repo = TelemetryRepository()
+    output_frame_repo = OutputFrameRepository()
 
     # -- fleet registry --
     registry = FleetRegistry()
@@ -202,6 +204,7 @@ def build(
         config=cfg.vast, client=vast_client,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
+        output_frame_repo=output_frame_repo,
         on_failure=_on_failure,
         on_success=_on_success,
         stall_detector_factory=_make_pre_render_stall_detector,
@@ -225,6 +228,7 @@ def build(
         config=cfg.modal, client=modal_client,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
+        output_frame_repo=output_frame_repo,
         on_failure=_on_failure,
         on_success=_on_success,
         stall_detector_factory=_make_pre_render_stall_detector,
@@ -334,6 +338,7 @@ def build(
         queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
         telemetry_repo=telemetry_repo,
+        output_frame_repo=output_frame_repo,
         fleet_registry=registry,
         resource_picker=_resource_picker,
     )
@@ -365,9 +370,9 @@ def build(
         machine_repo=machine_repo,
         heartbeat_repo=heartbeat_repo,
         machine_heartbeat_repo=machine_heartbeat_repo,
+        output_frame_repo=output_frame_repo,
         on_failure=_on_failure,
         stall_detector=_make_pre_render_stall_detector(),
-        stale_seconds=cfg.failover_stale_seconds,
         demote_seconds=cfg.community_machine_demote_seconds,
     )
 
@@ -382,6 +387,7 @@ def build(
     upload_coordinator = UploadCoordinator()
 
     outputs_resolver = OutputsResolver(
+        output_frame_repo=output_frame_repo,
         presigner=lambda key, name: storage.generate_presigned_url(key, download_name=name),
     )
 
@@ -393,15 +399,18 @@ def build(
         orchestrator=orchestrator,
         fleet_registry=registry,
         outputs_resolver=outputs_resolver,
+        output_frame_repo=output_frame_repo,
     )
 
     job_service = JobService(
         job_repo=job_repo,
         machine_repo=machine_repo,
         heartbeat_repo=heartbeat_repo,
+        machine_heartbeat_repo=machine_heartbeat_repo,
         progress_repo=progress_repo,
         worker_start_repo=worker_start_repo,
         outputs_resolver=outputs_resolver,
+        output_frame_repo=output_frame_repo,
         success_notifier=lambda jid: callback_router.route(
             job_id=jid, outcome=CallbackOutcome.SUCCESS,
         ),

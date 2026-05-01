@@ -252,6 +252,83 @@ package "Allocation (orchestrator/allocation)" <<Frame>> #fecaca {
 }
 
 ' ============================================================
+' Layer 5b -- Stall Detection
+' ============================================================
+package "Stall Detection (fleets/shared/pre_render_stall_detector)" <<Frame>> #fef3c7 {
+    interface IPreRenderStallDetector <<protocol>> {
+        + evaluate(window, job_age_sec) : StallReason | None
+    }
+
+    class PreRenderStallDetector {
+        + evaluate(window, job_age_sec)
+    }
+
+    class PreRenderStallDetectorBuilder <<builder>> {
+        + with_cpu_stall(threshold, window, rss_noise)
+        + with_bytes_stall(stall_sec)
+        + with_download_ceiling(secs_per_gb, min, max)
+        + with_hard_ceiling(max_sec)
+        + build() : IPreRenderStallDetector
+    }
+
+    interface StallRule <<protocol>> {
+        + evaluate(window, job_age_sec) : StallReason | None
+    }
+
+    class CpuStallRule
+    class BytesStallRule
+    class DownloadCeilingRule
+    class HardCeilingRule
+
+    class HeartbeatWindow <<value object>> {
+        + samples : list[Heartbeat]
+        + within_last(sec)
+        + oldest_in_phase(phase)
+    }
+    class StallReason <<dataclass>> {
+        + rule, message
+    }
+
+    PreRenderStallDetector       -[#a16207,dashed]-|> IPreRenderStallDetector
+    PreRenderStallDetectorBuilder -[#a16207]-> PreRenderStallDetector : builds
+    CpuStallRule                 -[#a16207,dashed]-|> StallRule
+    BytesStallRule               -[#a16207,dashed]-|> StallRule
+    DownloadCeilingRule          -[#a16207,dashed]-|> StallRule
+    HardCeilingRule              -[#a16207,dashed]-|> StallRule
+    PreRenderStallDetector       -[#a16207]-> StallRule : runs rules in order,\nfirst match returns
+
+    note right of PreRenderStallDetectorBuilder #ddffdd
+      Stateless across jobs.  Bootstrap
+      registers a 0-arg factory:
+        _make_pre_render_stall_detector()
+      Per-fleet behaviour:
+        Vast / Modal: factory called per
+          start_monitoring -- one detector
+          per active job, lives with the
+          monitor thread.
+        Community: ONE detector built at
+          init, reused across all jobs
+          (stateless w.r.t. job_id; takes
+          window + age as inputs).
+
+      Reads heartbeat sliding window from
+      Redis (HeartbeatRepository.get_recent),
+      not in-memory state -- recovery
+      reattaches monitors with a fresh
+      detector and the existing window.
+    end note
+
+    note right of CpuStallRule #ffe4e6
+      Currently DISABLED in the bootstrap
+      factory.  Worker handler.py idles at
+      ~0% CPU (Blender does the work in a
+      child process).  Re-enable once the
+      worker's ProcessSampler walks
+      children.
+    end note
+}
+
+' ============================================================
 ' Layer 6 -- Fleet
 ' ============================================================
 package "Fleet (fleets)" <<Frame>> #bbf7d0 {
@@ -472,10 +549,31 @@ RenderOrchestrator   -[#7c3aed]-> RenderLifecycle       : F4. handle_chunk_faile
 RenderLifecycle      -[#7c3aed]-> JobRepository         : F5. mark_failed
 RenderLifecycle      -[#7c3aed]-> LifecycleFramesDeduplication : F6. compute_remaining_for_chunk\n     (UNION across siblings)
 RenderLifecycle      -[#7c3aed]-> ChunkRequest          : F7. build retry request\n     (anti-affinity exclusions)
+RenderLifecycle      -[#7c3aed,bold]-> DispatchCoordinator   : F8. enqueue_and_flush(retry_task)\n     LOOPS BACK to step 6\n     (or terminal if retries exhausted)
 note on link
-  retries left AND eligible target ->
-  back to step 6 (enqueue_and_flush);
-  exhausted -> reconcile_group_status
+  Loop terminates when:
+    next_attempt > MAX_RETRIES
+    OR allocate_retry returns None
+    (no eligible target after exclusions)
+  Either case -> reconcile_group_status,
+  group may transition to 'failed'.
+end note
+
+' --- Stall-detection feeds the failure path (5th source) ---
+VastInstanceMonitor  -[#16a34a,dashed]-> IPreRenderStallDetector : evaluates per tick\nin "running" block
+ModalJobMonitor      -[#16a34a,dashed]-> IPreRenderStallDetector : evaluates per tick\nafter is_stale check
+CommunityMonitor     -[#16a34a,dashed]-> IPreRenderStallDetector : evaluates per tick\nper running community job
+IPreRenderStallDetector -[#a16207]-> HeartbeatRepository : reads sliding window\n(get_recent)
+note on link
+  StallReason -> monitor's _on_failure
+  closure -> CallbackRouter (FAILURE)
+  -> same retry path as steps F1..F8.
+  Stall detection is the implicit
+  pre-failure path: it just generates
+  failure events from the worker's
+  heartbeat stream when no other signal
+  has fired yet (e.g. download wedged
+  but heartbeats are still landing).
 end note
 
 ' --- 8. Cancel path ---
@@ -494,6 +592,11 @@ ModalRecovery        -[#16a34a]-> ModalCallbackHandler  : reattach in-flight mon
 RenderLifecycle      -[#7c3aed]-> MachineRepository     : get_available_community\n(intersected w/ alive_ids)
 RenderLifecycle      -[#7c3aed]-> MachineHeartbeatRepository : alive_ids snapshot
 
+' --- Bootstrap wires the stall-detector factory into each fleet ---
+VastCallbackHandler  -[#16a34a,dashed]-> PreRenderStallDetectorBuilder : factory injected,\n.build() per start_monitoring
+ModalCallbackHandler -[#16a34a,dashed]-> PreRenderStallDetectorBuilder : factory injected,\n.build() per start_monitoring
+CommunityMonitor     -[#16a34a,dashed]-> PreRenderStallDetectorBuilder : .build() ONCE at init\n(stateless across jobs)
+
 ' ============================================================
 ' Color legend
 ' ============================================================
@@ -505,11 +608,13 @@ legend right
   violet  = Orchestration (orchestrator + lifecycle + dispatch)
   cyan    = Callbacks     (router + handlers)
   red     = Allocation    (strategies + validators)
+  amber   = Stall Detection (detector + rules + builder)
   green   = Fleet         (registry + per-provider strategy / client / monitor / recovery)
   slate   = Repositories  (DB + Redis I/O)
   ----
   Numbered arrows = render lifecycle order (1..24)
-  F-prefix = failure branch        C-prefix = cancel branch
+  F-prefix = failure branch (F8 = explicit loop back to dispatch)
+  C-prefix = cancel branch
 end legend
 
 @enduml

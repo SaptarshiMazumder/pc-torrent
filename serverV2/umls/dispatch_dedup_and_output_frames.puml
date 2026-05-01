@@ -1,0 +1,382 @@
+@startuml dispatch_dedup_and_output_frames
+allowmixing
+title Dispatch dedup + output_frames + async failure flow\n(class diagram of changes)
+
+skinparam classFontSize 11
+skinparam noteFontSize 10
+skinparam classBackgroundColor<<NEW>> #DCFCE7
+skinparam classBackgroundColor<<CHANGED>> #FEF3C7
+skinparam classBackgroundColor<<DELETED>> #FEE2E2
+
+' =====================================================================
+' API layer
+' =====================================================================
+
+package "api/routers" {
+  class JobsRouter <<CHANGED>> {
+    + POST /agent-failure
+    + POST /register-outputs
+  }
+  note right of JobsRouter
+    **CHANGED**:
+    /agent-failure now takes
+    BackgroundTasks; returns
+    **202** immediately and
+    runs CallbackRouter.route
+    in background.
+    Agent no longer blocks
+    on the orchestration chain.
+  end note
+
+  class InternalRouter <<CHANGED>> {
+    + POST /internal/orphan/{job_id}
+  }
+  note right of InternalRouter
+    **CHANGED**: same
+    BackgroundTasks pattern.
+    backup_monitor cron
+    doesn't block either.
+  end note
+}
+
+' =====================================================================
+' Callbacks layer
+' =====================================================================
+
+class CallbackRouter {
+  + route(job_id, outcome, error)
+}
+note right of CallbackRouter
+  Unchanged.  Still funnels
+  SUCCESS / FAILURE through
+  is_job_terminal short-circuit
+  + handler dispatch.
+end note
+
+JobsRouter --> CallbackRouter : background.add_task
+InternalRouter --> CallbackRouter : background.add_task
+
+' =====================================================================
+' Orchestration layer
+' =====================================================================
+
+package "orchestrator" {
+  class RenderLifecycle <<CHANGED>> {
+    + handle_chunk_failed(job_id, error)
+    + _try_dispatch_retry(job_id, error)
+    + _write_terminal_snapshot(...)
+  }
+  note right of RenderLifecycle
+    **CHANGED — handle_chunk_failed**:
+    First call now is
+    in_progress.release_if_owner(...).
+    If False (lost the race) →
+    mark_failed + return.
+    Atomic dedup point.
+
+    **CHANGED — _try_dispatch_retry**:
+    Optimistic stale-signal guard
+    REMOVED (lines 328-334).
+    release_if_owner replaces it.
+
+    **CHANGED — _write_terminal_snapshot**:
+    Reads count_for_group and
+    list_for_group from
+    OutputFrameRepository
+    instead of parsing JSON
+    output_files per job.
+  end note
+
+  class DispatchCoordinator <<CHANGED>> {
+    + enqueue_and_flush(group_id, tasks, ctx)
+  }
+  note right of DispatchCoordinator
+    **CHANGED**:
+    Before each queue_repo.enqueue,
+    checks
+    in_progress.current_job_for(
+      group_id, chunk_index).
+    If non-None → skip enqueue.
+    Belt-and-suspenders for any
+    caller that forgot to release.
+  end note
+
+  class LifecycleFramesDeduplication <<DELETED>> {
+    DELETED
+  }
+  note right of LifecycleFramesDeduplication
+    **DELETED entirely**.
+    Set-union dedup over
+    jobs.output_files JSON
+    is gone — replaced by
+    DB-level uniqueness
+    on output_frames.
+  end note
+}
+
+CallbackRouter --> RenderLifecycle : handle_chunk_failed
+RenderLifecycle --> DispatchCoordinator : enqueue_and_flush
+
+' =====================================================================
+' Service layer
+' =====================================================================
+
+package "services" {
+  class JobService <<CHANGED>> {
+    + register_outputs(job_id, files)
+  }
+  note right of JobService
+    **CHANGED — register_outputs**:
+    Calls
+    output_frame_repo.add_many(...)
+    instead of jobs.merge_output_files.
+    Sibling retries that uploaded
+    the same frame are deduped by
+    the PK (group_id, filename) at
+    INSERT time.
+  end note
+
+  class RenderGroupService <<CHANGED>> {
+  }
+  note right of RenderGroupService
+    **CHANGED**:
+    available_output_files_count
+    now from
+    output_frame_repo.count_for_group(group_id)
+    not from summing tasks.
+  end note
+
+  class RenderGroupSerializer <<CHANGED>> {
+    + serialize(group, jobs)
+  }
+  note right of RenderGroupSerializer
+    **CHANGED**:
+    Was a pure module.
+    Becomes a class, with
+    OutputFrameRepository
+    injected.  Per-task
+    output_files / count /
+    latest read via
+    list_for_job(job_id).
+  end note
+
+  class OutputsResolver <<CHANGED>> {
+  }
+  note right of OutputsResolver
+    **CHANGED**:
+    list_for_job(job_id) instead
+    of parsing JSON column.
+  end note
+}
+
+JobService --> JobsRouter
+RenderGroupService --> RenderGroupSerializer
+
+' =====================================================================
+' Repositories
+' =====================================================================
+
+package "repositories" {
+
+  class InProgressChunkRepository <<CHANGED>> {
+    + claim_or_replace(...)
+    + current_job_for(...)
+    + release(...)
+    + release_all(...)
+    + release_if_owner(\n  group_id, chunk_index,\n  expected_job_id) : bool
+  }
+  note right of InProgressChunkRepository
+    **NEW METHOD — release_if_owner**:
+    DELETE FROM in_progress_chunks
+     WHERE group_id      = ?
+       AND chunk_index   = ?
+       AND current_job_id = ?
+    RETURNING current_job_id
+
+    Atomic.  Only ONE concurrent
+    caller gets a row back; others
+    see 0 rows and bail.
+    THIS is the dedup mechanism.
+  end note
+
+  class DispatchQueueRepository <<CHANGED>> {
+    + enqueue(group_id, item)
+    + dequeue_for_fleet(fleet)
+    + drain(group_id)
+  }
+  note right of DispatchQueueRepository
+    **CHANGED — enqueue**:
+    INSERT … ON CONFLICT
+    (group_id, chunk_index)
+    DO NOTHING.
+    DB-level safety net for any
+    race that slips past the
+    coordinator's app-level check.
+
+    **QueueItem.chunk_index**:
+    no longer Optional — schema
+    column flips to NOT NULL.
+  end note
+
+  class JobRepository <<CHANGED>> {
+    + get_raw_by_id(...)
+    + mark_failed(...)
+    + count_active_by_fleet()
+  }
+  note right of JobRepository
+    **DELETED methods**:
+    • get_output_files
+    • merge_output_files
+
+    **CHANGED**: INSERT statements
+    no longer write the
+    output_files column.
+  end note
+
+  class OutputFrameRepository <<NEW>> {
+    + add_many(group_id, job_id,\n    files) : list[str]
+    + count_for_group(group_id) : int
+    + count_for_job(job_id) : int
+    + list_for_group(group_id) : list[str]
+    + list_for_job(job_id) : list[str]
+    + unique_filenames_for_chunk(\n    group_id, chunk_index) : set[str]
+  }
+  note right of OutputFrameRepository
+    **NEW REPOSITORY**.
+    Single source of truth for
+    output frames.
+
+    add_many uses ON CONFLICT
+    (group_id, filename) DO
+    NOTHING RETURNING filename.
+    Returns the rows actually
+    inserted — empty list means
+    a sibling already uploaded
+    every frame in this batch.
+  end note
+
+  class JobCounts <<CHANGED>> {
+    + uploaded : int
+  }
+  note right of JobCounts
+    **CHANGED**:
+    uploaded → count_for_job.
+  end note
+}
+
+RenderLifecycle --> InProgressChunkRepository : release_if_owner\n_write_terminal_snapshot
+DispatchCoordinator --> InProgressChunkRepository : current_job_for
+DispatchCoordinator --> DispatchQueueRepository : enqueue / dequeue
+JobService --> OutputFrameRepository : add_many
+RenderGroupService --> OutputFrameRepository : count_for_group
+RenderGroupSerializer --> OutputFrameRepository : list_for_job
+OutputsResolver --> OutputFrameRepository : list_for_job
+JobCounts --> OutputFrameRepository : count_for_job
+RenderLifecycle --> OutputFrameRepository : count_for_group / list_for_group
+
+' =====================================================================
+' Models / value objects
+' =====================================================================
+
+package "core" {
+  class RenderJob <<CHANGED>> {
+    + id : str
+    + group_id : str
+    + chunk_index : int
+    + status : str
+  }
+  note right of RenderJob
+    **DELETED fields/methods**:
+    • output_files
+    • uploaded_count
+    • remaining_frames()
+
+    Frame counts now come from
+    OutputFrameRepository, not
+    from this model.
+  end note
+
+  class value_objects <<CHANGED>> {
+  }
+  note right of value_objects
+    **DELETED**:
+    parse_output_files(raw)
+    No more JSON to parse.
+  end note
+}
+
+' =====================================================================
+' Database
+' =====================================================================
+
+package "Postgres (Neon)" {
+  database "in_progress_chunks" as IPC
+  note right of IPC
+    PK (group_id, chunk_index)
+    UNIQUE already exists.
+    No schema change.
+  end note
+
+  database "dispatch_queue" as DQ <<CHANGED>>
+  note right of DQ
+    **NEW CONSTRAINT**:
+    UNIQUE (group_id, chunk_index)
+    + chunk_index flips to NOT NULL.
+    See SQL note below.
+  end note
+
+  database "output_frames" as OFT <<NEW>>
+  note right of OFT
+    **NEW TABLE**.
+    PK (group_id, filename).
+    Source of truth for
+    rendered frames.
+    Replaces jobs.output_files
+    JSON column.
+  end note
+
+  database "jobs" as JT <<CHANGED>>
+  note right of JT
+    **DROPPED COLUMN**:
+    output_files (JSON).
+    No dead code.
+  end note
+}
+
+InProgressChunkRepository --> IPC
+DispatchQueueRepository --> DQ
+OutputFrameRepository --> OFT
+JobRepository --> JT
+
+' =====================================================================
+' Neon SQL
+' =====================================================================
+
+note as SQL #FFF7ED
+  **Neon SQL (run manually)**
+
+  -- dispatch_queue uniqueness
+  DELETE FROM dispatch_queue a USING dispatch_queue b
+   WHERE a.id < b.id
+     AND a.group_id    = b.group_id
+     AND a.chunk_index = b.chunk_index;
+  ALTER TABLE dispatch_queue ALTER COLUMN chunk_index SET NOT NULL;
+  ALTER TABLE dispatch_queue
+    ADD CONSTRAINT dispatch_queue_chunk_unique
+    UNIQUE (group_id, chunk_index);
+
+  -- new output_frames table
+  CREATE TABLE output_frames (
+    group_id   TEXT        NOT NULL,
+    filename   TEXT        NOT NULL,
+    job_id     TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (group_id, filename)
+  );
+  CREATE INDEX output_frames_job_idx ON output_frames (job_id);
+
+  -- drop the old JSON column (no dead code)
+  ALTER TABLE jobs DROP COLUMN output_files;
+end note
+
+@enduml

@@ -95,25 +95,20 @@ def heartbeat(job_id: str, payload: JobHeartbeatPayload | None = None):
         raise HTTPException(e.status, e.message)
 
 
-@router.post("/jobs/{job_id}/agent-failure")
-def agent_failure(job_id: str, body: dict):
+@router.post("/jobs/{job_id}/agent-failure", status_code=202)
+def agent_failure(job_id: str, body: dict, background: BackgroundTasks):
     """Community-agent monitor-equivalent path.  The agent is its own
     monitor — when its local render fails, it tells the orchestrator
     here so the standard retry / drain / reconcile flow fires.
 
-    Routes through CallbackRouter so the ``is_job_terminal`` short-
-    circuit guard kicks in for free — duplicate failure reports
-    (retried HTTP calls, late signals from a job already terminal via
-    another path) collapse to a single transition.  Same path Vast and
-    Modal in-process monitors take via the ``_on_failure`` closure
-    wired in bootstrap.
-
-    Pairs with ``PUT /jobs/{job_id}/status`` (which the agent also
-    calls to update the DB row) — both are needed: status writes the
-    DB, agent-failure triggers the orchestration side-effects.
+    Returns 202 immediately; the orchestration chain (release_if_owner,
+    retry dispatch, group reconcile, drain) runs in a background task
+    so the agent's HTTP client doesn't block on it.  Mirrors the same
+    BackgroundTasks pattern that ``register_outputs`` uses.
     """
     error = str(body.get("error") or "Agent reported failure")
-    _get_callback_router().route(
+    background.add_task(
+        _get_callback_router().route,
         job_id=job_id, outcome=CallbackOutcome.FAILURE, error=error,
     )
     return {"job_id": job_id, "accepted": True}

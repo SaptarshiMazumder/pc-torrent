@@ -207,24 +207,10 @@ def get_outputs(group_id: str):
 
 @router.get("/render-groups/{group_id}/download-zip")
 def download_zip(group_id: str):
-    import io
-    import zipfile
-    from serverV2.infrastructure.db import query_all
-    from serverV2.infrastructure import storage
-    from serverV2.core.value_objects import parse_output_files
-
-    jobs = query_all("SELECT * FROM jobs WHERE group_id = %s", (group_id,))
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for job in jobs:
-            for fname in parse_output_files(job.get("output_files")):
-                key = f"jobs/{group_id}/output/{fname}"
-                try:
-                    data = storage.download_file(key)
-                    zf.writestr(fname, data)
-                except Exception:
-                    pass
-    buf.seek(0)
+    try:
+        buf = _get().download_all_as_zip(group_id)
+    except RenderGroupServiceError as e:
+        raise HTTPException(e.status, e.message)
     return StreamingResponse(
         buf,
         media_type="application/zip",

@@ -20,6 +20,7 @@ from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
 from serverV2.fleets.shared.pre_render_stall_detector import IPreRenderStallDetector
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
+from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ class ModalCallbackHandler:
         client: ModalClient,
         heartbeat_repo: HeartbeatRepository,
         progress_repo: ProgressRepository,
+        output_frame_repo: OutputFrameRepository,
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
         stall_detector_factory: Callable[[], IPreRenderStallDetector],
@@ -47,6 +49,7 @@ class ModalCallbackHandler:
         self._client = client
         self._heartbeats = heartbeat_repo
         self._progress = progress_repo
+        self._output_frames = output_frame_repo
         self._on_failure = on_failure
         self._on_success = on_success
         self._stall_detector_factory = stall_detector_factory
@@ -79,7 +82,7 @@ class ModalCallbackHandler:
         with self._monitors_lock:
             self._monitors[job_id] = stop_event
 
-        counts = JobCounts(self._progress)
+        counts = JobCounts(self._progress, self._output_frames)
         liveness = LivenessCheck(
             heartbeat_repo=self._heartbeats,
             stale_sec=self._cfg.in_progress_stale_sec,

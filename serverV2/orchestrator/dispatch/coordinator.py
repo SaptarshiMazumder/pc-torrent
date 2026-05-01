@@ -63,8 +63,23 @@ class DispatchCoordinator:
 
         Tasks that don't fit stay in the queue tagged by ``fleet`` and are
         drained later by :meth:`drain_for_fleet` when a job ends.
+
+        **Pre-enqueue ledger check**: skip any task whose chunk slot is
+        already owned by an active job (in_progress_chunks has a row for
+        ``(group_id, chunk_index)``).  Combined with the DB-level UNIQUE
+        constraint on dispatch_queue, this is the dedup gate that
+        prevents duplicate dispatches for the same chunk.
         """
         for t in tasks:
+            chunk_index = t.chunk_index or 0
+            owner = self._in_progress.current_job_for(group_id, chunk_index)
+            if owner is not None:
+                log.info(
+                    "Group %s chunk %s already in progress (job %s) "
+                    "— skipping enqueue",
+                    group_id, chunk_index, owner,
+                )
+                continue
             self._queue_repo.enqueue(group_id, _queue_item_for(t, context))
 
         in_flight = dict(self._job_repo.count_active_by_fleet())

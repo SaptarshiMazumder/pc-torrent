@@ -50,14 +50,6 @@ def set_idle(machine_id: str):
         raise HTTPException(e.status, e.message)
 
 
-@router.put("/machines/{machine_id}/heartbeat")
-def heartbeat(machine_id: str):
-    try:
-        return _get().heartbeat(machine_id)
-    except MachineServiceError as e:
-        raise HTTPException(e.status, e.message)
-
-
 @router.get("/machines")
 def list_machines():
     if _machine_repo is not None:

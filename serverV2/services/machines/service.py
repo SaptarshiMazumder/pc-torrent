@@ -135,14 +135,6 @@ class MachineService:
         )
         return {"success": True}
 
-    def heartbeat(self, machine_id: str) -> dict[str, bool]:
-        # Heartbeats land in Redis (sorted-set ZADD), not Postgres.  The
-        # allocator's liveness check reads from the same set.  No DB write
-        # here -- machine.last_seen_at column is now informational only,
-        # written on register/set_available transitions only.
-        self._machine_hb.record(machine_id)
-        return {"success": True}
-
     def list_all(self) -> list[dict[str, Any]]:
         return query_all("SELECT * FROM machines ORDER BY registered_at DESC")
 

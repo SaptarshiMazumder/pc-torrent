@@ -100,16 +100,9 @@ class RenderJob:
     render_overrides_json: str | None
     chunk_index: int | None
     priority: int
-    output_files: str | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RenderJob:
-        # rendered_frames is the single source of truth for "how many frames
-        # are complete."  We compute it as the max of the DB counter (which
-        # may be stale now that progress lives in Redis) and the verified
-        # count of uploaded files — whichever is higher is the real count.
-        from serverV2.core.value_objects import parse_output_files
-        uploaded = len(parse_output_files(row.get("output_files")))
         return cls(
             job_id=row["id"],
             group_id=row.get("group_id", ""),
@@ -119,7 +112,7 @@ class RenderJob:
             frame_start=row.get("frame_start") or 0,
             frame_end=row.get("frame_end") or 0,
             frame_step=row.get("frame_step") or 1,
-            rendered_frames=max(0, row.get("rendered_frames") or 0, uploaded),
+            rendered_frames=max(0, row.get("rendered_frames") or 0),
             total_frames=row.get("total_frames") or 0,
             attempt=row.get("attempt") or 0,
             max_retries=row.get("max_retries") or 0,
@@ -129,7 +122,6 @@ class RenderJob:
             render_overrides_json=row.get("render_overrides_json"),
             chunk_index=row.get("chunk_index"),
             priority=row.get("priority") or 0,
-            output_files=row.get("output_files"),
         )
 
     @property
@@ -139,18 +131,6 @@ class RenderJob:
     @property
     def is_serverless(self) -> bool:
         return self.machine_type in SERVERLESS_TYPE_VALUES
-
-    def remaining_frames(self) -> tuple[int, int] | None:
-        """Frames not yet uploaded.  Uses verified output_files count, not the
-        worker-pushed rendered_frames counter — self-reports can lie, uploaded
-        files cannot.  Assumes sequential rendering (workers always do).
-        """
-        from serverV2.core.value_objects import parse_output_files
-        uploaded = len(parse_output_files(self.output_files))
-        new_start = self.frame_start + uploaded * self.frame_step
-        if new_start > self.frame_end:
-            return None
-        return (new_start, self.frame_end)
 
     def can_retry_same_endpoint(self) -> bool:
         return self.attempt < self.max_retries

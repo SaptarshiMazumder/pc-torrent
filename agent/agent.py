@@ -325,9 +325,13 @@ def notify_orchestrator_failure(job_id, error):
     """Tell the orchestrator this community job failed so the retry /
     drain / reconcile flow fires.  The agent plays the role Vast/Modal
     monitors play in-process: it observes its own render outcome and
-    notifies the orchestrator over HTTP.  Pairs with
-    ``update_job_status(job_id, "failed", ...)`` — that one writes the
-    DB row, this one triggers the orchestration side-effects.
+    notifies the orchestrator over HTTP.
+
+    Do NOT pre-flip the DB row to ``failed`` before calling this.  The
+    orchestrator's ``handle_chunk_failed`` (reached via /agent-failure
+    -> CallbackRouter) owns that write, and pre-flipping trips the
+    router's ``is_job_terminal`` short-circuit and silently suppresses
+    the retry dispatch.
 
     Network failures are swallowed — the heartbeat-staleness path via
     ``CommunityMonitor`` is the eventual safety net if this notify
@@ -1480,7 +1484,11 @@ def execute_job(job):
         _log(f"[JOB] {e}")
         final_error = with_partial_recovery_hint(str(e))
         finalize_progress()
-        update_job_status(job_id, "failed", error=final_error)
+        # Don't pre-flip the DB row to 'failed' here -- the orchestrator's
+        # handle_chunk_failed (reached via /agent-failure -> CallbackRouter)
+        # owns that write, and pre-flipping would trip the router's
+        # is_job_terminal short-circuit and silently suppress the retry
+        # dispatch.  Same reasoning for the Timeout/Exception paths below.
         notify_orchestrator_failure(job_id, final_error)
 
     except subprocess.TimeoutExpired:
@@ -1491,7 +1499,6 @@ def execute_job(job):
             pass
         final_error = with_partial_recovery_hint("Render timed out")
         finalize_progress()
-        update_job_status(job_id, "failed", error=final_error)
         notify_orchestrator_failure(job_id, final_error)
 
     except Exception as e:
@@ -1509,10 +1516,6 @@ def execute_job(job):
                 final_error = str(e)
         else:
             final_error = str(e)
-        try:
-            update_job_status(job_id, "failed", error=final_error)
-        except Exception as report_exc:
-            _log(f"[JOB] Could not report failure for {job_id}: {report_exc}", level="warn")
         notify_orchestrator_failure(job_id, final_error)
 
     finally:
@@ -1679,7 +1682,6 @@ def main():
                         _log(f"[AGENT] Render image {COMMUNITY_IMAGE} not loaded, downloading...")
                         if not ensure_docker_image():
                             _log("[AGENT] Cannot load render image, failing job.")
-                            update_job_status(job["id"], "failed", error="Render image not available")
                             notify_orchestrator_failure(job["id"], "Render image not available")
                             continue
 

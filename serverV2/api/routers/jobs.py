@@ -114,6 +114,20 @@ def agent_failure(job_id: str, body: dict, background: BackgroundTasks):
     return {"job_id": job_id, "accepted": True}
 
 
+@router.post("/jobs/{job_id}/cancel", status_code=202)
+def cancel_one_job(job_id: str, background: BackgroundTasks):
+    """Per-instance Cancel button (B2).  Tears down ONE job (the
+    chunk the user clicked Cancel on) without touching the rest of
+    the render group.  Returns 202 immediately; the cancel chain
+    (mark cancelled, stop monitor, release ledger, RPC the provider)
+    runs in a background task -- the provider call can take seconds.
+    """
+    background.add_task(
+        _get_orchestrator().cancel_one_job, job_id,
+    )
+    return {"job_id": job_id, "accepted": True}
+
+
 @router.get("/jobs/{job_id}/cancel-status")
 def cancel_status(job_id: str):
     """Long-running workers (community renderer) poll this every ~30s to

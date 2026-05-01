@@ -117,9 +117,9 @@ function RenderGroupDetail({
       <FailedChunksPanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
 
       {/* GPU Instances */}
-      <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
-      <ModalInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
-      <CommunityInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} />
+      <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
+      <ModalInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
+      <CommunityInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
 
       {/* Scene heaviness — async-friendly: skeleton until analysis_snapshot lands. */}
       <HeavinessPanel

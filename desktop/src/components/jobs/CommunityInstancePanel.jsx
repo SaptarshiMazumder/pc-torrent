@@ -53,7 +53,7 @@ const communityProvider = {
   },
 };
 
-export default function CommunityInstancePanel({ tasks, backendUrl }) {
+export default function CommunityInstancePanel({ tasks, backendUrl, onRefresh }) {
   const provider = useMemo(() => communityProvider, []);
-  return <InstancePanel tasks={tasks} backendUrl={backendUrl} provider={provider} />;
+  return <InstancePanel tasks={tasks} backendUrl={backendUrl} provider={provider} onRefresh={onRefresh} />;
 }

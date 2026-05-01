@@ -115,12 +115,6 @@ class JobRepository:
         else:
             execute("UPDATE jobs SET status = %s WHERE id = %s", (status, job_id))
 
-    def update_progress(self, job_id: str, rendered_frames: int, total_frames: int) -> None:
-        execute(
-            "UPDATE jobs SET total_frames = %s, rendered_frames = %s WHERE id = %s",
-            (total_frames, rendered_frames, job_id),
-        )
-
     def mark_done(self, job_id: str) -> None:
         execute(
             "UPDATE jobs SET status = 'done', completed_at = %s WHERE id = %s",
@@ -192,21 +186,6 @@ class JobRepository:
             ),
         )
 
-    # ---- heartbeat ----
-
-    def update_heartbeat(self, job_id: str, phase: str | None = None) -> bool:
-        row = query_one("SELECT id FROM jobs WHERE id = %s", (job_id,))
-        if not row:
-            return False
-        if phase:
-            execute(
-                "UPDATE jobs SET last_heartbeat_at = %s, heartbeat_phase = %s WHERE id = %s",
-                (_now_iso(), phase, job_id),
-            )
-        else:
-            execute("UPDATE jobs SET last_heartbeat_at = %s WHERE id = %s", (_now_iso(), job_id))
-        return True
-
     # ---- output files ----
 
     def get_output_files(self, job_id: str) -> list[str]:
@@ -261,10 +240,9 @@ class JobRepository:
 
     def claim_next_for_machine(self, machine_id: str) -> dict[str, Any] | None:
         from serverV2.infrastructure.db import execute_returning
-        execute(
-            "UPDATE machines SET last_seen_at = %s WHERE id = %s",
-            (_now_iso(), machine_id),
-        )
+        # Liveness signal lives in Redis (MachineHeartbeatRepository).  The
+        # /machines/{id}/heartbeat route writes there; no need to update
+        # machines.last_seen_at on every poll.
         job = execute_returning(
             """
             UPDATE jobs SET status = 'running', last_heartbeat_at = %s

@@ -348,8 +348,22 @@ class AppConfig:
     modal: ModalConfig
     public_backend_url: str
     min_frames_per_worker: int = 2
+    # Allocator threshold: how recently a community machine must have
+    # heartbeated to be eligible for new dispatches.  Tight (15s) so we
+    # don't dispatch to a dead PC.
     machine_stale_seconds: int = 15
+    # CommunityMonitor's "machine went offline mid-render" detection.
+    # Wider than allocator so a brief network blip mid-render doesn't
+    # immediately fail the chunk.
     failover_stale_seconds: int = 30
+    # CommunityMonitor's "demote ghost machines back to idle" threshold.
+    # Wider still: must be >> heartbeat_interval (10s) + first-heartbeat
+    # lag after /available transition (~10s) so a normally-connecting
+    # agent can't be demoted in the race window between declaring
+    # available and its first ZADD landing.  Demote only fires for
+    # machines that have been silent long enough to be considered
+    # genuinely crashed.
+    community_machine_demote_seconds: int = 90
     # Per-hour cost stamped on every CommunityMachine.  Read by cost-aware
     # allocators (Phase 5+).  Loaded from config.json's ``community.price_per_hour``.
     community_price_per_hour: float = 1.0

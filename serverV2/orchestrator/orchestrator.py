@@ -100,13 +100,6 @@ class RenderOrchestrator:
         """
         self._lifecycle.handle_chunk_succeeded(job_id)
 
-    def on_job_progress(
-        self, job_id: str, rendered_frames: int, total_frames: int,
-    ) -> None:
-        """Worker pushed a PROGRESS event.  On the first one, transition
-        pending → running and roll up to the group."""
-        self._lifecycle.handle_chunk_progress(job_id, rendered_frames, total_frames)
-
     def on_job_running(self, job_id: str) -> None:
         """Fleet monitor saw the container reach 'running' state before
         the worker had a chance to send PROGRESS — transition the job

@@ -38,6 +38,9 @@ from serverV2.fleets.shared.pre_render_stall_detector import (
 )
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.repositories.machine_heartbeat_repository import (
+    MachineHeartbeatRepository,
+)
 from serverV2.repositories.machine_repository import MachineRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
@@ -53,18 +56,28 @@ class CommunityMonitor:
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
         heartbeat_repo: HeartbeatRepository,
+        machine_heartbeat_repo: MachineHeartbeatRepository,
         on_failure: Callable[[str, str], None],
         stall_detector: IPreRenderStallDetector,
         stale_seconds: int = 30,
+        demote_seconds: int = 90,
         interval_sec: int = 10,
     ) -> None:
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._machine_repo = machine_repo
         self._heartbeat_repo = heartbeat_repo
+        self._machine_hb = machine_heartbeat_repo
         self._on_failure = on_failure
         self._stall_detector = stall_detector
+        # ``stale_seconds`` (~30s): mid-render machine-offline detection.
+        # ``demote_seconds`` (~90s): "agent has crashed and isn't coming
+        # back" threshold for flipping Postgres status back to idle.
+        # Wider so a normally-connecting agent (between /available and
+        # its first heartbeat ZADD landing) can't be demoted in the
+        # race window.
         self._stale_sec = stale_seconds
+        self._demote_sec = demote_seconds
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
 
@@ -75,8 +88,10 @@ class CommunityMonitor:
             target=self._loop, daemon=True, name="community-monitor",
         )
         self._thread.start()
-        log.info("CommunityMonitor started (interval=%ds, stale=%ds)",
-                 self._interval, self._stale_sec)
+        log.info(
+            "CommunityMonitor started (interval=%ds, stale=%ds, demote=%ds)",
+            self._interval, self._stale_sec, self._demote_sec,
+        )
 
     def _loop(self) -> None:
         while True:
@@ -87,9 +102,16 @@ class CommunityMonitor:
             time.sleep(self._interval)
 
     def _tick(self) -> None:
-        stale_cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=self._stale_sec)
-        ).isoformat()
+        # Two Redis snapshots, two thresholds:
+        # - alive_ids_recent (stale_sec ~30s): used by per-job offline
+        #   detection -- flag a running chunk's machine as offline if
+        #   it's missed heartbeats for ~30s.
+        # - alive_ids_demote (demote_sec ~90s): used by the ghost-demote
+        #   pass below.  Wider so a freshly-connected agent (in the
+        #   /available -> first-heartbeat race window) is never
+        #   demoted to 'idle' by this loop.
+        alive_ids_recent = self._machine_hb.alive_ids(self._stale_sec)
+        alive_ids_demote = self._machine_hb.alive_ids(self._demote_sec)
 
         for group in self._group_repo.get_active_groups():
             try:
@@ -98,10 +120,25 @@ class CommunityMonitor:
                     if job.is_serverless:
                         continue
                     self._check_group_terminal(group, job)
-                    self._check_machine_offline(group, job, stale_cutoff)
+                    self._check_machine_offline(group, job, alive_ids_recent)
                     self._check_pre_render_stall(job)
             except Exception:
                 log.exception("CommunityMonitor error for group %s", group["id"])
+
+        # Demote ghost machines: status='available'/'processing' in
+        # Postgres but absent from the WIDE liveness window (90s).
+        # Skip if Redis is down -- demoting based on missing data could
+        # mass-demote real machines.  Prune stale entries from the
+        # sorted set with the same wide threshold so it doesn't grow
+        # unboundedly.
+        if alive_ids_demote is not None:
+            try:
+                demoted = self._machine_repo.demote_ghosts(alive_ids_demote)
+                if demoted:
+                    log.info("Demoted %d ghost machine(s) to idle", demoted)
+                self._machine_hb.prune_stale(self._demote_sec)
+            except Exception:
+                log.exception("Ghost demote / prune failed")
 
     def _check_group_terminal(self, group: dict, job: RenderJob) -> None:
         if job.status in ("done", "failed", "cancelled"):
@@ -119,14 +156,16 @@ class CommunityMonitor:
         self._on_failure(job.job_id, f"Group was {group_status}")
 
     def _check_machine_offline(
-        self, group: dict, job: RenderJob, stale_cutoff: str,
+        self, group: dict, job: RenderJob, alive_ids: set[str] | None,
     ) -> None:
         if job.status != "running":
             return
-        machine = self._machine_repo.get_by_id(job.machine_id)
-        if not machine:
+        if alive_ids is None:
+            # Redis unavailable -- can't reliably detect offline machines.
+            # Skip this check; backup_monitor (cron) catches absolute
+            # orphans via Redis job-heartbeat TTL eventually.
             return
-        if (machine.last_seen_at or "") >= stale_cutoff:
+        if job.machine_id in alive_ids:
             return
         if job.remaining_frames() is None:
             # All frames already uploaded — let the success path finish.

@@ -8,6 +8,9 @@ from uuid import uuid4
 
 from serverV2.core.value_objects import now_iso
 from serverV2.infrastructure.db import execute, query_one, query_all
+from serverV2.repositories.machine_heartbeat_repository import (
+    MachineHeartbeatRepository,
+)
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -28,10 +31,12 @@ class MachineService:
         self,
         *,
         orchestrator: "RenderOrchestrator",
+        machine_heartbeat_repo: MachineHeartbeatRepository,
         vast_config=None,
         modal_config=None,
     ) -> None:
         self._orchestrator = orchestrator
+        self._machine_hb = machine_heartbeat_repo
         self._vast_cfg = vast_config
         self._modal_cfg = modal_config
 
@@ -121,20 +126,21 @@ class MachineService:
         machine = query_one("SELECT id FROM machines WHERE id = %s", (machine_id,))
         if not machine:
             raise MachineServiceError(404, "Machine not found")
+        # Drop the agent from the alive set in Redis -- the allocator's
+        # liveness intersect should immediately stop returning this PC.
+        self._machine_hb.clear(machine_id)
         execute(
-            "UPDATE machines SET status = 'idle', last_seen_at = %s WHERE id = %s",
-            (now_iso(), machine_id),
+            "UPDATE machines SET status = 'idle' WHERE id = %s",
+            (machine_id,),
         )
         return {"success": True}
 
     def heartbeat(self, machine_id: str) -> dict[str, bool]:
-        machine = query_one("SELECT id FROM machines WHERE id = %s", (machine_id,))
-        if not machine:
-            raise MachineServiceError(404, "Machine not found")
-        execute(
-            "UPDATE machines SET last_seen_at = %s WHERE id = %s",
-            (now_iso(), machine_id),
-        )
+        # Heartbeats land in Redis (sorted-set ZADD), not Postgres.  The
+        # allocator's liveness check reads from the same set.  No DB write
+        # here -- machine.last_seen_at column is now informational only,
+        # written on register/set_available transitions only.
+        self._machine_hb.record(machine_id)
         return {"success": True}
 
     def list_all(self) -> list[dict[str, Any]]:

@@ -679,9 +679,10 @@ class RenderGroupService:
         buf.seek(0)
         return buf
 
-    @staticmethod
     def _compute_retryable_job_ids(
-        group: dict[str, Any], jobs: list[dict[str, Any]],
+        self,
+        group: dict[str, Any],
+        jobs: list[dict[str, Any]],
     ) -> set[str]:
         """Identify jobs the user can hit "Retry" on.  A job qualifies when:
           * status == 'failed'

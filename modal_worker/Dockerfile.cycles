@@ -1,0 +1,34 @@
+FROM ghcr.io/saptarshimazumder/pcrent-blender-base-cycles:5.0.1
+
+# Modal worker -- cycles variant.  Self-contained image: pulled by Modal
+# at function-spawn time, no copy_local_dir mounting.  Modal's app.py
+# does only `from_registry()` after this exists -- no per-deploy layer
+# materialization, faster cold starts.
+#
+# Reuses Vast's render scripts (render.sh, render_driver.py, etc.) since
+# Blender invocation is the same; modal_worker's handler is the only
+# fleet-specific Python.
+
+# Render scripts (shared with Vast)
+COPY vast_worker/scripts/render.sh /scripts/render.sh
+COPY vast_worker/scripts/progress_handler.py /scripts/progress_handler.py
+COPY vast_worker/scripts/render_driver.py /scripts/render_driver.py
+COPY vast_worker/scripts/pre_load.py /scripts/pre_load.py
+RUN sed -i 's/\r$//' /scripts/render.sh && chmod +x /scripts/render.sh
+
+# Shared protocol library.  Runtime deps (requests, psutil) are NOT
+# installed here -- Modal's add_python="3.11" injects its own Python at
+# /usr/local that doesn't see Ubuntu pip3's site-packages.  Installs go
+# in app.py via pip_install_from_requirements("worker_core/requirements.txt"),
+# which lands them under Modal's Python 3.11.
+COPY worker_core/ /worker_core/
+
+# Modal-specific Python: handler + watchdogs + blend discovery.
+# Modal's app.py imports from /modal_worker at function startup.
+COPY modal_worker/ /modal_worker/
+
+# Modal does NOT use a Docker CMD -- the Modal runtime spawns the function
+# defined in app.py and calls modal_worker.handler.handler() directly.
+# The CMD here is a defensive default in case anyone runs the image
+# outside Modal (e.g. for local debugging).
+CMD ["python3", "-c", "print('Modal worker image -- run via Modal SDK, not docker')"]

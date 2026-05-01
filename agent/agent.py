@@ -36,8 +36,18 @@ from docker_setup import (
     check_docker_running,
     get_cached_gpu_verification,
 )
-from pipeline.download import RangeResumer
-from pipeline.heartbeat import BytesProgress, JobHeartbeatSender, PhaseTracker
+from worker_core import (
+    BytesProgress,
+    HeartbeatSender,
+    PhaseTracker,
+    RangeResumer,
+)
+
+# Phase set the agent's heartbeats use.  Smaller than the cloud-worker set
+# because the actual Blender render runs inside a child Docker container,
+# so the agent doesn't see "loading"/"rendering" as distinct from a
+# single opaque "running" state.
+_AGENT_PHASES = frozenset({"initializing", "download", "running", "uploading"})
 
 
 # -----------------------------------------------
@@ -391,7 +401,7 @@ def send_machine_heartbeat(mid):
 def upload_output_files(job_id, output_dir, filenames=None):
     """Upload rendered frames via the server's presigned-URL flow:
     request URLs → PUT each file directly to GCS → register filenames.
-    Mirrors cloud_worker/scripts/handler.py._upload_outputs.
+    Mirrors vast_worker/scripts/handler.py._upload_outputs.
     """
     if filenames is None:
         files_found = [
@@ -1321,9 +1331,11 @@ def execute_job(job):
         # server's stall detector.  Lives alongside the machine-level
         # heartbeat (start_heartbeat_loop above) -- different endpoint,
         # different payload, different concern.
-        phase_tracker = PhaseTracker()
+        phase_tracker = PhaseTracker(
+            allowed=_AGENT_PHASES, initial="initializing",
+        )
         bytes_progress = BytesProgress()
-        job_heartbeat = JobHeartbeatSender(
+        job_heartbeat = HeartbeatSender(
             backend_url=BACKEND_URL,
             job_id=job_id,
             phase_tracker=phase_tracker,

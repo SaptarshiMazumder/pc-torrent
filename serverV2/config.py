@@ -101,7 +101,7 @@ class VastConfig:
     def from_env(cls, config_json_path: str | None = None) -> VastConfig:
         return cls(
             api_key=_env_str("VAST_API_KEY"),
-            docker_image=_env_str("VAST_DOCKER_IMAGE") or _env_str("MODAL_WORKER_IMAGE"),
+            docker_image=_env_str("VAST_DOCKER_IMAGE"),
             docker_image_eevee=_env_str("VAST_DOCKER_IMAGE_EEVEE") or None,
             provisioning_enabled=_env_bool("VAST_PROVISIONING_ENABLED", True),
             disk_gb=_env_float("VAST_DISK_GB", 20.0),

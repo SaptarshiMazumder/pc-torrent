@@ -50,6 +50,7 @@ from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
 from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
+from serverV2.orchestrator.lifecycle_output import LifecycleFramesDeduplication
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
@@ -118,6 +119,11 @@ class RenderLifecycle:
         self._telemetry = telemetry_repo
         self._fleet = fleet_registry
         self._resource_picker = resource_picker
+        # Output-layer helper: authoritative rendered-frame accounting via
+        # set-union of output_files across sibling attempts.  Preparation
+        # for the broader RenderLifecycle SRP refactor -- the lifecycle's
+        # job is narrative orchestration, not data-shape computation.
+        self._dedup = LifecycleFramesDeduplication(job_repo=job_repo)
 
     # ------------------------------------------------------------------
     # Planning — split frames across fleet targets (no dispatch)
@@ -332,8 +338,15 @@ class RenderLifecycle:
             log.info("Group %s is %s — not requeuing job %s", group_id, grp["status"], job_id)
             return False
 
-        remaining = rj.remaining_frames()
-        if remaining is None:
+        # Compute remaining frames from the union of ALL sibling attempts'
+        # outputs, not just this failing job's.  Defends against the
+        # auto-retry / manual-retry / duplicate-dispatch edge cases where
+        # earlier or parallel attempts already rendered some frames in
+        # this chunk's range.  See _compute_dedup_remaining_for_chunk.
+        dedup_remaining = self._dedup.compute_remaining_for_chunk(
+            group_id, chunk_index,
+        )
+        if dedup_remaining is None:
             self._in_progress.release(group_id, chunk_index)
             return False
 
@@ -341,13 +354,13 @@ class RenderLifecycle:
         if next_attempt > MAX_RETRIES:
             log.warning(
                 "Job %s: max retries (%d) exhausted for frames %d-%d",
-                job_id, MAX_RETRIES, remaining[0], remaining[1],
+                job_id, MAX_RETRIES, dedup_remaining[0], dedup_remaining[1],
             )
             self._in_progress.release(group_id, chunk_index)
             return False
 
-        frame_start, frame_end = remaining
-        total_frames = ((frame_end - frame_start) // rj.frame_step) + 1
+        frame_start, frame_end, frame_step = dedup_remaining
+        total_frames = ((frame_end - frame_start) // frame_step) + 1
 
         # Anti-affinity: don't retry on the same fleet/gpu_type or
         # community machine that just failed.
@@ -360,7 +373,7 @@ class RenderLifecycle:
             chunk_index=chunk_index,
             frame_start=frame_start,
             frame_end=frame_end,
-            frame_step=rj.frame_step,
+            frame_step=frame_step,
             total_frames=total_frames,
             attempt=next_attempt,
             excluded_machine_ids=excluded_ids,
@@ -475,8 +488,11 @@ class RenderLifecycle:
             raise ManualRetryError("active_sibling_exists")
 
         # Resolve the latest attempt for this chunk.  Caller may have passed
-        # an older attempt's job_id; we always operate on the latest so
-        # ``remaining_frames()`` reflects the most-advanced upload state.
+        # an older attempt's job_id; we always operate on the latest for
+        # status/anti-affinity decisions.  Frame-range computation goes
+        # through the dedup helper instead, which considers the union of
+        # outputs across ALL sibling attempts (handles duplicate-dispatch
+        # races and partial-progress retry chains correctly).
         siblings = [
             j for j in self._job_repo.get_raw_by_group(group_id)
             if (j.get("chunk_index") or 0) == chunk_index
@@ -491,12 +507,14 @@ class RenderLifecycle:
             raise ManualRetryError("not_failed")
 
         rj = RenderJob.from_row(latest)
-        remaining = rj.remaining_frames()
-        if remaining is None:
+        dedup_remaining = self._dedup.compute_remaining_for_chunk(
+            group_id, chunk_index,
+        )
+        if dedup_remaining is None:
             raise ManualRetryError("no_remaining_frames")
 
-        frame_start, frame_end = remaining
-        total_frames = ((frame_end - frame_start) // rj.frame_step) + 1
+        frame_start, frame_end, frame_step = dedup_remaining
+        total_frames = ((frame_end - frame_start) // frame_step) + 1
 
         # Anti-affinity from the latest failed attempt (per user spec).
         excluded_caps, excluded_ids = self._exclusions_for(latest)
@@ -508,7 +526,7 @@ class RenderLifecycle:
             chunk_index=chunk_index,
             frame_start=frame_start,
             frame_end=frame_end,
-            frame_step=rj.frame_step,
+            frame_step=frame_step,
             total_frames=total_frames,
             attempt=0,
             excluded_machine_ids=excluded_ids,
@@ -624,6 +642,33 @@ class RenderLifecycle:
 
         self._job_repo.mark_done(job_id)
         log.info("Job %s marked done", job_id)
+
+        # Eager provider-side cleanup.  The fleet monitor's next tick would
+        # eventually call this, but Vast's runtype=args auto-restarts the
+        # container in the meantime (re-downloading the blend, billing for
+        # a duplicate render until the monitor catches up) and Modal keeps
+        # billing the FunctionCall until cancelled.  Doing it here closes
+        # the window from up-to-poll-interval seconds to milliseconds.
+        # Best-effort — try/except + the monitor stays as the safety net.
+        # Community has no provider call (provider_job_id is empty), so the
+        # short-circuit no-ops; the agent's cancel-status poll handles the
+        # community equivalent.
+        try:
+            provider_job_id = (
+                raw.get("runpod_job_id")
+                or raw.get("modal_function_call_id")
+                or ""
+            )
+            if fleet and provider_job_id:
+                strategy = self._fleet.get(fleet)
+                if strategy is not None:
+                    strategy.cancel(provider_job_id)
+                    strategy.stop_monitoring(job_id)
+        except Exception as exc:
+            log.warning(
+                "Eager provider cleanup for job %s failed (monitor will "
+                "catch up): %s", job_id, exc,
+            )
 
         # Release the community machine lock so the allocator can return
         # this PC for the next dispatch.  Vast/Modal jobs have no
@@ -779,7 +824,7 @@ class RenderLifecycle:
             total_frames = group.get("total_frames") or 0
             total_rendered = min(
                 total_frames,
-                sum(j.rendered_frames for j in all_jobs),
+                self._dedup.compute_total_rendered(all_jobs),
             )
             self._write_terminal_snapshot(group_id, all_jobs, total_rendered)
 
@@ -806,7 +851,7 @@ class RenderLifecycle:
         total_frames = group["total_frames"] or 0
         total_rendered = min(
             total_frames,
-            sum(j.rendered_frames for j in jobs),
+            self._dedup.compute_total_rendered(jobs),
         )
         result = compute_group_status(
             current_group_status=group["status"],

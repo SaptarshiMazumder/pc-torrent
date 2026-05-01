@@ -140,7 +140,9 @@
       "Bash(git rm *)",
       "Bash(bash -n \"/c/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/community_worker/render.eevee.sh\")",
       "Bash(bash -n \"/c/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/push-worker.sh\")",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(chmod +x deploy-modal.sh)",
+      "Bash(grep -rn \"frame0\\\\|frame####\\\\|/output/frame\\\\|frame\\\\\\\\\\\\\\\\d\\\\\\\\\\\\\\\\+\" vast_worker/scripts/ community_worker/ modal_worker/)"
     ]
   }
 }

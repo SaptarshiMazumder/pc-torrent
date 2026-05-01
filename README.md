@@ -80,7 +80,7 @@ After pushing, go to `github.com/SaptarshiMazumder` → **Packages** → `pcrent
 ### Build and push a new version
 
 ```bash
-docker build -t ghcr.io/saptarshimazumder/pcrent-worker:2.0x -f cloud_worker/Dockerfile.cycles .
+docker build -t ghcr.io/saptarshimazumder/pcrent-worker:2.0x -f vast_worker/Dockerfile.cycles .
 docker push ghcr.io/saptarshimazumder/pcrent-worker:2.0x
 ```
 

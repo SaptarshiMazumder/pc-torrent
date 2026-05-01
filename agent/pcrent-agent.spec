@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = []
+hiddenimports += collect_submodules('worker_core')
 
 
 a = Analysis(
     ['C:\\Users\\sapma\\OneDrive\\Desktop\\Projects\\PC_Rent\\pc-torrent\\agent\\sidecar_main.py'],
-    pathex=[],
+    pathex=['C:\\Users\\sapma\\OneDrive\\Desktop\\Projects\\PC_Rent\\pc-torrent'],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -4,7 +4,7 @@ The download path increments this as bytes hit disk; the heartbeat
 sender reads it for the bytes_progressed payload field.  Server-side
 stall detection compares successive readings: counter unchanged for
 DOWNLOAD_BYTES_STALL_SEC means the connection is alive but no data
-is flowing -- different from a heartbeat-dead failure mode.
+is flowing -- distinct from a heartbeat-dead failure mode.
 """
 
 from __future__ import annotations

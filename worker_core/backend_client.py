@@ -3,13 +3,23 @@
 All endpoints are job-scoped, so the client is constructed with a
 ``(backend_url, job_id)`` pair and callers do not need to re-pass them.
 
-Behaviour preserved 1:1 from the pre-split handler.py:
-* ``mark_running`` is fire-and-forget — logs on failure but never raises.
-* ``push_progress`` is fire-and-forget — same treatment.
-* ``mark_failed`` uses the retry-with-deadline PUT (``_put_status``).
-* ``mark_done`` uses the retry-with-deadline PUT; raises on exhausted retries.
-* ``request_upload_urls`` and ``register_outputs`` raise on failure — the
-  caller (uploader / catch-up path) decides how to react.
+Response-handling policy across all status / register-outputs /
+request-upload-urls calls:
+
+* HTTP 4xx/5xx → exception, retried up to deadline.
+* Network timeout → exception, retried up to deadline.
+* HTTP 200 with body ``{"success": false, ...}`` for terminal status
+  writes (done/failed/cancelled): no-op success — server has already
+  reached the terminal state via another path (B3's success_notifier
+  from register-outputs, monitor force-cancel, etc.).  The worker's
+  assertion is irrelevant once the row is terminal.  Stop retrying.
+* HTTP 200 with ``success=false`` for non-terminal payloads: real
+  rejection — raise.
+
+The endpoints register-outputs and request-upload-urls are idempotent
+server-side (merge_output_files dedupes; presigned URL minting is
+pure read), so retry-on-timeout is safe and prevents misclassifying
+a slow-but-successful response as a failed call.
 """
 
 from __future__ import annotations
@@ -22,9 +32,13 @@ import requests
 log = logging.getLogger(__name__)
 
 
+_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
+
+
 class BackendClient:
 
     _STATUS_RETRY_DEADLINE_SEC = 600
+    _UPLOAD_RETRY_DEADLINE_SEC = 180
 
     def __init__(self, backend_url: str, job_id: str) -> None:
         self._backend_url = backend_url.rstrip("/")
@@ -36,11 +50,11 @@ class BackendClient:
 
     def try_worker_start(self) -> bool:
         """Return True if this worker is the first to start for this job.
-        Return False if another container already claimed — we must abort.
+        Return False if another container already claimed — caller aborts.
 
         Fail-open on network errors: if the backend is unreachable, return
         True so a transient outage doesn't block legitimate renders.  The
-        guard is re-enabled as soon as the backend is reachable again.
+        guard re-engages as soon as the backend is reachable again.
         """
         try:
             resp = requests.put(
@@ -98,11 +112,11 @@ class BackendClient:
             log.error(f"Failed to mark job failed after retries: {exc}")
 
     def _put_status(self, payload: dict, deadline_sec: float) -> None:
-        """PUT job status with retries to tolerate ngrok/Cloud Run latency spikes."""
         delay = 5
         last_exc: Exception | None = None
         start = time.monotonic()
         attempt = 0
+        target = str(payload.get("status") or "")
         while True:
             attempt += 1
             try:
@@ -117,18 +131,31 @@ class BackendClient:
                 except ValueError:
                     body = None
                 if isinstance(body, dict) and body.get("success") is False:
-                    reason = str(body.get("reason") or "backend rejected status update").strip()
+                    reason = str(body.get("reason") or "").strip()
+                    if target in _TERMINAL_STATUSES:
+                        # Server already moved this job to a terminal state
+                        # via another path (success_notifier from register-
+                        # outputs, monitor force-cancel, our earlier retry
+                        # that succeeded server-side but lost the response).
+                        # The job is where we wanted it.  Stop retrying.
+                        log.info(
+                            f"Status update for job {self._job_id} "
+                            f"({target}) accepted as no-op: {reason}"
+                        )
+                        return
                     raise RuntimeError(
-                        f"Backend rejected status update for job {self._job_id}: {reason}"
+                        f"Backend rejected status update for job "
+                        f"{self._job_id}: {reason or 'no reason given'}"
                     )
                 return
             except Exception as exc:
                 last_exc = exc
                 elapsed = time.monotonic() - start
                 log.warning(
-                    f"Status update attempt {attempt} failed ({elapsed:.0f}s elapsed): {exc}"
+                    f"Status update attempt {attempt} failed "
+                    f"({elapsed:.0f}s elapsed): {exc}"
                 )
-                if time.monotonic() - start + delay >= deadline_sec:
+                if elapsed + delay >= deadline_sec:
                     break
                 time.sleep(delay)
                 delay = min(delay * 2, 30)
@@ -136,11 +163,10 @@ class BackendClient:
             raise last_exc
 
     # ------------------------------------------------------------------
-    # Progress (PUT /jobs/{id}/progress)
+    # Progress + Heartbeat (fire-and-forget)
     # ------------------------------------------------------------------
 
     def push_progress(self, rendered_frames: int, total_frames: int) -> None:
-        """Fire-and-forget progress update."""
         try:
             requests.put(
                 f"{self._backend_url}/jobs/{self._job_id}/progress",
@@ -150,12 +176,10 @@ class BackendClient:
         except Exception as exc:
             log.warning(f"Failed to push progress: {exc}")
 
-    # ------------------------------------------------------------------
-    # Heartbeat (PUT /jobs/{id}/heartbeat)
-    # ------------------------------------------------------------------
-
     def heartbeat(self, phase: str) -> None:
-        """Fire-and-forget heartbeat ping used by ModalHeartbeat."""
+        """Minimal heartbeat — phase only.  HeartbeatSender uses its own
+        full-payload PUT path; this method exists for callers that just
+        want a one-shot ping (modal-side ModalHeartbeat legacy)."""
         try:
             requests.put(
                 f"{self._backend_url}/jobs/{self._job_id}/heartbeat",
@@ -166,26 +190,73 @@ class BackendClient:
             log.warning(f"Heartbeat failed for job {self._job_id}: {exc}")
 
     # ------------------------------------------------------------------
-    # Upload flow: request presigned URLs -> PUT to R2 -> register
+    # Cancel-status poll (community workers; cloud workers can also use
+    # it to detect server-side cancel mid-render).
+    # ------------------------------------------------------------------
+
+    def poll_cancel_status(self) -> bool:
+        """Return True if the server has marked this job cancelled or
+        failed.  Network errors → False (fail-open: don't abort a healthy
+        render because of a momentary blip)."""
+        try:
+            resp = requests.get(
+                f"{self._backend_url}/jobs/{self._job_id}/cancel-status",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return bool(resp.json().get("cancelled"))
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # Upload flow: presigned URL request -> direct R2 PUT -> register.
+    # Both endpoints retry on transient failures because they're
+    # idempotent server-side.
     # ------------------------------------------------------------------
 
     def request_upload_urls(self, filenames: list[str]) -> dict[str, str]:
-        """Return ``{filename: presigned_put_url}`` for the given filenames.
-        Raises on HTTP error."""
-        resp = requests.post(
+        """Return ``{filename: presigned_put_url}`` for the given filenames."""
+        resp = self._post_with_retry(
             f"{self._backend_url}/jobs/{self._job_id}/request-upload-urls",
             json={"filenames": filenames},
-            timeout=30,
+            deadline_sec=self._UPLOAD_RETRY_DEADLINE_SEC,
         )
-        resp.raise_for_status()
         return resp.json().get("urls", {}) or {}
 
     def register_outputs(self, filenames: list[str]) -> None:
-        """Register uploaded filenames with the server (updates DB
-        ``output_files`` list).  Raises on HTTP error."""
-        resp = requests.post(
+        """Register uploaded filenames with the server.  Retries on
+        transient errors — endpoint is idempotent (merge_output_files
+        dedupes), so a slow-but-successful response classified as a
+        timeout is safe to retry instead of bubbling to mark_failed."""
+        self._post_with_retry(
             f"{self._backend_url}/jobs/{self._job_id}/register-outputs",
             json={"filenames": filenames},
-            timeout=30,
+            deadline_sec=self._UPLOAD_RETRY_DEADLINE_SEC,
         )
-        resp.raise_for_status()
+
+    def _post_with_retry(
+        self, url: str, *, json: dict, deadline_sec: float, timeout: float = 30,
+    ) -> requests.Response:
+        delay = 5
+        last_exc: Exception | None = None
+        start = time.monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = requests.post(url, json=json, timeout=timeout)
+                resp.raise_for_status()
+                return resp
+            except Exception as exc:
+                last_exc = exc
+                elapsed = time.monotonic() - start
+                log.warning(
+                    f"POST {url} attempt {attempt} failed "
+                    f"({elapsed:.0f}s elapsed): {exc}"
+                )
+                if elapsed + delay >= deadline_sec:
+                    break
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+        assert last_exc is not None
+        raise last_exc

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any, Callable
 
 from serverV2.callbacks.group_status_aggregator import compute_group_status
@@ -46,7 +45,13 @@ from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
 from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
-from serverV2.orchestrator.lifecycle_cancel import JobCanceler, RenderCanceler
+from serverV2.orchestrator.lifecycle_job_termination import (
+    CANCEL_PIPELINE,
+    FAILURE_PIPELINE,
+    JobTerminator,
+    RenderCanceler,
+    RetryDispatcher,
+)
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
@@ -55,8 +60,6 @@ from serverV2.services.machines.machine_state_writer import MachineStateWriter
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
-
-_FRAME_FILENAME_RE = re.compile(r"frame(\d+)\.")
 
 log = logging.getLogger(__name__)
 
@@ -108,7 +111,8 @@ class RenderLifecycle:
         output_frame_repo: OutputFrameRepository,
         fleet_registry: FleetRegistry,
         resource_picker: Callable[[], AvailableResources],
-        job_canceler: JobCanceler,
+        retry_dispatcher: RetryDispatcher,
+        job_terminator: JobTerminator,
         render_canceler: RenderCanceler,
     ) -> None:
         self._default_strategy = default_strategy
@@ -125,7 +129,8 @@ class RenderLifecycle:
         self._output_frames = output_frame_repo
         self._fleet = fleet_registry
         self._resource_picker = resource_picker
-        self._job_canceler = job_canceler
+        self._retry_dispatcher = retry_dispatcher
+        self._terminator = job_terminator
         self._render_canceler = render_canceler
 
     # ------------------------------------------------------------------
@@ -269,180 +274,26 @@ class RenderLifecycle:
     # ------------------------------------------------------------------
 
     def handle_chunk_failed(self, job_id: str, error: str) -> None:
-        """Single entry point for chunk-failure routing.  Decides whether
-        to retry, marks the original job failed, and drains the failed
-        fleet's queue (a slot just opened up regardless).  On exhausted
-        retries, also rolls the new state up to the parent group.
+        """Single entry point for chunk-failure routing.  Thin shim over
+        ``JobTerminator.execute(FAILURE_PIPELINE, ...)``.  The full
+        narrative (atomic CAS dedup, retry attempt, mark failed,
+        release machine, log outcome, reconcile, drain) is encoded as
+        the FAILURE_PIPELINE constant in
+        ``lifecycle_job_termination/pipelines.py``.
 
-        Adapters (callbacks, monitors) call ``RenderOrchestrator.on_job_failed``
-        which delegates here — they never touch repositories themselves.
-
-        **Atomic dedup**: the first thing we do is
-        ``in_progress.release_if_owner(...)``.  Multiple failure signals
-        for the same job (worker callback + monitor heartbeat-stale +
-        backup_monitor sweep) race here — the DB serializes the DELETE
-        and only one returns a row.  The losers see 0 rows and bail
-        without calling ``_try_dispatch_retry`` at all, so duplicate
-        retries cannot be dispatched.  See lifecycle.handle_chunk_failed
-        in dispatch_dedup_and_output_frames.puml for the full flow.
+        Adapters (callbacks, monitors) call
+        ``RenderOrchestrator.on_job_failed`` which delegates here.
         """
-        # Capture failed fleet BEFORE retry — the retry may dispatch on a
-        # different fleet (anti-affinity), but the slot we freed is in this
-        # job's fleet.
         raw = self._job_repo.get_raw_by_id(job_id)
         if raw is None:
             log.info("handle_chunk_failed: job %s not found, skipping", job_id)
             return
-        failed_fleet = raw.get("machine_type") or ""
-        group_id = raw.get("group_id") or ""
-        chunk_index = raw.get("chunk_index") or 0
-        machine_id = raw.get("machine_id")
-
-        # Atomic claim of the right-to-retry.  Lose the race → bail.
-        we_own_retry = self._in_progress.release_if_owner(
-            group_id, chunk_index, expected_job_id=job_id,
-        ) if group_id else False
-
-        if not we_own_retry:
-            # Either the chunk already succeeded (ledger empty), or another
-            # retry path already advanced the ledger to a different job.
-            # Mark this row failed for state hygiene; do NOT retry.
-            self._job_repo.mark_failed(job_id, error)
-            if failed_fleet == "windows" and machine_id:
-                self._state_writer.set_status(machine_id, "available")
-            log.info(
-                "handle_chunk_failed: signal for job %s superseded "
-                "(chunk %s ledger no longer points at this job)",
-                job_id, chunk_index,
-            )
-            if failed_fleet:
-                try:
-                    self._coordinator.drain_for_fleet(failed_fleet)
-                except Exception as exc:
-                    log.warning("drain_for_fleet(%s) failed: %s", failed_fleet, exc)
-            return
-
-        retried = self._try_dispatch_retry(job_id, raw, error)
-        # Mark failed AFTER the retry attempt so the group always has at
-        # least one active job during the transition (prevents premature
-        # group-failed status flicker in the UI).
-        self._job_repo.mark_failed(job_id, error)
-
-        # Release the community machine lock so the allocator can return
-        # this PC for the next dispatch (or the just-queued retry, if it
-        # landed on this PC).  Vast/Modal have no machines row.
-        if failed_fleet == "windows" and machine_id:
-            self._state_writer.set_status(machine_id, "available")
-
-        if retried:
-            log.info("Job %s failed but retry dispatched: %s", job_id, error)
-        else:
-            # Generic message — the actual reason was logged inside
-            # _try_dispatch_retry (max retries hit / no eligible target /
-            # group cancelled / chunk already complete).  Don't mislabel
-            # them all as "retries exhausted" here.
-            log.warning("Job %s permanently failed (no retry dispatched): %s", job_id, error)
-            if group_id:
-                self.reconcile_group_status(group_id)
-
-        if failed_fleet:
-            try:
-                self._coordinator.drain_for_fleet(failed_fleet)
-            except Exception as exc:
-                log.warning("drain_for_fleet(%s) failed: %s", failed_fleet, exc)
-
-    def _try_dispatch_retry(
-        self, job_id: str, raw: dict[str, Any], error: str,
-    ) -> bool:
-        """Returns True if a retry was dispatched, False if the chunk is
-        giving up.  Internal — callers go through ``handle_chunk_failed``,
-        which already won the atomic CAS for retry ownership.
-
-        ``raw`` is the failing job row, passed in so we don't refetch.
-        """
-        rj = RenderJob.from_row(raw)
-        group_id = rj.group_id
-        chunk_index = rj.chunk_index or 0
-
-        grp = self._group_repo.get_by_id(group_id)
-        if grp and grp.get("status") in ("cancelled", "done"):
-            log.info("Group %s is %s — not requeuing job %s", group_id, grp["status"], job_id)
-            return False
-
-        # Compute remaining frames from the union of ALL sibling attempts'
-        # outputs (the output_frames table is self-deduplicating via PK
-        # on (group_id, filename) — sibling retries that uploaded the
-        # same frame collapse to one row).
-        dedup_remaining = self._compute_remaining_for_chunk(group_id, chunk_index)
-        if dedup_remaining is None:
-            return False
-
-        next_attempt = (rj.attempt or 0) + 1
-        if next_attempt > MAX_RETRIES:
-            log.warning(
-                "Job %s: max retries (%d) exhausted for frames %d-%d",
-                job_id, MAX_RETRIES, dedup_remaining[0], dedup_remaining[1],
-            )
-            return False
-
-        frame_start, frame_end, frame_step = dedup_remaining
-        total_frames = ((frame_end - frame_start) // frame_step) + 1
-
-        # Anti-affinity: don't retry on the same fleet/gpu_type or
-        # community machine that just failed.
-        excluded_caps, excluded_ids = self._exclusions_for(raw)
-
-        file_size_bytes, engine, tier = self._load_group_dispatch_context(grp)
-
-        chunk_request = ChunkRequest(
-            group_id=group_id,
-            chunk_index=chunk_index,
-            frame_start=frame_start,
-            frame_end=frame_end,
-            frame_step=frame_step,
-            total_frames=total_frames,
-            attempt=next_attempt,
-            excluded_machine_ids=excluded_ids,
-            excluded_serverless_capabilities=excluded_caps,
-            file_size_bytes=file_size_bytes,
-            engine=engine,
+        self._terminator.execute(
+            pipeline=FAILURE_PIPELINE,
+            job_id=job_id,
+            raw=raw,
+            error=error,
         )
-        retry_strategy = self._pick_strategy(
-            tiers.normalize(tier), file_size_bytes, total_frames,
-        )
-        retry_task = retry_strategy.allocate_retry(chunk_request, self._resource_picker())
-        if retry_task is None:
-            log.error(
-                "Job %s: no eligible target for retry of frames %d-%d (group %s)",
-                job_id, frame_start, frame_end, group_id,
-            )
-            return False
-
-        target_label = (
-            f"{retry_task.fleet}/{retry_task.gpu_type}"
-            if retry_task.gpu_type
-            else f"{retry_task.fleet}/{retry_task.machine_id}"
-        )
-        log.info(
-            "Job %s: requeued frames %d-%d (attempt %d/%d) on %s",
-            job_id, frame_start, frame_end, next_attempt, MAX_RETRIES, target_label,
-        )
-
-        if not rj.render_overrides_json:
-            raise RuntimeError(
-                f"job {rj.id} has no render_overrides_json — cannot retry"
-            )
-        context = DispatchContext(
-            group_id=group_id,
-            input_filename=rj.input_filename,
-            render_overrides_json=rj.render_overrides_json,
-            blend_url="",
-            max_retries=rj.max_retries,
-            priority=rj.priority,
-            engine=engine,
-        )
-        self._coordinator.enqueue_and_flush(group_id, [retry_task], context)
-        return True
 
     # ------------------------------------------------------------------
     # Story 2c1: community machine reports idle (post-register / post-job)
@@ -533,7 +384,9 @@ class RenderLifecycle:
             raise ManualRetryError("not_failed")
 
         rj = RenderJob.from_row(latest)
-        dedup_remaining = self._compute_remaining_for_chunk(group_id, chunk_index)
+        dedup_remaining = self._retry_dispatcher.compute_remaining_for_chunk(
+            group_id, chunk_index,
+        )
         if dedup_remaining is None:
             raise ManualRetryError("no_remaining_frames")
 
@@ -541,9 +394,9 @@ class RenderLifecycle:
         total_frames = ((frame_end - frame_start) // frame_step) + 1
 
         # Anti-affinity from the latest failed attempt (per user spec).
-        excluded_caps, excluded_ids = self._exclusions_for(latest)
+        excluded_caps, excluded_ids = self._retry_dispatcher.exclusions_for(latest)
 
-        file_size_bytes, engine, tier = self._load_group_dispatch_context(grp)
+        file_size_bytes, engine, tier = self._retry_dispatcher.load_group_dispatch_context(grp)
 
         chunk_request = ChunkRequest(
             group_id=group_id,
@@ -604,40 +457,6 @@ class RenderLifecycle:
             "fleet": retry_task.fleet,
             "gpu_type": retry_task.gpu_type,
         }
-
-    def _load_group_dispatch_context(
-        self, grp: dict[str, Any] | None,
-    ) -> tuple[int | None, str | None, str | None]:
-        """Pull (file_size_bytes, engine, tier) off a render_groups row for
-        the dispatch path.  Used by both auto-retry and manual-retry."""
-        file_size_bytes: int | None = None
-        engine: str | None = None
-        tier: str | None = None
-        if grp is None:
-            return file_size_bytes, engine, tier
-
-        raw_size = grp.get("r2_input_size_bytes")
-        if raw_size is not None:
-            try:
-                file_size_bytes = int(raw_size)
-            except (TypeError, ValueError):
-                file_size_bytes = None
-
-        raw_overrides = grp.get("render_overrides_json")
-        if raw_overrides:
-            parsed = json.loads(raw_overrides)
-            if isinstance(parsed, dict):
-                render_section = parsed.get("render")
-                if isinstance(render_section, dict):
-                    engine_value = render_section.get("engine")
-                    if isinstance(engine_value, str):
-                        engine = engine_value
-
-        tier_raw = grp.get("tier")
-        if isinstance(tier_raw, str):
-            tier = tier_raw
-
-        return file_size_bytes, engine, tier
 
     # ------------------------------------------------------------------
     # Story 2b: a chunk succeeded (full flow — DB writes + telemetry + drain + rollup)
@@ -784,17 +603,17 @@ class RenderLifecycle:
         return result
 
     def cancel_one_job(self, job_id: str) -> dict[str, Any]:
-        """Per-job cancel (B2 -- the per-instance Cancel button).
-        Idempotent: silently no-ops if the job is unknown or already
-        terminal.  Otherwise runs ``JobCanceler.cancel_one`` (mark
-        cancelled, stop monitor, release ledger, cancel provider) and
-        reconciles the parent group's status.
+        """Per-job cancel (B2 -- the per-instance Cancel button).  Thin
+        shim over ``JobTerminator.execute(CANCEL_PIPELINE, ...)``.
 
-        No do-not-retry flag is needed.  After ``mark_cancelled``
-        runs, the row is terminal and CallbackRouter's
-        ``is_job_terminal`` short-circuit drops every subsequent
-        failure signal for this job -- no path can reach
-        ``handle_chunk_failed`` or ``_try_dispatch_retry``.
+        Idempotent: silently no-ops if the job is unknown or already
+        terminal.  Otherwise runs the CANCEL_PIPELINE which (in order)
+        marks cancelled, releases the machine, releases the ledger,
+        stops the monitor, RPCs the provider, attempts a retry on a
+        different worker (anti-affinity excludes the cancelled
+        machine), drains the fleet's queue, and reconciles the parent
+        group.  All step ordering + rules live in
+        ``lifecycle_job_termination/pipelines.py``.
         """
         raw = self._job_repo.get_raw_by_id(job_id)
         if raw is None:
@@ -802,12 +621,12 @@ class RenderLifecycle:
         if str(raw.get("status") or "") in _TERMINAL_GROUP_STATUSES:
             return {"cancelled": False, "reason": "already_terminal"}
 
-        self._job_canceler.cancel_one(raw)
-
-        group_id = raw.get("group_id") or ""
-        if group_id:
-            self.reconcile_group_status(group_id)
-
+        self._terminator.execute(
+            pipeline=CANCEL_PIPELINE,
+            job_id=job_id,
+            raw=raw,
+            error="Cancelled by user",
+        )
         return {"cancelled": True, "job_id": job_id}
 
     # ------------------------------------------------------------------
@@ -866,70 +685,6 @@ class RenderLifecycle:
             available_output_files_count=available,
             overall_rendered_frames=total_rendered,
         )
-
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
-
-    def _compute_remaining_for_chunk(
-        self, group_id: str, chunk_index: int,
-    ) -> tuple[int, int, int] | None:
-        """Returns ``(frame_start, frame_end, frame_step)`` of the actually-
-        missing frame range for this chunk, or None if every frame in the
-        original range has already been rendered (by any sibling).
-
-        The canonical chunk range is taken from the lowest-attempt sibling
-        job's row.  Already-rendered filenames come straight from the
-        ``output_frames`` table (PK on (group_id, filename) makes the
-        contents self-deduplicating across siblings — we never have to
-        union JSON arrays in Python).
-
-        The returned range is contiguous from the earliest missing frame
-        to the chunk's end.  Mid-chunk gaps (rare in practice — workers
-        render sequentially) get included via this contiguous shape rather
-        than scattered into N parallel single-frame retries.
-        """
-        siblings = [
-            j for j in self._job_repo.get_raw_by_group(group_id)
-            if (j.get("chunk_index") or 0) == chunk_index
-        ]
-        if not siblings:
-            return None
-
-        original = min(siblings, key=lambda j: j.get("attempt") or 0)
-        chunk_start = int(original.get("frame_start") or 0)
-        chunk_end = int(original.get("frame_end") or 0)
-        step = int(original.get("frame_step") or 1)
-
-        rendered_filenames = self._output_frames.unique_filenames_for_chunk(
-            group_id, chunk_index,
-        )
-        rendered: set[int] = set()
-        for fname in rendered_filenames:
-            match = _FRAME_FILENAME_RE.match(fname)
-            if match:
-                rendered.add(int(match.group(1)))
-
-        all_chunk_frames = set(range(chunk_start, chunk_end + 1, step))
-        missing = sorted(all_chunk_frames - rendered)
-        if not missing:
-            return None
-        return (missing[0], chunk_end, step)
-
-    @staticmethod
-    def _exclusions_for(
-        job_row: dict[str, Any],
-    ) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
-        """Return ``(excluded_serverless_capabilities, excluded_machine_ids)``
-        for anti-affinity on retry."""
-        fleet = (job_row.get("machine_type") or "").strip()
-        gpu_type = (job_row.get("gpu_type") or "").strip()
-        machine_id = (job_row.get("machine_id") or "").strip()
-        if fleet in ("modal_serverless", "vast_serverless") and gpu_type:
-            return ((fleet, gpu_type),), ()
-        if machine_id:
-            return (), (machine_id,)
-        return (), ()
 
     # ------------------------------------------------------------------
     # Telemetry — single render_telemetry row per successful chunk.

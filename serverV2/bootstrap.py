@@ -48,7 +48,12 @@ from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
 from serverV2.orchestrator.lifecycle import RenderLifecycle
-from serverV2.orchestrator.lifecycle_cancel import JobCanceler, RenderCanceler
+from serverV2.orchestrator.lifecycle_job_termination import (
+    JobTerminator,
+    LifecycleDeps,
+    RenderCanceler,
+    RetryDispatcher,
+)
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
@@ -342,19 +347,50 @@ def build(
         fleet_cap_lookup=_fleet_cap_lookup,
     )
 
-    # -- cancellation: per-job atom + group-level multi-pass --
-    job_canceler = JobCanceler(
+    # -- termination: retry decision + step pipelines + group cancel --
+    # Constructed bottom-up because RetryDispatcher and the reconcile
+    # callback need a reference to lifecycle (for ``_pick_strategy`` and
+    # ``reconcile_group_status``).  Closures capture the local
+    # ``lifecycle`` name; we assign it at the end of this block, so
+    # they resolve correctly at call time even though Python's
+    # forward-reference hygiene would normally complain.
+
+    def _retry_strategy_picker(
+        tier: str, file_size_bytes: int, total_frames: int,
+    ):
+        return lifecycle._pick_strategy(tier, file_size_bytes, total_frames)
+
+    def _reconcile_group(group_id: str) -> None:
+        lifecycle.reconcile_group_status(group_id)
+
+    retry_dispatcher = RetryDispatcher(
         job_repo=job_repo,
-        machine_state_writer=machine_state_writer,
-        in_progress_repo=in_progress_repo,
-        fleet_registry=registry,
+        group_repo=group_repo,
+        output_frame_repo=output_frame_repo,
+        coordinator=dispatch_coordinator,
+        strategy_picker=_retry_strategy_picker,
+        resource_picker=_resource_picker,
     )
+
+    lifecycle_deps = LifecycleDeps(
+        job_repo=job_repo,
+        group_repo=group_repo,
+        in_progress_repo=in_progress_repo,
+        state_writer=machine_state_writer,
+        fleet_registry=registry,
+        coordinator=dispatch_coordinator,
+        retry_dispatcher=retry_dispatcher,
+        reconcile_group=_reconcile_group,
+    )
+
+    job_terminator = JobTerminator(deps=lifecycle_deps)
+
     render_canceler = RenderCanceler(
         group_repo=group_repo,
         job_repo=job_repo,
         queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
-        job_canceler=job_canceler,
+        deps=lifecycle_deps,
     )
 
     lifecycle = RenderLifecycle(
@@ -372,7 +408,8 @@ def build(
         output_frame_repo=output_frame_repo,
         fleet_registry=registry,
         resource_picker=_resource_picker,
-        job_canceler=job_canceler,
+        retry_dispatcher=retry_dispatcher,
+        job_terminator=job_terminator,
         render_canceler=render_canceler,
     )
     orchestrator = RenderOrchestrator(lifecycle)

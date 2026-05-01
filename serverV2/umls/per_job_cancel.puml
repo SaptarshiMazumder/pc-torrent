@@ -1,0 +1,222 @@
+@startuml per_job_cancel
+title Per-job cancel (B2) — refactor cancel_render, add one new caller
+
+skinparam classFontSize 11
+skinparam noteFontSize 10
+skinparam classBackgroundColor<<NEW>> #DCFCE7
+skinparam classBackgroundColor<<CHANGED>> #FEF3C7
+skinparam classBackgroundColor<<EXISTING>> #E5E7EB
+
+' =====================================================================
+' API layer
+' =====================================================================
+
+class JobsRouter <<CHANGED>> {
+  + POST /jobs/{job_id}/cancel  <<NEW endpoint>>
+  POST /jobs/{job_id}/agent-failure
+  POST /jobs/{job_id}/register-outputs
+  PUT  /jobs/{job_id}/status
+  PUT  /jobs/{job_id}/heartbeat
+  GET  /jobs/{job_id}/cancel-status
+}
+note right of JobsRouter
+  **NEW endpoint**:
+  POST /jobs/{job_id}/cancel
+  Returns 202 + BackgroundTasks
+  (same async pattern as
+  /agent-failure -- the cancel
+  chain calls provider APIs that
+  can take seconds).
+  No new wiring: orchestrator
+  is already injected here.
+end note
+
+' =====================================================================
+' Orchestration layer
+' =====================================================================
+
+class RenderOrchestrator <<CHANGED>> {
+  + cancel_render(group_id)
+  + cancel_one_job(job_id)  <<NEW>>
+  + on_job_failed(...)
+  + on_job_succeeded(...)
+}
+note right of RenderOrchestrator
+  **NEW facade method**
+  cancel_one_job(job_id):
+    self._lifecycle.cancel_one_job(job_id)
+  One-line delegation -- same
+  shape as on_job_failed.
+end note
+
+class RenderLifecycle <<CHANGED>> {
+  + cancel_render(group_id)
+  + cancel_one_job(job_id)  <<NEW>>
+  - _cancel_one_job_inner(raw)  <<EXTRACTED>>
+  + handle_chunk_failed(...)
+  + reconcile_group_status(...)
+}
+note right of RenderLifecycle
+  **EXTRACT** `_cancel_one_job_inner(raw)`
+  from `cancel_render`'s per-job
+  loop bodies.  Today there are
+  three separate `for job in jobs`
+  blocks doing the per-job dance;
+  collapse them into one helper
+  that runs the steps in order:
+
+    1. job_repo.update_status(
+         id, 'cancelled',
+         error='Cancelled by user')
+       -- terminal first.  Every
+       subsequent CallbackRouter
+       signal bounces off
+       is_job_terminal.
+    2. machine_repo.set_available(
+         machine_id)  -- community only
+    3. strategy.stop_monitoring(id)
+    4. in_progress.release(
+         group_id, chunk_index)
+    5. strategy.cancel(provider_id)
+
+  **NEW public method**
+  cancel_one_job(job_id):
+    raw = job_repo.get_raw_by_id(...)
+    if raw terminal: return  -- idempotent
+    _cancel_one_job_inner(raw)
+    reconcile_group_status(raw.group_id)
+
+  **Refactored** cancel_render:
+    group_repo.update_status(cancelled)
+    jobs = job_repo.get_active_by_group(...)
+    for job in jobs:
+      _cancel_one_job_inner(job)
+    queue_repo.drain(group_id)
+    _write_terminal_snapshot(...)
+
+  No duplicated cancellation logic.
+end note
+
+JobsRouter --> RenderOrchestrator : cancel_one_job
+RenderOrchestrator --> RenderLifecycle : cancel_one_job
+
+' =====================================================================
+' Fleet layer (already exists, no changes)
+' =====================================================================
+
+interface IFleetStrategy <<EXISTING>> {
+  + cancel(provider_job_id)
+  + stop_monitoring(job_id)
+  + dispatch(...)
+  + provider_job_id_from_job(...)
+  + is_enabled() : bool
+}
+note right of IFleetStrategy
+  **Already wired**.  Per-fleet
+  cancel is the lowest-level
+  primitive and already shipped:
+  • Vast: instances.destroy
+  • Modal: FunctionCall.cancel
+  • Community: no-op (agent's
+    /cancel-status poll handles it)
+  stop_monitoring sets a
+  threading.Event the per-job
+  monitor checks each tick.
+end note
+
+class FleetRegistry <<EXISTING>> {
+  + get(fleet) : IFleetStrategy
+}
+
+RenderLifecycle --> FleetRegistry : get(fleet)
+FleetRegistry --> IFleetStrategy : returns
+
+' =====================================================================
+' Repositories (already exist, no changes)
+' =====================================================================
+
+class JobRepository <<EXISTING>> {
+  + get_raw_by_id(...)
+  + get_active_by_group(...)
+  + update_status(id, status, error)
+}
+class InProgressChunkRepository <<EXISTING>> {
+  + release(group_id, chunk_index)
+  + release_if_owner(...)
+  + claim_or_replace(...)
+}
+class MachineRepository <<EXISTING>> {
+  + set_available(machine_id)
+}
+class CallbackRouter <<EXISTING>> {
+  + route(job_id, outcome, error)
+  ~ is_job_terminal short-circuit
+}
+
+RenderLifecycle --> JobRepository : update_status\nget_raw_by_id
+RenderLifecycle --> InProgressChunkRepository : release
+RenderLifecycle --> MachineRepository : set_available
+
+note as N1
+  **Why no do-not-retry flag is needed**
+
+  After step 1 of `_cancel_one_job_inner`
+  the DB row is `status='cancelled'`,
+  which is in CallbackRouter's
+  ``_TERMINAL_GROUP_STATUSES``.
+
+  Any delayed failure signal that
+  comes in afterwards (provider's
+  monitor's last-tick race, agent's
+  /agent-failure callback, backup_monitor
+  sweep) hits CallbackRouter.route's
+  is_job_terminal short-circuit FIRST
+  and gets dropped silently.
+  handle_chunk_failed never runs,
+  _try_dispatch_retry never runs,
+  no retry can fire.
+
+  Step 4's ledger release is
+  belt-and-suspenders for the same
+  reason: even if a signal somehow
+  slipped past the terminal guard,
+  release_if_owner would return
+  False (row already gone) and
+  bail before the retry path.
+
+  No `cancelled_at` column,
+  no in-memory set,
+  no max-attempts hack.
+end note
+
+note as N2
+  **Why this isn't "rebuilding the flow"**
+
+  cancel_render today contains
+  three `for job in jobs:` blocks
+  doing the per-job cancel dance
+  (mark cancelled, set available,
+  stop monitor, drain, cancel
+  provider).
+
+  B2 needs the SAME dance for one
+  job from a different caller.
+
+  The work is:
+  1. Extract `_cancel_one_job_inner(raw)`
+     from cancel_render's loops.
+  2. cancel_render calls
+     `_cancel_one_job_inner` per job.
+  3. New public `cancel_one_job(id)`
+     calls the same inner helper +
+     reconcile_group_status.
+  4. Facade method on
+     RenderOrchestrator.
+  5. New POST /jobs/{id}/cancel
+     route + BackgroundTasks.
+
+  Net new code: ~30 lines.
+  Net duplication: zero.
+end note
+
+@enduml

@@ -144,3 +144,8 @@ class RenderOrchestrator:
 
     def cancel_group(self, group_id: str) -> dict[str, Any]:
         return self._lifecycle.cancel_render(group_id)
+
+    def cancel_one_job(self, job_id: str) -> dict[str, Any]:
+        """User pressed Cancel on a single in-flight chunk (B2).
+        Idempotent; no-op on unknown / already-terminal jobs."""
+        return self._lifecycle.cancel_one_job(job_id)

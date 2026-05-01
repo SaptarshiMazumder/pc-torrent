@@ -427,6 +427,10 @@ export async function retryJobChunk(baseUrl, jobId) {
   return apiFetch(baseUrl, `/jobs/${jobId}/retry`, { method: "POST" });
 }
 
+export async function cancelJob(baseUrl, jobId) {
+  return apiFetch(baseUrl, `/jobs/${jobId}/cancel`, { method: "POST" });
+}
+
 export async function getVastInstances(baseUrl) {
   return apiFetch(baseUrl, "/vast/instances");
 }

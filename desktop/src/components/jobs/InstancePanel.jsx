@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { cancelJob } from "../../services/api";
 
 const MERGED_STATUS_COLORS = {
   created: "#888", provisioning: "#f5a623", loading: "#f5a623",
@@ -74,17 +75,36 @@ const ICON = {
  *   error, statusMsg, logs, history }
  */
 
-function ActiveCard({ data }) {
+function ActiveCard({ data, jobId, backendUrl, onCancel }) {
   const [showLogs, setShowLogs] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState("");
   const logsRef = useRef(null);
 
   useEffect(() => {
     if (showLogs && logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
   }, [data.logs, showLogs]);
 
+  async function handleCancel() {
+    if (cancelling || !jobId || !backendUrl) return;
+    setCancelling(true);
+    setCancelError("");
+    try {
+      await cancelJob(backendUrl, jobId);
+      // Server returned 202; the cancel chain runs in a background task.
+      // Refresh so the UI moves this card from active to finished as
+      // soon as the server's row flips to 'cancelled'.
+      if (onCancel) onCancel();
+    } catch (e) {
+      setCancelling(false);
+      setCancelError(e?.message || "Cancel failed");
+    }
+  }
+
   const dot = statusColor(data.displayStatus);
   const pct = data.total ? Math.min(100, Math.round((data.rendered / data.total) * 100)) : null;
   const fillPct = pct ?? 0;
+  const canCancel = Boolean(jobId && backendUrl && onCancel);
 
   return (
     <div className="inst-active-card" style={{ "--inst-color": dot }}>
@@ -99,6 +119,39 @@ function ActiveCard({ data }) {
         <div className="inst-active-header">
           <span className="inst-active-gpu">{data.gpuLabel}</span>
           <span className="inst-active-pill" style={{ background: dot + "18", color: dot }}>{data.displayStatus}</span>
+          {canCancel && (
+            <button
+              type="button"
+              className="inst-active-cancel-btn"
+              onClick={handleCancel}
+              disabled={cancelling}
+              title={cancelling ? "Cancelling…" : "Cancel this chunk"}
+              aria-label="Cancel this chunk"
+              style={{
+                marginLeft: "auto",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 22,
+                height: 22,
+                padding: 0,
+                borderRadius: "50%",
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: cancelling ? "rgba(239,68,68,0.25)" : "transparent",
+                color: "#ef4444",
+                cursor: cancelling ? "default" : "pointer",
+                opacity: cancelling ? 0.6 : 1,
+                transition: "background 0.15s ease, border-color 0.15s ease",
+              }}
+              onMouseEnter={(e) => { if (!cancelling) e.currentTarget.style.background = "rgba(239,68,68,0.18)"; }}
+              onMouseLeave={(e) => { if (!cancelling) e.currentTarget.style.background = "transparent"; }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="6" y1="6" x2="18" y2="18" />
+                <line x1="18" y1="6" x2="6" y2="18" />
+              </svg>
+            </button>
+          )}
         </div>
         <div className="inst-active-stats">
           <StatChip icon={ICON.frames}>{data.rendered}{data.total != null ? ` / ${data.total}` : ""} frames</StatChip>
@@ -111,6 +164,7 @@ function ActiveCard({ data }) {
         </div>
 
         {data.error && <div className="inst-error">{data.error}</div>}
+        {cancelError && <div className="inst-error">{cancelError}</div>}
         {data.statusMsg && !data.error && <div className="inst-status-msg">{data.statusMsg}</div>}
 
         {data.history.length > 1 && (
@@ -173,7 +227,7 @@ function FinishedRow({ data }) {
  * @param {(backendUrl) => Promise<Array>} provider.fetchInstances
  * @param {(task, live) => CardData} provider.extractCardData
  */
-export default function InstancePanel({ tasks, backendUrl, provider }) {
+export default function InstancePanel({ tasks, backendUrl, provider, onRefresh }) {
   const [liveMap, setLiveMap] = useState({});
 
   const filteredTasks = (tasks || []).filter(
@@ -226,7 +280,13 @@ export default function InstancePanel({ tasks, backendUrl, provider }) {
       {activeTasks.length > 0 && (
         <div className="inst-active-list">
           {activeTasks.map((task) => (
-            <ActiveCard key={task.job_id} data={provider.extractCardData(task, liveMap[task.job_id] || null)} />
+            <ActiveCard
+              key={task.job_id}
+              data={provider.extractCardData(task, liveMap[task.job_id] || null)}
+              jobId={task.job_id}
+              backendUrl={backendUrl}
+              onCancel={onRefresh}
+            />
           ))}
         </div>
       )}

@@ -46,6 +46,7 @@ from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
 from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
+from serverV2.orchestrator.lifecycle_cancel import JobCanceler, RenderCanceler
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
@@ -105,6 +106,8 @@ class RenderLifecycle:
         output_frame_repo: OutputFrameRepository,
         fleet_registry: FleetRegistry,
         resource_picker: Callable[[], AvailableResources],
+        job_canceler: JobCanceler,
+        render_canceler: RenderCanceler,
     ) -> None:
         self._default_strategy = default_strategy
         self._fast_render_strategy = fast_render_strategy
@@ -119,6 +122,8 @@ class RenderLifecycle:
         self._output_frames = output_frame_repo
         self._fleet = fleet_registry
         self._resource_picker = resource_picker
+        self._job_canceler = job_canceler
+        self._render_canceler = render_canceler
 
     # ------------------------------------------------------------------
     # Planning — split frames across fleet targets (no dispatch)
@@ -755,72 +760,14 @@ class RenderLifecycle:
     # ------------------------------------------------------------------
 
     def cancel_render(self, group_id: str) -> dict[str, Any]:
-        """Mark cancelled → stop monitors → drain queue + ledger → cancel
-        provider-side jobs.  Order matters: marking the group cancelled
-        first blocks any in-flight requeues via the DB guard."""
-        # 1. Mark group + active jobs cancelled in the DB.  Also release
-        # any community machine locks so the freed PCs become available
-        # for new dispatches immediately (auto-demotion would catch them
-        # eventually via heartbeat-stale, but this is faster and clean).
-        self._group_repo.update_status(group_id, "cancelled")
-        jobs = self._job_repo.get_active_by_group(group_id)
-        for job in jobs:
-            self._job_repo.update_status(job["id"], "cancelled", error="Cancelled by user")
-            machine_id = job.get("machine_id")
-            if (job.get("machine_type") or "") == "windows" and machine_id:
-                self._machine_repo.set_available(machine_id)
+        """Group-level cancel.  Delegates the multi-pass teardown to
+        ``RenderCanceler`` (which composes ``JobCanceler`` for the
+        per-job atom), then writes the terminal snapshot so the list
+        endpoint can serve this group without re-fetching its
+        children.  Behaviorally identical to the inline implementation
+        that lived here before the lifecycle_cancel/ extraction."""
+        result = self._render_canceler.cancel(group_id)
 
-        # 2. Stop monitor threads so they stop acting on this group
-        for job in jobs:
-            fleet = job.get("machine_type") or ""
-            strategy = self._fleet.get(fleet)
-            if strategy:
-                strategy.stop_monitoring(job["id"])
-
-        # 3. Drain the dispatch queue + in-progress ledger for the group
-        drained = self._queue_repo.drain(group_id)
-        if drained:
-            log.info("Group %s: drained %d items from dispatch queue", group_id, drained)
-        self._in_progress.release_all(group_id)
-
-        # 4. Cancel provider-side jobs (Modal function calls, Vast instances)
-        for job in jobs:
-            job_id = job["id"]
-            fleet = job.get("machine_type") or ""
-            strategy = self._fleet.get(fleet)
-            if not strategy:
-                log.warning(
-                    "cancel %s: no strategy for fleet=%r — provider job not cancelled",
-                    job_id, fleet,
-                )
-                continue
-            if not strategy.is_enabled():
-                log.warning(
-                    "cancel %s: fleet %s disabled — provider job not cancelled",
-                    job_id, fleet,
-                )
-                continue
-            pid = strategy.provider_job_id_from_job(job)
-            if not pid:
-                log.warning(
-                    "cancel %s: fleet=%s has no provider_job_id stored — cannot cancel provider-side",
-                    job_id, fleet,
-                )
-                continue
-            try:
-                strategy.cancel(pid)
-                log.info("cancel %s: fleet=%s pid=%s — cancel call returned", job_id, fleet, pid)
-            except Exception as exc:
-                log.warning(
-                    "cancel %s: fleet=%s pid=%s raised %s: %s",
-                    job_id, fleet, pid, type(exc).__name__, exc,
-                )
-
-        log.info("Group %s: cancelled %d jobs", group_id, len(jobs))
-
-        # Snapshot the per-group fields the list view will read for this
-        # cancelled group, so the list endpoint never needs to re-fetch
-        # children for it again.
         all_jobs = self._job_repo.get_by_group(group_id)
         group = self._group_repo.get_by_id(group_id)
         if group is not None:
@@ -831,7 +778,34 @@ class RenderLifecycle:
             )
             self._write_terminal_snapshot(group_id, all_jobs, total_rendered)
 
-        return {"cancelled_jobs": len(jobs)}
+        return result
+
+    def cancel_one_job(self, job_id: str) -> dict[str, Any]:
+        """Per-job cancel (B2 -- the per-instance Cancel button).
+        Idempotent: silently no-ops if the job is unknown or already
+        terminal.  Otherwise runs ``JobCanceler.cancel_one`` (mark
+        cancelled, stop monitor, release ledger, cancel provider) and
+        reconciles the parent group's status.
+
+        No do-not-retry flag is needed.  After ``mark_cancelled``
+        runs, the row is terminal and CallbackRouter's
+        ``is_job_terminal`` short-circuit drops every subsequent
+        failure signal for this job -- no path can reach
+        ``handle_chunk_failed`` or ``_try_dispatch_retry``.
+        """
+        raw = self._job_repo.get_raw_by_id(job_id)
+        if raw is None:
+            return {"cancelled": False, "reason": "not_found"}
+        if str(raw.get("status") or "") in _TERMINAL_GROUP_STATUSES:
+            return {"cancelled": False, "reason": "already_terminal"}
+
+        self._job_canceler.cancel_one(raw)
+
+        group_id = raw.get("group_id") or ""
+        if group_id:
+            self.reconcile_group_status(group_id)
+
+        return {"cancelled": True, "job_id": job_id}
 
     # ------------------------------------------------------------------
     # Story 4: a job state changed; roll the change up to the group

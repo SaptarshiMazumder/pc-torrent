@@ -103,6 +103,12 @@ class CommunityMonitor:
             time.sleep(self._interval)
 
     def _tick(self) -> None:
+        # Single Redis read for the whole tick.  Used as a fallback
+        # liveness signal in _check_machine_offline AND for the
+        # demote-ghosts pass at the bottom -- no reason to query it
+        # twice per tick.
+        machine_alive_ids = self._machine_hb.alive_ids(self._demote_sec)
+
         for group in self._group_repo.get_active_groups():
             try:
                 jobs = self._job_repo.get_by_group(group["id"])
@@ -110,7 +116,7 @@ class CommunityMonitor:
                     if job.is_serverless:
                         continue
                     self._check_group_terminal(group, job)
-                    self._check_machine_offline(group, job)
+                    self._check_machine_offline(job, machine_alive_ids)
                     self._check_pre_render_stall(job)
             except Exception:
                 log.exception("CommunityMonitor error for group %s", group["id"])
@@ -121,10 +127,9 @@ class CommunityMonitor:
         # flows through the active job's heartbeat, not machines:alive.
         # Skip if Redis is down (mass-demote risk).  Prune stale entries
         # from the sorted set so it doesn't grow unboundedly.
-        alive_ids_demote = self._machine_hb.alive_ids(self._demote_sec)
-        if alive_ids_demote is not None:
+        if machine_alive_ids is not None:
             try:
-                demoted = self._machine_repo.demote_ghosts(alive_ids_demote)
+                demoted = self._machine_repo.demote_ghosts(machine_alive_ids)
                 if demoted:
                     log.info("Demoted %d ghost machine(s) to idle", demoted)
                 self._machine_hb.prune_stale(self._demote_sec)
@@ -147,18 +152,29 @@ class CommunityMonitor:
         self._on_failure(job.job_id, f"Group was {group_status}")
 
     def _check_machine_offline(
-        self, group: dict, job: RenderJob,
+        self,
+        job: RenderJob,
+        machine_alive_ids: set[str] | None,
     ) -> None:
-        """During render, machine liveness IS job heartbeat liveness:
-        the worker pushes /jobs/{id}/heartbeat every ~5-10s, which
-        writes the Redis job:{id}:hb TTL key.  If that key expired,
-        the worker has stopped pinging -- the machine has gone offline
-        mid-render.
+        """Fire 'Machine went offline' iff the agent has stopped pinging.
 
-        machines:alive (idle-phase signal) is intentionally NOT checked
-        here: a rendering machine is in status='processing', not
-        polling for new work, so it has no entries there.  Its
-        liveness during render flows through the job's heartbeat."""
+        Two liveness signals are consulted -- either being fresh proves
+        the agent is alive:
+
+        1. ``job:{id}:hb`` (TTL key, written every 5s by HeartbeatSender)
+           -- the render-phase per-job heartbeat.
+        2. ``machines:alive`` (sorted set, ZADD on every
+           /jobs/next-for-machine poll) -- the idle-phase heartbeat,
+           kept warm by polling.
+
+        Why both: between job claim (the poll's response) and the
+        agent's first /jobs/{id}/heartbeat call (~1s later), only
+        signal #2 exists.  Falsely declaring offline in that window
+        would kill every freshly-claimed community job whose monitor
+        tick happened to land inside the gap.  After ~90s of rendering
+        without polling, signal #2 ages out and #1 takes over as the
+        sole liveness check -- which is correct for long renders.
+        """
         if job.status != "running":
             return
         alive = self._heartbeat_repo.is_alive(job.job_id)
@@ -168,8 +184,14 @@ class CommunityMonitor:
             return
         if alive:
             return
-        # Suppress the offline signal if every frame in this job's range
-        # is already uploaded — let the success path finish naturally.
+        # Per-job heartbeat is missing.  Fall back to machines:alive --
+        # the agent may be in the post-claim window, hasn't sent the
+        # first per-job heartbeat yet, but its last poll's ZADD is
+        # still fresh in the sorted set.
+        if machine_alive_ids is not None and job.machine_id in machine_alive_ids:
+            return
+        # Both signals say dead.  Suppress if all frames already uploaded
+        # so the success path can finish naturally.
         uploaded = self._output_frames.count_for_job(job.job_id)
         expected = ((job.frame_end - job.frame_start) // job.frame_step) + 1
         if uploaded >= expected:

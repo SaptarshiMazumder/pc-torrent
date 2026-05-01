@@ -48,6 +48,7 @@ from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
 from serverV2.orchestrator.lifecycle import RenderLifecycle
+from serverV2.orchestrator.lifecycle_cancel import JobCanceler, RenderCanceler
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
@@ -327,6 +328,21 @@ def build(
         fleet_cap_lookup=_fleet_cap_lookup,
     )
 
+    # -- cancellation: per-job atom + group-level multi-pass --
+    job_canceler = JobCanceler(
+        job_repo=job_repo,
+        machine_repo=machine_repo,
+        in_progress_repo=in_progress_repo,
+        fleet_registry=registry,
+    )
+    render_canceler = RenderCanceler(
+        group_repo=group_repo,
+        job_repo=job_repo,
+        queue_repo=queue_repo,
+        in_progress_repo=in_progress_repo,
+        job_canceler=job_canceler,
+    )
+
     lifecycle = RenderLifecycle(
         default_strategy=default_strategy,
         fast_render_strategy=fast_render_strategy,
@@ -341,6 +357,8 @@ def build(
         output_frame_repo=output_frame_repo,
         fleet_registry=registry,
         resource_picker=_resource_picker,
+        job_canceler=job_canceler,
+        render_canceler=render_canceler,
     )
     orchestrator = RenderOrchestrator(lifecycle)
 

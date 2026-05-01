@@ -53,7 +53,7 @@ const vastProvider = {
   },
 };
 
-export default function VastInstancePanel({ tasks, backendUrl }) {
+export default function VastInstancePanel({ tasks, backendUrl, onRefresh }) {
   const provider = useMemo(() => vastProvider, []);
-  return <InstancePanel tasks={tasks} backendUrl={backendUrl} provider={provider} />;
+  return <InstancePanel tasks={tasks} backendUrl={backendUrl} provider={provider} onRefresh={onRefresh} />;
 }

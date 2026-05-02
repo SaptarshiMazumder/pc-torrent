@@ -53,6 +53,7 @@ from serverV2.orchestrator.anti_affinity import (
     AntiAffinityRepository,
     AntiAffinityService,
 )
+from serverV2.orchestrator.chunk_progress import ChunkProgressService
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 from serverV2.orchestrator.lifecycle_job_retry import RetryDeps, RetryExecutor
 from serverV2.orchestrator.lifecycle_job_termination import (
@@ -384,10 +385,14 @@ def build(
     def _reconcile_group(group_id: str) -> None:
         lifecycle.reconcile_group_status(group_id)
 
+    chunk_progress_service = ChunkProgressService(
+        output_frame_repo=output_frame_repo,
+    )
+
     retry_deps = RetryDeps(
         job_repo=job_repo,
         group_repo=group_repo,
-        output_frame_repo=output_frame_repo,
+        chunk_progress=chunk_progress_service,
         in_progress_repo=in_progress_repo,
         coordinator=dispatch_coordinator,
         strategy_picker=_retry_strategy_picker,
@@ -467,6 +472,7 @@ def build(
         heartbeat_repo=heartbeat_repo,
         machine_heartbeat_repo=machine_heartbeat_repo,
         output_frame_repo=output_frame_repo,
+        progress_repo=progress_repo,
         on_failure=_on_failure,
         stall_detector=_make_pre_render_stall_detector(),
         lock_repo=monitor_lock_repo,
@@ -513,6 +519,7 @@ def build(
         fleet_registry=registry,
         outputs_resolver=outputs_resolver,
         output_frame_repo=output_frame_repo,
+        chunk_progress=chunk_progress_service,
     )
 
     job_service = JobService(

@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from serverV2.core.models import RenderJob
+from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.pre_render_stall_detector import (
     HeartbeatWindow,
     IPreRenderStallDetector,
@@ -49,6 +50,7 @@ from serverV2.services.machines.machine_heartbeat_repository import (
 )
 from serverV2.services.machines.machine_repository import MachineRepository
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
+from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 log = logging.getLogger(__name__)
@@ -65,6 +67,7 @@ class CommunityMonitor:
         heartbeat_repo: HeartbeatRepository,
         machine_heartbeat_repo: MachineHeartbeatRepository,
         output_frame_repo: OutputFrameRepository,
+        progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
         stall_detector: IPreRenderStallDetector,
         lock_repo: MonitorLockRepository,
@@ -78,6 +81,10 @@ class CommunityMonitor:
         self._heartbeat_repo = heartbeat_repo
         self._machine_hb = machine_heartbeat_repo
         self._output_frames = output_frame_repo
+        # Same JobCounts shape Modal and Vast monitors construct -- single
+        # source of truth for "is this job complete?" semantics so all
+        # three fleets agree on what "done" means.
+        self._counts = JobCounts(progress_repo, output_frame_repo)
         self._on_failure = on_failure
         self._stall_detector = stall_detector
         self._lock_repo = lock_repo
@@ -228,10 +235,12 @@ class CommunityMonitor:
         if machine_alive_ids is not None and job.machine_id in machine_alive_ids:
             return
         # Both signals say dead.  Suppress if all frames already uploaded
-        # so the success path can finish naturally.
-        uploaded = self._output_frames.count_for_job(job.job_id)
-        expected = ((job.frame_end - job.frame_start) // job.frame_step) + 1
-        if uploaded >= expected:
+        # so the success path can finish naturally.  Delegates to the
+        # shared JobCounts facade Modal and Vast monitors also use, so
+        # community treats "complete" with the same semantics.
+        if self._counts.is_complete(
+            {"id": job.job_id, "total_frames": job.total_frames},
+        ):
             return
         self._on_failure(job.job_id, "Machine went offline")
 

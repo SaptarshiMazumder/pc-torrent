@@ -29,12 +29,12 @@ from serverV2.core.models import (
 from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
 from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
 from serverV2.orchestrator.anti_affinity import AntiAffinityExclusions
+from serverV2.orchestrator.chunk_progress import ChunkProgressService
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.repositories.in_progress_chunk_repository import (
     InProgressChunkRepository,
 )
 from serverV2.repositories.job_repository import JobRepository
-from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 
@@ -47,7 +47,7 @@ class RetryDeps:
 
     job_repo: JobRepository
     group_repo: RenderGroupRepository
-    output_frame_repo: OutputFrameRepository
+    chunk_progress: ChunkProgressService
     in_progress_repo: InProgressChunkRepository
     coordinator: DispatchCoordinator
     strategy_picker: Callable[[str, int, int], FrameAllocator]

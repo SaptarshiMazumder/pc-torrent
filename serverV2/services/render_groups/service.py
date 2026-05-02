@@ -25,6 +25,7 @@ from serverV2.core.value_objects import (
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firestore_client import write_render_group_record
 from serverV2.orchestrator.allocation import tiers
+from serverV2.orchestrator.chunk_progress import ChunkProgressService
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.services.assets.serializers import serialize_asset
@@ -75,6 +76,7 @@ class RenderGroupService:
         fleet_registry,
         outputs_resolver,
         output_frame_repo: OutputFrameRepository,
+        chunk_progress: ChunkProgressService,
     ) -> None:
         self._groups = group_repo
         self._jobs = job_repo
@@ -84,6 +86,7 @@ class RenderGroupService:
         self._fleet = fleet_registry
         self._outputs = outputs_resolver
         self._output_frames = output_frame_repo
+        self._chunk_progress = chunk_progress
         self._serializer = RenderGroupSerializer(output_frame_repo=output_frame_repo)
 
     # ------------------------------------------------------------------
@@ -731,11 +734,23 @@ class RenderGroupService:
                 continue
             if ci in active_chunks:
                 continue
-            # Skip if this job already uploaded every frame in its range.
-            uploaded = self._output_frames.count_for_job(j["id"])
-            step = j.get("frame_step") or 1
-            expected = ((j.get("frame_end") or 0) - (j.get("frame_start") or 0)) // step + 1
-            if uploaded >= expected:
+            # Skip if the chunk is already fully rendered.  Source-of-truth
+            # for "is this chunk done?" is ``ChunkProgressService``, which
+            # reads frames uploaded across ALL siblings (not just this job)
+            # and compares them against the canonical chunk range from the
+            # lowest-attempt sibling.  A chunk where the original sibling
+            # rendered everything before being cancelled is correctly
+            # excluded even though the latest sibling's per-job count is
+            # zero.  Same service the retry pipeline uses, so the UI's
+            # ``is_retryable`` and the backend's ``retry_chunk_manually``
+            # always agree.
+            chunk_siblings = [
+                s for s in jobs if (s.get("chunk_index") or 0) == ci
+            ]
+            progress = self._chunk_progress.progress_for_chunk(
+                group["id"], ci, chunk_siblings,
+            )
+            if progress.is_complete:
                 continue
             retryable.add(j["id"])
         return retryable

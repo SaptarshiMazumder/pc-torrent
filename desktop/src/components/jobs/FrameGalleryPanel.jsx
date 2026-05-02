@@ -3,7 +3,7 @@ import FrameThumb from "./FrameThumb";
 
 const FRAME_BATCH_SIZE = 2;
 
-export default function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenFrame, backendUrl }) {
+export default function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenFrame, onRefresh, backendUrl }) {
   const [visibleCount, setVisibleCount] = useState(FRAME_BATCH_SIZE);
   const sentinelRef = useRef(null);
 
@@ -34,6 +34,17 @@ export default function FrameGalleryPanel({ id, files, loading, error, openingFr
       <div className="job-frame-gallery-head">
         <span>Rendered Frames</span>
         <span className="muted">{files.length} available</span>
+        {onRefresh && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onRefresh}
+            disabled={loading}
+            style={{ marginLeft: "auto", padding: "4px 10px", fontSize: 12 }}
+          >
+            {loading ? "Refreshing..." : "Refresh"}
+          </button>
+        )}
       </div>
 
       {loading && files.length === 0 && (

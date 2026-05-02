@@ -53,6 +53,49 @@ class ChunkProgressService:
         chunk_index: int,
         siblings: list[dict[str, Any]],
     ) -> ChunkProgress:
+        rendered_filenames = self._output_frames.unique_filenames_for_chunk(
+            group_id, chunk_index,
+        )
+        return self._compute(siblings, rendered_filenames)
+
+    def progress_for_group(
+        self,
+        group_id: str,
+        jobs: list[dict[str, Any]],
+    ) -> dict[int, ChunkProgress]:
+        """Bulk equivalent of ``{ci: progress_for_chunk(...)}`` for every
+        chunk_index in the group.  One DB query (``unique_filenames_per_
+        chunk_for_group``) instead of N -- used by the render-groups
+        detail page so the per-chunk computation collapses to a single
+        round-trip.
+
+        Returns a dict mapping each chunk_index seen in ``jobs`` to its
+        ``ChunkProgress``.  Chunks with no siblings (shouldn't happen in
+        practice -- caller passes the group's full job list) are absent
+        from the result.
+        """
+        siblings_by_chunk: dict[int, list[dict[str, Any]]] = {}
+        for j in jobs:
+            ci = j.get("chunk_index") or 0
+            siblings_by_chunk.setdefault(ci, []).append(j)
+
+        filenames_by_chunk = self._output_frames.unique_filenames_per_chunk_for_group(
+            group_id,
+        )
+        return {
+            ci: self._compute(siblings, filenames_by_chunk.get(ci, set()))
+            for ci, siblings in siblings_by_chunk.items()
+        }
+
+    @staticmethod
+    def _compute(
+        siblings: list[dict[str, Any]],
+        rendered_filenames: set[str],
+    ) -> ChunkProgress:
+        """Pure in-process computation shared by ``progress_for_chunk``
+        (singular, used by the retry pipeline) and ``progress_for_group``
+        (bulk, used by the detail page).  No I/O.
+        """
         if not siblings:
             return ChunkProgress(is_complete=False, remaining_range=None)
 
@@ -61,9 +104,6 @@ class ChunkProgressService:
         chunk_end = int(original.get("frame_end") or 0)
         step = int(original.get("frame_step") or 1)
 
-        rendered_filenames = self._output_frames.unique_filenames_for_chunk(
-            group_id, chunk_index,
-        )
         rendered: set[int] = set()
         for fname in rendered_filenames:
             match = _FRAME_FILENAME_RE.match(fname)

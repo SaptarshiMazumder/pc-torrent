@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   cancelRenderGroup,
@@ -37,10 +37,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
   // — fetch the full DTO via /render-groups/{id} when one is selected,
   // and cache it in localStorage forever (terminal data never changes).
   const [terminalDetailJob, setTerminalDetailJob] = useState(null);
-  const jobsRef = useRef(jobs);
   const { downloads, startDownload } = useDownloads();
-
-  useEffect(() => { jobsRef.current = jobs; }, [jobs]);
 
   // If selected job gets removed, go back to grid
   useEffect(() => {
@@ -160,27 +157,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
     [fetchFrameGallery, openFrameGalleries]
   );
 
-  // Poll open galleries for live updates — only while the job is still active.
-  // Terminal jobs (done/failed/cancelled) have a frozen output list; no reason to poll.
-  useEffect(() => {
-    const openIds = Object.keys(openFrameGalleries).filter((id) => openFrameGalleries[id]);
-    if (openIds.length === 0) return;
-    const TERMINAL = new Set(["done", "failed", "cancelled"]);
-    const tick = () => {
-      const currentJobs = jobsRef.current || [];
-      for (const id of openIds) {
-        const job = currentJobs.find((candidate) => jobKey(candidate) === id);
-        if (job && !TERMINAL.has(job.status)) {
-          void fetchFrameGallery(job, { silent: true });
-        }
-      }
-    };
-    tick();
-    const timer = setInterval(tick, 2500);
-    return () => clearInterval(timer);
-  }, [openFrameGalleries, fetchFrameGallery]);
-
-  const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId) : null;
+const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId) : null;
   const selectedStatus = selectedJob?.status;
   const isTerminalSelection = !!selectedStatus && TERMINAL_STATUSES.has(selectedStatus);
 
@@ -269,6 +246,7 @@ export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markR
         setSelectedJobId(null);
       },
       onReRender: () => onReRender(job),
+      onRefreshFrames: () => { void fetchFrameGallery(job, { silent: false }); },
     };
   };
 

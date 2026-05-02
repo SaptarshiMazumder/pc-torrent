@@ -57,7 +57,7 @@ function RenderGroupDetail({
   job, backendUrl, authToken, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
   onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove, onReRender,
-  onRefresh,
+  onRefresh, onRefreshFrames,
 }) {
   const id = job.group_id;
   const rawPct = typeof job.overall_progress_pct === "number" ? Math.max(0, Math.min(100, job.overall_progress_pct)) : null;
@@ -144,6 +144,7 @@ function RenderGroupDetail({
               error={galleryState?.error || ""}
               openingFrameKey={openingFrameKey}
               onOpenFrame={onOpenFrame}
+              onRefresh={onRefreshFrames}
               backendUrl={backendUrl}
             />
           )}
@@ -174,6 +175,7 @@ function SingleJobDetail({
   job, backendUrl, authToken, downloadState, downloadingId,
   galleryOpen, galleryState, openingFrameKey,
   onDownload, onToggleGallery, onOpenFrame, onRemove,
+  onRefreshFrames,
 }) {
   const id = job.job_id;
   const totalFrames = typeof job.total_frames === "number" ? job.total_frames : null;
@@ -226,6 +228,7 @@ function SingleJobDetail({
               error={galleryState?.error || ""}
               openingFrameKey={openingFrameKey}
               onOpenFrame={onOpenFrame}
+              onRefresh={onRefreshFrames}
               backendUrl={backendUrl}
             />
           )}
@@ -249,7 +252,7 @@ export default function JobDetailView({
   job, backendUrl, authToken, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
   onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove, onReRender,
-  onRefresh,
+  onRefresh, onRefreshFrames,
 }) {
   const isGroup = !!job?.group_id;
   const displayName = resolveJobFilename(job);
@@ -303,7 +306,7 @@ export default function JobDetailView({
           galleryOpen={galleryOpen} galleryState={galleryState} openingFrameKey={openingFrameKey}
           onDownload={onDownload} onCancel={onCancel} onToggleGallery={onToggleGallery}
           onOpenFrame={onOpenFrame} onRemove={onRemove} onReRender={onReRender}
-          onRefresh={onRefresh}
+          onRefresh={onRefresh} onRefreshFrames={onRefreshFrames}
         />
       ) : (
         <SingleJobDetail
@@ -312,6 +315,7 @@ export default function JobDetailView({
           galleryOpen={galleryOpen} galleryState={galleryState} openingFrameKey={openingFrameKey}
           onDownload={onDownload} onToggleGallery={onToggleGallery}
           onOpenFrame={onOpenFrame} onRemove={onRemove}
+          onRefreshFrames={onRefreshFrames}
         />
       )}
     </div>

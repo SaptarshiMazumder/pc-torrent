@@ -714,7 +714,15 @@ class RenderGroupService:
 
         retryable: set[str] = set()
         for j in jobs:
-            if (j.get("status") or "") != "failed":
+            # 'cancelled' qualifies because per-instance cancel
+            # (CANCEL_PIPELINE) auto-retries via TryRetryStep, but that
+            # retry can hit max-retries-exhausted or no-eligible-target
+            # and stop dispatching.  Showing the button on a cancelled
+            # chunk lets the user manually re-fire when auto-retry gave
+            # up.  Group-level cancel still short-circuits at the top
+            # of this method, so a fully aborted render shows no
+            # retry buttons.
+            if (j.get("status") or "") not in ("failed", "cancelled"):
                 continue
             ci = j.get("chunk_index") or 0
             if latest_per_chunk.get(ci) != j["id"]:

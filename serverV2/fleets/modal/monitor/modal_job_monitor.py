@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Callable
 
 from serverV2.config import ModalConfig
 from serverV2.fleets.modal.client import ModalClient
-from serverV2.fleets.modal.callback.modal_snapshot_writer import ModalSnapshotWriter
+from serverV2.fleets.modal.monitor.modal_snapshot_writer import ModalSnapshotWriter
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
 from serverV2.fleets.shared.pre_render_stall_detector import (
@@ -24,6 +24,7 @@ from serverV2.fleets.shared.pre_render_stall_detector import (
     StallReason,
 )
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
+from serverV2.monitor_lock import MonitorLockRepository
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -50,6 +51,9 @@ class ModalJobMonitor:
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
         stop_event: threading.Event,
+        lock_repo: MonitorLockRepository,
+        lock_key: str,
+        owner_id: str,
     ) -> None:
         self._job_id = job_id
         self._provider_job_id = provider_job_id
@@ -65,6 +69,9 @@ class ModalJobMonitor:
         self._on_failure = on_failure
         self._on_success = on_success
         self._stop = stop_event
+        self._lock_repo = lock_repo
+        self._lock_key = lock_key
+        self._owner_id = owner_id
 
         self._started_at = time.monotonic()
 
@@ -77,6 +84,17 @@ class ModalJobMonitor:
             self._stop.wait(self._cfg.monitor_interval_sec)
             if self._stop.is_set():
                 log.info("Job %s: monitor stopped by cancel", self._job_id)
+                self._snapshot.remove()
+                break
+            # Compare-and-extend per-job lock.  False = another instance
+            # took over via the sweeper after our TTL expired; exit
+            # silently so the new owner is the only one firing terminal
+            # actions.
+            if not self._lock_repo.refresh(self._lock_key, self._owner_id):
+                log.info(
+                    "Job %s: modal monitor exiting -- lock taken by another instance",
+                    self._job_id,
+                )
                 self._snapshot.remove()
                 break
             try:

@@ -24,16 +24,11 @@ class VastOfferSearcher:
         self._cfg = config
 
     def search(self, gpu_name: str) -> list[dict[str, Any]]:
-        offers = self._query(gpu_name, verified_only=True)
-        if offers:
-            return offers
-        return self._query(gpu_name, verified_only=False)
-
-    def _query(self, gpu_name: str, *, verified_only: bool) -> list[dict[str, Any]]:
         filters: dict = {
             "gpu_name": {"eq": gpu_name},
             "num_gpus": {"eq": 1},
             "rentable": {"eq": True},
+            "verified": {"eq": True},
             "reliability2": {"gte": 0.90},
             "cuda_max_good": {"gte": 12.0},
             "dph_total": {"lte": self._cfg.max_price_per_gpu},
@@ -41,8 +36,8 @@ class VastOfferSearcher:
             "order": [["dph_total", "asc"], ["reliability2", "desc"]],
             "limit": 10,
         }
-        if verified_only:
-            filters["verified"] = {"eq": True}
+        if self._cfg.secure_cloud_only:
+            filters["datacenter"] = {"eq": True}
 
         resp = httpx.get(
             f"{self._cfg.api_base}/bundles/",

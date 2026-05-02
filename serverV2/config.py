@@ -107,7 +107,7 @@ class VastConfig:
             provisioning_enabled=_env_bool("VAST_PROVISIONING_ENABLED", True),
             disk_gb=_env_float("VAST_DISK_GB", 20.0),
             max_price_per_gpu=_env_float("VAST_MAX_PRICE_PER_GPU", 1.00),
-            secure_cloud_only=_env_bool("VAST_SECURE_CLOUD_ONLY", True),
+            secure_cloud_only=_env_bool("VAST_SECURE_CLOUD_ONLY", False),
             poll_interval_sec=_env_float("VAST_POLL_INTERVAL_SEC", 15.0),
             startup_timeout_sec=_env_float("VAST_STARTUP_TIMEOUT_SEC", 300.0),
             in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 30 * 60),

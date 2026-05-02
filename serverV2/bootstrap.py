@@ -48,12 +48,17 @@ from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
 from serverV2.monitor_lock import MonitorLockFacade, MonitorLockRepository
+from serverV2.orchestrator.anti_affinity import (
+    AntiAffinityFacade,
+    AntiAffinityRepository,
+    AntiAffinityService,
+)
 from serverV2.orchestrator.lifecycle import RenderLifecycle
+from serverV2.orchestrator.lifecycle_job_retry import RetryDeps, RetryExecutor
 from serverV2.orchestrator.lifecycle_job_termination import (
     JobTerminator,
     LifecycleDeps,
     RenderCanceler,
-    RetryDispatcher,
 )
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
@@ -351,13 +356,25 @@ def build(
         fleet_cap_lookup=_fleet_cap_lookup,
     )
 
-    # -- termination: retry decision + step pipelines + group cancel --
-    # Constructed bottom-up because RetryDispatcher and the reconcile
-    # callback need a reference to lifecycle (for ``_pick_strategy`` and
-    # ``reconcile_group_status``).  Closures capture the local
-    # ``lifecycle`` name; we assign it at the end of this block, so
-    # they resolve correctly at call time even though Python's
-    # forward-reference hygiene would normally complain.
+    # -- anti-affinity: facade/service/repository for retry exclusion
+    # resolution.  Resolves the union of (fleet, gpu_type) and
+    # machine_id exclusions across all prior failed/cancelled attempts
+    # of a chunk.  RenderLifecycle calls it before invoking any
+    # termination or retry pipeline.
+    anti_affinity_repository = AntiAffinityRepository()
+    anti_affinity_service = AntiAffinityService()
+    anti_affinity_facade = AntiAffinityFacade(
+        repository=anti_affinity_repository,
+        service=anti_affinity_service,
+    )
+
+    # -- retry: pipelines + executor + termination steps + group cancel --
+    # Constructed bottom-up because the retry strategy_picker and the
+    # reconcile callback need a reference to lifecycle (for
+    # ``_pick_strategy`` and ``reconcile_group_status``).  Closures
+    # capture the local ``lifecycle`` name; we assign it at the end of
+    # this block, so they resolve correctly at call time even though
+    # Python's forward-reference hygiene would normally complain.
 
     def _retry_strategy_picker(
         tier: str, file_size_bytes: int, total_frames: int,
@@ -367,14 +384,17 @@ def build(
     def _reconcile_group(group_id: str) -> None:
         lifecycle.reconcile_group_status(group_id)
 
-    retry_dispatcher = RetryDispatcher(
+    retry_deps = RetryDeps(
         job_repo=job_repo,
         group_repo=group_repo,
         output_frame_repo=output_frame_repo,
+        in_progress_repo=in_progress_repo,
         coordinator=dispatch_coordinator,
         strategy_picker=_retry_strategy_picker,
         resource_picker=_resource_picker,
+        reconcile_group=_reconcile_group,
     )
+    retry_executor = RetryExecutor(deps=retry_deps)
 
     lifecycle_deps = LifecycleDeps(
         job_repo=job_repo,
@@ -383,7 +403,7 @@ def build(
         state_writer=machine_state_writer,
         fleet_registry=registry,
         coordinator=dispatch_coordinator,
-        retry_dispatcher=retry_dispatcher,
+        retry_executor=retry_executor,
         reconcile_group=_reconcile_group,
     )
 
@@ -412,7 +432,8 @@ def build(
         output_frame_repo=output_frame_repo,
         fleet_registry=registry,
         resource_picker=_resource_picker,
-        retry_dispatcher=retry_dispatcher,
+        retry_executor=retry_executor,
+        anti_affinity=anti_affinity_facade,
         job_terminator=job_terminator,
         render_canceler=render_canceler,
     )

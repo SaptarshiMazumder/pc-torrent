@@ -134,21 +134,7 @@ class JobRepository:
             (_now_iso(), group_id),
         )
 
-    # ---- retry / failover ----
-
-    def set_retry(
-        self, job_id: str, next_attempt: int, max_retries: int,
-        error: str, new_frame_start: int,
-    ) -> None:
-        execute(
-            """
-            UPDATE jobs
-            SET status = 'pending', attempt = %s, rendered_frames = 0,
-                error = %s, frame_start = %s
-            WHERE id = %s
-            """,
-            (next_attempt, f"Retry {next_attempt}/{max_retries} (was: {error})", new_frame_start, job_id),
-        )
+    # ---- failover ----
 
     def create_failover_job(
         self,

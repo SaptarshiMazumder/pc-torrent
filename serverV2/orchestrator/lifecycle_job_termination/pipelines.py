@@ -30,7 +30,8 @@ from serverV2.orchestrator.lifecycle_job_termination.termination_pipeline_builde
 #   1. release_ledger_atomic_cas()          -> sets ctx.we_own_retry
 #   2. try_retry(requires_we_own_retry=True)
 #        - if !we_own_retry: no-op
-#        - else: ctx.retried = retry_dispatcher.attempt(...)
+#        - else: retry_executor.execute(AUTO_RETRY_PIPELINE, ...)
+#               sets ctx.retried from retry_ctx.dispatched
 #   3. mark_terminal('failed')              -> mark_failed(job_id, ctx.error)
 #   4. release_machine_if_community()
 #   5. log_failure_outcome()                -> 1 of 3 messages on flags

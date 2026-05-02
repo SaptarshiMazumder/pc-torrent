@@ -1,12 +1,16 @@
 """Job-termination package.
 
 Houses everything related to terminating one or more render jobs:
-the per-job teardown steps (``steps/``), the retry decision logic
-(``retry_dispatcher``), the rules-style pipeline builder
-(``termination_pipeline_builder``), the two pre-built pipelines
-(``pipelines``) for the failure and per-job-cancel flows, the
-executor that runs a pipeline against a context (``job_terminator``),
-and the group-level multi-pass cancel (``render_canceler``).
+the per-job teardown steps (``steps/``), the rules-style pipeline
+builder (``termination_pipeline_builder``), the two pre-built
+pipelines (``pipelines``) for the failure and per-job-cancel flows,
+the executor that runs a pipeline against a context
+(``job_terminator``), and the group-level multi-pass cancel
+(``render_canceler``).
+
+Auto-retry inside the failure / cancel pipelines is dispatched by
+``TryRetryStep`` which delegates to the ``lifecycle_job_retry``
+package (sibling to this one).  No retry logic lives here.
 
 Design: builder produces immutable rules (tuples of step instances);
 the executor is the only thing that calls ``step.run(ctx)``.  Building
@@ -19,7 +23,6 @@ from serverV2.orchestrator.lifecycle_job_termination.pipelines import (
     FAILURE_PIPELINE,
 )
 from serverV2.orchestrator.lifecycle_job_termination.execution.render_canceler import RenderCanceler
-from serverV2.orchestrator.lifecycle_job_termination.execution.retry_dispatcher import RetryDispatcher
 from serverV2.orchestrator.lifecycle_job_termination.execution.termination_context import (
     LifecycleDeps,
     TerminationContext,
@@ -34,7 +37,6 @@ __all__ = [
     "JobTerminator",
     "LifecycleDeps",
     "RenderCanceler",
-    "RetryDispatcher",
     "TerminationContext",
     "TerminationPipelineBuilder",
 ]

@@ -45,12 +45,16 @@ from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
 from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
+from serverV2.orchestrator.anti_affinity import AntiAffinityFacade
+from serverV2.orchestrator.lifecycle_job_retry import (
+    MANUAL_RETRY_PIPELINE,
+    RetryExecutor,
+)
 from serverV2.orchestrator.lifecycle_job_termination import (
     CANCEL_PIPELINE,
     FAILURE_PIPELINE,
     JobTerminator,
     RenderCanceler,
-    RetryDispatcher,
 )
 from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
@@ -66,25 +70,14 @@ log = logging.getLogger(__name__)
 _TERMINAL_GROUP_STATUSES = frozenset({"done", "failed", "cancelled"})
 
 
-class ManualRetryError(Exception):
-    """User-triggered retry refused.  ``reason`` is a short stable code the
-    router maps to an HTTP status — see ``RETRY_REASON_HTTP_STATUS`` below."""
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
-# Stable reason codes for ``ManualRetryError``.  Kept here next to the
-# raise sites so the router translation stays in sync.
-RETRY_REASON_HTTP_STATUS: dict[str, int] = {
-    "not_found": 404,
-    "not_failed": 409,
-    "active_sibling_exists": 409,
-    "group_cancelled": 409,
-    "no_remaining_frames": 409,
-    "no_eligible_target": 503,
-}
+# ``ManualRetryError`` and ``RETRY_REASON_HTTP_STATUS`` live in the
+# lifecycle_job_retry package alongside the manual retry pipeline.
+# Re-exported here so existing imports (api/routers/jobs.py) keep working;
+# new callers should import directly from lifecycle_job_retry.
+from serverV2.orchestrator.lifecycle_job_retry import (  # noqa: E402  (re-export)
+    RETRY_REASON_HTTP_STATUS,
+    ManualRetryError,
+)
 
 
 class RenderLifecycle:
@@ -111,7 +104,8 @@ class RenderLifecycle:
         output_frame_repo: OutputFrameRepository,
         fleet_registry: FleetRegistry,
         resource_picker: Callable[[], AvailableResources],
-        retry_dispatcher: RetryDispatcher,
+        retry_executor: RetryExecutor,
+        anti_affinity: AntiAffinityFacade,
         job_terminator: JobTerminator,
         render_canceler: RenderCanceler,
     ) -> None:
@@ -129,7 +123,8 @@ class RenderLifecycle:
         self._output_frames = output_frame_repo
         self._fleet = fleet_registry
         self._resource_picker = resource_picker
-        self._retry_dispatcher = retry_dispatcher
+        self._retry_executor = retry_executor
+        self._anti_affinity = anti_affinity
         self._terminator = job_terminator
         self._render_canceler = render_canceler
 
@@ -288,11 +283,17 @@ class RenderLifecycle:
         if raw is None:
             log.info("handle_chunk_failed: job %s not found, skipping", job_id)
             return
+        exclusions = self._anti_affinity.exclusions_for_chunk(
+            raw.get("group_id") or "",
+            raw.get("chunk_index") or 0,
+            including_row=raw,
+        )
         self._terminator.execute(
             pipeline=FAILURE_PIPELINE,
             job_id=job_id,
             raw=raw,
             error=error,
+            exclusions=exclusions,
         )
 
     # ------------------------------------------------------------------
@@ -335,16 +336,18 @@ class RenderLifecycle:
     # ------------------------------------------------------------------
 
     def retry_chunk_manually(self, job_id: str) -> dict[str, Any]:
-        """User pressed "Retry" on a stuck chunk in the UI.  Resolves the
-        latest attempt for the chunk, validates it's actually stuck (failed
-        + auto-retries exhausted + nothing active), and dispatches a fresh
-        attempt with ``attempt=0`` for the un-uploaded frames only.
+        """User pressed "Retry" on a stuck chunk in the UI.  Thin shim
+        over ``RetryExecutor.execute(MANUAL_RETRY_PIPELINE, ...)``.
 
-        Anti-affinity excludes the latest failed target so we don't retry
-        on the same fleet/GPU that just gave up.
+        The two ``not_found`` checks below happen pre-pipeline because
+        the anti-affinity resolver needs a valid ``group_id`` to query;
+        every other validation (group_cancelled, active_sibling_exists,
+        not_retryable, no_remaining_frames, no_eligible_target) is enforced
+        by the pipeline as it runs.
 
-        Group status flips terminal → running automatically via
-        ``reconcile_group_status`` once the new pending job appears.
+        Anti-affinity is the union of every prior failed/cancelled
+        attempt of this chunk — resolved here before the pipeline,
+        threaded in via ``RetryContext.exclusions``.
 
         Raises ``ManualRetryError`` with a stable reason code on refusal.
         """
@@ -356,107 +359,13 @@ class RenderLifecycle:
             raise ManualRetryError("not_found")
         chunk_index = raw.get("chunk_index") or 0
 
-        grp = self._group_repo.get_by_id(group_id)
-        if grp and grp.get("status") == "cancelled":
-            raise ManualRetryError("group_cancelled")
-
-        # Already-active retry for this chunk — don't double-fire.
-        if self._in_progress.current_job_for(group_id, chunk_index) is not None:
-            raise ManualRetryError("active_sibling_exists")
-
-        # Resolve the latest attempt for this chunk.  Caller may have passed
-        # an older attempt's job_id; we always operate on the latest for
-        # status/anti-affinity decisions.  Frame-range computation goes
-        # through the dedup helper instead, which considers the union of
-        # outputs across ALL sibling attempts (handles duplicate-dispatch
-        # races and partial-progress retry chains correctly).
-        siblings = [
-            j for j in self._job_repo.get_raw_by_group(group_id)
-            if (j.get("chunk_index") or 0) == chunk_index
-        ]
-        if not siblings:
-            raise ManualRetryError("not_found")
-        latest = max(
-            siblings,
-            key=lambda j: (j.get("attempt") or 0, j.get("submitted_at") or ""),
+        exclusions = self._anti_affinity.exclusions_for_chunk(group_id, chunk_index)
+        retry_ctx = self._retry_executor.execute(
+            pipeline=MANUAL_RETRY_PIPELINE,
+            raw=raw,
+            exclusions=exclusions,
         )
-        if (latest.get("status") or "") != "failed":
-            raise ManualRetryError("not_failed")
-
-        rj = RenderJob.from_row(latest)
-        dedup_remaining = self._retry_dispatcher.compute_remaining_for_chunk(
-            group_id, chunk_index,
-        )
-        if dedup_remaining is None:
-            raise ManualRetryError("no_remaining_frames")
-
-        frame_start, frame_end, frame_step = dedup_remaining
-        total_frames = ((frame_end - frame_start) // frame_step) + 1
-
-        # Anti-affinity from the latest failed attempt (per user spec).
-        excluded_caps, excluded_ids = self._retry_dispatcher.exclusions_for(latest)
-
-        file_size_bytes, engine, tier = self._retry_dispatcher.load_group_dispatch_context(grp)
-
-        chunk_request = ChunkRequest(
-            group_id=group_id,
-            chunk_index=chunk_index,
-            frame_start=frame_start,
-            frame_end=frame_end,
-            frame_step=frame_step,
-            total_frames=total_frames,
-            attempt=0,
-            excluded_machine_ids=excluded_ids,
-            excluded_serverless_capabilities=excluded_caps,
-            file_size_bytes=file_size_bytes,
-            engine=engine,
-        )
-        retry_strategy = self._pick_strategy(
-            tiers.normalize(tier), file_size_bytes or 0, total_frames,
-        )
-        retry_task = retry_strategy.allocate_retry(chunk_request, self._resource_picker())
-        if retry_task is None:
-            raise ManualRetryError("no_eligible_target")
-
-        target_label = (
-            f"{retry_task.fleet}/{retry_task.gpu_type}"
-            if retry_task.gpu_type
-            else f"{retry_task.fleet}/{retry_task.machine_id}"
-        )
-        log.info(
-            "Manual retry for chunk %d (group %s): frames %d-%d on %s "
-            "(attempt reset to 0, latest failed attempt was %d)",
-            chunk_index, group_id, frame_start, frame_end, target_label,
-            rj.attempt or 0,
-        )
-
-        if not rj.render_overrides_json:
-            raise RuntimeError(
-                f"job {rj.id} has no render_overrides_json — cannot manually retry"
-            )
-        context = DispatchContext(
-            group_id=group_id,
-            input_filename=rj.input_filename,
-            render_overrides_json=rj.render_overrides_json,
-            blend_url="",
-            max_retries=rj.max_retries,
-            priority=rj.priority,
-            engine=engine,
-        )
-        results = self._coordinator.enqueue_and_flush(group_id, [retry_task], context)
-
-        # Aggregator sees the new pending job and unlocks the group from
-        # any terminal state (failed) back to running.
-        self.reconcile_group_status(group_id)
-
-        new_job_id = results[0].job_id if results else None
-        return {
-            "new_job_id": new_job_id,
-            "frame_start": frame_start,
-            "frame_end": frame_end,
-            "fleet": retry_task.fleet,
-            "gpu_type": retry_task.gpu_type,
-        }
+        return retry_ctx.result
 
     # ------------------------------------------------------------------
     # Story 2b: a chunk succeeded (full flow — DB writes + telemetry + drain + rollup)
@@ -621,11 +530,17 @@ class RenderLifecycle:
         if str(raw.get("status") or "") in _TERMINAL_GROUP_STATUSES:
             return {"cancelled": False, "reason": "already_terminal"}
 
+        exclusions = self._anti_affinity.exclusions_for_chunk(
+            raw.get("group_id") or "",
+            raw.get("chunk_index") or 0,
+            including_row=raw,
+        )
         self._terminator.execute(
             pipeline=CANCEL_PIPELINE,
             job_id=job_id,
             raw=raw,
             error="Cancelled by user",
+            exclusions=exclusions,
         )
         return {"cancelled": True, "job_id": job_id}
 

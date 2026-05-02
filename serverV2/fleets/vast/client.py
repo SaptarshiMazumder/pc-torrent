@@ -28,7 +28,6 @@ class VastOfferSearcher:
             "gpu_name": {"eq": gpu_name},
             "num_gpus": {"eq": 1},
             "rentable": {"eq": True},
-            "verified": {"eq": True},
             "reliability2": {"gte": 0.90},
             "cuda_max_good": {"gte": 12.0},
             "dph_total": {"lte": self._cfg.max_price_per_gpu},

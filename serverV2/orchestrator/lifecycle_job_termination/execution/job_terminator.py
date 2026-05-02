@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from serverV2.orchestrator.anti_affinity import AntiAffinityExclusions
 from serverV2.orchestrator.lifecycle_job_termination.steps import TerminationStep
 from serverV2.orchestrator.lifecycle_job_termination.execution.termination_context import (
     LifecycleDeps,
@@ -38,12 +39,14 @@ class JobTerminator:
         job_id: str,
         raw: dict[str, Any],
         error: str,
+        exclusions: AntiAffinityExclusions,
     ) -> TerminationContext:
         ctx = TerminationContext(
             job_id=job_id,
             raw=raw,
             error=error,
             deps=self._deps,
+            exclusions=exclusions,
         )
         for step in pipeline:
             step.run(ctx)

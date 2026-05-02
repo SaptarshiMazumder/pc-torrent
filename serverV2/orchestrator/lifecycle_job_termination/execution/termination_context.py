@@ -1,13 +1,19 @@
 """Job termination context + dependency bundle.
 
 Carries everything a termination pipeline's steps need to run -- the job
-row, the per-flow error string, the lifecycle's repos and helpers, and a
-small set of mutable flags the steps write to as they progress (e.g.
-whether the atomic-CAS dedup was won, whether a retry got dispatched).
+row, the per-flow error string, the lifecycle's repos and helpers, the
+pre-resolved anti-affinity exclusions for any retry the pipeline might
+trigger, and a small set of mutable flags the steps write to as they
+progress (whether the atomic-CAS dedup was won, whether a retry got
+dispatched).
 
 Steps read and write the context.  The pipeline never executes anything
 itself; that's ``JobTerminator``'s job.  See lifecycle_job_termination/
 __init__.py for the rationale.
+
+Anti-affinity is resolved by ``RenderLifecycle`` BEFORE invoking the
+pipeline and threaded in via ``exclusions``.  The pipeline itself
+never queries job history for exclusions -- the resolver lives outside.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 
 from serverV2.fleets.registry import FleetRegistry
+from serverV2.orchestrator.anti_affinity import AntiAffinityExclusions
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
@@ -23,9 +30,7 @@ from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.services.machines.machine_state_writer import MachineStateWriter
 
 if TYPE_CHECKING:
-    from serverV2.orchestrator.lifecycle_job_termination.execution.retry_dispatcher import (
-        RetryDispatcher,
-    )
+    from serverV2.orchestrator.lifecycle_job_retry import RetryExecutor
 
 
 @dataclass
@@ -41,10 +46,17 @@ class LifecycleDeps:
     state_writer: MachineStateWriter
     fleet_registry: FleetRegistry
     coordinator: DispatchCoordinator
-    retry_dispatcher: "RetryDispatcher"
+    retry_executor: "RetryExecutor"
     # Callable into RenderLifecycle.reconcile_group_status -- kept as a
     # callback so the termination package doesn't import lifecycle.
     reconcile_group: Callable[[str], None]
+
+
+def _empty_exclusions() -> AntiAffinityExclusions:
+    return AntiAffinityExclusions(
+        excluded_serverless_capabilities=(),
+        excluded_machine_ids=(),
+    )
 
 
 @dataclass
@@ -58,6 +70,11 @@ class TerminationContext:
     raw: dict[str, Any]
     error: str
     deps: LifecycleDeps
+
+    # Pre-resolved anti-affinity exclusions for any retry this pipeline
+    # might trigger.  Defaults to empty so call sites that don't trigger
+    # retries (group-level cancel) don't have to construct one.
+    exclusions: AntiAffinityExclusions = field(default_factory=_empty_exclusions)
 
     # Flags written by steps, read by later steps.
     we_own_retry: bool = False

@@ -1,4 +1,4 @@
-"""CommunityMonitor — leader-only scanner for community (desktop) jobs.
+"""CommunityMonitor — singleton scanner for community (desktop) jobs.
 
 Community workers pull jobs from the DB instead of running inside a
 container we dispatched to, so the per-job monitor pattern used by Modal
@@ -20,7 +20,12 @@ repositories directly because its job is *discovery* — enumerating all
 candidate jobs — not single-job state inspection like Vast/Modal
 monitors do.
 
-Runs on the leader Cloud Run instance only.
+Singleton across the fleet of Cloud Run instances: at most one runs at
+a time, coordinated via the ``monitor:community`` Redis lock.  ``try_start``
+is the only entry point — it acquires the lock and spawns the thread
+on win, returns False on lose.  The loop refreshes the lock every tick
+and self-terminates on lost ownership so a sweeper on another instance
+can take over after a crash.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from serverV2.fleets.shared.pre_render_stall_detector import (
 )
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.monitor_lock import MonitorLockRepository
 from serverV2.services.machines.machine_heartbeat_repository import (
     MachineHeartbeatRepository,
 )
@@ -61,6 +67,8 @@ class CommunityMonitor:
         output_frame_repo: OutputFrameRepository,
         on_failure: Callable[[str, str], None],
         stall_detector: IPreRenderStallDetector,
+        lock_repo: MonitorLockRepository,
+        instance_id: str,
         demote_seconds: int = 90,
         interval_sec: int = 10,
     ) -> None:
@@ -72,6 +80,8 @@ class CommunityMonitor:
         self._output_frames = output_frame_repo
         self._on_failure = on_failure
         self._stall_detector = stall_detector
+        self._lock_repo = lock_repo
+        self._instance_id = instance_id
         # ``demote_seconds`` (~90s): how long without an idle-phase
         # heartbeat (machines:alive ZADD) before we flip a status=
         # 'available' machine to 'idle'.  Wider than the agent's poll
@@ -81,21 +91,48 @@ class CommunityMonitor:
         self._demote_sec = demote_seconds
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
+        self._thread_lock = threading.Lock()
 
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._loop, daemon=True, name="community-monitor",
-        )
-        self._thread.start()
+    def try_start(self) -> bool:
+        """Acquire the singleton ``monitor:community`` lock and spawn the
+        scan thread on win.  Returns True iff this instance now owns the
+        monitor.  Idempotent within a single process: a second call
+        while we already own the lock is a no-op (returns True).
+
+        Called both at boot (every Cloud Run instance attempts; only the
+        first wins) and from the MonitorLockSweeper tick (when the
+        previous owner died and the lock TTL expired)."""
+        with self._thread_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return True
+            if not self._lock_repo.try_acquire(
+                MonitorLockRepository.community_key(),
+                self._instance_id,
+            ):
+                return False
+            self._thread = threading.Thread(
+                target=self._loop, daemon=True, name="community-monitor",
+            )
+            self._thread.start()
         log.info(
             "CommunityMonitor started (interval=%ds, demote=%ds)",
             self._interval, self._demote_sec,
         )
+        return True
 
     def _loop(self) -> None:
+        lock_key = MonitorLockRepository.community_key()
         while True:
+            # Compare-and-extend the singleton lock.  False = our TTL
+            # expired (Redis blip / GC pause) and another instance's
+            # sweeper has taken over -- exit so we don't double-write.
+            if not self._lock_repo.refresh(lock_key, self._instance_id):
+                log.info(
+                    "CommunityMonitor exiting -- lock taken by another instance",
+                )
+                with self._thread_lock:
+                    self._thread = None
+                return
             try:
                 self._tick()
             except Exception:

@@ -24,10 +24,11 @@ from serverV2.fleets.shared.pre_render_stall_detector import (
     IPreRenderStallDetector,
     StallReason,
 )
-from serverV2.fleets.vast.callback.vast_snapshot_writer import VastSnapshotWriter
-from serverV2.fleets.vast.callback.vast_status_classifier import VastStatusClassifier
+from serverV2.fleets.vast.monitor.vast_snapshot_writer import VastSnapshotWriter
+from serverV2.fleets.vast.monitor.vast_status_classifier import VastStatusClassifier
 from serverV2.fleets.vast.client import VastClient
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
+from serverV2.monitor_lock import MonitorLockRepository
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -59,6 +60,9 @@ class VastInstanceMonitor:
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
         stop_event: threading.Event,
+        lock_repo: MonitorLockRepository,
+        lock_key: str,
+        owner_id: str,
     ) -> None:
         self._job_id = job_id
         self._instance_id = instance_id
@@ -75,6 +79,9 @@ class VastInstanceMonitor:
         self._on_failure = on_failure
         self._on_success = on_success
         self._stop = stop_event
+        self._lock_repo = lock_repo
+        self._lock_key = lock_key
+        self._owner_id = owner_id
 
         self._started_at = time.monotonic()
         self._became_running_at: float | None = None
@@ -89,6 +96,19 @@ class VastInstanceMonitor:
             self._stop.wait(self._cfg.poll_interval_sec)
             if self._stop.is_set():
                 log.info("Job %s: vast monitor stopped by cancel", self._job_id)
+                self._snapshot.remove()
+                break
+            # Compare-and-extend the per-job lock.  False means another
+            # Cloud Run instance has already taken this monitor over via
+            # the sweeper after our lock TTL expired (Redis blip / GC
+            # pause / instance shutdown that didn't release cleanly).
+            # Exit silently -- the new owner is in charge of terminal
+            # actions; firing on_failure here would race them.
+            if not self._lock_repo.refresh(self._lock_key, self._owner_id):
+                log.info(
+                    "Job %s: vast monitor exiting -- lock taken by another instance",
+                    self._job_id,
+                )
                 self._snapshot.remove()
                 break
             try:

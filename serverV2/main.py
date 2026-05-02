@@ -3,17 +3,15 @@
 Startup sequence:
 1. Load env vars
 2. Build the composition root (Container)
-3. Register virtual machines + start heartbeat threads
-4. Run startup recovery for in-flight jobs
-5. Start failover scanner background thread
-6. Mount all routers
+3. Mount routers
+4. Try to start the community monitor (singleton across instances)
+5. Start the monitor lock sweeper (per-instance, no leader gating)
+6. Drain any orphan dispatch-queue rows left from the previous process
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import threading
 
 from pathlib import Path
 from dotenv import load_dotenv
@@ -24,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from serverV2.bootstrap import Container, build
-from serverV2.infrastructure.db import init_db, try_acquire_leader_lock
+from serverV2.infrastructure.db import init_db
 from serverV2.infrastructure.redis_client import RedisClient
 
 log = logging.getLogger(__name__)
@@ -63,18 +61,34 @@ def on_startup() -> None:
 
     _wire_routers(_container)
 
-    # Background daemons must only run on ONE Cloud Run instance.  After
-    # the allocator redesign, Modal and Vast no longer have machine
-    # registrars / heartbeat threads — their capacity is described in
-    # config.json and they're elastic at dispatch time.  Recovery and the
-    # community monitor remain leader-only.
-    if try_acquire_leader_lock():
-        _run_recovery(_container)
+    # Every Cloud Run instance runs the same boot sequence.  Lock-based
+    # ownership replaces the old leader election:
+    #
+    #  * ``community_monitor.try_start()`` attempts the singleton
+    #    ``monitor:community`` Redis lock; the first booted instance
+    #    wins and starts the scan thread, others no-op.  If that
+    #    instance dies, its lock TTL expires (60s) and the
+    #    MonitorLockSweeper running on every other instance will
+    #    re-attempt try_start on the next tick.
+    #
+    #  * ``monitor_lock_facade.start()`` runs on every instance and
+    #    iterates active Vast / Modal jobs every 30s, asking the
+    #    managers to start_monitoring.  Each manager try_acquires a
+    #    per-job lock; at most one wins per job.  No leader needed.
+    #
+    #  * Boot-time queue drain still has to happen exactly once after
+    #    a restart so it sits behind the community lock too -- if we
+    #    just won it, this is the freshly-started owner instance and
+    #    the right place to nudge any stranded queue rows.
+    _container.monitor_lock_facade.start()
+    if _container.community_monitor.try_start():
         _drain_queues_after_recovery(_container)
-        _container.community_monitor.start()
-        log.info("ServerV2 startup complete (leader)")
+        log.info("ServerV2 startup complete (community-monitor owner)")
     else:
-        log.info("ServerV2 startup complete (follower — daemons skipped)")
+        log.info(
+            "ServerV2 startup complete "
+            "(community-monitor owned by another instance)",
+        )
 
 
 def _wire_routers(c: Container) -> None:
@@ -106,18 +120,6 @@ def _wire_routers(c: Container) -> None:
     app.include_router(logs.router)
     app.include_router(debug.router)
     app.include_router(internal.router)
-
-
-def _run_recovery(c: Container) -> None:
-    try:
-        c.vast_recovery.recover()
-    except Exception as exc:
-        log.warning("Vast recovery failed: %s", exc)
-
-    try:
-        c.modal_recovery.recover()
-    except Exception as exc:
-        log.warning("Modal recovery failed: %s", exc)
 
 
 def _drain_queues_after_recovery(c: Container) -> None:

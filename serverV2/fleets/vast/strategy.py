@@ -1,4 +1,4 @@
-"""VastFleetStrategy — composes VastClient + VastCallbackHandler + JobRepository.
+"""VastFleetStrategy — composes VastClient + VastMonitorManager + JobRepository.
 
 Implements IFleetStrategy via composition, not inheritance.  After Phase
 1 of the allocator redesign, the strategy reads ``task.gpu_type``
@@ -14,7 +14,7 @@ from typing import Any, Callable
 from serverV2.config import VastConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.vast.client import VastClient
-from serverV2.fleets.vast.callback import VastCallbackHandler
+from serverV2.fleets.vast.monitor import VastMonitorManager
 from serverV2.repositories.job_repository import JobRepository
 
 log = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class VastFleetStrategy:
         self,
         config: VastConfig,
         client: VastClient,
-        callback_handler: VastCallbackHandler,
+        callback_handler: VastMonitorManager,
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None] | None = None,
     ) -> None:

@@ -11,6 +11,8 @@ the community fleet has DB-backed machine rows.
 
 from __future__ import annotations
 
+import uuid
+
 from serverV2.callbacks.failure_handler import FailureHandler
 from serverV2.callbacks.router import CallbackRouter
 from serverV2.callbacks.success_handler import SuccessHandler
@@ -20,10 +22,9 @@ from serverV2.core.models import AvailableResources, FleetCapability
 from serverV2.fleets.community.community_monitor import CommunityMonitor
 from serverV2.fleets.community.strategy import CommunityStrategy
 from serverV2.fleets.instance_registry import InstanceRegistry
-from serverV2.fleets.modal.callback import ModalCallbackHandler
+from serverV2.fleets.modal.monitor import ModalMonitorManager
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.endpoint_validator import validate_modal_endpoints
-from serverV2.fleets.modal.recovery import ModalRecovery
 from serverV2.fleets.modal.strategy import ModalFleetStrategy
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.fleets.shared.pre_render_stall_detector import (
@@ -32,9 +33,8 @@ from serverV2.fleets.shared.pre_render_stall_detector import (
 )
 from serverV2.fleets.status_aggregator import InstanceStatusAggregator
 from serverV2.fleets.status_provider import ModalStatusProvider, VastStatusProvider
-from serverV2.fleets.vast.callback import VastCallbackHandler
+from serverV2.fleets.vast.monitor import VastMonitorManager
 from serverV2.fleets.vast.client import VastClient
-from serverV2.fleets.vast.recovery import VastRecovery
 from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.redis_client import RedisClient
@@ -47,6 +47,7 @@ from serverV2.orchestrator.allocation.validators.engine_compatibility_validator 
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
+from serverV2.monitor_lock import MonitorLockFacade, MonitorLockRepository
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 from serverV2.orchestrator.lifecycle_job_termination import (
     JobTerminator,
@@ -91,6 +92,7 @@ class Container:
         dispatch_coordinator: DispatchCoordinator,
         fleet_registry: FleetRegistry,
         community_monitor: CommunityMonitor,
+        monitor_lock_facade: MonitorLockFacade,
         job_repo: JobRepository,
         machine_repo: MachineRepository,
         group_repo: RenderGroupRepository,
@@ -100,8 +102,6 @@ class Container:
         job_service: JobService,
         machine_service: MachineService,
         asset_service: AssetService,
-        vast_recovery: VastRecovery,
-        modal_recovery: ModalRecovery,
         status_aggregator: InstanceStatusAggregator,
     ) -> None:
         self.config = config
@@ -110,6 +110,7 @@ class Container:
         self.dispatch_coordinator = dispatch_coordinator
         self.fleet_registry = fleet_registry
         self.community_monitor = community_monitor
+        self.monitor_lock_facade = monitor_lock_facade
         self.job_repo = job_repo
         self.machine_repo = machine_repo
         self.group_repo = group_repo
@@ -119,8 +120,6 @@ class Container:
         self.job_service = job_service
         self.machine_service = machine_service
         self.asset_service = asset_service
-        self.vast_recovery = vast_recovery
-        self.modal_recovery = modal_recovery
         self.status_aggregator = status_aggregator
 
 
@@ -132,6 +131,13 @@ def build(
 
     cfg = config or AppConfig.from_env()
     redis = redis_client or RedisClient()
+
+    # Per-instance ID used as the value of every monitor lock this
+    # process holds.  Generated once per process: surviving across
+    # restarts is wrong (we want a fresh ID so old locks held by the
+    # dead process expire on TTL rather than being refreshed).  Used by
+    # MonitorLockRepository's compare-and-swap refresh / release.
+    instance_id = str(uuid.uuid4())
 
     # -- Modal endpoint drift check --
     # Fail loud at boot if config.json declares a Modal GPU that is not
@@ -159,6 +165,7 @@ def build(
     in_progress_repo = InProgressChunkRepository()
     telemetry_repo = TelemetryRepository()
     output_frame_repo = OutputFrameRepository()
+    monitor_lock_repo = MonitorLockRepository(redis)
 
     # -- fleet registry --
     registry = FleetRegistry()
@@ -213,7 +220,7 @@ def build(
     # No machine registrar — Vast capabilities live in config.json.
     # Strategy reads task.gpu_type at dispatch time.
     vast_client = VastClient(cfg.vast)
-    vast_callback = VastCallbackHandler(
+    vast_callback = VastMonitorManager(
         config=cfg.vast, client=vast_client,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
@@ -221,6 +228,8 @@ def build(
         on_failure=_on_failure,
         on_success=_on_success,
         stall_detector_factory=_make_pre_render_stall_detector,
+        lock_repo=monitor_lock_repo,
+        instance_id=instance_id,
         registry=vast_instance_registry,
     )
     vast_strategy = VastFleetStrategy(
@@ -228,16 +237,12 @@ def build(
         callback_handler=vast_callback, job_repo=job_repo,
         on_failure=_on_failure,
     )
-    vast_recovery = VastRecovery(
-        config=cfg.vast, client=vast_client,
-        callback_handler=vast_callback,
-    )
     registry.register(vast_strategy)
 
     # -- modal fleet --
     # No machine registrar — Modal capabilities live in config.json.
     modal_client = ModalClient(cfg.modal)
-    modal_callback = ModalCallbackHandler(
+    modal_callback = ModalMonitorManager(
         config=cfg.modal, client=modal_client,
         heartbeat_repo=heartbeat_repo,
         progress_repo=progress_repo,
@@ -245,15 +250,14 @@ def build(
         on_failure=_on_failure,
         on_success=_on_success,
         stall_detector_factory=_make_pre_render_stall_detector,
+        lock_repo=monitor_lock_repo,
+        instance_id=instance_id,
         registry=modal_instance_registry,
     )
     modal_strategy = ModalFleetStrategy(
         config=cfg.modal, client=modal_client,
         callback_handler=modal_callback, job_repo=job_repo,
         on_failure=_on_failure,
-    )
-    modal_recovery = ModalRecovery(
-        config=cfg.modal, callback_handler=modal_callback,
     )
     registry.register(modal_strategy)
 
@@ -434,6 +438,7 @@ def build(
     # -- community fleet monitor (machine-offline + group-terminal reconciliation)
     # Modal and Vast own their own health via per-job monitors inside their
     # callback handlers; community is pull-based and needs this daemon.
+    # Singleton across instances via the ``monitor:community`` Redis lock.
     community_monitor = CommunityMonitor(
         job_repo=job_repo,
         group_repo=group_repo,
@@ -443,7 +448,24 @@ def build(
         output_frame_repo=output_frame_repo,
         on_failure=_on_failure,
         stall_detector=_make_pre_render_stall_detector(),
+        lock_repo=monitor_lock_repo,
+        instance_id=instance_id,
         demote_seconds=cfg.community_machine_demote_seconds,
+    )
+
+    # -- monitor lock facade --
+    # Per-instance daemon that re-claims orphaned per-job (Vast/Modal)
+    # monitors and the community singleton.  Replaces leader-only boot
+    # recovery: every instance runs this and ownership is decided by
+    # the per-key Redis lock the managers acquire on ``start_monitoring``.
+    # The facade hides the per-fleet sweep strategies + thread driver --
+    # bootstrap only sees the public surface.
+    monitor_lock_facade = MonitorLockFacade.build(
+        vast_cfg=cfg.vast,
+        modal_cfg=cfg.modal,
+        vast_manager=vast_callback,
+        modal_manager=modal_callback,
+        community_monitor=community_monitor,
     )
 
     # -- status providers + aggregator --
@@ -505,6 +527,7 @@ def build(
         dispatch_coordinator=dispatch_coordinator,
         fleet_registry=registry,
         community_monitor=community_monitor,
+        monitor_lock_facade=monitor_lock_facade,
         job_repo=job_repo,
         machine_repo=machine_repo,
         group_repo=group_repo,
@@ -514,7 +537,5 @@ def build(
         job_service=job_service,
         machine_service=machine_service,
         asset_service=asset_service,
-        vast_recovery=vast_recovery,
-        modal_recovery=modal_recovery,
         status_aggregator=status_aggregator,
     )

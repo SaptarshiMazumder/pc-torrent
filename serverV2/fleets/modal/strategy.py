@@ -1,4 +1,4 @@
-"""ModalFleetStrategy — composes ModalClient + ModalCallbackHandler + JobRepository.
+"""ModalFleetStrategy — composes ModalClient + ModalMonitorManager + JobRepository.
 
 Implements IFleetStrategy via composition.  After Phase 1 of the
 allocator redesign, the strategy reads ``task.gpu_type`` directly from
@@ -13,7 +13,7 @@ from typing import Any, Callable
 from serverV2.config import ModalConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.modal.client import ModalClient
-from serverV2.fleets.modal.callback import ModalCallbackHandler
+from serverV2.fleets.modal.monitor import ModalMonitorManager
 from serverV2.repositories.job_repository import JobRepository
 
 log = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class ModalFleetStrategy:
         self,
         config: ModalConfig,
         client: ModalClient,
-        callback_handler: ModalCallbackHandler,
+        callback_handler: ModalMonitorManager,
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None] | None = None,
     ) -> None:

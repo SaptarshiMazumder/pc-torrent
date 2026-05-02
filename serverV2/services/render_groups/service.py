@@ -25,7 +25,7 @@ from serverV2.core.value_objects import (
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firestore_client import write_render_group_record
 from serverV2.orchestrator.allocation import tiers
-from serverV2.orchestrator.chunk_progress import ChunkProgressService
+from serverV2.orchestrator.chunk_progress import ChunkProgress, ChunkProgressService
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.services.assets.serializers import serialize_asset
@@ -602,12 +602,23 @@ class RenderGroupService:
         analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
         analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 
-        retryable_ids = self._compute_retryable_job_ids(group, jobs)
+        # Pre-fetch the two N+1 sources in bulk: per-job filenames and
+        # per-chunk progress.  Each replaces N round-trips (one per job
+        # / one per qualifying chunk) with a single query.  Result: the
+        # whole detail-page response goes from ~17-22 queries to ~7.
+        files_by_job = self._output_frames.list_for_group_grouped_by_job(group["id"])
+        chunk_progress_by_index = self._chunk_progress.progress_for_group(
+            group["id"], jobs,
+        )
+        retryable_ids = self._compute_retryable_job_ids(
+            group, jobs, chunk_progress_by_index,
+        )
         tasks = [
             self._serializer.serialize_task(
                 job,
                 machines_by_id.get(job.get("machine_id")),
                 is_retryable=(job["id"] in retryable_ids),
+                output_files=files_by_job.get(job["id"], []),
             )
             for job in jobs
         ]
@@ -686,6 +697,7 @@ class RenderGroupService:
         self,
         group: dict[str, Any],
         jobs: list[dict[str, Any]],
+        chunk_progress_by_index: dict[int, ChunkProgress],
     ) -> set[str]:
         """Identify jobs the user can hit "Retry" on.  A job qualifies when:
           * status == 'failed'
@@ -735,22 +747,16 @@ class RenderGroupService:
             if ci in active_chunks:
                 continue
             # Skip if the chunk is already fully rendered.  Source-of-truth
-            # for "is this chunk done?" is ``ChunkProgressService``, which
-            # reads frames uploaded across ALL siblings (not just this job)
-            # and compares them against the canonical chunk range from the
-            # lowest-attempt sibling.  A chunk where the original sibling
-            # rendered everything before being cancelled is correctly
-            # excluded even though the latest sibling's per-job count is
-            # zero.  Same service the retry pipeline uses, so the UI's
+            # for "is this chunk done?" is ``ChunkProgressService``, pre-
+            # computed in bulk by the caller.  Reads frames uploaded across
+            # ALL siblings (not just this job) so a chunk where the original
+            # sibling rendered everything before being cancelled is
+            # correctly excluded even when the latest sibling's per-job
+            # count is zero.  Same service the retry pipeline uses; UI's
             # ``is_retryable`` and the backend's ``retry_chunk_manually``
             # always agree.
-            chunk_siblings = [
-                s for s in jobs if (s.get("chunk_index") or 0) == ci
-            ]
-            progress = self._chunk_progress.progress_for_chunk(
-                group["id"], ci, chunk_siblings,
-            )
-            if progress.is_complete:
+            progress = chunk_progress_by_index.get(ci)
+            if progress is None or progress.is_complete:
                 continue
             retryable.add(j["id"])
         return retryable

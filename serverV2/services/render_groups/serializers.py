@@ -31,12 +31,15 @@ class RenderGroupSerializer:
         machine: dict[str, Any] | None = None,
         *,
         is_retryable: bool = False,
+        output_files: list[str] | None = None,
     ) -> dict[str, Any]:
         total_frames = job.get("total_frames")
         # Verified-upload list is the single source of truth for progress.
-        # Pull straight from output_frames; sibling-retry duplicates are
-        # already collapsed at INSERT time (PK on (group_id, filename)).
-        output_files = self._output_frames.list_for_job(job["id"])
+        # Caller can pre-fetch all jobs' filenames in one bulk query and
+        # pass them in (used by the detail page to avoid N+1).  Falls
+        # back to a per-job query when the lookup wasn't pre-fetched.
+        if output_files is None:
+            output_files = self._output_frames.list_for_job(job["id"])
 
         rendered_frames = len(output_files)
         if total_frames and total_frames > 0:

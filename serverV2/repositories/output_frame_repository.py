@@ -82,6 +82,28 @@ class OutputFrameRepository:
         )
         return [r["filename"] for r in rows]
 
+    def list_for_group_grouped_by_job(
+        self, group_id: str,
+    ) -> dict[str, list[str]]:
+        """Bulk equivalent of ``{job_id: list_for_job(job_id) for ...}``
+        for every job that uploaded into ``group_id``.  One query instead
+        of N -- used by the render-groups detail page to avoid the per-
+        job N+1 in ``serialize_task``.
+
+        Per-job filename lists arrive sorted by filename (matches what
+        ``list_for_job`` returns).  Jobs with no uploads simply don't
+        appear in the result -- callers should ``dict.get(job_id, [])``.
+        """
+        rows = query_all(
+            "SELECT job_id, filename FROM output_frames "
+            "WHERE group_id = %s ORDER BY job_id, filename",
+            (group_id,),
+        )
+        out: dict[str, list[str]] = {}
+        for r in rows:
+            out.setdefault(r["job_id"], []).append(r["filename"])
+        return out
+
     def unique_filenames_for_chunk(
         self, group_id: str, chunk_index: int,
     ) -> set[str]:
@@ -104,6 +126,32 @@ class OutputFrameRepository:
             (group_id, chunk_index),
         )
         return {r["filename"] for r in rows}
+
+    def unique_filenames_per_chunk_for_group(
+        self, group_id: str,
+    ) -> dict[int, set[str]]:
+        """Bulk equivalent of ``{ci: unique_filenames_for_chunk(group_id, ci)
+        for ...}`` covering every chunk_index in the group.  One query
+        instead of N -- used by the render-groups detail page so it can
+        compute per-chunk progress for every chunk in a single round-trip.
+
+        Same JOIN through ``jobs`` as ``unique_filenames_for_chunk`` but
+        without the per-chunk filter.  PK ``(group_id, filename)`` on
+        ``output_frames`` already dedupes; the JOIN can't introduce
+        duplicates within one group.
+        """
+        rows = query_all(
+            "SELECT j.chunk_index, of.filename "
+            "FROM output_frames of "
+            "JOIN jobs j ON j.id = of.job_id "
+            "WHERE of.group_id = %s",
+            (group_id,),
+        )
+        out: dict[int, set[str]] = {}
+        for r in rows:
+            ci = r["chunk_index"] or 0
+            out.setdefault(ci, set()).add(r["filename"])
+        return out
 
     def latest_for_group(self, group_id: str) -> tuple[str, str] | None:
         """Most recently uploaded (filename, job_id) for the group, by

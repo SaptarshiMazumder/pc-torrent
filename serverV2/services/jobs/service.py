@@ -42,6 +42,7 @@ class JobService:
         outputs_resolver: OutputsResolver,
         output_frame_repo: OutputFrameRepository,
         success_notifier: Callable[[str], None],
+        community_idle_notifier: Callable[[str], None],
     ) -> None:
         self._jobs = job_repo
         self._machines = machine_repo
@@ -59,6 +60,12 @@ class JobService:
         # group reconcile).  No worker self-report of "done"; no monitor
         # poll race — the data is the success signal.
         self._success_notifier = success_notifier
+        # Called from ``next_for_machine``'s self-heal when a polling
+        # agent is found with status='processing'.  Wired to
+        # ``orchestrator.handle_community_machine_idle`` in bootstrap
+        # so any zombie running-job assigned to this machine gets
+        # marked failed before we flip the row back to 'available'.
+        self._community_idle_notifier = community_idle_notifier
 
     # ---- duplicate-start guard for serverless containers ----
 
@@ -236,15 +243,32 @@ class JobService:
         self._machine_hb.record(machine_id)
 
         # 2. Self-heal: a polling agent is by definition alive AND not
-        # rendering, so the machine row should say 'available'.  If a
-        # demote_ghosts sweep clobbered it (status='idle') because the
-        # set_available -> first-poll window left machines:alive empty,
-        # this flip undoes the false demote.  Read Redis first; fall
-        # back to PG if the cache is missing or unavailable.
+        # rendering, so the machine row should say 'available'.  Two
+        # ways the row drifts off 'available' and we have to repair:
+        #
+        #   (a) 'idle'        -- demote_ghosts swept the row before the
+        #                        agent's first poll wrote machines:alive
+        #                        post-set_available.  Just flip back.
+        #   (b) 'processing'  -- a previous render's failure/cancel
+        #                        path didn't reach the
+        #                        release-machine step (Cloud Run
+        #                        deploy mid-flight, idempotent
+        #                        already-terminal cancel that
+        #                        skipped the pipeline, etc.).  May
+        #                        also have left a zombie running job
+        #                        assigned to this machine; reclaim
+        #                        it via handle_community_machine_idle
+        #                        so retry can fire, then flip the
+        #                        row back to 'available'.
+        #
+        # Read Redis first; fall back to PG if the cache is missing
+        # or unavailable.
         cached = self._machine_hb.get_status(machine_id)
         if cached is None:
             cached = self._machines.get_status(machine_id)
-        if cached == "idle":
+        if cached and cached != "available":
+            if cached == "processing":
+                self._community_idle_notifier(machine_id)
             self._state_writer.set_status(machine_id, "available")
 
         # 3. Try to claim a pending job for this machine.

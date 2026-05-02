@@ -485,6 +485,7 @@ def build(
         success_notifier=lambda jid: callback_router.route(
             job_id=jid, outcome=CallbackOutcome.SUCCESS,
         ),
+        community_idle_notifier=orchestrator.handle_community_machine_idle,
     )
 
     machine_service = MachineService(

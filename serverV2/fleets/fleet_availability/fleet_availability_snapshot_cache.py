@@ -21,10 +21,14 @@ Source-of-truth refresh cadence is therefore exactly every 60s
 regardless of how many ticks fire in between.
 
 Serialization:
-  Pickle.  The snapshot carries ``FleetCapability`` and
-  ``CommunityMachine`` dataclasses; pickle handles them losslessly.
-  Redis is internal infra (trusted), so pickle's known security
-  caveats around untrusted input do not apply.
+  JSON.  The snapshot carries only primitive-field dataclasses
+  (``FleetCapability``, ``CommunityMachine``) plus a ``dict[str,int]``,
+  so JSON round-trips losslessly via ``asdict`` + dataclass
+  reconstruction.  Chosen over pickle because the project's shared
+  Redis client uses ``decode_responses=True`` (required by the SADD /
+  SCARD / ZADD work elsewhere) which can't read raw pickle bytes
+  back — UTF-8 decode chokes on the 0x80 protocol marker.  JSON sails
+  through, and is human-readable in Redis MONITOR for debugging.
 
 Fail-soft:
   If Redis is unreachable on read, falls through to the in-process
@@ -34,9 +38,11 @@ Fail-soft:
 
 from __future__ import annotations
 
+import json
 import logging
-import pickle
+from dataclasses import asdict
 
+from serverV2.core.models import CommunityMachine, FleetCapability
 from serverV2.fleets.fleet_availability.fleet_availability_builder_factory import (
     FleetAvailabilityBuilderFactory,
 )
@@ -76,10 +82,10 @@ class FleetAvailabilitySnapshotCache:
                 cached = None
             if cached is not None:
                 try:
-                    return pickle.loads(cached)
+                    return _deserialize(cached)
                 except Exception as exc:
                     log.warning(
-                        "FleetAvailabilitySnapshotCache: failed to unpickle "
+                        "FleetAvailabilitySnapshotCache: failed to decode "
                         "cached snapshot (%s); rebuilding",
                         exc,
                     )
@@ -87,7 +93,7 @@ class FleetAvailabilitySnapshotCache:
         snapshot = self._build_fresh()
         if client is not None:
             try:
-                client.set(_KEY, pickle.dumps(snapshot), ex=_TTL_S)
+                client.set(_KEY, _serialize(snapshot), ex=_TTL_S)
             except Exception as exc:
                 log.warning(
                     "FleetAvailabilitySnapshotCache: Redis SET on rebuild "
@@ -105,7 +111,7 @@ class FleetAvailabilitySnapshotCache:
         if client is None:
             return
         try:
-            client.set(_KEY, pickle.dumps(snapshot), keepttl=True, xx=True)
+            client.set(_KEY, _serialize(snapshot), keepttl=True, xx=True)
         except Exception as exc:
             log.warning(
                 "FleetAvailabilitySnapshotCache: Redis SET on persist "
@@ -122,3 +128,29 @@ class FleetAvailabilitySnapshotCache:
             .check_in_progress_serverless_fleet()
             .build()
         )
+
+
+# ----------------------------------------------------------------------
+# JSON codec — module-private helpers, kept here because they belong
+# next to the cache that owns the wire format.
+# ----------------------------------------------------------------------
+
+def _serialize(snapshot: FleetAvailabilitySnapshot) -> str:
+    return json.dumps({
+        "vast_available":       [asdict(c) for c in snapshot.vast_available],
+        "modal_available":      [asdict(c) for c in snapshot.modal_available],
+        "community_available":  [asdict(m) for m in snapshot.community_available],
+        "serverless_in_flight": dict(snapshot.serverless_in_flight),
+    })
+
+
+def _deserialize(raw: str) -> FleetAvailabilitySnapshot:
+    data = json.loads(raw)
+    return FleetAvailabilitySnapshot(
+        vast_available=tuple(FleetCapability(**c) for c in data["vast_available"]),
+        modal_available=tuple(FleetCapability(**c) for c in data["modal_available"]),
+        community_available=tuple(
+            CommunityMachine(**m) for m in data["community_available"]
+        ),
+        serverless_in_flight=dict(data["serverless_in_flight"]),
+    )

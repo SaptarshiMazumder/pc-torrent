@@ -49,15 +49,18 @@ from serverV2.fleets.vast.client import VastClient
 from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.redis_client import RedisClient
-from serverV2.orchestrator.allocation.default_allocation_strategy import DefaultAllocationStrategy
-from serverV2.orchestrator.allocation.economy_allocation_strategy import EconomyAllocationStrategy
-from serverV2.orchestrator.allocation.fast_render_allocation_strategy import FastRenderAllocationStrategy
-from serverV2.orchestrator.allocation.validators.engine_compatibility_validator import (
-    EngineCompatibilityValidator,
+from serverV2.allocation.allocation_strategies.default_allocation_strategy import (
+    DefaultAllocationStrategy,
 )
-from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
-from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
-from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
+from serverV2.allocation.allocation_strategies.economy_allocation_strategy import (
+    EconomyAllocationStrategy,
+)
+from serverV2.allocation.allocation_strategies.fast_render_allocation_strategy import (
+    FastRenderAllocationStrategy,
+)
+from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
+    AllocationEngineCompatibilityValidator,
+)
 from serverV2.monitor_lock import MonitorLockFacade, MonitorLockRepository
 from serverV2.orchestrator.anti_affinity import (
     AntiAffinityFacade,
@@ -126,7 +129,6 @@ class Container:
         config: AppConfig,
         orchestrator: RenderOrchestrator,
         callback_router: CallbackRouter,
-        dispatch_coordinator: DispatchCoordinator,
         fleet_registry: FleetRegistry,
         community_monitor: CommunityMonitor,
         monitor_lock_facade: MonitorLockFacade,
@@ -147,7 +149,6 @@ class Container:
         self.config = config
         self.orchestrator = orchestrator
         self.callback_router = callback_router
-        self.dispatch_coordinator = dispatch_coordinator
         self.fleet_registry = fleet_registry
         self.community_monitor = community_monitor
         self.monitor_lock_facade = monitor_lock_facade
@@ -214,9 +215,6 @@ def build(
 
     # -- fleet registry --
     registry = FleetRegistry()
-
-    # -- blend URL resolver --
-    blend_resolver = BlendUrlResolver(cfg)
 
     # -- instance registries (one per fleet, shared InstanceRegistry class) --
     modal_instance_registry = InstanceRegistry()
@@ -320,18 +318,20 @@ def build(
     # based on file size + frame count (heuristic in RenderLifecycle).
     # Both share the same validator list — per-target eligibility rules
     # (engine compatibility today; tier / price caps in the future).
-    target_validators = [EngineCompatibilityValidator()]
+    target_validators = [AllocationEngineCompatibilityValidator()]
     default_strategy = DefaultAllocationStrategy(registry, validators=target_validators)
     fast_render_strategy = FastRenderAllocationStrategy(registry, validators=target_validators)
     economy_strategy = EconomyAllocationStrategy(registry, validators=target_validators)
-    dispatcher = Dispatcher(registry)
 
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
 
-    # -- fleet availability: per-step builders + factory.  Each step
-    # owns one focused question and gets invoked at most once per
-    # _resource_picker call via the master builder's fluent flags.
+    # -- fleet availability: per-step builders + factory.  The cache
+    # holds the snapshot; the daemon and orchestrator both go through
+    # AllocationClient + FleetAvailabilitySnapshotCache.  No
+    # _resource_picker closure here -- that lived in the old
+    # DispatchCoordinator world; AllocationClient does the snapshot
+    # fetch + AvailableResources adapter internally.
     fleet_availability_factory = FleetAvailabilityBuilderFactory(
         vast=VastAvailabilityBuilder(
             client=vast_client, config=cfg.vast, job_repo=job_repo,
@@ -351,54 +351,10 @@ def build(
         ),
     )
 
-    # -- resource picker: adapts a FleetAvailabilitySnapshot into the
-    # ``AvailableResources`` shape the allocators expect.  The snapshot
-    # already pre-filters by per-fleet availability + caps; the picker
-    # is a thin shape-adapter that concatenates serverless capabilities
-    # and forwards the in-flight dict for the allocators' headroom math.
-    def _resource_picker() -> AvailableResources:
-        snapshot = (
-            fleet_availability_factory.new()
-            .check_vast()
-            .check_modal()
-            .check_community()
-            .check_in_progress_serverless_fleet()
-            .build()
-        )
-        return AvailableResources(
-            community_machines=list(snapshot.community_available),
-            serverless_capabilities=(
-                list(snapshot.vast_available) + list(snapshot.modal_available)
-            ),
-            serverless_in_flight=snapshot.serverless_in_flight,
-        )
-
-    # -- per-fleet cap lookup used by the dispatch coordinator --
-    def _fleet_cap_lookup(fleet: str) -> int:
-        if fleet == "modal_serverless":
-            return cfg.modal.max_parallel
-        if fleet == "vast_serverless":
-            return cfg.vast.max_parallel
-        # Community: each machine handles its own queue, no fleet-wide cap.
-        # Use a high number so the coordinator never gates community.
-        return 10_000
-
-    # -- orchestration: DispatchCoordinator (plumbing) + RenderLifecycle
-    # (narrative) + RenderOrchestrator (facade).  External callers hold only
-    # the facade; lifecycle holds the flow logic; coordinator is thin plumbing.
-    dispatch_coordinator = DispatchCoordinator(
-        queue_repo=queue_repo,
-        in_progress_repo=in_progress_repo,
-        dispatcher=dispatcher,
-        blend_url_resolver=blend_resolver,
-        job_repo=job_repo,
-        fleet_cap_lookup=_fleet_cap_lookup,
-    )
-
     # ------------------------------------------------------------------
-    # NEW allocation module — Phase B atomic cutover.  Lifecycle now
-    # plans + enqueues through AllocationClient; the daemon picks up
-    # queued items every ~2s under a Redis singleton lock.
+    # Allocation module wiring.  Lifecycle plans + enqueues through
+    # AllocationClient; the daemon picks up queued items every ~2s
+    # under a Redis singleton lock.
     # ------------------------------------------------------------------
     allocation_dispatcher = AllocationDispatcher(registry)
     allocation_blend_resolver = AllocationBlendUrlResolver(cfg)
@@ -512,18 +468,15 @@ def build(
     )
 
     lifecycle = RenderLifecycle(
-        coordinator=dispatch_coordinator,
         allocation_client=allocation_client,
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,
         machine_state_writer=machine_state_writer,
-        queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
         telemetry_repo=telemetry_repo,
         output_frame_repo=output_frame_repo,
         fleet_registry=registry,
-        resource_picker=_resource_picker,
         retry_executor=retry_executor,
         anti_affinity=anti_affinity_facade,
         modal_active_jobs_hooks=modal_active_jobs_hooks,
@@ -640,7 +593,6 @@ def build(
         config=cfg,
         orchestrator=orchestrator,
         callback_router=callback_router,
-        dispatch_coordinator=dispatch_coordinator,
         fleet_registry=registry,
         community_monitor=community_monitor,
         monitor_lock_facade=monitor_lock_facade,

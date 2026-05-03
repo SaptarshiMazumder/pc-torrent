@@ -17,8 +17,8 @@ from typing import Any
 
 from serverV2.core.value_objects import parse_analysis_heaviness, parse_json_object
 from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
-from serverV2.orchestrator.allocation.analyzers.cost_analyzer import (
-    MixSlot,
+from serverV2.allocation.allocation_strategies.analyzers.allocation_cost_analyzer import (
+    AllocationMixSlot,
     estimate_cost_for_mix,
 )
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -92,7 +92,7 @@ def estimate(
             continue
 
         mix = [
-            MixSlot(
+            AllocationMixSlot(
                 render_speed=t.render_speed,
                 price_per_hour=t.price_per_hour,
                 frames_assigned=t.total_frames,

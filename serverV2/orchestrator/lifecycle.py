@@ -14,8 +14,7 @@ first progress) so this lifecycle can update the parent group.
 All decisions (stale-signal guard, retry-attempt limit, cancellation
 teardown order, group rollup) live here.  Grunt work is delegated:
 
-    FrameAllocator       — picks fleet targets for chunks (initial + retry)
-    DispatchCoordinator  — drains the queue, claims the ledger, dispatches
+    AllocationClient     — gateway to the allocation module (plan + enqueue)
     GroupStatusAggregator (pure function) — computes group-level status
 
 Open THIS file to understand what happens during a render.
@@ -25,29 +24,25 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable
+from typing import Any
 
-from serverV2.callbacks.group_status_aggregator import compute_group_status
-from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
-from serverV2.orchestrator.allocation.analyzers.cost_analyzer import (
-    MixSlot,
+from serverV2.allocation.allocation_strategies.analyzers.allocation_cost_analyzer import (
+    AllocationMixSlot,
     estimate_cost_for_mix,
 )
+from serverV2.callbacks.group_status_aggregator import compute_group_status
 from serverV2.core.models import (
-    AvailableResources,
     DispatchContext,
     DispatchResult,
     PlannedTask,
     RenderJob,
 )
-from serverV2.fleets.registry import FleetRegistry
-from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
-from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
-from serverV2.orchestrator.config import MAX_RETRIES
-from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
+from serverV2.fleets.registry import FleetRegistry
+from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.orchestrator.anti_affinity import AntiAffinityFacade
+from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.lifecycle_job_retry import (
     MANUAL_RETRY_PIPELINE,
     RetryExecutor,
@@ -57,9 +52,6 @@ from serverV2.orchestrator.lifecycle_job_termination import (
     FAILURE_PIPELINE,
     JobTerminator,
     RenderCanceler,
-)
-from serverV2.allocation.allocation_dispatch_queue_repository import (
-    AllocationDispatchQueueRepository as DispatchQueueRepository,
 )
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
@@ -89,36 +81,30 @@ class RenderLifecycle:
     def __init__(
         self,
         *,
-        coordinator: DispatchCoordinator,
         allocation_client: AllocationClient,
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
         machine_state_writer: MachineStateWriter,
-        queue_repo: DispatchQueueRepository,
         in_progress_repo: InProgressChunkRepository,
         telemetry_repo: TelemetryRepository,
         output_frame_repo: OutputFrameRepository,
         fleet_registry: FleetRegistry,
-        resource_picker: Callable[[], AvailableResources],
         retry_executor: RetryExecutor,
         anti_affinity: AntiAffinityFacade,
         modal_active_jobs_hooks: ModalActiveJobsHooks,
         job_terminator: JobTerminator,
         render_canceler: RenderCanceler,
     ) -> None:
-        self._coordinator = coordinator
         self._allocation_client = allocation_client
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._machine_repo = machine_repo
         self._state_writer = machine_state_writer
-        self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
         self._telemetry = telemetry_repo
         self._output_frames = output_frame_repo
         self._fleet = fleet_registry
-        self._resource_picker = resource_picker
         self._retry_executor = retry_executor
         self._anti_affinity = anti_affinity
         self._modal_active_jobs_hooks = modal_active_jobs_hooks
@@ -199,7 +185,7 @@ class RenderLifecycle:
         # A6000 reference: speed=1.30, price=$0.55/hr (matches config.json).
         # Standard's cap = 1.0x A6000-equivalent cost.  With FastRender's
         # internal BUDGET_CAP_MULTIPLIER=1.5, total headroom is 1.5x.
-        slot = MixSlot(render_speed=1.30, price_per_hour=0.55, frames_assigned=total_frames)
+        slot = AllocationMixSlot(render_speed=1.30, price_per_hour=0.55, frames_assigned=total_frames)
         try:
             est = estimate_cost_for_mix(heaviness, [slot])
         except Exception:

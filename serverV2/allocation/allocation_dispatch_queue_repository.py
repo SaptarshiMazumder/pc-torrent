@@ -132,6 +132,20 @@ class AllocationDispatchQueueRepository:
         )
         return _row_to_item(row) if row else None
 
+    def has_any_for_fleets(self, fleets: list[str]) -> bool:
+        """Cheap existence check: is anything queued for any of the
+        given fleets?  ``LIMIT 1`` so the planner stops at the first
+        match — used by the dispatch daemon's per-tick early-return so
+        idle ticks don't touch Redis or the fleet-availability builders.
+        """
+        if not fleets:
+            return False
+        row = execute_returning(
+            "SELECT 1 AS x FROM dispatch_queue WHERE fleet = ANY(%s) LIMIT 1",
+            (list(fleets),),
+        )
+        return row is not None
+
     def count_for_fleet(self, fleet: str) -> int:
         row = execute_returning(
             "SELECT COUNT(*) AS cnt FROM dispatch_queue WHERE fleet = %s",

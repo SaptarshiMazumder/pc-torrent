@@ -119,6 +119,16 @@ class AllocationDispatchQueueDaemon:
         return False
 
     def _tick(self) -> None:
+        # Idle-tick guard: if nothing is queued for any enabled fleet,
+        # skip the snapshot fetch and end-of-tick persist entirely.
+        # Saves a Redis GET + SET KEEPTTL on every idle tick, and (on
+        # cache expiry every 60s) saves the parallel rebuild that hits
+        # Vast HTTPS, Modal SCARDs, the community DB query, and the
+        # JobRepository COUNT.  One LIMIT 1 SELECT against an indexed
+        # column is the only DB cost on idle ticks.
+        if not self._dispatch_queue.has_any_for_fleets(self._enabled_fleets):
+            return
+
         snapshot = self._snapshot_cache.get_or_build()
         mutable = snapshot.to_mutable()
         for fleet in self._enabled_fleets:

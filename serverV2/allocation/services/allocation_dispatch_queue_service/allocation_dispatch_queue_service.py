@@ -89,6 +89,9 @@ class AllocationDispatchQueueService:
     ) -> list[DispatchResult]:
         return self._enqueue_handler.enqueue(group_id, tasks, context)
 
+    def has_any_for_fleets(self, fleets: list[str]) -> bool:
+        return self._dispatch_handler.has_any_for_fleets(fleets)
+
     def dispatch_pending_for_fleet(
         self,
         fleet: str,

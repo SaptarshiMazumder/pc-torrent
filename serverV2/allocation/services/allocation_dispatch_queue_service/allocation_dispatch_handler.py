@@ -76,6 +76,14 @@ class AllocationDispatchHandler:
         self._engine_resolver = engine_resolver
         self._snapshot_mutator = snapshot_mutator
 
+    def has_any_for_fleets(self, fleets: list[str]) -> bool:
+        """Cheap existence check used by the daemon's pre-tick guard.
+        Returns True iff at least one row is queued for any of the
+        given fleets.  Lets the daemon skip the snapshot fetch + the
+        end-of-tick persist when there's nothing to dispatch.
+        """
+        return self._queue_repo.has_any_for_fleets(fleets)
+
     def dispatch_pending_for_fleet(
         self,
         fleet: str,

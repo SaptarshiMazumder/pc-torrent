@@ -18,13 +18,24 @@ from serverV2.callbacks.router import CallbackRouter
 from serverV2.callbacks.success_handler import SuccessHandler
 from serverV2.config import AppConfig
 from serverV2.core.enums import CallbackOutcome
-from serverV2.core.models import AvailableResources, FleetCapability
+from serverV2.core.models import AvailableResources
 from serverV2.fleets.community.community_monitor import CommunityMonitor
 from serverV2.fleets.community.strategy import CommunityStrategy
 from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.modal.monitor import ModalMonitorManager
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.endpoint_validator import validate_modal_endpoints
+from serverV2.fleets.fleet_availability import (
+    CommunityAvailabilityBuilder,
+    FleetAvailabilityBuilderFactory,
+    InProgressServerlessFleetBuilder,
+    ModalAvailabilityBuilder,
+    VastAvailabilityBuilder,
+)
+from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
+from serverV2.fleets.modal.modal_active_jobs_tracker import (
+    ModalActiveJobsTracker,
+)
 from serverV2.fleets.modal.strategy import ModalFleetStrategy
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.fleets.shared.pre_render_stall_detector import (
@@ -260,10 +271,15 @@ def build(
         instance_id=instance_id,
         registry=modal_instance_registry,
     )
+    modal_active_jobs_tracker = ModalActiveJobsTracker(redis_client=redis)
+    modal_active_jobs_hooks = ModalActiveJobsHooks(
+        tracker=modal_active_jobs_tracker,
+    )
     modal_strategy = ModalFleetStrategy(
         config=cfg.modal, client=modal_client,
         callback_handler=modal_callback, job_repo=job_repo,
         on_failure=_on_failure,
+        active_jobs_hooks=modal_active_jobs_hooks,
     )
     registry.register(modal_strategy)
 
@@ -285,54 +301,48 @@ def build(
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
 
-    # -- resource picker: builds AvailableResources per allocation --
+    # -- fleet availability: per-step builders + factory.  Each step
+    # owns one focused question and gets invoked at most once per
+    # _resource_picker call via the master builder's fluent flags.
+    fleet_availability_factory = FleetAvailabilityBuilderFactory(
+        vast=VastAvailabilityBuilder(
+            client=vast_client, config=cfg.vast, job_repo=job_repo,
+        ),
+        modal=ModalAvailabilityBuilder(
+            config=cfg.modal,
+            job_repo=job_repo,
+            tracker=modal_active_jobs_tracker,
+        ),
+        community=CommunityAvailabilityBuilder(
+            machine_repo=machine_repo,
+            machine_heartbeat_repo=machine_heartbeat_repo,
+            stale_seconds=cfg.machine_stale_seconds,
+        ),
+        in_progress_serverless_fleet=InProgressServerlessFleetBuilder(
+            job_repo=job_repo,
+        ),
+    )
+
+    # -- resource picker: adapts a FleetAvailabilitySnapshot into the
+    # ``AvailableResources`` shape the allocators expect.  The snapshot
+    # already pre-filters by per-fleet availability + caps; the picker
+    # is a thin shape-adapter that concatenates serverless capabilities
+    # and forwards the in-flight dict for the allocators' headroom math.
     def _resource_picker() -> AvailableResources:
-        # Two Redis signals, both consulted:
-        #   1. machines:status hash -- which agents have status='available'
-        #   2. machines:alive sorted set -- which agents are recently pinging
-        # Available community pool = (status=available) ∩ (alive within window).
-        # PG fallback per signal if Redis is down: status filter via
-        # SELECT WHERE status='available'; liveness intersect via PG's
-        # last_seen_at is no longer used -- Redis-down means we serve a
-        # stale alive picture for one tick, which is fine.
-        available_ids = machine_heartbeat_repo.available_ids()
-        if available_ids is not None:
-            community = machine_repo.get_community_by_ids(available_ids)
-        else:
-            community = machine_repo.get_available_community()
-        alive_ids = machine_heartbeat_repo.alive_ids(cfg.machine_stale_seconds)
-        if alive_ids is not None:
-            community = [m for m in community if m.id in alive_ids]
-        capabilities: list[FleetCapability] = []
-        for ep in cfg.modal.endpoints:
-            capabilities.append(FleetCapability(
-                fleet="modal_serverless",
-                gpu_type=ep.gpu_type,
-                label=ep.label,
-                vram_gb=ep.vram_gb,
-                cpu_cores=ep.cpu_cores,
-                ram_gb=ep.ram_gb,
-                render_speed=ep.render_speed,
-                fleet_max_parallel=cfg.modal.max_parallel,
-                price_per_hour=ep.price_per_hour,
-            ))
-        for ep in cfg.vast.endpoints:
-            capabilities.append(FleetCapability(
-                fleet="vast_serverless",
-                gpu_type=ep.gpu_name,
-                label=ep.label,
-                vram_gb=ep.vram_gb,
-                cpu_cores=ep.cpu_cores,
-                ram_gb=ep.ram_gb,
-                render_speed=ep.render_speed,
-                fleet_max_parallel=cfg.vast.max_parallel,
-                price_per_hour=ep.price_per_hour,
-            ))
-        in_flight = job_repo.count_active_by_fleet()
+        snapshot = (
+            fleet_availability_factory.new()
+            .check_vast()
+            .check_modal()
+            .check_community()
+            .check_in_progress_serverless_fleet()
+            .build()
+        )
         return AvailableResources(
-            community_machines=community,
-            serverless_capabilities=capabilities,
-            serverless_in_flight=in_flight,
+            community_machines=list(snapshot.community_available),
+            serverless_capabilities=(
+                list(snapshot.vast_available) + list(snapshot.modal_available)
+            ),
+            serverless_in_flight=snapshot.serverless_in_flight,
         )
 
     # -- per-fleet cap lookup used by the dispatch coordinator --
@@ -420,6 +430,7 @@ def build(
         queue_repo=queue_repo,
         in_progress_repo=in_progress_repo,
         deps=lifecycle_deps,
+        modal_active_jobs_hooks=modal_active_jobs_hooks,
     )
 
     lifecycle = RenderLifecycle(
@@ -439,6 +450,7 @@ def build(
         resource_picker=_resource_picker,
         retry_executor=retry_executor,
         anti_affinity=anti_affinity_facade,
+        modal_active_jobs_hooks=modal_active_jobs_hooks,
         job_terminator=job_terminator,
         render_canceler=render_canceler,
     )

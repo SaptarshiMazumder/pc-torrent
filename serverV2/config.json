@@ -1,9 +1,10 @@
 {
   "modal": {
-    "max_parallel": 15
+    "max_parallel": 30,
+    "per_gpu_max_parallel": 5
   },
   "vast": {
-    "max_parallel": 15
+    "max_parallel": 30
   },
   "community": {
     "price_per_hour": 0.01

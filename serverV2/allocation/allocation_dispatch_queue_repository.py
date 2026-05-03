@@ -1,4 +1,4 @@
-"""DispatchQueueRepository — DB-backed dispatch queue.
+"""AllocationDispatchQueueRepository — DB-backed dispatch queue.
 
 Each queue row carries everything needed to dispatch the chunk later when
 a slot opens up in its target fleet — frame info plus the per-render
@@ -27,7 +27,7 @@ def _now_iso() -> str:
 
 
 @dataclass
-class QueueItem:
+class AllocationQueueItem:
     frame_start: int
     frame_end: int
     frame_step: int
@@ -45,15 +45,20 @@ class QueueItem:
     priority: int = 0
     attempt: int = 0
     group_id: str = ""    # populated when read back from DB
+    # Pre-generated at enqueue time so the caller can synthesize a
+    # DispatchResult immediately (preserving the orchestrator's
+    # synchronous start_render contract).  The same job_id is reused
+    # at actual dispatch time.
+    job_id: str = ""
 
 
-class DispatchQueueRepository:
+class AllocationDispatchQueueRepository:
 
     # ------------------------------------------------------------------
     # writes
     # ------------------------------------------------------------------
 
-    def enqueue(self, group_id: str, item: QueueItem) -> None:
+    def enqueue(self, group_id: str, item: AllocationQueueItem) -> None:
         # ON CONFLICT DO NOTHING is the DB-level safety net for the
         # duplicate-dispatch race: the coordinator's app-level check
         # against in_progress_chunks already filters most duplicates,
@@ -67,12 +72,14 @@ class DispatchQueueRepository:
                 fleet, gpu_type, machine_id,
                 input_filename, render_overrides_json,
                 max_retries, priority,
+                job_id,
                 created_at)
                VALUES (%s, %s, %s, %s,
                        %s, %s, %s,
                        %s, %s, %s,
                        %s, %s,
                        %s, %s,
+                       %s,
                        %s)
                ON CONFLICT (group_id, chunk_index) DO NOTHING""",
             (
@@ -81,11 +88,12 @@ class DispatchQueueRepository:
                 item.fleet, item.gpu_type, item.machine_id,
                 item.input_filename, item.render_overrides_json,
                 item.max_retries, item.priority,
+                item.job_id,
                 _now_iso(),
             ),
         )
 
-    def enqueue_all(self, group_id: str, items: list[QueueItem]) -> None:
+    def enqueue_all(self, group_id: str, items: list[AllocationQueueItem]) -> None:
         for item in items:
             self.enqueue(group_id, item)
 
@@ -93,7 +101,7 @@ class DispatchQueueRepository:
     # reads + pops
     # ------------------------------------------------------------------
 
-    def dequeue(self, group_id: str) -> QueueItem | None:
+    def dequeue(self, group_id: str) -> AllocationQueueItem | None:
         row = execute_returning(
             """DELETE FROM dispatch_queue
                WHERE id = (
@@ -107,7 +115,7 @@ class DispatchQueueRepository:
         )
         return _row_to_item(row) if row else None
 
-    def dequeue_for_fleet(self, fleet: str) -> QueueItem | None:
+    def dequeue_for_fleet(self, fleet: str) -> AllocationQueueItem | None:
         """Pop the oldest queued item targeting ``fleet``, across all groups.
         Used by drain after a slot opens up in that fleet.
         """
@@ -151,8 +159,8 @@ class DispatchQueueRepository:
 # helpers
 # ----------------------------------------------------------------------
 
-def _row_to_item(row: dict) -> QueueItem:
-    return QueueItem(
+def _row_to_item(row: dict) -> AllocationQueueItem:
+    return AllocationQueueItem(
         frame_start=row["frame_start"],
         frame_end=row["frame_end"],
         frame_step=row["frame_step"],
@@ -170,4 +178,5 @@ def _row_to_item(row: dict) -> QueueItem:
         attempt=int(row.get("attempt") or 0),
         chunk_index=row.get("chunk_index"),
         group_id=row.get("group_id") or "",
+        job_id=row.get("job_id") or "",
     )

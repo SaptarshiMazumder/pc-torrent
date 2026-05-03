@@ -21,16 +21,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
+    AllocationChunkRequest,
+)
 from serverV2.core.models import (
-    AvailableResources,
     PlannedTask,
     RenderJob,
 )
-from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
-from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
+from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.orchestrator.anti_affinity import AntiAffinityExclusions
 from serverV2.orchestrator.chunk_progress import ChunkProgressService
-from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.repositories.in_progress_chunk_repository import (
     InProgressChunkRepository,
 )
@@ -49,9 +49,7 @@ class RetryDeps:
     group_repo: RenderGroupRepository
     chunk_progress: ChunkProgressService
     in_progress_repo: InProgressChunkRepository
-    coordinator: DispatchCoordinator
-    strategy_picker: Callable[[str, int, int], FrameAllocator]
-    resource_picker: Callable[[], AvailableResources]
+    allocation_client: AllocationClient
     # Callable into RenderLifecycle.reconcile_group_status — kept as a
     # callback so this package doesn't import lifecycle.
     reconcile_group: Callable[[str], None]
@@ -99,7 +97,7 @@ class RetryContext:
     # ------------------------------------------------------------------
     # State written by allocation/dispatch steps
     # ------------------------------------------------------------------
-    chunk_request: ChunkRequest | None = None
+    chunk_request: AllocationChunkRequest | None = None
     retry_task: PlannedTask | None = None
     dispatched: bool = False
 

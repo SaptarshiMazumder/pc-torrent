@@ -6,7 +6,9 @@ Startup sequence:
 3. Mount routers
 4. Try to start the community monitor (singleton across instances)
 5. Start the monitor lock sweeper (per-instance, no leader gating)
-6. Drain any orphan dispatch-queue rows left from the previous process
+6. Start the allocation dispatch queue daemon on every replica;
+   only the lock-holder's tick fires (Redis singleton).  Queued
+   items left from a previous process are picked up on the next tick.
 """
 
 from __future__ import annotations
@@ -76,13 +78,16 @@ def on_startup() -> None:
     #    managers to start_monitoring.  Each manager try_acquires a
     #    per-job lock; at most one wins per job.  No leader needed.
     #
-    #  * Boot-time queue drain still has to happen exactly once after
-    #    a restart so it sits behind the community lock too -- if we
-    #    just won it, this is the freshly-started owner instance and
-    #    the right place to nudge any stranded queue rows.
+    #  * ``allocation_dispatch_queue_daemon.start()`` runs on every
+    #    instance.  Each replica's thread polls the
+    #    ``allocation:dispatch:daemon`` Redis lock; only the holder
+    #    actually dispatches.  When the holder dies, lock TTL expires
+    #    and the next replica's poll picks up the work.  Stranded
+    #    queue rows from a previous process are cleared the same way:
+    #    next tick after boot.
     _container.monitor_lock_facade.start()
+    _container.allocation_dispatch_queue_daemon.start()
     if _container.community_monitor.try_start():
-        _drain_queues_after_recovery(_container)
         log.info("ServerV2 startup complete (community-monitor owner)")
     else:
         log.info(
@@ -122,14 +127,3 @@ def _wire_routers(c: Container) -> None:
     app.include_router(internal.router)
 
 
-def _drain_queues_after_recovery(c: Container) -> None:
-    """Catch the post-restart edge case where queued items were left
-    behind by the previous process.  If no active job exists to fire a
-    drain trigger, those rows would sit forever — kick the drain once
-    per enabled fleet at boot.
-    """
-    for fleet in c.fleet_registry.enabled_fleets():
-        try:
-            c.dispatch_coordinator.drain_for_fleet(fleet)
-        except Exception as exc:
-            log.warning("Boot-time drain for %s failed: %s", fleet, exc)

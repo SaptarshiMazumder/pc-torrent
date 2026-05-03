@@ -28,7 +28,8 @@ import logging
 from typing import Any, Callable
 
 from serverV2.callbacks.group_status_aggregator import compute_group_status
-from serverV2.orchestrator.allocation import tiers
+from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
 from serverV2.orchestrator.allocation.analyzers.cost_analyzer import (
     MixSlot,
     estimate_cost_for_mix,
@@ -57,7 +58,9 @@ from serverV2.orchestrator.lifecycle_job_termination import (
     JobTerminator,
     RenderCanceler,
 )
-from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
+from serverV2.allocation.allocation_dispatch_queue_repository import (
+    AllocationDispatchQueueRepository as DispatchQueueRepository,
+)
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.services.machines.machine_repository import MachineRepository
@@ -83,18 +86,11 @@ from serverV2.orchestrator.lifecycle_job_retry import (  # noqa: E402  (re-expor
 
 class RenderLifecycle:
 
-    # Heuristic thresholds for picking the FastRender strategy over the
-    # Default one.  Either condition (heavy file OR many frames) is enough.
-    _FAST_RENDER_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024   # 2 GB
-    _FAST_RENDER_TOTAL_FRAMES = 30
-
     def __init__(
         self,
         *,
-        default_strategy: FrameAllocator,
-        fast_render_strategy: FrameAllocator,
-        economy_strategy: FrameAllocator,
         coordinator: DispatchCoordinator,
+        allocation_client: AllocationClient,
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
@@ -111,10 +107,8 @@ class RenderLifecycle:
         job_terminator: JobTerminator,
         render_canceler: RenderCanceler,
     ) -> None:
-        self._default_strategy = default_strategy
-        self._fast_render_strategy = fast_render_strategy
-        self._economy_strategy = economy_strategy
         self._coordinator = coordinator
+        self._allocation_client = allocation_client
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._machine_repo = machine_repo
@@ -147,51 +141,30 @@ class RenderLifecycle:
         engine: str | None = None,
         tier: str | None = None,
     ) -> list[PlannedTask]:
-        # File size for strategy selection is carried inside ``heaviness``
-        # (see ``parse_analysis_heaviness(snapshot, file_size_bytes=...)``).
         # ``heaviness=None`` is fine — equivalent to a defaulted dict with
-        # file_size=0; the picker treats unknown size as "use Default".
-        file_size_bytes = int((heaviness or {}).get("file_size_bytes", 0) or 0)
-
+        # file_size=0.  Strategy choice is allocation's job; lifecycle
+        # just forwards the user's tier and the scene context.
         resolved_tier = tiers.normalize(tier)
-
-        resources = self._resource_picker()
-        raw_community = len(resources.community_machines)
-        raw_caps_by_fleet: dict[str, int] = {}
-        for cap in resources.serverless_capabilities:
-            raw_caps_by_fleet[cap.fleet] = raw_caps_by_fleet.get(cap.fleet, 0) + 1
-        pinned = bool(machine_ids)
-        if pinned:
-            # User pinned specific community machines.  Filter the pool
-            # accordingly and drop serverless capabilities entirely.
-            wanted = set(machine_ids)
-            resources = AvailableResources(
-                community_machines=[
-                    m for m in resources.community_machines if m.id in wanted
-                ],
-                serverless_capabilities=[],
-                serverless_in_flight=resources.serverless_in_flight,
-            )
-        strategy = self._pick_strategy(resolved_tier, file_size_bytes, total_frames)
         tier_budget = self._tier_budget(resolved_tier, heaviness, total_frames)
-        tasks = strategy.allocate_initial(
+        pinned = bool(machine_ids)
+
+        tasks = self._allocation_client.plan_initial(
+            tier=resolved_tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
             total_frames=total_frames,
-            resources=resources,
             engine=engine,
             heaviness=heaviness,
             tier_budget_usd=tier_budget,
+            machine_ids=machine_ids,
         )
         log.info(
-            "plan: tier=%s strategy=%s pinned=%s engine=%s raw_community=%d raw_caps=%s "
-            "after_filter_community=%d after_filter_caps=%d in_flight=%s "
+            "plan: tier=%s pinned=%s engine=%s "
             "total_frames=%d file_size_bytes=%s tier_budget=%s -> tasks=%d",
-            resolved_tier, type(strategy).__name__, pinned, engine, raw_community,
-            raw_caps_by_fleet, len(resources.community_machines),
-            len(resources.serverless_capabilities), dict(resources.serverless_in_flight),
-            total_frames, file_size_bytes, tier_budget, len(tasks),
+            resolved_tier, pinned, engine, total_frames,
+            int((heaviness or {}).get("file_size_bytes", 0) or 0),
+            tier_budget, len(tasks),
         )
         return tasks
 
@@ -211,26 +184,6 @@ class RenderLifecycle:
         self._modal_active_jobs_hooks.on_terminal(
             job_id=job_id, gpu_type=gpu_type,
         )
-
-    def _pick_strategy(
-        self, tier: str, file_size_bytes: int, total_frames: int,
-    ) -> FrameAllocator:
-        """Tier-first strategy routing.  Falls back to the heaviness
-        heuristic for STANDARD (Default vs FastRender)."""
-        if tier == tiers.ECONOMY:
-            return self._economy_strategy
-        if tier == tiers.PREMIUM:
-            # Reserved — UI disables the picker.  If a Premium request
-            # somehow arrives, fall through to STANDARD's selection.
-            log.warning("plan: PREMIUM tier requested but not implemented; falling back to STANDARD")
-        # STANDARD (or unknown / fallback): heaviness heuristic decides
-        # between Default and FastRender (today's behaviour).
-        size_known = file_size_bytes > 0
-        is_heavy = size_known and file_size_bytes >= self._FAST_RENDER_FILE_SIZE_BYTES
-        is_long = total_frames >= self._FAST_RENDER_TOTAL_FRAMES
-        if is_heavy or is_long:
-            return self._fast_render_strategy
-        return self._default_strategy
 
     def _tier_budget(
         self, tier: str, heaviness: dict | None, total_frames: int,
@@ -282,7 +235,13 @@ class RenderLifecycle:
             priority=0,
             engine=engine,
         )
-        return self._coordinator.enqueue_and_flush(group_id, tasks, context)
+        # Tick-driven dispatch: enqueue is a pure write.  The
+        # AllocationDispatchQueueDaemon picks queued items up on its
+        # next tick (~2s) and dispatches within fleet caps.  The
+        # returned DispatchResults carry pre-generated job_ids so the
+        # caller can persist stable IDs immediately even though
+        # dispatch fires asynchronously.
+        return self._allocation_client.enqueue(group_id, tasks, context)
 
     # ------------------------------------------------------------------
     # Story 2: a chunk failed (full flow — retry decision + DB mutations)
@@ -299,23 +258,40 @@ class RenderLifecycle:
         Adapters (callbacks, monitors) call
         ``RenderOrchestrator.on_job_failed`` which delegates here.
         """
+        log.info("[RETRY_DEBUG] handle_chunk_failed(%s) entered", job_id)
         raw = self._job_repo.get_raw_by_id(job_id)
         if raw is None:
+            log.info("[RETRY_DEBUG] handle_chunk_failed: job %s NOT FOUND in DB — skipping pipeline", job_id)
             log.info("handle_chunk_failed: job %s not found, skipping", job_id)
             return
+        log.info(
+            "[RETRY_DEBUG] handle_chunk_failed(%s): raw loaded status=%s attempt=%s chunk_index=%s",
+            job_id, raw.get("status"), raw.get("attempt"), raw.get("chunk_index"),
+        )
         self._fire_modal_terminal_hook_if_modal(raw, job_id)
         exclusions = self._anti_affinity.exclusions_for_chunk(
             raw.get("group_id") or "",
             raw.get("chunk_index") or 0,
             including_row=raw,
         )
-        self._terminator.execute(
-            pipeline=FAILURE_PIPELINE,
-            job_id=job_id,
-            raw=raw,
-            error=error,
-            exclusions=exclusions,
+        log.info(
+            "[RETRY_DEBUG] handle_chunk_failed(%s): exclusions resolved (machine_ids=%d, capabilities=%d) — invoking FAILURE_PIPELINE",
+            job_id,
+            len(exclusions.excluded_machine_ids),
+            len(exclusions.excluded_serverless_capabilities),
         )
+        try:
+            self._terminator.execute(
+                pipeline=FAILURE_PIPELINE,
+                job_id=job_id,
+                raw=raw,
+                error=error,
+                exclusions=exclusions,
+            )
+            log.info("[RETRY_DEBUG] handle_chunk_failed(%s): FAILURE_PIPELINE completed cleanly", job_id)
+        except Exception as exc:
+            log.error("[RETRY_DEBUG] handle_chunk_failed(%s): FAILURE_PIPELINE RAISED: %r", job_id, exc)
+            raise
 
     # ------------------------------------------------------------------
     # Story 2c1: community machine reports idle (post-register / post-job)
@@ -461,11 +437,8 @@ class RenderLifecycle:
         if group_id:
             self.reconcile_group_status(group_id)
 
-        if fleet:
-            try:
-                self._coordinator.drain_for_fleet(fleet)
-            except Exception as exc:
-                log.warning("drain_for_fleet(%s) failed: %s", fleet, exc)
+        # No drain: the AllocationDispatchQueueDaemon picks up the freed
+        # cap headroom on its next tick (~2s).
 
     def handle_chunk_running(self, job_id: str) -> None:
         """Transition pending → running without touching the progress

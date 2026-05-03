@@ -3,17 +3,19 @@
 Two immutable tuples constructed once at import time:
 
 * ``FAILURE_PIPELINE`` -- reproduces ``RenderLifecycle.handle_chunk_failed``
-  step-for-step.  No behavior change vs the inline implementation that
-  preceded the extraction.
+  step-for-step.
 
-* ``CANCEL_PIPELINE`` -- per-instance cancel.  Adds ``try_retry``,
-  ``drain_fleet``, and unconditional ``reconcile_group`` to the
-  previous cancel flow so cancelling one worker redirects the chunk
-  to a different worker (the documented B2 ask).
+* ``CANCEL_PIPELINE`` -- per-instance cancel.  Adds ``try_retry`` and
+  unconditional ``reconcile_group`` so cancelling one worker
+  re-dispatches the chunk to a different worker (the documented B2 ask).
 
 Both flows share the same step classes; the difference is which
 steps are included and the order.  See termination_pipeline_builder
 for the rules-not-action design rationale.
+
+Drain steps are no longer present in either pipeline:
+``AllocationDispatchQueueDaemon`` ticks every ~2s and picks up freed
+fleet headroom autonomously.
 """
 
 from __future__ import annotations
@@ -39,7 +41,6 @@ from serverV2.orchestrator.lifecycle_job_termination.termination_pipeline_builde
 #        - branch A (lost CAS):              skip
 #        - branch B + retried:               skip
 #        - branch B + not retried:           reconcile
-#   7. drain_fleet()                        -> always
 # ---------------------------------------------------------------------
 
 FAILURE_PIPELINE = (
@@ -50,7 +51,6 @@ FAILURE_PIPELINE = (
     .release_machine_if_community()
     .log_failure_outcome()
     .reconcile_group(only_if_not_retried_and_owned=True)
-    .drain_fleet()
     .build()
 )
 
@@ -69,8 +69,7 @@ FAILURE_PIPELINE = (
 # 5. cancel_provider()                       -> RPC the provider
 # 6. try_retry(requires_we_own_retry=False)  -> re-dispatch missing frames
 #                                              to a different worker
-# 7. drain_fleet()
-# 8. reconcile_group()                       -> always (no gating)
+# 7. reconcile_group()                       -> always (no gating)
 # ---------------------------------------------------------------------
 
 CANCEL_PIPELINE = (
@@ -81,7 +80,6 @@ CANCEL_PIPELINE = (
     .stop_monitor()
     .cancel_provider()
     .try_retry(requires_we_own_retry=False)
-    .drain_fleet()
     .reconcile_group(only_if_not_retried_and_owned=False)
     .build()
 )

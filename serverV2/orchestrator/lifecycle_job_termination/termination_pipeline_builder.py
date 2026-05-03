@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from serverV2.orchestrator.lifecycle_job_termination.steps import (
     CancelProviderStep,
-    DrainFleetStep,
     LogFailureOutcomeStep,
     MarkTerminalStep,
     ReconcileGroupStep,
@@ -94,10 +93,6 @@ class TerminationPipelineBuilder:
 
     def log_failure_outcome(self) -> "TerminationPipelineBuilder":
         self._steps.append(LogFailureOutcomeStep())
-        return self
-
-    def drain_fleet(self) -> "TerminationPipelineBuilder":
-        self._steps.append(DrainFleetStep())
         return self
 
     def reconcile_group(

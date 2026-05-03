@@ -16,7 +16,7 @@ import logging
 from typing import Any
 
 from serverV2.core.value_objects import parse_analysis_heaviness, parse_json_object
-from serverV2.orchestrator.allocation import tiers
+from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
 from serverV2.orchestrator.allocation.analyzers.cost_analyzer import (
     MixSlot,
     estimate_cost_for_mix,

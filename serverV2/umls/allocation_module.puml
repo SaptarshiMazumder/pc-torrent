@@ -1,0 +1,126 @@
+@startuml allocation_module
+title Allocation module — top-level class structure
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+' ===========================================================
+' INBOUND callers — place ABOVE allocation
+' ===========================================================
+package "<<inbound>>" <<Cloud>> #c7d2fe {
+    class "AllocationClient\nserverV2/orchestrator" as ExtAllocationClient
+    class "Bootstrap\nserverV2/bootstrap" as ExtBootstrap
+}
+
+' ===========================================================
+' INFRA — place to the LEFT
+' ===========================================================
+package "<<infra>>" <<Cloud>> #fde68a {
+    class "AppConfig\nserverV2/config" as ExtConfig
+    class "MonitorLockRepository\nserverV2/monitor_lock" as ExtLockRepo
+}
+
+' ===========================================================
+' INSIDE serverV2/allocation/
+' ===========================================================
+package "serverV2/allocation" <<Frame>> #d4e3fc {
+
+    class AllocationFacade <<entry>> #b9e3a3 {
+        + plan_initial(strategy_name, ...) : list[PlannedTask]
+        + plan_retry(strategy_name, chunk_request) : PlannedTask | None
+        + enqueue(group_id, tasks, ctx) : list[DispatchResult]
+    }
+
+    class AllocationDispatchQueueDaemon <<background, singleton>> #fcd34d {
+        + start()
+        + stop()
+        - tick()
+    }
+
+    class AllocationPlanningService {
+        + plan_initial / plan_retry
+    }
+
+    class AllocationDispatchQueueService {
+        + enqueue / dispatch_pending_for_fleet
+    }
+
+    class AllocationDispatcher {
+        + dispatch_one(task, ctx, job_id) : DispatchResult
+    }
+
+    class AllocationBlendUrlResolver {
+        + resolve(fleet, group_id, filename) : str
+    }
+
+    class AllocationDispatchQueueRepository <<repo>> #f9c1c1 {
+        + enqueue / dequeue_for_fleet / drain
+    }
+
+    package "allocation_strategies" <<Frame>> #fde68a {
+        class strategies <<package>>
+        class validators <<package>>
+        class analyzers <<package>>
+        class allocation_helpers <<package>>
+    }
+}
+
+' ===========================================================
+' FLEETS-side — place to the RIGHT
+' ===========================================================
+package "<<fleets>>" <<Cloud>> #e9d5ff {
+    class "FleetRegistry\nserverV2/fleets/registry" as ExtFleetRegistry
+    class "FleetAvailabilitySnapshotCache\nserverV2/fleets/fleet_availability" as ExtSnapshotCache
+    class "MutableFleetAvailabilitySnapshot\nserverV2/fleets/fleet_availability" as ExtMutableSnapshot
+}
+
+' ===========================================================
+' REPOS — place BELOW allocation
+' ===========================================================
+package "<<external repos>>" <<Cloud>> #fecaca {
+    class "InProgressChunkRepository\nserverV2/repositories" as ExtInProgressRepo
+    class "JobRepository\nserverV2/repositories" as ExtJobRepo
+    class "RenderGroupRepository\nserverV2/repositories" as ExtGroupRepo
+}
+
+' ===========================================================
+' INBOUND wiring
+' ===========================================================
+ExtAllocationClient --> AllocationFacade : ONLY caller
+ExtBootstrap        ..> AllocationFacade : constructs
+ExtBootstrap        ..> AllocationDispatchQueueDaemon : constructs + start()
+
+' ===========================================================
+' INTERNAL wiring
+' ===========================================================
+AllocationFacade --> AllocationPlanningService
+AllocationFacade --> AllocationDispatchQueueService
+
+AllocationPlanningService --> strategies : picks by name
+
+AllocationDispatchQueueDaemon --> AllocationDispatchQueueService : dispatch_pending_for_fleet per tick
+
+AllocationDispatchQueueService --> AllocationDispatchQueueRepository
+AllocationDispatchQueueService --> AllocationDispatcher
+AllocationDispatchQueueService --> AllocationBlendUrlResolver
+
+strategies --> validators
+strategies --> analyzers
+strategies --> allocation_helpers
+
+' ===========================================================
+' EXTERNAL wiring (allocation -> external)
+' ===========================================================
+AllocationBlendUrlResolver         ..> ExtConfig
+AllocationDispatchQueueDaemon      ..> ExtLockRepo         : try_acquire / refresh / release
+AllocationDispatchQueueDaemon      ..> ExtSnapshotCache    : get_or_build / persist
+AllocationDispatchQueueService     ..> ExtMutableSnapshot  : mutates per dispatch
+AllocationDispatcher               ..> ExtFleetRegistry    : get_or_raise(fleet)
+AllocationDispatchQueueService     ..> ExtInProgressRepo   : claim_or_replace, current_job_for
+AllocationDispatchQueueService     ..> ExtJobRepo          : count_active_by_fleet (Callable)
+AllocationDispatchQueueService     ..> ExtGroupRepo        : is_group_terminal (Callable)
+
+@enduml

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from serverV2.allocation.power_scorer import compute_power_score
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_power_scorer import compute_power_score
 
 DEFAULT_MIN_FRAMES_PER_WORKER = 2
 

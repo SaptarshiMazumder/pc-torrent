@@ -11,7 +11,6 @@ implementation.
 """
 
 from serverV2.orchestrator.lifecycle_job_termination.steps.cancel_provider_step import CancelProviderStep
-from serverV2.orchestrator.lifecycle_job_termination.steps.drain_fleet_step import DrainFleetStep
 from serverV2.orchestrator.lifecycle_job_termination.steps.log_failure_outcome_step import LogFailureOutcomeStep
 from serverV2.orchestrator.lifecycle_job_termination.steps.mark_terminal_step import MarkTerminalStep
 from serverV2.orchestrator.lifecycle_job_termination.steps.reconcile_group_step import ReconcileGroupStep
@@ -35,7 +34,6 @@ __all__ = [
     "StopMonitorStep",
     "CancelProviderStep",
     "TryRetryStep",
-    "DrainFleetStep",
     "LogFailureOutcomeStep",
     "ReconcileGroupStep",
 ]

@@ -11,8 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from serverV2.allocation.budget_limiter import limit_machines_for_frame_budget
-from serverV2.allocation.power_scorer import compute_power_score
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_budget_limiter import limit_machines_for_frame_budget
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_power_scorer import compute_power_score
 
 
 @dataclass(frozen=True)

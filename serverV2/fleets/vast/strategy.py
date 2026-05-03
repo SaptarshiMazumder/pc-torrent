@@ -101,7 +101,13 @@ class VastFleetStrategy:
         except Exception as exc:
             log.error("Vast dispatch failed for %s: %s", job_id, exc)
             error = f"Dispatch failed: {exc}"
-            self._on_failure(job_id, error)
+            log.info("[RETRY_DEBUG] vast.strategy.dispatch: about to call on_failure(%s)", job_id)
+            try:
+                self._on_failure(job_id, error)
+                log.info("[RETRY_DEBUG] vast.strategy.dispatch: on_failure(%s) returned cleanly", job_id)
+            except Exception as cb_exc:
+                log.error("[RETRY_DEBUG] vast.strategy.dispatch: on_failure(%s) RAISED: %r", job_id, cb_exc)
+                raise
             return DispatchResult(job_id=job_id, machine_id="", status="failed", error=error)
 
         self._callback.start_monitoring(

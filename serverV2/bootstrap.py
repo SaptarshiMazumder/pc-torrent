@@ -65,6 +65,7 @@ from serverV2.orchestrator.anti_affinity import (
     AntiAffinityService,
 )
 from serverV2.orchestrator.chunk_progress import ChunkProgressService
+from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 from serverV2.orchestrator.lifecycle_job_retry import RetryDeps, RetryExecutor
 from serverV2.orchestrator.lifecycle_job_termination import (
@@ -73,7 +74,26 @@ from serverV2.orchestrator.lifecycle_job_termination import (
     RenderCanceler,
 )
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
-from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
+from serverV2.allocation import AllocationDispatchQueueDaemon, AllocationFacade
+from serverV2.allocation.allocation_blend_url_resolver import (
+    AllocationBlendUrlResolver,
+)
+from serverV2.allocation.allocation_dispatch_queue_repository import (
+    AllocationDispatchQueueRepository as DispatchQueueRepository,
+)
+from serverV2.allocation.allocation_dispatcher import AllocationDispatcher
+from serverV2.allocation.services.allocation_dispatch_queue_service import (
+    AllocationDispatchQueueService,
+)
+from serverV2.allocation.services.allocation_planning_service import (
+    AllocationPlanningService,
+)
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_strategy_selector import (
+    AllocationStrategySelector,
+)
+from serverV2.fleets.fleet_availability.fleet_availability_snapshot_cache import (
+    FleetAvailabilitySnapshotCache,
+)
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
@@ -120,6 +140,9 @@ class Container:
         machine_service: MachineService,
         asset_service: AssetService,
         status_aggregator: InstanceStatusAggregator,
+        allocation_facade: AllocationFacade,
+        allocation_dispatch_queue_daemon: AllocationDispatchQueueDaemon,
+        fleet_availability_snapshot_cache: FleetAvailabilitySnapshotCache,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -138,6 +161,11 @@ class Container:
         self.machine_service = machine_service
         self.asset_service = asset_service
         self.status_aggregator = status_aggregator
+        # Phase A: new allocation module — constructed but inert.
+        # Phase B starts the daemon and reroutes callers.
+        self.allocation_facade = allocation_facade
+        self.allocation_dispatch_queue_daemon = allocation_dispatch_queue_daemon
+        self.fleet_availability_snapshot_cache = fleet_availability_snapshot_cache
 
 
 def build(
@@ -367,6 +395,67 @@ def build(
         fleet_cap_lookup=_fleet_cap_lookup,
     )
 
+    # ------------------------------------------------------------------
+    # NEW allocation module — Phase B atomic cutover.  Lifecycle now
+    # plans + enqueues through AllocationClient; the daemon picks up
+    # queued items every ~2s under a Redis singleton lock.
+    # ------------------------------------------------------------------
+    allocation_dispatcher = AllocationDispatcher(registry)
+    allocation_blend_resolver = AllocationBlendUrlResolver(cfg)
+    allocation_strategy_selector = AllocationStrategySelector()
+    allocation_planning_service = AllocationPlanningService(
+        strategies={
+            "default": default_strategy,
+            "fast_render": fast_render_strategy,
+            "economy": economy_strategy,
+        },
+        selector=allocation_strategy_selector,
+    )
+    _allocation_fleet_caps: dict[str, int] = {
+        "modal_serverless": cfg.modal.max_parallel,
+        "vast_serverless": cfg.vast.max_parallel,
+        "community": 10_000,  # per-machine queue, no fleet-wide cap
+    }
+    _TERMINAL_GROUP_STATUSES = frozenset({"done", "failed", "cancelled"})
+
+    def _is_group_terminal(group_id: str) -> bool:
+        grp = group_repo.get_by_id(group_id)
+        if grp is None:
+            # Group was deleted out from under us — treat as terminal so
+            # we drop the orphaned queue row rather than dispatching
+            # against a non-existent group.
+            return True
+        return str(grp.get("status") or "") in _TERMINAL_GROUP_STATUSES
+
+    allocation_dispatch_queue_service = AllocationDispatchQueueService(
+        queue_repo=queue_repo,
+        in_progress_repo=in_progress_repo,
+        active_count_by_fleet=job_repo.count_active_by_fleet,
+        dispatcher=allocation_dispatcher,
+        blend_url_resolver=allocation_blend_resolver,
+        fleet_caps=_allocation_fleet_caps,
+        is_group_terminal=_is_group_terminal,
+    )
+    allocation_facade = AllocationFacade(
+        planning=allocation_planning_service,
+        dispatch_queue=allocation_dispatch_queue_service,
+    )
+    fleet_availability_snapshot_cache = FleetAvailabilitySnapshotCache(
+        builder_factory=fleet_availability_factory,
+        redis_client=redis,
+    )
+    allocation_dispatch_queue_daemon = AllocationDispatchQueueDaemon(
+        dispatch_queue=allocation_dispatch_queue_service,
+        snapshot_cache=fleet_availability_snapshot_cache,
+        lock_repo=monitor_lock_repo,
+        instance_id=instance_id,
+        enabled_fleets=list(_allocation_fleet_caps.keys()),
+    )
+    allocation_client = AllocationClient(
+        facade=allocation_facade,
+        snapshot_cache=fleet_availability_snapshot_cache,
+    )
+
     # -- anti-affinity: facade/service/repository for retry exclusion
     # resolution.  Resolves the union of (fleet, gpu_type) and
     # machine_id exclusions across all prior failed/cancelled attempts
@@ -380,17 +469,9 @@ def build(
     )
 
     # -- retry: pipelines + executor + termination steps + group cancel --
-    # Constructed bottom-up because the retry strategy_picker and the
-    # reconcile callback need a reference to lifecycle (for
-    # ``_pick_strategy`` and ``reconcile_group_status``).  Closures
-    # capture the local ``lifecycle`` name; we assign it at the end of
-    # this block, so they resolve correctly at call time even though
-    # Python's forward-reference hygiene would normally complain.
-
-    def _retry_strategy_picker(
-        tier: str, file_size_bytes: int, total_frames: int,
-    ):
-        return lifecycle._pick_strategy(tier, file_size_bytes, total_frames)
+    # Constructed bottom-up because ``_reconcile_group`` needs a forward
+    # reference to lifecycle.  The closure captures the local
+    # ``lifecycle`` name, which we assign at the end of this block.
 
     def _reconcile_group(group_id: str) -> None:
         lifecycle.reconcile_group_status(group_id)
@@ -404,9 +485,7 @@ def build(
         group_repo=group_repo,
         chunk_progress=chunk_progress_service,
         in_progress_repo=in_progress_repo,
-        coordinator=dispatch_coordinator,
-        strategy_picker=_retry_strategy_picker,
-        resource_picker=_resource_picker,
+        allocation_client=allocation_client,
         reconcile_group=_reconcile_group,
     )
     retry_executor = RetryExecutor(deps=retry_deps)
@@ -417,7 +496,6 @@ def build(
         in_progress_repo=in_progress_repo,
         state_writer=machine_state_writer,
         fleet_registry=registry,
-        coordinator=dispatch_coordinator,
         retry_executor=retry_executor,
         reconcile_group=_reconcile_group,
     )
@@ -434,10 +512,8 @@ def build(
     )
 
     lifecycle = RenderLifecycle(
-        default_strategy=default_strategy,
-        fast_render_strategy=fast_render_strategy,
-        economy_strategy=economy_strategy,
         coordinator=dispatch_coordinator,
+        allocation_client=allocation_client,
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,
@@ -578,4 +654,7 @@ def build(
         machine_service=machine_service,
         asset_service=asset_service,
         status_aggregator=status_aggregator,
+        allocation_facade=allocation_facade,
+        allocation_dispatch_queue_daemon=allocation_dispatch_queue_daemon,
+        fleet_availability_snapshot_cache=fleet_availability_snapshot_cache,
     )

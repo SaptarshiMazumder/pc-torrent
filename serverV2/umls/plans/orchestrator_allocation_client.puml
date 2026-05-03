@@ -1,0 +1,152 @@
+@startuml orchestrator_allocation_client
+title Orchestrator surface area\nWho reaches IN to orchestrator, and how orchestrator reaches OUT to allocation\n(tick-driven dispatch — no drain calls; release goes direct to the shared repo)
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+' ============================================================
+' INBOUND callers — only these things reach into orchestrator.
+' All land on Lifecycle.
+' ============================================================
+package "INBOUND (outside orchestrator)" <<Frame>> #fef3c7 {
+
+    package "API layer" <<Rectangle>> #fde68a {
+        class JobsRouter
+        class RenderGroupsRouter
+        class MachinesRouter
+    }
+
+    package "Service layer (orchestrator-adjacent)" <<Rectangle>> #fed7aa {
+        class JobService
+        class RenderGroupService
+    }
+
+    package "Fleet callbacks / monitors\n(serverV2/fleets/)" <<Rectangle>> #e9d5ff {
+        class ModalCallbackHandler
+        class CommunityMonitor
+        class JobMonitorSweep
+    }
+}
+
+' ============================================================
+' Orchestrator
+' ============================================================
+package "serverV2/orchestrator" <<Frame>> #fed7aa {
+
+    class Lifecycle <<orchestrator facade>> #b9e3a3 {
+        + start_render(group)
+        + handle_chunk_succeeded(job)
+        + handle_chunk_failed(job)
+        + cancel_one_job(job)
+        + cancel_render_group(group_id)
+    }
+
+    class AllocationClient <<gateway, single seam>> #b9e3a3 {
+        - facade : AllocationFacade
+        - tier_to_strategy : dict[Tier, str]
+        + plan_initial_for_group(group, snapshot) : list[PlannedTask]
+        + plan_retry_for_chunk(req, tier, snapshot) : PlannedTask | None
+        + enqueue(group_id, tasks, ctx) : int
+    }
+
+    package "lifecycle_job_retry\n(internal pipeline)" <<Frame>> #fde68a {
+        class RetryPipelineRunner
+    }
+
+    package "lifecycle_job_termination\n(internal pipeline)" <<Frame>> #fde68a {
+        class TerminationPipelineRunner
+    }
+
+    package "internal collaborators" <<Frame>> #fce7f3 {
+        class AntiAffinityFacade
+        class ChunkProgressService
+    }
+}
+
+' ============================================================
+' Allocation — opaque except for the facade
+' ============================================================
+package "serverV2/allocation" <<Frame>> #d4e3fc {
+    class AllocationFacade <<entry, thin>>
+    class AllocationDispatchQueueDaemon <<background, autonomous>> #fcd34d
+}
+
+' ============================================================
+' Shared low-level repos (multiple owners)
+' ============================================================
+package "serverV2/repositories" <<Frame>> #fecaca {
+    class InProgressChunkRepository <<shared>>
+    class JobRepositoryReader as "JobRepository\n.count_active_by_fleet"
+}
+
+package "serverV2/fleets" <<Frame>> #e9d5ff {
+    class FleetAvailabilityBuilderFactory
+}
+
+' ============================================================
+' INBOUND wiring — every entry point lands on Lifecycle
+' ============================================================
+JobsRouter            --> JobService
+RenderGroupsRouter    --> RenderGroupService
+JobService            --> Lifecycle           : handle_chunk_succeeded / handle_chunk_failed
+RenderGroupService    --> Lifecycle           : start_render / cancel_render_group
+ModalCallbackHandler  --> Lifecycle           : handle_chunk_succeeded / handle_chunk_failed
+CommunityMonitor      --> Lifecycle           : cancel_one_job (orphan)
+JobMonitorSweep       --> Lifecycle           : handle_chunk_failed (stale)
+
+' ============================================================
+' INTERNAL — only Lifecycle + retry pipeline reach AllocationClient
+' ============================================================
+Lifecycle                  --> AllocationClient    : start_render: plan + enqueue
+Lifecycle                  --> RetryPipelineRunner : on retryable failure
+Lifecycle                  --> TerminationPipelineRunner : on group cancel / final fail
+RetryPipelineRunner        --> AllocationClient    : plan_retry + enqueue
+
+' Termination pipeline does ledger work directly via the shared repo —
+' no allocation interaction needed
+TerminationPipelineRunner --> InProgressChunkRepository : release / release_all / release_if_owner
+
+' Lifecycle's terminal handlers release directly via the shared repo
+Lifecycle --> InProgressChunkRepository : release on success/failure
+
+' Read-only collaborators
+Lifecycle           --> AntiAffinityFacade
+Lifecycle           --> ChunkProgressService
+RetryPipelineRunner --> AntiAffinityFacade : exclude_machine_ids
+RetryPipelineRunner --> InProgressChunkRepository : current_job_for (sibling check)
+Lifecycle           --> FleetAvailabilityBuilderFactory : .new().check_*().build()
+
+' ============================================================
+' OUTBOUND — only AllocationClient touches the facade
+' ============================================================
+AllocationClient              --> AllocationFacade  : ONLY caller (anywhere)
+AllocationDispatchQueueDaemon -[hidden]-> AllocationFacade
+
+' ============================================================
+' RULES
+' ============================================================
+note bottom of Lifecycle
+  Only externally-callable surface in orchestrator.
+  API services + fleet callbacks + daemons land here only.
+end note
+
+note bottom of AllocationClient
+  Only orchestrator-side caller of AllocationFacade.
+  Inside orchestrator, only TWO classes reach this client:
+    1. Lifecycle           — start_render: plan + enqueue
+    2. RetryPipelineRunner — plan_retry + enqueue
+  TerminationPipelineRunner does NOT call AllocationClient —
+  ledger releases go straight to the shared repo.
+  No drain calls anywhere. The AllocationDispatchQueueDaemon
+  (inside allocation) ticks every ~2s and dispatches autonomously.
+end note
+
+note bottom of AllocationFacade
+  3 methods. Strategy name comes IN from the client.
+  No release_chunk — that's not allocation's concern.
+end note
+
+@enduml

@@ -23,7 +23,6 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.anti_affinity import AntiAffinityExclusions
-from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
@@ -45,7 +44,6 @@ class LifecycleDeps:
     in_progress_repo: InProgressChunkRepository
     state_writer: MachineStateWriter
     fleet_registry: FleetRegistry
-    coordinator: DispatchCoordinator
     retry_executor: "RetryExecutor"
     # Callable into RenderLifecycle.reconcile_group_status -- kept as a
     # callback so the termination package doesn't import lifecycle.

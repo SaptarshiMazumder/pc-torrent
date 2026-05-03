@@ -46,10 +46,13 @@ class CallbackRouter:
         outcome: CallbackOutcome,
         error: str | None = None,
     ) -> None:
+        log.info("[RETRY_DEBUG] CallbackRouter.route(%s, %s) entered", job_id, outcome.value)
+        is_terminal = self._orchestrator.is_job_terminal(job_id)
+        log.info("[RETRY_DEBUG] CallbackRouter.route(%s): is_job_terminal=%s", job_id, is_terminal)
         # Skip already-terminal jobs to avoid double-processing of late
         # callbacks (e.g. a monitor tick fired between mark_done and the
         # monitor's own ``snapshot.remove()``).
-        if self._orchestrator.is_job_terminal(job_id):
+        if is_terminal:
             log.info(
                 "Job %s already terminal — ignoring %s callback",
                 job_id, outcome.value,
@@ -61,4 +64,6 @@ class CallbackRouter:
             # looks it up — but keep the signature stable for now.
             self._success.handle(job_id, "")
         elif outcome == CallbackOutcome.FAILURE:
+            log.info("[RETRY_DEBUG] CallbackRouter.route(%s): dispatching to FailureHandler", job_id)
             self._failure.handle(job_id, error or "Unknown failure")
+            log.info("[RETRY_DEBUG] CallbackRouter.route(%s): FailureHandler returned", job_id)

@@ -8,7 +8,6 @@ logic; raises ``no_eligible_target`` instead of logging + aborting.
 
 from __future__ import annotations
 
-from serverV2.orchestrator.allocation import tiers
 from serverV2.orchestrator.lifecycle_job_retry.execution.retry_context import (
     RetryContext,
 )
@@ -22,13 +21,9 @@ class ManualRetryAllocateRetryTaskStep:
     def run(self, ctx: RetryContext) -> None:
         if ctx.chunk_request is None:
             raise ManualRetryError("no_eligible_target")
-        retry_strategy = ctx.deps.strategy_picker(
-            tiers.normalize(ctx.tier),
-            ctx.file_size_bytes if ctx.file_size_bytes is not None else 0,
-            ctx.chunk_request.total_frames,
-        )
-        retry_task = retry_strategy.allocate_retry(
-            ctx.chunk_request, ctx.deps.resource_picker(),
+        retry_task = ctx.deps.allocation_client.plan_retry(
+            tier=ctx.tier,
+            chunk_request=ctx.chunk_request,
         )
         if retry_task is None:
             raise ManualRetryError("no_eligible_target")

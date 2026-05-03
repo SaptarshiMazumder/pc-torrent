@@ -20,9 +20,9 @@ from uuid import uuid4
 from serverV2.core.models import DispatchContext, DispatchResult, PlannedTask
 from serverV2.orchestrator.blend_url_resolver import BlendUrlResolver
 from serverV2.orchestrator.dispatch.dispatcher import Dispatcher
-from serverV2.repositories.dispatch_queue_repository import (
-    DispatchQueueRepository,
-    QueueItem,
+from serverV2.allocation.allocation_dispatch_queue_repository import (
+    AllocationDispatchQueueRepository as DispatchQueueRepository,
+    AllocationQueueItem as QueueItem,
 )
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository

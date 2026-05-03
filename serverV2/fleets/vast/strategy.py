@@ -30,7 +30,7 @@ class VastFleetStrategy:
         client: VastClient,
         callback_handler: VastMonitorManager,
         job_repo: JobRepository,
-        on_failure: Callable[[str, str], None] | None = None,
+        on_failure: Callable[[str, str], None],
     ) -> None:
         self._cfg = config
         self._client = client
@@ -101,10 +101,7 @@ class VastFleetStrategy:
         except Exception as exc:
             log.error("Vast dispatch failed for %s: %s", job_id, exc)
             error = f"Dispatch failed: {exc}"
-            if self._on_failure:
-                self._on_failure(job_id, error)
-            else:
-                self._job_repo.mark_failed(job_id, error)
+            self._on_failure(job_id, error)
             return DispatchResult(job_id=job_id, machine_id="", status="failed", error=error)
 
         self._callback.start_monitoring(

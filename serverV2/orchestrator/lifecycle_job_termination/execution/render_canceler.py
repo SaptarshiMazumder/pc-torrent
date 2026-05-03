@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
 from serverV2.orchestrator.lifecycle_job_termination.steps import (
     CancelProviderStep,
     MarkTerminalStep,
@@ -61,12 +62,14 @@ class RenderCanceler:
         queue_repo: DispatchQueueRepository,
         in_progress_repo: InProgressChunkRepository,
         deps: LifecycleDeps,
+        modal_active_jobs_hooks: ModalActiveJobsHooks,
     ) -> None:
         self._group_repo = group_repo
         self._job_repo = job_repo
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
         self._deps = deps
+        self._modal_active_jobs_hooks = modal_active_jobs_hooks
         # Reused step instances -- stateless and configurable.
         self._mark_step = MarkTerminalStep(
             "cancelled", error_override=_GROUP_CANCEL_ERROR,
@@ -97,6 +100,16 @@ class RenderCanceler:
             )
             for job in jobs
         ]
+        # Modal-side bookkeeping for any modal_serverless jobs in the
+        # group.  Group cancel doesn't route through the success/failure
+        # callbacks, so the hook fires here.  SREM-backed and idempotent.
+        for ctx in contexts:
+            if (ctx.raw.get("machine_type") or "") == "modal_serverless":
+                gpu_type = (ctx.raw.get("gpu_type") or "").strip()
+                if gpu_type:
+                    self._modal_active_jobs_hooks.on_terminal(
+                        job_id=ctx.job_id, gpu_type=gpu_type,
+                    )
         for ctx in contexts:
             self._mark_step.run(ctx)
             self._release_machine_step.run(ctx)

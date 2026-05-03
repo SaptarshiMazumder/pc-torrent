@@ -45,6 +45,7 @@ from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
 from serverV2.orchestrator.allocation.frame_allocator import FrameAllocator
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.dispatch.coordinator import DispatchCoordinator
+from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
 from serverV2.orchestrator.anti_affinity import AntiAffinityFacade
 from serverV2.orchestrator.lifecycle_job_retry import (
     MANUAL_RETRY_PIPELINE,
@@ -106,6 +107,7 @@ class RenderLifecycle:
         resource_picker: Callable[[], AvailableResources],
         retry_executor: RetryExecutor,
         anti_affinity: AntiAffinityFacade,
+        modal_active_jobs_hooks: ModalActiveJobsHooks,
         job_terminator: JobTerminator,
         render_canceler: RenderCanceler,
     ) -> None:
@@ -125,6 +127,7 @@ class RenderLifecycle:
         self._resource_picker = resource_picker
         self._retry_executor = retry_executor
         self._anti_affinity = anti_affinity
+        self._modal_active_jobs_hooks = modal_active_jobs_hooks
         self._terminator = job_terminator
         self._render_canceler = render_canceler
 
@@ -191,6 +194,23 @@ class RenderLifecycle:
             total_frames, file_size_bytes, tier_budget, len(tasks),
         )
         return tasks
+
+    def _fire_modal_terminal_hook_if_modal(
+        self, raw: dict[str, Any], job_id: str,
+    ) -> None:
+        """Fire the Modal active-jobs ``on_terminal`` hook iff this row
+        is a Modal job.  Called from every terminal-transition entry
+        point on this class (success / failure / per-job cancel).
+        SREM-backed and idempotent at the tracker layer, so duplicate
+        fires from race conditions are harmless."""
+        if (raw.get("machine_type") or "") != "modal_serverless":
+            return
+        gpu_type = (raw.get("gpu_type") or "").strip()
+        if not gpu_type:
+            return
+        self._modal_active_jobs_hooks.on_terminal(
+            job_id=job_id, gpu_type=gpu_type,
+        )
 
     def _pick_strategy(
         self, tier: str, file_size_bytes: int, total_frames: int,
@@ -283,6 +303,7 @@ class RenderLifecycle:
         if raw is None:
             log.info("handle_chunk_failed: job %s not found, skipping", job_id)
             return
+        self._fire_modal_terminal_hook_if_modal(raw, job_id)
         exclusions = self._anti_affinity.exclusions_for_chunk(
             raw.get("group_id") or "",
             raw.get("chunk_index") or 0,
@@ -384,6 +405,8 @@ class RenderLifecycle:
         if raw is None:
             log.warning("on_job_succeeded for unknown job %s", job_id)
             return
+
+        self._fire_modal_terminal_hook_if_modal(raw, job_id)
 
         fleet = (raw.get("machine_type") or "")
         group_id = (raw.get("group_id") or "")
@@ -530,6 +553,7 @@ class RenderLifecycle:
         if str(raw.get("status") or "") in _TERMINAL_GROUP_STATUSES:
             return {"cancelled": False, "reason": "already_terminal"}
 
+        self._fire_modal_terminal_hook_if_modal(raw, job_id)
         exclusions = self._anti_affinity.exclusions_for_chunk(
             raw.get("group_id") or "",
             raw.get("chunk_index") or 0,

@@ -104,6 +104,22 @@ class JobRepository:
         )
         return {r["machine_type"]: int(r["n"]) for r in rows if r.get("machine_type")}
 
+    def count_active_by_fleet_and_gpu_type(self) -> dict[tuple[str, str], int]:
+        """Per-(fleet, gpu_type) live count of ``pending``/``running`` jobs.
+        Used as the PG fallback by ``ModalAvailabilityBuilder`` when its
+        Redis-backed tracker is unreachable -- enforces the per-GPU cap
+        on top of the fleet-wide ``max_parallel``.
+        """
+        rows = query_all(
+            "SELECT machine_type, gpu_type, count(*) AS n FROM jobs "
+            "WHERE status IN ('pending', 'running') "
+            "GROUP BY machine_type, gpu_type",
+        )
+        return {
+            (r["machine_type"], r["gpu_type"] or ""): int(r["n"])
+            for r in rows if r.get("machine_type") and r.get("gpu_type")
+        }
+
     # ---- status mutations ----
 
     def update_status(self, job_id: str, status: str, *, error: str | None = None) -> None:

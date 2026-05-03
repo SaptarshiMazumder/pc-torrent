@@ -7,6 +7,8 @@ import logging
 import os
 from dataclasses import dataclass, field
 
+from serverV2.fleets.fleet_exception import FleetException
+
 log = logging.getLogger(__name__)
 
 
@@ -77,7 +79,7 @@ class VastConfig:
     heartbeat_interval_sec: int
     heartbeat_timeout_sec: float
     heartbeat_grace_sec: float
-    max_parallel: int = 15
+    max_parallel: int = 0
     endpoints: tuple[VastEndpoint, ...] = field(default_factory=tuple)
     api_base: str = "https://console.vast.ai/api/v0"
     # Separate image for EEVEE renders (NVIDIA EGL ICD + GLVND).  When unset
@@ -115,7 +117,7 @@ class VastConfig:
             heartbeat_interval_sec=10,
             heartbeat_timeout_sec=_env_float("VAST_HEARTBEAT_TIMEOUT_SEC", 45.0),
             heartbeat_grace_sec=_env_float("VAST_HEARTBEAT_GRACE_SEC", 90.0),
-            max_parallel=_load_fleet_max_parallel("vast", config_json_path),
+            max_parallel=_require_fleet_int("vast", "max_parallel", config_json_path),
             endpoints=tuple(_parse_vast_endpoints(config_json_path)),
         )
 
@@ -130,17 +132,36 @@ def _load_config_json(config_json_path: str | None = None) -> dict:
         return {}
 
 
-def _load_fleet_max_parallel(
-    fleet_key: str, config_json_path: str | None = None,
+def _require_fleet_int(
+    fleet_key: str, field_key: str, config_json_path: str | None = None,
 ) -> int:
-    """Read ``<fleet>.max_parallel`` from config.json.  Default 15 if absent."""
+    """Read a required int field from a fleet's config.json block.  Raises
+    ``FleetException`` if the fleet block is missing, the field is missing,
+    or the value isn't a valid positive int.  No defaults -- callers
+    that need a knob set it explicitly in config.json.
+    """
     cfg = _load_config_json(config_json_path)
-    block = cfg.get(fleet_key) or {}
+    block = cfg.get(fleet_key)
+    if not isinstance(block, dict):
+        raise FleetException(
+            f"config.json missing required block: {fleet_key!r}"
+        )
+    if field_key not in block:
+        raise FleetException(
+            f"config.json missing required key: {fleet_key}.{field_key}"
+        )
     try:
-        value = int(block.get("max_parallel", 15))
-    except (TypeError, ValueError):
-        value = 15
-    return max(1, value)
+        value = int(block[field_key])
+    except (TypeError, ValueError) as exc:
+        raise FleetException(
+            f"config.json {fleet_key}.{field_key} is not a valid int: "
+            f"{block[field_key]!r}"
+        ) from exc
+    if value < 1:
+        raise FleetException(
+            f"config.json {fleet_key}.{field_key} must be >= 1, got {value}"
+        )
+    return value
 
 
 def _load_community_price_per_hour(config_json_path: str | None = None) -> float:
@@ -213,7 +234,8 @@ class ModalConfig:
     in_progress_stale_sec: float
     endpoint_url_prefix: str
     workspace: str
-    max_parallel: int = 15
+    max_parallel: int = 0
+    per_gpu_max_parallel: int = 0
     endpoints: tuple[ModalEndpoint, ...] = field(default_factory=tuple)
 
     def is_enabled(self) -> bool:
@@ -251,7 +273,8 @@ class ModalConfig:
             in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 30 * 60),
             endpoint_url_prefix=_env_str("MODAL_ENDPOINT_URL_PREFIX").strip().rstrip("/"),
             workspace=_env_str("MODAL_WORKSPACE").strip(),
-            max_parallel=_load_fleet_max_parallel("modal"),
+            max_parallel=_require_fleet_int("modal", "max_parallel"),
+            per_gpu_max_parallel=_require_fleet_int("modal", "per_gpu_max_parallel"),
             endpoints=tuple(_parse_modal_endpoints()),
         )
 

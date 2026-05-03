@@ -24,7 +24,7 @@ from serverV2.core.value_objects import (
 )
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firestore_client import write_render_group_record
-from serverV2.orchestrator.allocation import tiers
+from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
 from serverV2.orchestrator.chunk_progress import ChunkProgress, ChunkProgressService
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.repositories.output_frame_repository import OutputFrameRepository

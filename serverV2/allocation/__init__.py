@@ -1,9 +1,19 @@
-from serverV2.allocation.power_scorer import compute_power_score
-from serverV2.allocation.frame_distributor import distribute_frames
-from serverV2.allocation.budget_limiter import limit_machines_for_frame_budget
+"""Allocation module — frame-range planning + dispatch queue + dispatch.
+
+Public surface (only thing orchestrator imports):
+  * ``AllocationFacade``                 — entry, 3 thin delegations
+  * ``AllocationDispatchQueueDaemon``    — background tick (started by bootstrap)
+
+Internals (services, strategies, repositories, dispatcher) are not
+exported.  Orchestrator never reaches past the facade.
+"""
+
+from serverV2.allocation.allocation_dispatch_queue_daemon import (
+    AllocationDispatchQueueDaemon,
+)
+from serverV2.allocation.allocation_facade import AllocationFacade
 
 __all__ = [
-    "compute_power_score",
-    "distribute_frames",
-    "limit_machines_for_frame_budget",
+    "AllocationDispatchQueueDaemon",
+    "AllocationFacade",
 ]

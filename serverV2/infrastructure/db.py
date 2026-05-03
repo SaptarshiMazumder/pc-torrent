@@ -182,6 +182,10 @@ def init_db() -> None:
                 # Phase 2 — fleet-cap-aware dispatch queue.  Each queue row
                 # carries enough context to be dispatched later, when a
                 # slot opens up in the target fleet.
+                # job_id added in the tick-driven dispatch refactor: the
+                # caller pre-generates the UUID at enqueue time so the
+                # synchronous start_render contract returns DispatchResults
+                # with stable IDs even though dispatch fires asynchronously.
                 for column_def in (
                     "fleet TEXT",
                     "gpu_type TEXT",
@@ -190,6 +194,7 @@ def init_db() -> None:
                     "render_overrides_json TEXT",
                     "max_retries INTEGER DEFAULT 0",
                     "priority INTEGER DEFAULT 0",
+                    "job_id TEXT",
                 ):
                     cur.execute(
                         f"ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS {column_def}"

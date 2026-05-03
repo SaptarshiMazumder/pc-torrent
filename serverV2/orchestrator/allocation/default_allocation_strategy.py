@@ -16,8 +16,8 @@ into capability-based allocation (see plans/allocator_redesign_phases.md).
 
 from __future__ import annotations
 
-from serverV2.allocation.frame_distributor import distribute_frames
-from serverV2.allocation.power_scorer import compute_power_score
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_frame_distributor import distribute_frames
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_power_scorer import compute_power_score
 from serverV2.core.models import (
     AvailableResources,
     CommunityMachine,

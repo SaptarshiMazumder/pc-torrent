@@ -41,7 +41,9 @@ from serverV2.orchestrator.lifecycle_job_termination.execution.termination_conte
     LifecycleDeps,
     TerminationContext,
 )
-from serverV2.repositories.dispatch_queue_repository import DispatchQueueRepository
+from serverV2.allocation.allocation_dispatch_queue_repository import (
+    AllocationDispatchQueueRepository as DispatchQueueRepository,
+)
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository

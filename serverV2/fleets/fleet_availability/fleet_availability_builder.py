@@ -26,6 +26,8 @@ flag state lives on instances of this class.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from serverV2.fleets.fleet_availability.fleet_availability_snapshot import (
     FleetAvailabilitySnapshot,
 )
@@ -35,6 +37,14 @@ from serverV2.fleets.fleet_availability.steps import (
     ModalAvailabilityBuilder,
     VastAvailabilityBuilder,
 )
+
+
+# All four flagged builds are independent IO-bound work (Vast HTTPS,
+# Modal Redis-or-PG, Community DB, JobRepository count).  Run them on
+# separate threads so the snapshot's wall time is max(per-step) rather
+# than sum.  Vast's existing internal ThreadPoolExecutor for parallel
+# /bundles/ probes nests beneath this outer pool unaffected.
+_BUILD_WORKERS = 4
 
 
 class FleetAvailabilityBuilder:
@@ -73,15 +83,21 @@ class FleetAvailabilityBuilder:
         return self
 
     def build(self) -> FleetAvailabilitySnapshot:
-        return FleetAvailabilitySnapshot(
-            vast_available=self._vast.build() if self._check_vast else (),
-            modal_available=self._modal.build() if self._check_modal else (),
-            community_available=(
-                self._community.build() if self._check_community else ()
-            ),
-            serverless_in_flight=(
-                self._in_progress_serverless.build()
+        with ThreadPoolExecutor(max_workers=_BUILD_WORKERS) as ex:
+            vast_f = ex.submit(self._vast.build) if self._check_vast else None
+            modal_f = ex.submit(self._modal.build) if self._check_modal else None
+            community_f = (
+                ex.submit(self._community.build) if self._check_community else None
+            )
+            in_flight_f = (
+                ex.submit(self._in_progress_serverless.build)
                 if self._check_in_progress_serverless_fleet
-                else {}
-            ),
-        )
+                else None
+            )
+
+            return FleetAvailabilitySnapshot(
+                vast_available=vast_f.result() if vast_f else (),
+                modal_available=modal_f.result() if modal_f else (),
+                community_available=community_f.result() if community_f else (),
+                serverless_in_flight=in_flight_f.result() if in_flight_f else {},
+            )

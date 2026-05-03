@@ -17,6 +17,7 @@ with the right pipeline.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from serverV2.orchestrator.anti_affinity import AntiAffinityExclusions
@@ -25,6 +26,8 @@ from serverV2.orchestrator.lifecycle_job_termination.execution.termination_conte
     LifecycleDeps,
     TerminationContext,
 )
+
+log = logging.getLogger(__name__)
 
 
 class JobTerminator:
@@ -48,6 +51,22 @@ class JobTerminator:
             deps=self._deps,
             exclusions=exclusions,
         )
+        log.info(
+            "[RETRY_DEBUG] JobTerminator.execute(%s): pipeline has %d steps", job_id, len(pipeline),
+        )
         for step in pipeline:
-            step.run(ctx)
+            step_name = type(step).__name__
+            log.info("[RETRY_DEBUG] JobTerminator(%s): -> step %s", job_id, step_name)
+            try:
+                step.run(ctx)
+            except Exception as exc:
+                log.error(
+                    "[RETRY_DEBUG] JobTerminator(%s): step %s RAISED: %r",
+                    job_id, step_name, exc,
+                )
+                raise
+            log.info(
+                "[RETRY_DEBUG] JobTerminator(%s): <- step %s done (we_own_retry=%s, retried=%s)",
+                job_id, step_name, ctx.we_own_retry, ctx.retried,
+            )
         return ctx

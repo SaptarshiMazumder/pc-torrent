@@ -27,3 +27,16 @@ class FleetAvailabilitySnapshot:
     modal_available: tuple[FleetCapability, ...]
     community_available: tuple[CommunityMachine, ...]
     serverless_in_flight: dict[str, int] = field(default_factory=dict)
+
+    def to_mutable(self):
+        # Local import — MutableFleetAvailabilitySnapshot imports this
+        # module, so a top-level import here would be circular.
+        from serverV2.fleets.fleet_availability.mutable_fleet_availability_snapshot import (
+            MutableFleetAvailabilitySnapshot,
+        )
+        return MutableFleetAvailabilitySnapshot(
+            vast_available=self.vast_available,
+            modal_available=self.modal_available,
+            community_available=self.community_available,
+            serverless_in_flight=self.serverless_in_flight,
+        )

@@ -11,7 +11,9 @@ pipeline ran — anti-affinity is never a pipeline concern).
 
 from __future__ import annotations
 
-from serverV2.orchestrator.allocation.chunk_request import ChunkRequest
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
+    AllocationChunkRequest,
+)
 from serverV2.orchestrator.lifecycle_job_retry.execution.retry_context import (
     RetryContext,
 )
@@ -26,7 +28,7 @@ class BuildRetryChunkRequestStep:
             return
         frame_start, frame_end, frame_step = ctx.remaining
         total_frames = ((frame_end - frame_start) // frame_step) + 1
-        ctx.chunk_request = ChunkRequest(
+        ctx.chunk_request = AllocationChunkRequest(
             group_id=ctx.group_id,
             chunk_index=ctx.chunk_index,
             frame_start=frame_start,

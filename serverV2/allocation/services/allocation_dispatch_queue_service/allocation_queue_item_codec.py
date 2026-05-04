@@ -19,7 +19,10 @@ class AllocationQueueItemCodec:
 
     @staticmethod
     def encode(
-        task: PlannedTask, context: DispatchContext, *, job_id: str,
+        task: PlannedTask,
+        context: DispatchContext,
+        *,
+        job_id: str,
     ) -> AllocationQueueItem:
         return AllocationQueueItem(
             frame_start=task.frame_start,
@@ -39,6 +42,7 @@ class AllocationQueueItemCodec:
             attempt=task.attempt,
             chunk_index=task.chunk_index,
             job_id=job_id,
+            force_retry=context.force_retry,
         )
 
     @staticmethod

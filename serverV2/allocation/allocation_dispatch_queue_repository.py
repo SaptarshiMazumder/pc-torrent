@@ -50,6 +50,12 @@ class AllocationQueueItem:
     # synchronous start_render contract).  The same job_id is reused
     # at actual dispatch time.
     job_id: str = ""
+    # Manual retry sets this to True so the dispatch daemon's
+    # terminal-group guard lets the row through even when the parent
+    # group is marked ``failed``.  Initial dispatch + auto-retry leave
+    # it False (default), so a stranded row from a failed group can't
+    # be auto-resurrected.
+    force_retry: bool = False
 
 
 class AllocationDispatchQueueRepository:
@@ -72,14 +78,14 @@ class AllocationDispatchQueueRepository:
                 fleet, gpu_type, machine_id,
                 input_filename, render_overrides_json,
                 max_retries, priority,
-                job_id,
+                job_id, force_retry,
                 created_at)
                VALUES (%s, %s, %s, %s,
                        %s, %s, %s,
                        %s, %s, %s,
                        %s, %s,
                        %s, %s,
-                       %s,
+                       %s, %s,
                        %s)
                ON CONFLICT (group_id, chunk_index) DO NOTHING""",
             (
@@ -88,7 +94,7 @@ class AllocationDispatchQueueRepository:
                 item.fleet, item.gpu_type, item.machine_id,
                 item.input_filename, item.render_overrides_json,
                 item.max_retries, item.priority,
-                item.job_id,
+                item.job_id, item.force_retry,
                 _now_iso(),
             ),
         )
@@ -193,4 +199,5 @@ def _row_to_item(row: dict) -> AllocationQueueItem:
         chunk_index=row.get("chunk_index"),
         group_id=row.get("group_id") or "",
         job_id=row.get("job_id") or "",
+        force_retry=bool(row.get("force_retry") or False),
     )

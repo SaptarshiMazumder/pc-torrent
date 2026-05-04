@@ -11,7 +11,6 @@ from serverV2.api.dependencies import get_current_user
 from serverV2.api.schemas.render_group import (
     ConfirmRenderGroupPayload,
     CreateRenderGroupPayload,
-    ReRenderPayload,
 )
 from serverV2.api.schemas.upload import (
     MultipartAbortPayload,
@@ -110,14 +109,6 @@ def cancel(group_id: str):
         raise HTTPException(e.status, e.message)
 
 
-@router.post("/render-groups/{group_id}/rerender")
-def rerender(group_id: str, payload: ReRenderPayload, user: dict = Depends(get_current_user)):
-    try:
-        return _get().rerender(group_id, payload, user)
-    except RenderGroupServiceError as e:
-        raise HTTPException(e.status, e.message)
-
-
 @router.delete("/render-groups/{group_id}")
 def delete(group_id: str, user: dict = Depends(get_current_user)):
     try:
@@ -125,21 +116,6 @@ def delete(group_id: str, user: dict = Depends(get_current_user)):
     except RenderGroupServiceError as e:
         raise HTTPException(e.status, e.message)
 
-
-@router.post("/render-groups/{group_id}/estimate")
-def estimate_cost(group_id: str, user: dict = Depends(get_current_user)):
-    """Phase 9 — per-tier cost + wall-time estimate for a render group.
-
-    Returns ``{"group_id": ..., "tiers": {"economy": {...}, "standard":
-    {...}, "premium": null}}`` where each tier dict has
-    ``wall_time_seconds``, ``cost_low_usd``, ``cost_mid_usd``,
-    ``cost_high_usd``, ``machines``.  ``null`` for unimplemented tiers
-    or when planning fails for that tier.
-    """
-    try:
-        return _get().estimate_cost(group_id, user["uid"])
-    except RenderGroupServiceError as e:
-        raise HTTPException(e.status, e.message)
 
 
 # ---- multipart upload ----

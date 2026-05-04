@@ -1,8 +1,8 @@
 """LoadDispatchContextStep — shared between auto and manual pipelines.
 
 Populates ``ctx.file_size_bytes``, ``ctx.engine``, ``ctx.tier`` from the
-group row.  Used to feed the strategy picker and the ``DispatchContext``
-construction downstream.
+group row's ``resolved_scene_json``.  Single source of truth for engine
+post-submit; no merging at the call site.
 
 # SOURCE: retry_dispatcher.py:234-268 (legacy load_group_dispatch_context)
 """
@@ -41,14 +41,14 @@ class LoadDispatchContextStep:
             except (TypeError, ValueError):
                 file_size_bytes = None
 
-        raw_overrides = grp.get("render_overrides_json")
-        if raw_overrides:
-            parsed = json.loads(raw_overrides)
+        raw_scene = grp.get("resolved_scene_json")
+        if raw_scene:
+            parsed = json.loads(raw_scene)
             if isinstance(parsed, dict):
-                render_section = parsed.get("render")
-                if isinstance(render_section, dict):
-                    engine_value = render_section.get("engine")
-                    if isinstance(engine_value, str):
+                heaviness = parsed.get("heaviness")
+                if isinstance(heaviness, dict):
+                    engine_value = heaviness.get("render_engine")
+                    if isinstance(engine_value, str) and engine_value:
                         engine = engine_value
 
         tier_raw = grp.get("tier")

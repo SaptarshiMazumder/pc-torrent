@@ -23,6 +23,11 @@ from __future__ import annotations
 import logging
 
 from serverV2.allocation import AllocationFacade
+from serverV2.allocation.allocation_pending_queue_repository import (
+    AllocationPendingItem,
+    TYPE_INITIAL_GROUP,
+    TYPE_RETRY_CHUNK,
+)
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
@@ -127,6 +132,82 @@ class AllocationClient:
         context: DispatchContext,
     ) -> list[DispatchResult]:
         return self._facade.enqueue(group_id, tasks, context)
+
+    # ------------------------------------------------------------------
+    # pending queue — escalate "no eligible target" cases for the daemon
+    # to re-evaluate on each tick
+    # ------------------------------------------------------------------
+
+    def enqueue_pending_retry(
+        self,
+        chunk_request: AllocationChunkRequest,
+        *,
+        tier: str | None,
+        input_filename: str,
+        render_overrides_json: str,
+        max_retries: int,
+        priority: int,
+    ) -> None:
+        self._facade.enqueue_pending(
+            AllocationPendingItem(
+                type=TYPE_RETRY_CHUNK,
+                group_id=chunk_request.group_id,
+                chunk_index=chunk_request.chunk_index,
+                attempt=chunk_request.attempt,
+                frame_start=chunk_request.frame_start,
+                frame_end=chunk_request.frame_end,
+                frame_step=chunk_request.frame_step,
+                total_frames=chunk_request.total_frames,
+                file_size_bytes=chunk_request.file_size_bytes,
+                engine=chunk_request.engine,
+                tier=tier,
+                excluded_machine_ids=chunk_request.excluded_machine_ids,
+                excluded_serverless_capabilities=chunk_request.excluded_serverless_capabilities,
+                render_overrides_json=render_overrides_json,
+                max_retries=max_retries,
+                priority=priority,
+                input_filename=input_filename,
+            )
+        )
+
+    def enqueue_pending_initial(
+        self,
+        *,
+        group_id: str,
+        frame_start: int,
+        frame_end: int,
+        frame_step: int,
+        total_frames: int,
+        tier: str | None,
+        engine: str | None,
+        heaviness: dict | None,
+        machine_ids: list[str] | None,
+        input_filename: str,
+        render_overrides_json: str,
+        max_retries: int,
+        priority: int,
+    ) -> None:
+        file_size_bytes = (heaviness or {}).get("file_size_bytes")
+        self._facade.enqueue_pending(
+            AllocationPendingItem(
+                type=TYPE_INITIAL_GROUP,
+                group_id=group_id,
+                chunk_index=None,
+                attempt=None,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                frame_step=frame_step,
+                total_frames=total_frames,
+                file_size_bytes=int(file_size_bytes) if file_size_bytes else None,
+                engine=engine,
+                tier=tier,
+                machine_ids=tuple(machine_ids or ()),
+                render_overrides_json=render_overrides_json,
+                max_retries=max_retries,
+                priority=priority,
+                input_filename=input_filename,
+            )
+        )
 
     # ------------------------------------------------------------------
     # internals

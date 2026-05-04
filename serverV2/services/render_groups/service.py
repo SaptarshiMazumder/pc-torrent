@@ -14,11 +14,7 @@ from uuid import uuid4
 from serverV2.core.value_objects import (
     MAX_UPLOAD_BYTES,
     SINGLE_PUT_MAX_BYTES,
-    extract_analysis_warnings,
-    normalize_render_overrides,
     now_iso,
-    parse_analysis_heaviness,
-    parse_json_list,
     parse_json_object,
     sanitize_filename,
 )
@@ -30,7 +26,8 @@ from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.services.assets.serializers import serialize_asset
 from serverV2.services.blend_parser.parser import BlendParseError, parse_upload
-from serverV2.services.render_groups.frame_planning import resolve_frame_range
+from serverV2.services.pre_render import SceneResolver, resolve_frame_range
+from serverV2.services.pre_render.scene_resolver import SceneResolutionError
 from serverV2.services.render_groups.serializers import (
     RenderGroupSerializer,
     build_dispatch_task_entry,
@@ -39,21 +36,6 @@ from serverV2.services.render_groups.serializers import (
 log = logging.getLogger(__name__)
 
 _ACTIVE_GROUP_STATUSES = frozenset({"uploading", "pending", "running"})
-
-
-def _engine_from_snapshot(snapshot) -> str | None:
-    """Pull ``heaviness.render_engine`` out of an analyzer snapshot.  Used
-    by submission paths to fall back to the .blend's actual engine when
-    the user didn't set ``render_overrides.render.engine`` explicitly.
-    Returns None if the snapshot doesn't carry the field.
-    """
-    if not isinstance(snapshot, dict):
-        return None
-    heaviness_section = snapshot.get("heaviness")
-    if not isinstance(heaviness_section, dict):
-        return None
-    engine = heaviness_section.get("render_engine")
-    return engine if isinstance(engine, str) and engine else None
 
 
 class RenderGroupServiceError(Exception):
@@ -77,6 +59,7 @@ class RenderGroupService:
         outputs_resolver,
         output_frame_repo: OutputFrameRepository,
         chunk_progress: ChunkProgressService,
+        scene_resolver: SceneResolver,
     ) -> None:
         self._groups = group_repo
         self._jobs = job_repo
@@ -87,6 +70,7 @@ class RenderGroupService:
         self._outputs = outputs_resolver
         self._output_frames = output_frame_repo
         self._chunk_progress = chunk_progress
+        self._scene_resolver = scene_resolver
         self._serializer = RenderGroupSerializer(output_frame_repo=output_frame_repo)
 
     # ------------------------------------------------------------------
@@ -192,40 +176,39 @@ class RenderGroupService:
         if not storage.file_exists(r2_key):
             raise RenderGroupServiceError(400, "File not found in storage")
 
-        render_overrides = normalize_render_overrides(getattr(payload, "render_overrides", None))
-        scheduling = getattr(payload, "scheduling", None) or {}
         analysis_snapshot = getattr(payload, "analysis_snapshot", None)
         analysis_snapshot = analysis_snapshot if isinstance(analysis_snapshot, dict) else {}
-        analysis_warnings = extract_analysis_warnings(analysis_snapshot)
+        raw_overrides = getattr(payload, "render_overrides", None)
+        scheduling = getattr(payload, "scheduling", None) or {}
 
-        # Engine resolution at the submission boundary.  User override
-        # wins; otherwise fall back to whatever the analyzer detected
-        # from the .blend itself.  Resolved here, BEFORE any persistence,
-        # and written back into render_overrides so every downstream
-        # serialization (group row, job rows, asset cache) carries the
-        # engine.  Single source of truth for both initial dispatch and
-        # retry — the retry path reads engine from render_overrides_json
-        # alone, so this is what makes retry work.
-        engine = (
-            (render_overrides.get("render") or {}).get("engine")
-            or _engine_from_snapshot(analysis_snapshot)
-        )
-        if not engine:
-            raise RenderGroupServiceError(
-                400,
-                "Render engine could not be determined. Set render.engine in "
-                "render_overrides, or ensure the analyzer populated "
-                "analysis_snapshot.heaviness.render_engine.",
+        # File-size signal for heaviness — server-side fact, the desktop
+        # analyzer can't see it.  HEAD-equivalent against R2.
+        try:
+            r2_input_size_bytes = storage.get_file_size(r2_key)
+        except Exception:
+            r2_input_size_bytes = None
+
+        # Submission boundary: collapse (snapshot, overrides) to ONE
+        # canonical resolved scene.  Engine resolution + heaviness merge
+        # happen exactly here — every post-submit reader sees the row.
+        try:
+            resolved_scene = self._scene_resolver.resolve(
+                analysis_snapshot=analysis_snapshot,
+                render_overrides=raw_overrides,
+                file_size_bytes=r2_input_size_bytes,
             )
-        render_overrides.setdefault("render", {})["engine"] = engine
+        except SceneResolutionError as exc:
+            raise RenderGroupServiceError(400, str(exc))
 
-        timeline = render_overrides.get("timeline", {})
+        normalized_overrides = resolved_scene["render_overrides"]
+        heaviness = resolved_scene["heaviness"]
+        engine = heaviness["render_engine"]
 
         plan = resolve_frame_range(
             payload_frame_start=getattr(payload, "frame_start", None),
             payload_frame_end=getattr(payload, "frame_end", None),
             payload_frame_step=getattr(payload, "frame_step", None),
-            timeline_overrides=timeline,
+            timeline_overrides=normalized_overrides.get("timeline"),
         )
 
         if plan is None:
@@ -243,19 +226,16 @@ class RenderGroupService:
                 self._groups.full_update(
                     group_id,
                     status="pending",
-                    render_overrides_json=json.dumps(render_overrides),
+                    resolved_scene_json=self._scene_resolver.serialize(resolved_scene),
                     scheduling_json=json.dumps(scheduling),
-                    analysis_snapshot_json=json.dumps(analysis_snapshot),
-                    analysis_warnings_json=json.dumps(analysis_warnings),
                 )
-                self._save_asset(group, r2_key, None, analysis_snapshot, render_overrides, scheduling)
+                self._save_asset(group, r2_key, None, analysis_snapshot, normalized_overrides, scheduling)
                 return {
                     "group_id": group_id,
                     "needs_frame_input": True,
                     "parse_error": str(e),
-                    "resolved_render_settings": render_overrides,
+                    "resolved_render_settings": normalized_overrides,
                     "scheduling": scheduling,
-                    "analysis_warnings": analysis_warnings,
                 }
             except Exception:
                 raise RenderGroupServiceError(500, "Failed to analyze uploaded file")
@@ -263,16 +243,8 @@ class RenderGroupService:
         if plan is None or plan.total_frames <= 0:
             raise RenderGroupServiceError(400, "No renderable frames found in .blend file")
 
-        # Capture the blend file size as a heaviness signal for the
-        # allocator strategy picker (Phase 3).  HEAD-equivalent against R2.
-        try:
-            r2_input_size_bytes = storage.get_file_size(r2_key)
-        except Exception:
-            r2_input_size_bytes = None
-
         # Tier — user-selected allocation tier, normalised to a known value.
-        # Persisted on the group row so list/detail responses can show it
-        # and so rerenders inherit it by default.
+        # Persisted on the group row so list/detail responses can show it.
         resolved_tier = tiers.normalize(getattr(payload, "tier", None))
 
         self._groups.full_update(
@@ -281,25 +253,15 @@ class RenderGroupService:
             frame_start=plan.frame_start,
             frame_end=plan.frame_end,
             frame_step=plan.frame_step,
-            render_overrides_json=json.dumps(render_overrides),
+            resolved_scene_json=self._scene_resolver.serialize(resolved_scene),
             scheduling_json=json.dumps(scheduling),
-            analysis_snapshot_json=json.dumps(analysis_snapshot),
-            analysis_warnings_json=json.dumps(analysis_warnings),
             r2_input_size_bytes=r2_input_size_bytes,
             tier=resolved_tier,
             status="pending",
         )
-        self._save_asset(group, r2_key, plan, analysis_snapshot, render_overrides, scheduling)
+        self._save_asset(group, r2_key, plan, analysis_snapshot, normalized_overrides, scheduling)
 
         machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
-
-        # Build the heaviness dict once from the analyzer's snapshot + the
-        # server-side file size; cost-aware strategies read everything they
-        # need from this single object.
-        heaviness = parse_analysis_heaviness(
-            analysis_snapshot if isinstance(analysis_snapshot, dict) else None,
-            file_size_bytes=r2_input_size_bytes,
-        )
 
         planned = self._orchestrator.plan(
             frame_start=plan.frame_start,
@@ -312,23 +274,37 @@ class RenderGroupService:
             engine=engine,
         )
 
-        if not planned:
-            err = (
-                "No eligible render targets. "
-                "Pinned community machines are offline, or no serverless capacity available."
-                if machine_ids
-                else "No eligible render targets. Community machines offline and no serverless capacity available."
-            )
-            self._groups.full_update(group_id, status="failed", error=err)
-            raise RenderGroupServiceError(503, err)
+        # Worker contract: ``DispatchContext.render_overrides_json`` is
+        # the user-overrides slice of the resolved scene (timeline,
+        # output, render.engine, camera_*, etc.).  Heaviness stays
+        # server-side; workers don't need it.
+        overrides_json = json.dumps(normalized_overrides)
 
-        overrides_json = json.dumps(render_overrides)
-        dispatch_results = self._orchestrator.execute(
-            group_id=group_id,
-            input_filename=group["input_filename"],
-            tasks=planned,
-            render_overrides_json=overrides_json,
-        )
+        if not planned:
+            # No fleet has an eligible target right now — park the group
+            # on pending_allocation_queue.  The dispatch daemon retries
+            # the same strategies every tick until capacity opens up.
+            self._orchestrator.escalate_initial_to_pending(
+                group_id=group_id,
+                frame_start=plan.frame_start,
+                frame_end=plan.frame_end,
+                frame_step=plan.frame_step,
+                total_frames=plan.total_frames,
+                machine_ids=machine_ids,
+                heaviness=heaviness,
+                engine=engine,
+                tier=resolved_tier,
+                input_filename=group["input_filename"],
+                render_overrides_json=overrides_json,
+            )
+            dispatch_results: list = []
+        else:
+            dispatch_results = self._orchestrator.execute(
+                group_id=group_id,
+                input_filename=group["input_filename"],
+                tasks=planned,
+                render_overrides_json=overrides_json,
+            )
 
         tasks = [
             build_dispatch_task_entry(pt, dr, scheduling)
@@ -359,9 +335,8 @@ class RenderGroupService:
             "frame_start": plan.frame_start,
             "frame_end": plan.frame_end,
             "frame_step": plan.frame_step,
-            "resolved_render_settings": render_overrides,
+            "resolved_render_settings": normalized_overrides,
             "scheduling": scheduling,
-            "analysis_warnings": analysis_warnings,
             "tasks": tasks,
         }
 
@@ -375,165 +350,6 @@ class RenderGroupService:
             raise RenderGroupServiceError(404, "Render group not found")
         result = self._orchestrator.cancel_group(group_id)
         return {"success": True, **result}
-
-    # ------------------------------------------------------------------
-    # rerender
-    # ------------------------------------------------------------------
-
-    def rerender(self, group_id: str, payload: Any, user: dict[str, Any]) -> dict[str, Any]:
-        original = self._groups.get_by_id(group_id)
-        if not original:
-            raise RenderGroupServiceError(404, "Render group not found")
-        if not original.get("user_id") or original["user_id"] != user["uid"]:
-            raise RenderGroupServiceError(403, "Access denied")
-
-        r2_key = original["r2_input_key"]
-        if not storage.file_exists(r2_key):
-            raise RenderGroupServiceError(400, "Original input file is no longer in storage")
-
-        frame_start = payload.frame_start
-        frame_end = payload.frame_end
-        frame_step = max(1, payload.frame_step)
-        total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
-        if total_frames <= 0:
-            raise RenderGroupServiceError(400, "Invalid frame range")
-
-        base_overrides = parse_json_object(original.get("render_overrides_json"), {})
-        if getattr(payload, "render_overrides", None):
-            base_overrides.update(payload.render_overrides)
-        if getattr(payload, "camera", None):
-            base_overrides.setdefault("scene", {})["camera"] = payload.camera
-
-        render_overrides = normalize_render_overrides(base_overrides)
-        scheduling = parse_json_object(original.get("scheduling_json"), {})
-
-        # Engine resolution at the rerender boundary — same single-source
-        # rule as confirm_upload.  Resolved BEFORE any persistence and
-        # written back into render_overrides so the new group's
-        # render_overrides_json (and every job row built from it) carries
-        # the engine for both initial dispatch and any later retry.
-        original_snapshot = parse_json_object(
-            original.get("analysis_snapshot_json") or "{}", {},
-        )
-        engine = (
-            (render_overrides.get("render") or {}).get("engine")
-            or _engine_from_snapshot(original_snapshot)
-        )
-        if not engine:
-            raise RenderGroupServiceError(
-                400,
-                "Render engine could not be determined for rerender. The "
-                "original group's analysis_snapshot.heaviness.render_engine "
-                "is missing — set render.engine in render_overrides instead.",
-            )
-        render_overrides.setdefault("render", {})["engine"] = engine
-
-        new_group_id = str(uuid4())
-        now = now_iso()
-
-        # Carry the heaviness signal forward — same blend file, same size.
-        r2_input_size_bytes = original.get("r2_input_size_bytes")
-        if r2_input_size_bytes is None:
-            try:
-                r2_input_size_bytes = storage.get_file_size(r2_key)
-            except Exception:
-                r2_input_size_bytes = None
-
-        # Tier — payload override falls back to the original group's tier.
-        resolved_tier = tiers.normalize(
-            getattr(payload, "tier", None) or original.get("tier")
-        )
-
-        from serverV2.infrastructure.db import execute
-        execute(
-            """
-            INSERT INTO render_groups (
-                id, input_filename, r2_input_key, r2_input_size_bytes,
-                total_frames, frame_start, frame_end, frame_step,
-                render_overrides_json, scheduling_json,
-                analysis_snapshot_json, analysis_warnings_json,
-                status, submitted_at, user_id, source_asset_id, tier
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)
-            """,
-            (
-                new_group_id, original["input_filename"], r2_key, r2_input_size_bytes,
-                total_frames, frame_start, frame_end, frame_step,
-                json.dumps(render_overrides), json.dumps(scheduling),
-                original.get("analysis_snapshot_json") or "{}",
-                original.get("analysis_warnings_json") or "[]",
-                now, user["uid"], original.get("source_asset_id"), resolved_tier,
-            ),
-        )
-
-        machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
-
-        # Build heaviness once for the rerender (analysis snapshot copied
-        # from the original group) + the new r2 file size.
-        heaviness = parse_analysis_heaviness(
-            original_snapshot,
-            file_size_bytes=r2_input_size_bytes,
-        )
-
-        planned = self._orchestrator.plan(
-            frame_start=frame_start,
-            frame_end=frame_end,
-            frame_step=frame_step,
-            total_frames=total_frames,
-            machine_ids=machine_ids,
-            heaviness=heaviness,
-            tier=resolved_tier,
-            engine=engine,
-        )
-
-        if not planned:
-            err = (
-                "No eligible render targets. "
-                "Pinned community machines are offline, or no serverless capacity available."
-                if machine_ids
-                else "No eligible render targets. Community machines offline and no serverless capacity available."
-            )
-            self._groups.update_status(new_group_id, "failed", error=err)
-            raise RenderGroupServiceError(503, err)
-
-        overrides_json = json.dumps(render_overrides)
-        dispatch_results = self._orchestrator.execute(
-            group_id=new_group_id,
-            input_filename=original["input_filename"],
-            tasks=planned,
-            render_overrides_json=overrides_json,
-        )
-
-        tasks = [
-            build_dispatch_task_entry(pt, dr, scheduling)
-            for pt, dr in zip(planned, dispatch_results)
-        ]
-
-        try:
-            write_render_group_record(user["uid"], new_group_id, {
-                "group_id": new_group_id,
-                "filename": original["input_filename"],
-                "status": "pending",
-                "total_frames": total_frames,
-                "frame_start": frame_start,
-                "frame_end": frame_end,
-                "submitted_at": now,
-                "machine_count": len(tasks),
-            })
-        except Exception:
-            pass
-
-        return {
-            "group_id": new_group_id,
-            "status": "pending",
-            "input_filename": original["input_filename"],
-            "total_frames": total_frames,
-            "frame_start": frame_start,
-            "frame_end": frame_end,
-            "frame_step": frame_step,
-            "submitted_at": now,
-            "tasks": tasks,
-        }
 
     # ------------------------------------------------------------------
     # get_status
@@ -595,12 +411,12 @@ class RenderGroupService:
         ``tasks`` from freshly-loaded children.  Used by the detail/status
         endpoints (single group) and by the list endpoint for the active
         slice (batched children)."""
-        resolved_render_settings = normalize_render_overrides(
-            parse_json_object(group.get("render_overrides_json"), {})
+        resolved_scene = self._scene_resolver.deserialize(
+            group.get("resolved_scene_json"),
         )
+        resolved_render_settings = resolved_scene.get("render_overrides", {})
+        heaviness = resolved_scene.get("heaviness", {})
         scheduling = parse_json_object(group.get("scheduling_json"), {})
-        analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
-        analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 
         # Pre-fetch the two N+1 sources in bulk: per-job filenames and
         # per-chunk progress.  Each replaces N round-trips (one per job
@@ -659,9 +475,8 @@ class RenderGroupService:
             "completed_at": group.get("completed_at"),
             "error": group.get("error"),
             "resolved_render_settings": resolved_render_settings,
+            "heaviness": heaviness,
             "scheduling": scheduling,
-            "analysis_snapshot": analysis_snapshot,
-            "analysis_warnings": analysis_warnings,
             "overall_rendered_frames": total_rendered,
             "overall_progress_pct": overall_pct,
             "available_output_files_count": min(total_frames, unique_rendered),
@@ -767,12 +582,12 @@ class RenderGroupService:
         once by the lifecycle when the group entered terminal state).
         ``tasks`` is intentionally empty; the detail page re-loads
         children on demand if the user opens it."""
-        resolved_render_settings = normalize_render_overrides(
-            parse_json_object(group.get("render_overrides_json"), {})
+        resolved_scene = self._scene_resolver.deserialize(
+            group.get("resolved_scene_json"),
         )
+        resolved_render_settings = resolved_scene.get("render_overrides", {})
+        heaviness = resolved_scene.get("heaviness", {})
         scheduling = parse_json_object(group.get("scheduling_json"), {})
-        analysis_warnings = parse_json_list(group.get("analysis_warnings_json"), [])
-        analysis_snapshot = parse_json_object(group.get("analysis_snapshot_json"), {})
 
         total_frames = group.get("total_frames") or 0
         total_rendered = group.get("overall_rendered_frames") or 0
@@ -796,9 +611,8 @@ class RenderGroupService:
             "completed_at": group.get("completed_at"),
             "error": group.get("error"),
             "resolved_render_settings": resolved_render_settings,
+            "heaviness": heaviness,
             "scheduling": scheduling,
-            "analysis_snapshot": analysis_snapshot,
-            "analysis_warnings": analysis_warnings,
             "overall_rendered_frames": total_rendered,
             "overall_progress_pct": overall_pct,
             "available_output_files_count": group.get("available_output_files_count") or 0,
@@ -806,34 +620,6 @@ class RenderGroupService:
             "latest_output_job_id": group.get("latest_output_job_id"),
             "tasks_count": group.get("tasks_count") or 0,
             "tasks": [],
-        }
-
-    # ------------------------------------------------------------------
-    # cost preview (Phase 9)
-    # ------------------------------------------------------------------
-
-    def estimate_cost(self, group_id: str, user_id: str) -> dict[str, Any]:
-        """Per-tier cost + wall-time estimate for a render group.
-
-        Dry-run dispatch — uses the same orchestrator.plan(...) the real
-        submit will use, then runs the resulting mix through the cost
-        analyzer.  No DB writes.
-        """
-        from serverV2.services.render_groups.cost_preview import estimate as _estimate
-
-        group = self._groups.get_by_id(group_id)
-        if not group:
-            raise RenderGroupServiceError(404, "Render group not found")
-        if user_id and group.get("user_id") and group["user_id"] != user_id:
-            raise RenderGroupServiceError(403, "Forbidden")
-
-        return {
-            "group_id": group_id,
-            "tiers": _estimate(
-                orchestrator=self._orchestrator,
-                group_repo=self._groups,
-                group_id=group_id,
-            ),
         }
 
     # ------------------------------------------------------------------

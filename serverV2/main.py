@@ -106,12 +106,14 @@ def _wire_routers(c: Container) -> None:
         jobs,
         logs,
         machines,
+        pre_render,
         render_groups,
     )
 
     machines.init(c.machine_service, machine_repo=c.machine_repo)
     jobs.init(c.job_service, orchestrator=c.orchestrator, callback_router=c.callback_router)
     render_groups.init(c.render_group_service, c.upload_coordinator)
+    pre_render.init(c.pre_render_estimator)
     assets.init(c.asset_service)
     debug.init(aggregator=c.status_aggregator)
     internal.init(c.callback_router, c.config.orphan_secret)
@@ -120,6 +122,7 @@ def _wire_routers(c: Container) -> None:
     app.include_router(machines.router)
     app.include_router(jobs.router)
     app.include_router(render_groups.router)
+    app.include_router(pre_render.router)
     app.include_router(assets.router)
     app.include_router(docker.router)
     app.include_router(logs.router)

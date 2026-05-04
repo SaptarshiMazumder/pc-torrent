@@ -374,9 +374,35 @@ export async function confirmDistributedJob(
   });
 }
 
-export async function estimateRenderGroup(baseUrl, groupId) {
-  return apiFetch(baseUrl, `/render-groups/${groupId}/estimate`, {
+export async function estimateRenderGroup(
+  baseUrl,
+  {
+    analysisSnapshot = null,
+    renderOverrides = null,
+    frameStart = null,
+    frameEnd = null,
+    frameStep = null,
+    machineIds = null,
+    fileSizeBytes = null,
+  } = {},
+) {
+  // Stateless RPC — frontend has both the analyzer snapshot (desktop
+  // Blender ran analysis at .blend pick time) and the user's edited
+  // overrides locally; the backend merges and returns cost / wall-time
+  // estimates without touching the database.
+  const body = {
+    analysis_snapshot: analysisSnapshot,
+    render_overrides: renderOverrides,
+    frame_start: frameStart,
+    frame_end: frameEnd,
+    frame_step: frameStep,
+    machine_ids: machineIds,
+    file_size_bytes: fileSizeBytes,
+  };
+  return apiFetch(baseUrl, `/pre-render/estimate`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 }
 
@@ -402,21 +428,6 @@ export async function cancelRenderGroup(baseUrl, groupId) {
 
 export async function cancelAllRenderGroups(baseUrl) {
   return apiFetch(baseUrl, "/render-groups/cancel-all", { method: "POST" });
-}
-
-export async function rerenderGroup(baseUrl, groupId, { frameStart, frameEnd, frameStep = 1, camera = null, renderOverrides = null } = {}) {
-  const body = {
-    frame_start: frameStart,
-    frame_end: frameEnd,
-    frame_step: frameStep,
-  };
-  if (camera) body.camera = camera;
-  if (renderOverrides) body.render_overrides = renderOverrides;
-  return apiFetch(baseUrl, `/render-groups/${groupId}/rerender`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
 }
 
 export async function deleteRenderGroup(baseUrl, groupId) {

@@ -56,7 +56,8 @@ class AllocationEnqueueHandler:
                 continue
             job_id = str(uuid4())
             self._queue_repo.enqueue(
-                group_id, self._codec.encode(t, context, job_id=job_id),
+                group_id,
+                self._codec.encode(t, context, job_id=job_id),
             )
             results.append(
                 DispatchResult(

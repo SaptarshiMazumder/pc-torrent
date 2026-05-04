@@ -35,14 +35,14 @@ class MonitorLockVastSweepStrategy:
             return
         rows = query_all(
             """
-            SELECT j.id, j.runpod_job_id, j.machine_id, j.group_id,
+            SELECT j.id, j.vast_job_id, j.machine_id, j.group_id,
                    j.render_overrides_json, j.input_filename,
                    rg.input_filename AS rg_input_filename
             FROM jobs j
             LEFT JOIN render_groups rg ON rg.id = j.group_id
             WHERE j.status IN ('running', 'pending')
               AND j.machine_type = 'vast_serverless'
-              AND j.runpod_job_id IS NOT NULL
+              AND j.vast_job_id IS NOT NULL
             """,
         )
         for row in rows:
@@ -50,9 +50,9 @@ class MonitorLockVastSweepStrategy:
 
     def _claim_one(self, row: dict) -> None:
         job_id = row["id"]
-        provider_job_id = row.get("runpod_job_id")
+        provider_job_id = row.get("vast_job_id")
         if not provider_job_id:
-            log.warning("Sweep skip: vast job %s has no runpod_job_id", job_id)
+            log.warning("Sweep skip: vast job %s has no vast_job_id", job_id)
             return
         group_id = row.get("group_id")
         overrides_json = row.get("render_overrides_json")

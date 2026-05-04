@@ -290,7 +290,7 @@ class JobRepository:
     # ---- provider tracking ----
 
     def save_provider_job_id(self, job_id: str, *, provider_job_id: str, column: str) -> None:
-        allowed = {"runpod_job_id", "modal_function_call_id"}
+        allowed = {"vast_job_id", "modal_function_call_id"}
         if column not in allowed:
             raise ValueError(f"Invalid provider column: {column}")
         execute(f"UPDATE jobs SET {column} = %s WHERE id = %s", (provider_job_id, job_id))

@@ -364,6 +364,29 @@ def init_db() -> None:
                     "ALTER TABLE dispatch_queue DROP COLUMN IF EXISTS force_retry"
                 )
 
+                # ``runpod_job_id`` is a misnomer — the column holds Vast.ai
+                # instance ids, not RunPod ids.  Rename idempotently: the
+                # information_schema check makes this a no-op after the
+                # first boot, so deploys are safe to re-run.
+                cur.execute(
+                    """
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                             WHERE table_name = 'jobs'
+                               AND column_name = 'runpod_job_id'
+                        ) AND NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                             WHERE table_name = 'jobs'
+                               AND column_name = 'vast_job_id'
+                        ) THEN
+                            ALTER TABLE jobs RENAME COLUMN runpod_job_id TO vast_job_id;
+                        END IF;
+                    END $$
+                    """
+                )
+
                 # Phase 9 — dispatch_queue uniqueness.  Two concurrent
                 # retry signals for the same chunk used to insert two
                 # rows; with this constraint the second INSERT is a

@@ -192,7 +192,7 @@ T=0   Follower B receives POST /render-groups/.../confirm-upload
 T=0   Follower B's Dispatcher.dispatch_one calls
       VastFleetStrategy.dispatch
 T=1   Follower B issues create-instance HTTP to Vast.ai, gets instance_id
-T=1   Follower B writes job row with runpod_job_id=<instance_id>
+T=1   Follower B writes job row with vast_job_id=<instance_id>
 T=1   Follower B's VastCallbackHandler.start_monitoring spawns
       VastInstanceMonitor thread on instance B
 T=2..N  Thread on B polls Vast.ai every N sec; worker uploads frames;

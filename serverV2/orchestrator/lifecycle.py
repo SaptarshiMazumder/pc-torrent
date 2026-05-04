@@ -415,7 +415,7 @@ class RenderLifecycle:
         # community equivalent.
         try:
             provider_job_id = (
-                raw.get("runpod_job_id")
+                raw.get("vast_job_id")
                 or raw.get("modal_function_call_id")
                 or ""
             )

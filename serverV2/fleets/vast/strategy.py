@@ -96,7 +96,7 @@ class VastFleetStrategy:
             )
             provider_job_id = str(instance_id)
             self._job_repo.save_provider_job_id(
-                job_id, provider_job_id=provider_job_id, column="runpod_job_id",
+                job_id, provider_job_id=provider_job_id, column="vast_job_id",
             )
         except Exception as exc:
             log.error("Vast dispatch failed for %s: %s", job_id, exc)
@@ -133,5 +133,5 @@ class VastFleetStrategy:
         self._callback.stop_monitoring(job_id)
 
     def provider_job_id_from_job(self, job: dict[str, Any]) -> str | None:
-        value = (job.get("runpod_job_id") or "").strip()
+        value = (job.get("vast_job_id") or "").strip()
         return value or None

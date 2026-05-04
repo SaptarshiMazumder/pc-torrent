@@ -10,7 +10,6 @@
   "vast": {
     "max_parallel": 30,
     "disk_gb": 20,
-    "max_price_per_gpu": 1.00,
     "secure_cloud_only": true,
     "poll_interval_sec": 15,
     "startup_timeout_sec": 300,
@@ -40,6 +39,87 @@
   },
   "vast_instances": [
     {
+      "gpu_name": "H200 NVL",
+      "label": "Vast H200 NVL 141GB",
+      "vram_gb": 141,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 2.8,
+      "price_per_hour": 3.50
+    },
+    {
+      "gpu_name": "H100 NVL",
+      "label": "Vast H100 NVL 94GB",
+      "vram_gb": 94,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 2.45,
+      "price_per_hour": 2.20
+    },
+    {
+      "gpu_name": "H100 SXM",
+      "label": "Vast H100 SXM 80GB",
+      "vram_gb": 80,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 2.5,
+      "price_per_hour": 1.50
+    },
+    {
+      "gpu_name": "RTX 6000Ada",
+      "label": "Vast RTX 6000 Ada 48GB",
+      "vram_gb": 48,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.85,
+      "price_per_hour": 0.60
+    },
+    {
+      "gpu_name": "A100 SXM4",
+      "label": "Vast A100 SXM4 40GB",
+      "vram_gb": 40,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.80,
+      "price_per_hour": 0.85
+    },
+    {
+      "gpu_name": "L40S",
+      "label": "Vast L40S 48GB",
+      "vram_gb": 48,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.75,
+      "price_per_hour": 0.55
+    },
+    {
+      "gpu_name": "A100 PCIE",
+      "label": "Vast A100 PCIE 40GB",
+      "vram_gb": 40,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.65,
+      "price_per_hour": 0.50
+    },
+    {
+      "gpu_name": "L40",
+      "label": "Vast L40 48GB",
+      "vram_gb": 48,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.55,
+      "price_per_hour": 0.55
+    },
+    {
+      "gpu_name": "RTX 5880Ada",
+      "label": "Vast RTX 5880 Ada 48GB",
+      "vram_gb": 48,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.50,
+      "price_per_hour": 0.45
+    },
+    {
       "gpu_name": "RTX 4090",
       "label": "Vast RTX 4090 24GB",
       "vram_gb": 24,
@@ -47,6 +127,15 @@
       "ram_gb": 32,
       "render_speed": 1.45,
       "price_per_hour": 0.45
+    },
+    {
+      "gpu_name": "RTX 4080S",
+      "label": "Vast RTX 4080 SUPER 32GB",
+      "vram_gb": 32,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.30,
+      "price_per_hour": 0.18
     },
     {
       "gpu_name": "RTX A6000",
@@ -67,13 +156,22 @@
       "price_per_hour": 0.3
     },
     {
-      "gpu_name": "RTX 3090",
-      "label": "Vast RTX 3090 24GB",
-      "vram_gb": 24,
+      "gpu_name": "A40",
+      "label": "Vast A40 48GB",
+      "vram_gb": 48,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 0.95,
-      "price_per_hour": 0.25
+      "render_speed": 1.0,
+      "price_per_hour": 0.40
+    },
+    {
+      "gpu_name": "RTX A4000",
+      "label": "Vast RTX A4000 16GB",
+      "vram_gb": 16,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 0.50,
+      "price_per_hour": 0.10
     }
   ],
   "modal_instances": [

@@ -30,7 +30,6 @@ from serverV2.core.models import (
     AvailableResources,
     DispatchContext,
     PlannedTask,
-    SubmitInitialResult,
 )
 from serverV2.fleets.fleet_availability.fleet_availability_snapshot import (
     FleetAvailabilitySnapshot,
@@ -85,7 +84,7 @@ class AllocationClient:
         )
 
     # ------------------------------------------------------------------
-    # submit (plan + (enqueue|park) atomically)
+    # submit (park to pending_allocation_queue; daemon plans on tick)
     # ------------------------------------------------------------------
 
     def submit_initial(
@@ -99,23 +98,21 @@ class AllocationClient:
         total_frames: int,
         engine: str | None,
         heaviness: dict | None,
-        tier_budget_usd: float | None,
         machine_ids: list[str] | None,
         dispatch_context: DispatchContext,
-    ) -> SubmitInitialResult:
-        snapshot = self._snapshot_cache.get_or_build()
-        resources = self._adapt_resources(snapshot, machine_ids=machine_ids)
-        return self._facade.submit_initial(
+    ) -> None:
+        """Park a whole render group.  No snapshot read here -- planning
+        happens later inside the daemon's tick.  Same shape as
+        ``park_retry`` for retries."""
+        self._facade.submit_initial(
             group_id=group_id,
             tier=tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
             total_frames=total_frames,
-            resources=resources,
             engine=engine,
             heaviness=heaviness,
-            tier_budget_usd=tier_budget_usd,
             machine_ids=machine_ids,
             dispatch_context=dispatch_context,
         )

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from serverV2.core.models import PlannedTask, SubmitInitialResult
+from serverV2.core.models import PlannedTask
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 
 
@@ -83,12 +83,13 @@ class RenderOrchestrator:
         tier: str | None,
         input_filename: str,
         render_overrides_json: str,
-    ) -> SubmitInitialResult:
-        """Plan + dispatch (or park) a whole render group.  Atomic from
-        the caller's POV — they get one result back and never have to
-        ask "did it dispatch or did it park?"  See ``Lifecycle.submit_initial``
-        and ``AllocationFacade.submit_initial`` for details."""
-        return self._lifecycle.submit_initial(
+    ) -> None:
+        """Park a whole render group on ``pending_allocation_queue``.
+        Returns nothing -- the daemon plans + dispatches asynchronously
+        on its next tick.  See ``Lifecycle.submit_initial`` and
+        ``AllocationFacade.submit_initial`` for details.
+        """
+        self._lifecycle.submit_initial(
             group_id=group_id,
             frame_start=frame_start,
             frame_end=frame_end,

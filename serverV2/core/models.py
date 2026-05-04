@@ -214,21 +214,6 @@ class DispatchResult:
 
 
 # ---------------------------------------------------------------------------
-# Submit result -- atomic plan + (enqueue|park) outcome shape returned
-# by AllocationFacade.submit_initial.  Caller never asks "did it
-# dispatch or did it park?" via separate API calls; that's the whole
-# point of the boundary.
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class SubmitInitialResult:
-    """Outcome of a whole-group initial plan + enqueue/park."""
-    planned: list  # list[PlannedTask]
-    dispatch_results: list  # list[DispatchResult]
-    parked: bool
-
-
-# ---------------------------------------------------------------------------
 # Group status aggregation
 # ---------------------------------------------------------------------------
 

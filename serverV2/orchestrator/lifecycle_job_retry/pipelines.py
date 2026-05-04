@@ -2,26 +2,31 @@
 
 Two immutable tuples constructed once at import time:
 
-* ``AUTO_RETRY_PIPELINE`` -- reproduces the legacy
-  ``RetryDispatcher.attempt`` step-for-step.  Silent short-circuit on
-  abort (matches ``return False``).  Used by the failure / cancel
-  termination pipelines via ``TryRetryStep``.
+* ``AUTO_RETRY_PIPELINE`` -- silent short-circuit on abort (group
+  terminal / no remaining frames / max retries).  On success: parks
+  the retry chunk on ``pending_allocation_queue`` for the dispatch
+  daemon to plan + dispatch on its next tick.
 
-* ``MANUAL_RETRY_PIPELINE`` -- reproduces the legacy
-  ``RenderLifecycle.retry_chunk_manually`` step-for-step.  Raises
-  ``ManualRetryError`` on any refusal (matches the typed-error API
-  contract surfaced by the router).
+* ``MANUAL_RETRY_PIPELINE`` -- raise-on-refusal flow (group_cancelled,
+  active_sibling_exists, not_retryable, no_remaining_frames).  On
+  success: flips the group status back to ``pending`` and parks the
+  retry chunk.  Endpoint returns immediately with ``queued_for_retry``;
+  the daemon picks a target asynchronously.
 
-Both flows share most steps.  The differences are:
-* Manual retry's row-resolution path (latest sibling lookup) vs auto's
-  direct-from-input.
-* Manual retry's ``attempt = 0`` reset vs auto's ``attempt = N + 1``
-  with MAX_RETRIES enforcement.
-* Manual retry's typed-error refusal vs auto's silent log + abort.
-* Manual retry's terminal reconcile + result-building (so the API can
-  return ``new_job_id`` etc.).
+Why both flows park instead of plan synchronously:
 
-See ``retry_pipeline_builder`` for the rules-not-action design rationale.
+The dispatch daemon is the SOLE owner of the fleet-availability
+snapshot's mutable state.  Within a tick, it reads the cached snapshot
+once, mutates a local view as it dispatches each queued item, and
+persists the mutated view at end-of-tick.  If a retry callback (auto)
+or HTTP request thread (manual) reads the cache and plans
+synchronously, it races with the daemon's mid-tick mutations -- the
+cache only persists at end-of-tick, so out-of-tick readers see
+pre-tick state and can pick a target the daemon has already consumed.
+Result: dogpile (multiple chunks dispatched to the same machine).
+
+By parking, the only thread reading or writing fleet availability is
+the daemon.  No race possible.
 """
 
 from __future__ import annotations
@@ -32,12 +37,7 @@ from serverV2.orchestrator.lifecycle_job_retry.retry_pipeline_builder import (
 
 
 # ---------------------------------------------------------------------
-# AUTO -- collapses allocate + enqueue into a single allocation-side
-# ``submit_retry`` call.  Allocation owns the plan-vs-park decision
-# internally; on park, ``ctx.aborted`` is set and the rest of the
-# pipeline short-circuits.  Group-status aggregator treats the parked
-# row as still-active (has_pending_allocation=True) so the group
-# stays "running" while the daemon re-evaluates each tick.
+# AUTO -- silent abort steps + park-to-pending.
 #
 # Step trace:
 #   1. load_job_and_group()           -> ctx.rj, group_id, chunk_index, grp
@@ -47,10 +47,9 @@ from serverV2.orchestrator.lifecycle_job_retry.retry_pipeline_builder import (
 #   5. enforce_max_retries()          -> ctx.next_attempt; abort if > cap
 #   6. load_dispatch_context()        -> ctx.file_size_bytes, engine, tier
 #   7. build_retry_chunk_request()    -> ctx.chunk_request (with exclusions)
-#   8. submit_retry()                 -> plan + (enqueue|park).  Sets
-#                                        ctx.retry_task, ctx.dispatched on
-#                                        success; ctx.aborted on park.
-#   9. log_auto_retry()               -> "Job X: requeued frames A-B ..."
+#   8. park_retry_to_pending()        -> writes pending_allocation_queue row,
+#                                        sets ctx.parked = True
+#   9. log_auto_retry()               -> "Job X: parked retry frames A-B ..."
 # ---------------------------------------------------------------------
 
 AUTO_RETRY_PIPELINE = (
@@ -62,20 +61,19 @@ AUTO_RETRY_PIPELINE = (
     .enforce_max_retries()
     .load_dispatch_context()
     .build_retry_chunk_request()
-    .submit_retry()
+    .park_retry_to_pending()
     .log_auto_retry()
     .build()
 )
 
 
 # ---------------------------------------------------------------------
-# MANUAL -- raise-on-refusal flow.  No force_retry plumbing: the flip
-# step writes ``render_groups.status = 'pending'`` BEFORE the dispatch
-# row is enqueued, so the daemon's terminal-group guard (drops anything
-# not in ``pending``/``running``) lets the row through naturally.  If
-# the new dispatch + any downstream auto-retries all fail, the
-# FAILURE_PIPELINE's reconcile path flips the group back to ``failed``
-# in the normal flow.
+# MANUAL -- raise-on-refusal flow.  Same parking shape as auto for the
+# same race reason.  ``no_eligible_target`` is no longer a synchronous
+# refusal: if no fleet has capacity, the parked row stays parked across
+# daemon ticks until something becomes available.  The endpoint returns
+# ``queued_for_retry`` immediately and the UI polls the group detail to
+# observe the chunk getting dispatched.
 #
 # Step trace:
 #   (not_found checks happen in lifecycle wrapper before pipeline)
@@ -88,16 +86,14 @@ AUTO_RETRY_PIPELINE = (
 #   6. manual_retry_set_attempt_zero()        -> ctx.next_attempt = 0
 #   7. load_dispatch_context()                -> file_size_bytes, engine, tier
 #   8. build_retry_chunk_request()            -> ctx.chunk_request
-#   9. manual_retry_allocate_retry_task()     -> ctx.retry_task;
-#                                                raise no_eligible_target
-#  10. log_manual_retry()                     -> "Manual retry for chunk ..."
-#  11. manual_retry_flip_group_pending()      -> if grp terminal:
+#   9. manual_retry_flip_group_pending()      -> if grp terminal:
 #                                                  group_repo.update_status('pending')
-#                                                (must run BEFORE enqueue so
+#                                                (must run BEFORE park so
 #                                                 the daemon's read sees the
 #                                                 active status)
-#  12. enqueue_retry_dispatch()               -> dispatch_queue row written
-#  13. manual_retry_build_result()            -> ctx.result payload
+#  10. park_retry_to_pending()                -> pending_allocation_queue row
+#  11. log_manual_retry()                     -> "Manual retry parked ..."
+#  12. manual_retry_build_result()            -> ctx.result payload
 # ---------------------------------------------------------------------
 
 MANUAL_RETRY_PIPELINE = (
@@ -110,10 +106,9 @@ MANUAL_RETRY_PIPELINE = (
     .manual_retry_set_attempt_zero()
     .load_dispatch_context()
     .build_retry_chunk_request()
-    .manual_retry_allocate_retry_task()
-    .log_manual_retry()
     .manual_retry_flip_group_pending()
-    .enqueue_retry_dispatch()
+    .park_retry_to_pending()
+    .log_manual_retry()
     .manual_retry_build_result()
     .build()
 )

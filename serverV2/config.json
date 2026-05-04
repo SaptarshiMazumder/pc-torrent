@@ -22,7 +22,8 @@
     "max_retries": 1
   },
   "community": {
-    "price_per_hour": 0.01
+    "price_per_hour": 0.01,
+    "dispatch_claim_timeout_sec": 120
   },
   "monitor": {
     "in_progress_stale_sec": 1800

@@ -468,6 +468,12 @@ class AppConfig:
     # machines that have been silent long enough to be considered
     # genuinely crashed.
     community_machine_demote_seconds: int = 90
+    # CommunityMonitor's "agent never claimed the pending dispatch" detector.
+    # Mirrors Modal's ``in_queue_timeout_sec`` and Vast's ``startup_timeout_sec``:
+    # if a community ``jobs`` row sits in status='pending' for longer than this
+    # without the agent claiming it, fail the chunk so the retry pipeline can
+    # take over.  Threshold is 4x the agent's max polling interval.
+    community_dispatch_claim_timeout_sec: int = 120
     # Per-hour cost stamped on every CommunityMachine.  Read by cost-aware
     # allocators (Phase 5+).  Loaded from config.json's ``community.price_per_hour``.
     community_price_per_hour: float = 1.0
@@ -481,11 +487,15 @@ class AppConfig:
     def from_env(cls) -> AppConfig:
         vast = VastConfig.from_env()
         modal = ModalConfig.from_env()
+        community_block = _require_block("community")
         return cls(
             vast=vast,
             modal=modal,
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             community_price_per_hour=_load_community_price_per_hour(),
+            community_dispatch_claim_timeout_sec=_require_field_int(
+                community_block, "community", "dispatch_claim_timeout_sec",
+            ),
             orphan_secret=_env_str("ORPHAN_SECRET", ""),
             stall=StallDetectionConfig.from_env(),
         )

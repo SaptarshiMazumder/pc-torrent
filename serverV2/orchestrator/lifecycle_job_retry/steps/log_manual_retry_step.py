@@ -1,11 +1,7 @@
-"""LogManualRetryStep — manual-retry pipeline.
+"""LogManualRetryStep -- manual-retry pipeline.
 
-Emits the legacy "Manual retry for chunk X (group Y): frames A-B on TARGET
-(attempt reset to 0, latest failed attempt was N)" info log.  The
-"latest failed attempt was N" detail differentiates this from the
-auto-retry log line.
-
-# SOURCE: lifecycle.py:421-431 (legacy)
+Logs that a user-triggered retry was parked.  No target is chosen
+synchronously anymore -- the daemon picks one on its next tick.
 """
 
 from __future__ import annotations
@@ -22,21 +18,15 @@ log = logging.getLogger(__name__)
 class LogManualRetryStep:
 
     def run(self, ctx: RetryContext) -> None:
-        if ctx.retry_task is None or ctx.rj is None or ctx.chunk_request is None:
+        if not ctx.parked or ctx.rj is None or ctx.chunk_request is None:
             return
-        retry_task = ctx.retry_task
-        target_label = (
-            f"{retry_task.fleet}/{retry_task.gpu_type}"
-            if retry_task.gpu_type
-            else f"{retry_task.fleet}/{retry_task.machine_id}"
-        )
         log.info(
-            "Manual retry for chunk %d (group %s): frames %d-%d on %s "
-            "(attempt reset to 0, latest failed attempt was %d)",
+            "Manual retry parked for chunk %d (group %s): frames %d-%d "
+            "(attempt reset to 0, latest failed attempt was %d) -- "
+            "daemon will plan a target on next tick",
             ctx.chunk_index,
             ctx.group_id,
             ctx.chunk_request.frame_start,
             ctx.chunk_request.frame_end,
-            target_label,
             ctx.rj.attempt or 0,
         )

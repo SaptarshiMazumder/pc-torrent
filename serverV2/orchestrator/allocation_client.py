@@ -1,10 +1,10 @@
-"""AllocationClient — orchestrator-side gateway to the allocation module.
+"""AllocationClient -- orchestrator-side gateway to the allocation module.
 
 The ONLY thing in the entire codebase allowed to import
 ``AllocationFacade``.  Inside orchestrator, callers reach this client
 to (a) dry-run a plan for the cost preview / pre-render estimate,
-(b) submit a render group for dispatch (initial), (c) submit a single
-retry attempt, or (d) drain queues on cancel.
+(b) submit a render group for dispatch (initial), (c) park a retry
+attempt, or (d) drain queues on cancel.
 
 Responsibilities:
   * Fetch the cached fleet-availability snapshot via
@@ -29,10 +29,8 @@ from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chu
 from serverV2.core.models import (
     AvailableResources,
     DispatchContext,
-    DispatchResult,
     PlannedTask,
     SubmitInitialResult,
-    SubmitRetryResult,
 )
 from serverV2.fleets.fleet_availability.fleet_availability_snapshot import (
     FleetAvailabilitySnapshot,
@@ -86,20 +84,6 @@ class AllocationClient:
             tier_budget_usd=tier_budget_usd,
         )
 
-    def plan_retry(
-        self,
-        *,
-        tier: str | None,
-        chunk_request: AllocationChunkRequest,
-    ) -> PlannedTask | None:
-        snapshot = self._snapshot_cache.get_or_build()
-        resources = self._adapt_resources(snapshot, machine_ids=None)
-        return self._facade.plan_retry(
-            tier=tier,
-            chunk_request=chunk_request,
-            resources=resources,
-        )
-
     # ------------------------------------------------------------------
     # submit (plan + (enqueue|park) atomically)
     # ------------------------------------------------------------------
@@ -136,42 +120,22 @@ class AllocationClient:
             dispatch_context=dispatch_context,
         )
 
-    def enqueue(
-        self,
-        group_id: str,
-        tasks: list[PlannedTask],
-        context: DispatchContext,
-    ) -> list[DispatchResult]:
-        """Enqueue an already-planned task list (no allocation step).
-        Used by the manual-retry pipeline only; initial submit + auto
-        retry use ``submit_*`` instead."""
-        return self._facade.enqueue(group_id, tasks, context)
-
-    def submit_retry(
+    def park_retry(
         self,
         *,
         chunk_request: AllocationChunkRequest,
         tier: str | None,
         dispatch_context: DispatchContext,
-    ) -> SubmitRetryResult:
-        snapshot = self._snapshot_cache.get_or_build()
-        resources = self._adapt_resources(snapshot, machine_ids=None)
-        log.info(
-            "[RETRY_DEBUG] AllocationClient.submit_retry: tier=%s "
-            "snapshot(vast=%d, modal=%d, community=%d, in_flight=%s) "
-            "adapted_resources(community=%d, serverless_caps=%d)",
-            tier,
-            len(snapshot.vast_available),
-            len(snapshot.modal_available),
-            len(snapshot.community_available),
-            dict(snapshot.serverless_in_flight),
-            len(resources.community_machines),
-            len(resources.serverless_capabilities),
-        )
-        return self._facade.submit_retry(
+    ) -> None:
+        """Park a retry onto ``pending_allocation_queue``.  No snapshot
+        read here -- planning happens later inside the daemon's tick,
+        against the tick-local mutable snapshot.  Used by both auto-
+        retry (failure callback threads) and manual-retry (HTTP
+        request thread); neither needs to read the cache.
+        """
+        self._facade.park_retry(
             chunk_request=chunk_request,
             tier=tier,
-            resources=resources,
             dispatch_context=dispatch_context,
         )
 

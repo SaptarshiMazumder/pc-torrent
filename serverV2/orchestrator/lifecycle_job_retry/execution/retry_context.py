@@ -98,7 +98,14 @@ class RetryContext:
     # State written by allocation/dispatch steps
     # ------------------------------------------------------------------
     chunk_request: AllocationChunkRequest | None = None
+    # ``retry_task`` is now always None -- the retry pipeline parks the
+    # request on pending_allocation_queue rather than synchronously
+    # picking a target.  The daemon plans it on its next tick.  Field
+    # kept for backwards-compat with any external reader; remove later.
     retry_task: PlannedTask | None = None
+    # Set by ``ParkRetryToPendingStep`` -- means the chunk request was
+    # parked for re-evaluation.  Downstream log + result steps read it.
+    parked: bool = False
     dispatched: bool = False
 
     # ------------------------------------------------------------------

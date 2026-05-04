@@ -1,10 +1,10 @@
-"""AllocationDispatchQueueService — public service.
+"""AllocationDispatchQueueService -- public service.
 
 Three responsibilities, all thin delegations:
 
   * ``enqueue``                       -> AllocationEnqueueHandler
   * ``dispatch_pending_for_fleet``    -> AllocationDispatchHandler
-  * pending-queue surface             -> AllocationPendingReEvaluator + the
+  * pending-queue surface             -> AllocationPendingPlanner + the
                                          pending repository directly
 
 The class composes the read-side and write-side handlers (and their
@@ -13,7 +13,7 @@ can hold a single reference to.
 
 Cap math comes from the injected ``active_count_by_fleet`` callable
 (bound at boot to ``JobRepository.count_active_by_fleet``).  No DB
-access from this class itself — all I/O is in the handlers / repos.
+access from this class itself -- all I/O is in the handlers / repos.
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_e
 from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_enqueue_handler import (
     AllocationEnqueueHandler,
 )
-from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_pending_re_evaluator import (
-    AllocationPendingReEvaluator,
+from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_pending_planner import (
+    AllocationPendingPlanner,
 )
 from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_queue_item_codec import (
     AllocationQueueItemCodec,
@@ -94,12 +94,12 @@ class AllocationDispatchQueueService:
             get_group_status=get_group_status,
             codec=codec,
             engine_resolver=engine_resolver,
-            snapshot_mutator=snapshot_mutator,
         )
-        self._pending_re_evaluator = AllocationPendingReEvaluator(
+        self._pending_planner = AllocationPendingPlanner(
             pending_repo=pending_repo,
             planning_service=planning_service,
             enqueue_handler=self._enqueue_handler,
+            snapshot_mutator=snapshot_mutator,
         )
 
     # ------------------------------------------------------------------
@@ -117,12 +117,8 @@ class AllocationDispatchQueueService:
     def has_any_for_fleets(self, fleets: list[str]) -> bool:
         return self._dispatch_handler.has_any_for_fleets(fleets)
 
-    def dispatch_pending_for_fleet(
-        self,
-        fleet: str,
-        snapshot: MutableFleetAvailabilitySnapshot | None = None,
-    ) -> int:
-        return self._dispatch_handler.dispatch_pending_for_fleet(fleet, snapshot)
+    def dispatch_pending_for_fleet(self, fleet: str) -> int:
+        return self._dispatch_handler.dispatch_pending_for_fleet(fleet)
 
     # ------------------------------------------------------------------
     # pending_allocation_queue surface
@@ -132,12 +128,12 @@ class AllocationDispatchQueueService:
         self._pending_repo.enqueue(item)
 
     def has_any_pending(self) -> bool:
-        return self._pending_re_evaluator.has_any()
+        return self._pending_planner.has_any()
 
-    def re_evaluate_pending(
+    def plan_pending(
         self, snapshot: MutableFleetAvailabilitySnapshot,
     ) -> int:
-        return self._pending_re_evaluator.re_evaluate(snapshot)
+        return self._pending_planner.plan(snapshot)
 
     # ------------------------------------------------------------------
     # group-scoped delete (cancel path)

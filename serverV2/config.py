@@ -39,7 +39,6 @@ class VastConfig:
     docker_image: str
     provisioning_enabled: bool
     disk_gb: float
-    max_price_per_gpu: float
     secure_cloud_only: bool
     poll_interval_sec: float
     startup_timeout_sec: float
@@ -80,7 +79,6 @@ class VastConfig:
             docker_image_eevee=_env_str("VAST_DOCKER_IMAGE_EEVEE") or None,
             provisioning_enabled=_require_field_bool(block, "vast", "provisioning_enabled"),
             disk_gb=_require_field_float(block, "vast", "disk_gb"),
-            max_price_per_gpu=_require_field_float(block, "vast", "max_price_per_gpu"),
             secure_cloud_only=_require_field_bool(block, "vast", "secure_cloud_only"),
             poll_interval_sec=_require_field_float(block, "vast", "poll_interval_sec"),
             startup_timeout_sec=_require_field_float(block, "vast", "startup_timeout_sec"),

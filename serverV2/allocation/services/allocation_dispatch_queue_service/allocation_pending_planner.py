@@ -1,13 +1,21 @@
-"""AllocationPendingReEvaluator — per-tick pass over the pending queue.
+"""AllocationPendingPlanner -- per-tick pass over the pending queue.
 
-Pure orchestration.  Pulls each pending row, hands it to the existing
-``AllocationPlanningService`` (the same strategies fresh allocations
-use), and on success writes the resulting tasks to ``dispatch_queue``
-+ deletes the pending row.  On still-no-target, stamps
-``last_attempted_at`` so we can see whether re-eval is making
-progress.
+Pure orchestration.  Pulls each pending row, hands it to
+``AllocationPlanningService`` (the strategies), and on success writes
+the resulting tasks to ``dispatch_queue``, mutates the in-tick
+mutable snapshot to reflect committed resources, and deletes the
+pending row.  On still-no-target, stamps ``last_attempted_at`` so we
+can see whether the planner is making progress.
 
-No allocation logic lives here — this is a loop, not a planner.
+Race-free intra-tick: every promotion mutates the shared mutable
+snapshot via ``AllocationSnapshotMutator.mark_planned_dispatched``
+BEFORE the next row in the loop is planned, so two pending rows can
+never pick the same target.
+
+This is the FIRST and ONLY place these rows are planned.  All
+allocation entry points (initial submit, auto-retry, manual-retry)
+park to ``pending_allocation_queue`` first; the daemon picks them up
+here.  Nothing was "previously planned" -- so no "re" anywhere.
 """
 
 from __future__ import annotations
@@ -26,6 +34,9 @@ from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chu
 from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_enqueue_handler import (
     AllocationEnqueueHandler,
 )
+from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_snapshot_mutator import (
+    AllocationSnapshotMutator,
+)
 from serverV2.allocation.services.allocation_planning_service import (
     AllocationPlanningService,
 )
@@ -41,7 +52,7 @@ from serverV2.fleets.fleet_availability.mutable_fleet_availability_snapshot impo
 log = logging.getLogger(__name__)
 
 
-class AllocationPendingReEvaluator:
+class AllocationPendingPlanner:
 
     def __init__(
         self,
@@ -49,15 +60,17 @@ class AllocationPendingReEvaluator:
         pending_repo: AllocationPendingQueueRepository,
         planning_service: AllocationPlanningService,
         enqueue_handler: AllocationEnqueueHandler,
+        snapshot_mutator: AllocationSnapshotMutator,
     ) -> None:
         self._pending_repo = pending_repo
         self._planning = planning_service
         self._enqueue = enqueue_handler
+        self._snapshot_mutator = snapshot_mutator
 
     def has_any(self) -> bool:
         return self._pending_repo.has_any()
 
-    def re_evaluate(self, snapshot: MutableFleetAvailabilitySnapshot) -> int:
+    def plan(self, snapshot: MutableFleetAvailabilitySnapshot) -> int:
         """One pass over the pending queue.  Returns the number of rows
         promoted to ``dispatch_queue``.
         """
@@ -71,12 +84,12 @@ class AllocationPendingReEvaluator:
                     self._pending_repo.update_last_attempted_at(row.id)  # type: ignore[arg-type]
             except Exception as exc:
                 log.error(
-                    "AllocationPendingReEvaluator: row %s (type=%s, group=%s) raised: %r",
+                    "AllocationPendingPlanner: row %s (type=%s, group=%s) raised: %r",
                     row.id, row.type, row.group_id, exc,
                 )
         if moved:
             log.info(
-                "AllocationPendingReEvaluator: promoted %d row(s) from pending to dispatch_queue",
+                "AllocationPendingPlanner: promoted %d row(s) from pending to dispatch_queue",
                 moved,
             )
         return moved
@@ -96,7 +109,7 @@ class AllocationPendingReEvaluator:
             tasks = self._plan_for_initial(row, snapshot)
         else:
             log.warning(
-                "AllocationPendingReEvaluator: unknown row type=%r (id=%s) — skipping",
+                "AllocationPendingPlanner: unknown row type=%r (id=%s) -- skipping",
                 row.type, row.id,
             )
             return False
@@ -113,10 +126,13 @@ class AllocationPendingReEvaluator:
             priority=row.priority,
             engine=row.engine,
         )
-        # force_retry stays False here.  A pending row that came from a
-        # manual retry never lands here in the first place — manual
-        # retry raises rather than escalating to pending.
         self._enqueue.enqueue(row.group_id, tasks, ctx)
+        # Commit each planned target into the in-tick mutable snapshot
+        # immediately.  This is what prevents the dogpile: the next row
+        # in the planner's loop sees the resource as taken and the
+        # strategy picks something else.
+        for task in tasks:
+            self._snapshot_mutator.mark_planned_dispatched(snapshot, task)
         self._pending_repo.delete(row.id)  # type: ignore[arg-type]
         return True
 
@@ -177,9 +193,10 @@ def _adapt_resources(
     *,
     machine_ids: list[str] | None,
 ) -> AvailableResources:
-    """Mirror of ``AllocationClient._adapt_resources`` — the strategies
-    always consume an ``AvailableResources``, so the re-evaluator
-    constructs one from the in-tick mutable snapshot it received.
+    """Construct ``AvailableResources`` from the in-tick mutable
+    snapshot for the strategies to consume.  Mirrors the shape of
+    ``AllocationClient._adapt_resources`` (cost-preview path) but
+    reads from the daemon's mutable view rather than the cache.
     """
     community = list(snapshot.community_available)
     if machine_ids:

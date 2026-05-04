@@ -135,18 +135,19 @@ class AllocationDispatchQueueDaemon:
         mutable = snapshot.to_mutable()
         for fleet in self._enabled_fleets:
             try:
-                self._dispatch_queue.dispatch_pending_for_fleet(fleet, mutable)
+                self._dispatch_queue.dispatch_pending_for_fleet(fleet)
             except Exception as exc:
                 log.warning(
                     "dispatch_pending_for_fleet(%s) failed in tick: %s",
                     fleet, exc,
                 )
-        # After the per-fleet dispatch loop, give the pending queue a
-        # chance to promote rows whose strategy now finds an eligible
-        # target.  Successful promotions land in dispatch_queue and are
-        # picked up on the next tick.
+        # After the per-fleet dispatch loop, plan the pending queue's
+        # rows.  The planner mutates ``mutable`` for every committed
+        # task before the next row is planned, so two pending rows
+        # never race on the same target.  Promotions land in
+        # dispatch_queue and are popped on the next tick.
         try:
-            self._dispatch_queue.re_evaluate_pending(mutable)
+            self._dispatch_queue.plan_pending(mutable)
         except Exception as exc:
-            log.warning("re_evaluate_pending failed in tick: %s", exc)
+            log.warning("plan_pending failed in tick: %s", exc)
         self._snapshot_cache.persist(mutable.to_frozen())

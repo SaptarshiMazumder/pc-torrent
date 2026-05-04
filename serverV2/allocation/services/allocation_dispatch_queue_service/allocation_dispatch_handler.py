@@ -1,4 +1,4 @@
-"""AllocationDispatchHandler — read side of the dispatch queue.
+"""AllocationDispatchHandler -- read side of the dispatch queue.
 
 One responsibility: the cap-gated pop+dispatch loop the daemon calls
 once per fleet per tick.  Per-iteration work:
@@ -9,12 +9,14 @@ once per fleet per tick.  Per-iteration work:
   4. Reuse the pre-generated job_id, claim the in-progress ledger,
      resolve the blend URL, build the ``DispatchContext``, fire the
      fleet strategy.
-  5. On success, mutate the in-tick snapshot via
-     ``AllocationSnapshotMutator`` so the daemon's end-of-tick cache
-     write reflects post-dispatch state.
+
+This handler does NOT mutate the snapshot.  Resource commitment
+already happened upstream in ``AllocationPendingPlanner._try_promote``
+when the row was first written to dispatch_queue.  Mutating again
+here would double-count.
 
 Strict fleet-name lookup: an unknown fleet here is a wiring bug, not
-a runtime condition — raises rather than silently no-op'ing.
+a runtime condition -- raises rather than silently no-op'ing.
 """
 
 from __future__ import annotations
@@ -37,13 +39,7 @@ from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_e
 from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_queue_item_codec import (
     AllocationQueueItemCodec,
 )
-from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_snapshot_mutator import (
-    AllocationSnapshotMutator,
-)
 from serverV2.core.models import DispatchContext, DispatchResult
-from serverV2.fleets.fleet_availability.mutable_fleet_availability_snapshot import (
-    MutableFleetAvailabilitySnapshot,
-)
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 
 log = logging.getLogger(__name__)
@@ -63,7 +59,6 @@ class AllocationDispatchHandler:
         get_group_status: Callable[[str], str | None],
         codec: AllocationQueueItemCodec,
         engine_resolver: AllocationEngineResolver,
-        snapshot_mutator: AllocationSnapshotMutator,
     ) -> None:
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
@@ -74,7 +69,6 @@ class AllocationDispatchHandler:
         self._get_group_status = get_group_status
         self._codec = codec
         self._engine_resolver = engine_resolver
-        self._snapshot_mutator = snapshot_mutator
 
     def has_any_for_fleets(self, fleets: list[str]) -> bool:
         """Cheap existence check used by the daemon's pre-tick guard.
@@ -84,11 +78,7 @@ class AllocationDispatchHandler:
         """
         return self._queue_repo.has_any_for_fleets(fleets)
 
-    def dispatch_pending_for_fleet(
-        self,
-        fleet: str,
-        snapshot: MutableFleetAvailabilitySnapshot | None = None,
-    ) -> int:
+    def dispatch_pending_for_fleet(self, fleet: str) -> int:
         if fleet not in self._fleet_caps:
             raise KeyError(
                 f"AllocationDispatchHandler: no cap configured for fleet={fleet!r}. "
@@ -148,8 +138,6 @@ class AllocationDispatchHandler:
                     "[RETRY_DEBUG] dispatch_pending_for_fleet(%s): dispatched job_id=%s status=%s",
                     fleet, item.job_id, result.status,
                 )
-                if snapshot is not None:
-                    self._snapshot_mutator.mark_dispatched(snapshot, item)
             else:
                 log.warning(
                     "[RETRY_DEBUG] dispatch_pending_for_fleet(%s): _dispatch_one returned None "

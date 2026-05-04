@@ -263,52 +263,33 @@ class RenderGroupService:
 
         machine_ids = self._validated_machine_ids(getattr(payload, "machine_ids", None))
 
-        planned = self._orchestrator.plan(
+        # Worker contract: render_overrides_json passed into dispatch is
+        # the user-overrides slice of the resolved scene (timeline,
+        # output, render.engine, camera_*, etc.).  Heaviness stays
+        # server-side; workers don't need it.
+        overrides_json = json.dumps(normalized_overrides)
+
+        # One call, one result.  Allocation owns the plan vs park
+        # decision internally; we don't see the dichotomy.  ``parked``
+        # on the result tells the UI "no fleet capacity yet, the daemon
+        # will pick it up" — both lists are empty in that case.
+        submit = self._orchestrator.submit_initial(
+            group_id=group_id,
             frame_start=plan.frame_start,
             frame_end=plan.frame_end,
             frame_step=plan.frame_step,
             total_frames=plan.total_frames,
             machine_ids=machine_ids,
             heaviness=heaviness,
-            tier=resolved_tier,
             engine=engine,
+            tier=resolved_tier,
+            input_filename=group["input_filename"],
+            render_overrides_json=overrides_json,
         )
-
-        # Worker contract: ``DispatchContext.render_overrides_json`` is
-        # the user-overrides slice of the resolved scene (timeline,
-        # output, render.engine, camera_*, etc.).  Heaviness stays
-        # server-side; workers don't need it.
-        overrides_json = json.dumps(normalized_overrides)
-
-        if not planned:
-            # No fleet has an eligible target right now — park the group
-            # on pending_allocation_queue.  The dispatch daemon retries
-            # the same strategies every tick until capacity opens up.
-            self._orchestrator.escalate_initial_to_pending(
-                group_id=group_id,
-                frame_start=plan.frame_start,
-                frame_end=plan.frame_end,
-                frame_step=plan.frame_step,
-                total_frames=plan.total_frames,
-                machine_ids=machine_ids,
-                heaviness=heaviness,
-                engine=engine,
-                tier=resolved_tier,
-                input_filename=group["input_filename"],
-                render_overrides_json=overrides_json,
-            )
-            dispatch_results: list = []
-        else:
-            dispatch_results = self._orchestrator.execute(
-                group_id=group_id,
-                input_filename=group["input_filename"],
-                tasks=planned,
-                render_overrides_json=overrides_json,
-            )
 
         tasks = [
             build_dispatch_task_entry(pt, dr, scheduling)
-            for pt, dr in zip(planned, dispatch_results)
+            for pt, dr in zip(submit.planned, submit.dispatch_results)
         ]
 
         uid = group.get("user_id")

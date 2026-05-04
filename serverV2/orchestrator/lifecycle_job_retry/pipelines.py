@@ -32,9 +32,14 @@ from serverV2.orchestrator.lifecycle_job_retry.retry_pipeline_builder import (
 
 
 # ---------------------------------------------------------------------
-# AUTO -- preserves RetryDispatcher.attempt behavior exactly.
+# AUTO -- collapses allocate + enqueue into a single allocation-side
+# ``submit_retry`` call.  Allocation owns the plan-vs-park decision
+# internally; on park, ``ctx.aborted`` is set and the rest of the
+# pipeline short-circuits.  Group-status aggregator treats the parked
+# row as still-active (has_pending_allocation=True) so the group
+# stays "running" while the daemon re-evaluates each tick.
 #
-# Step trace (legacy retry_dispatcher.py:80-167):
+# Step trace:
 #   1. load_job_and_group()           -> ctx.rj, group_id, chunk_index, grp
 #   2. abort_if_group_terminal()      -> if grp terminal: log + abort
 #   3. compute_remaining_frames()     -> ctx.remaining
@@ -42,9 +47,10 @@ from serverV2.orchestrator.lifecycle_job_retry.retry_pipeline_builder import (
 #   5. enforce_max_retries()          -> ctx.next_attempt; abort if > cap
 #   6. load_dispatch_context()        -> ctx.file_size_bytes, engine, tier
 #   7. build_retry_chunk_request()    -> ctx.chunk_request (with exclusions)
-#   8. allocate_retry_task()          -> ctx.retry_task; log+abort if None
+#   8. submit_retry()                 -> plan + (enqueue|park).  Sets
+#                                        ctx.retry_task, ctx.dispatched on
+#                                        success; ctx.aborted on park.
 #   9. log_auto_retry()               -> "Job X: requeued frames A-B ..."
-#  10. enqueue_retry_dispatch()       -> coordinator.enqueue_and_flush
 # ---------------------------------------------------------------------
 
 AUTO_RETRY_PIPELINE = (
@@ -56,17 +62,22 @@ AUTO_RETRY_PIPELINE = (
     .enforce_max_retries()
     .load_dispatch_context()
     .build_retry_chunk_request()
-    .allocate_retry_task()
+    .submit_retry()
     .log_auto_retry()
-    .enqueue_retry_dispatch()
     .build()
 )
 
 
 # ---------------------------------------------------------------------
-# MANUAL -- preserves RenderLifecycle.retry_chunk_manually exactly.
+# MANUAL -- raise-on-refusal flow.  No force_retry plumbing: the flip
+# step writes ``render_groups.status = 'pending'`` BEFORE the dispatch
+# row is enqueued, so the daemon's terminal-group guard (drops anything
+# not in ``pending``/``running``) lets the row through naturally.  If
+# the new dispatch + any downstream auto-retries all fail, the
+# FAILURE_PIPELINE's reconcile path flips the group back to ``failed``
+# in the normal flow.
 #
-# Step trace (legacy lifecycle.py:351-459):
+# Step trace:
 #   (not_found checks happen in lifecycle wrapper before pipeline)
 #   1. manual_retry_load_group()              -> grp; raise group_cancelled
 #   2. manual_retry_raise_if_active_sibling() -> raise active_sibling_exists
@@ -80,12 +91,13 @@ AUTO_RETRY_PIPELINE = (
 #   9. manual_retry_allocate_retry_task()     -> ctx.retry_task;
 #                                                raise no_eligible_target
 #  10. log_manual_retry()                     -> "Manual retry for chunk ..."
-#  11. mark_force_retry()                     -> ctx.force_retry = True
-#                                                (bypasses terminal-group
-#                                                guard for "failed" groups)
-#  12. enqueue_retry_dispatch()               -> coordinator.enqueue_and_flush
-#  13. manual_retry_reconcile_group()         -> reconcile_group_status
-#  14. manual_retry_build_result()            -> ctx.result payload
+#  11. manual_retry_flip_group_pending()      -> if grp terminal:
+#                                                  group_repo.update_status('pending')
+#                                                (must run BEFORE enqueue so
+#                                                 the daemon's read sees the
+#                                                 active status)
+#  12. enqueue_retry_dispatch()               -> dispatch_queue row written
+#  13. manual_retry_build_result()            -> ctx.result payload
 # ---------------------------------------------------------------------
 
 MANUAL_RETRY_PIPELINE = (
@@ -100,9 +112,8 @@ MANUAL_RETRY_PIPELINE = (
     .build_retry_chunk_request()
     .manual_retry_allocate_retry_task()
     .log_manual_retry()
-    .mark_force_retry()
+    .manual_retry_flip_group_pending()
     .enqueue_retry_dispatch()
-    .manual_retry_reconcile_group()
     .manual_retry_build_result()
     .build()
 )

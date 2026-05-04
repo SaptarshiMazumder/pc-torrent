@@ -31,6 +31,7 @@ import logging
 from typing import Any
 
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
+from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.orchestrator.lifecycle_job_termination.steps import (
     CancelProviderStep,
     MarkTerminalStep,
@@ -40,9 +41,6 @@ from serverV2.orchestrator.lifecycle_job_termination.steps import (
 from serverV2.orchestrator.lifecycle_job_termination.execution.termination_context import (
     LifecycleDeps,
     TerminationContext,
-)
-from serverV2.allocation.allocation_dispatch_queue_repository import (
-    AllocationDispatchQueueRepository as DispatchQueueRepository,
 )
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
@@ -61,14 +59,14 @@ class RenderCanceler:
         *,
         group_repo: RenderGroupRepository,
         job_repo: JobRepository,
-        queue_repo: DispatchQueueRepository,
+        allocation_client: AllocationClient,
         in_progress_repo: InProgressChunkRepository,
         deps: LifecycleDeps,
         modal_active_jobs_hooks: ModalActiveJobsHooks,
     ) -> None:
         self._group_repo = group_repo
         self._job_repo = job_repo
-        self._queue_repo = queue_repo
+        self._allocation = allocation_client
         self._in_progress = in_progress_repo
         self._deps = deps
         self._modal_active_jobs_hooks = modal_active_jobs_hooks
@@ -120,11 +118,13 @@ class RenderCanceler:
         for ctx in contexts:
             self._stop_monitor_step.run(ctx)
 
-        # Pass 4 -- drain queue + release every chunk slot for the
-        # group.  Group-scoped operations; no per-job iteration.
-        drained = self._queue_repo.drain(group_id)
+        # Pass 4 -- drain both queues + release every chunk slot for
+        # the group.  Group-scoped operations; no per-job iteration.
+        # Allocation-side facade owns the deletes; canceler stays out
+        # of the queue repos.
+        drained = self._allocation.drain_for_group(group_id)
         if drained:
-            log.info("Group %s: drained %d items from dispatch queue", group_id, drained)
+            log.info("Group %s: drained %d allocation row(s) (dispatch + pending)", group_id, drained)
         self._in_progress.release_all(group_id)
 
         # Pass 5 -- provider-side cancellation (slowest; may RPC out).

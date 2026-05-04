@@ -11,9 +11,6 @@ from serverV2.orchestrator.lifecycle_job_retry.steps.abort_if_group_terminal_ste
 from serverV2.orchestrator.lifecycle_job_retry.steps.abort_if_no_remaining_step import (
     AbortIfNoRemainingStep,
 )
-from serverV2.orchestrator.lifecycle_job_retry.steps.allocate_retry_task_step import (
-    AllocateRetryTaskStep,
-)
 from serverV2.orchestrator.lifecycle_job_retry.steps.build_retry_chunk_request_step import (
     BuildRetryChunkRequestStep,
 )
@@ -53,8 +50,8 @@ from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_raise_if_activ
 from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_raise_if_no_remaining_step import (
     ManualRetryRaiseIfNoRemainingStep,
 )
-from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_reconcile_group_step import (
-    ManualRetryReconcileGroupStep,
+from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_flip_group_pending_step import (
+    ManualRetryFlipGroupPendingStep,
 )
 from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_resolve_latest_sibling_step import (
     ManualRetryResolveLatestSiblingStep,
@@ -62,8 +59,8 @@ from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_resolve_latest
 from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_set_attempt_zero_step import (
     ManualRetrySetAttemptZeroStep,
 )
-from serverV2.orchestrator.lifecycle_job_retry.steps.mark_force_retry_step import (
-    MarkForceRetryStep,
+from serverV2.orchestrator.lifecycle_job_retry.steps.submit_retry_step import (
+    SubmitRetryStep,
 )
 from serverV2.orchestrator.lifecycle_job_retry.steps.retry_step import RetryStep
 
@@ -74,7 +71,7 @@ __all__ = [
     "AbortIfGroupTerminalStep",
     "AbortIfNoRemainingStep",
     "EnforceMaxRetriesStep",
-    "AllocateRetryTaskStep",
+    "SubmitRetryStep",
     "LogAutoRetryStep",
     # Manual-retry steps
     "ManualRetryLoadGroupStep",
@@ -83,7 +80,7 @@ __all__ = [
     "ManualRetryRaiseIfNoRemainingStep",
     "ManualRetrySetAttemptZeroStep",
     "ManualRetryAllocateRetryTaskStep",
-    "ManualRetryReconcileGroupStep",
+    "ManualRetryFlipGroupPendingStep",
     "ManualRetryBuildResultStep",
     "LogManualRetryStep",
     # Shared
@@ -91,5 +88,4 @@ __all__ = [
     "LoadDispatchContextStep",
     "BuildRetryChunkRequestStep",
     "EnqueueRetryDispatchStep",
-    "MarkForceRetryStep",
 ]

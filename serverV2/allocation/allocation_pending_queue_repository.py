@@ -109,6 +109,17 @@ class AllocationPendingQueueRepository:
             (row_id,),
         )
 
+    def delete_for_group(self, group_id: str) -> int:
+        """Drop every pending row for ``group_id``.  Called by the cancel
+        pipeline (via the dispatch queue service) so a cancelled group's
+        parked rows can't be promoted on the next daemon tick.  Returns
+        the count removed."""
+        rows = query_all(
+            "DELETE FROM pending_allocation_queue WHERE group_id = %s RETURNING id",
+            (group_id,),
+        )
+        return len(rows)
+
     # ------------------------------------------------------------------
     # reads
     # ------------------------------------------------------------------

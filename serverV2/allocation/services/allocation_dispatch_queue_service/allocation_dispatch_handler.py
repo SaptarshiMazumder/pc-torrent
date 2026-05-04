@@ -120,21 +120,13 @@ class AllocationDispatchHandler:
                 "group=%s chunk=%s attempt=%d",
                 fleet, item.job_id, item.group_id, item.chunk_index, item.attempt,
             )
-            # Terminal-group guard.  Policy:
-            #   * cancelled / done       → always drop (group is closed)
-            #   * group missing          → drop (orphan)
-            #   * failed + force_retry   → dispatch (manual retry override)
-            #   * failed + !force_retry  → drop (auto-retry can't resurrect a failed group)
-            #   * any other status       → dispatch (normal case)
+            # Terminal-group guard.  Drop the row if the parent group
+            # is in any non-active state.  Manual retry's responsibility
+            # is to flip the group OUT of terminal before enqueueing
+            # (``ManualRetryFlipGroupPendingStep``); auto-retry from a
+            # failed/cancelled/done group has nothing to retry into.
             if item.group_id:
                 grp_status = self._get_group_status(item.group_id)
-                if grp_status in ("cancelled", "done"):
-                    log.info(
-                        "dispatch_pending_for_fleet(%s): dropping queued chunk %s — "
-                        "group %s is %s (job_id=%s)",
-                        fleet, item.chunk_index, item.group_id, grp_status, item.job_id,
-                    )
-                    continue
                 if grp_status is None:
                     log.info(
                         "dispatch_pending_for_fleet(%s): dropping queued chunk %s — "
@@ -142,11 +134,11 @@ class AllocationDispatchHandler:
                         fleet, item.chunk_index, item.group_id, item.job_id,
                     )
                     continue
-                if grp_status == "failed" and not item.force_retry:
+                if grp_status not in ("pending", "running"):
                     log.info(
                         "dispatch_pending_for_fleet(%s): dropping queued chunk %s — "
-                        "group %s is failed and row is not force_retry (job_id=%s)",
-                        fleet, item.chunk_index, item.group_id, item.job_id,
+                        "group %s is %s (job_id=%s)",
+                        fleet, item.chunk_index, item.group_id, grp_status, item.job_id,
                     )
                     continue
             result = self._dispatch_one(item)

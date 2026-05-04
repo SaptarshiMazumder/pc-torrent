@@ -1,9 +1,10 @@
 """AllocationClient — orchestrator-side gateway to the allocation module.
 
 The ONLY thing in the entire codebase allowed to import
-``AllocationFacade``.  Inside orchestrator, only ``Lifecycle`` and
-``RetryPipelineRunner`` (and per-step retry/termination steps) reach
-this client.
+``AllocationFacade``.  Inside orchestrator, callers reach this client
+to (a) dry-run a plan for the cost preview / pre-render estimate,
+(b) submit a render group for dispatch (initial), (c) submit a single
+retry attempt, or (d) drain queues on cancel.
 
 Responsibilities:
   * Fetch the cached fleet-availability snapshot via
@@ -12,7 +13,6 @@ Responsibilities:
     expect (community + serverless merged + in-flight dict).
   * Apply orchestrator-side filters (machine_ids pinning) before
     delegating to the facade.
-  * Forward ``enqueue`` calls to the facade with no logic added.
 
 Stateless beyond the injected facade + cache; safe to share across
 requests.
@@ -23,11 +23,6 @@ from __future__ import annotations
 import logging
 
 from serverV2.allocation import AllocationFacade
-from serverV2.allocation.allocation_pending_queue_repository import (
-    AllocationPendingItem,
-    TYPE_INITIAL_GROUP,
-    TYPE_RETRY_CHUNK,
-)
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
@@ -36,6 +31,8 @@ from serverV2.core.models import (
     DispatchContext,
     DispatchResult,
     PlannedTask,
+    SubmitInitialResult,
+    SubmitRetryResult,
 )
 from serverV2.fleets.fleet_availability.fleet_availability_snapshot import (
     FleetAvailabilitySnapshot,
@@ -59,7 +56,7 @@ class AllocationClient:
         self._snapshot_cache = snapshot_cache
 
     # ------------------------------------------------------------------
-    # planning
+    # planning (pure compute — used by the pre-render cost preview)
     # ------------------------------------------------------------------
 
     def plan_initial(
@@ -97,8 +94,70 @@ class AllocationClient:
     ) -> PlannedTask | None:
         snapshot = self._snapshot_cache.get_or_build()
         resources = self._adapt_resources(snapshot, machine_ids=None)
+        return self._facade.plan_retry(
+            tier=tier,
+            chunk_request=chunk_request,
+            resources=resources,
+        )
+
+    # ------------------------------------------------------------------
+    # submit (plan + (enqueue|park) atomically)
+    # ------------------------------------------------------------------
+
+    def submit_initial(
+        self,
+        *,
+        group_id: str,
+        tier: str | None,
+        frame_start: int,
+        frame_end: int,
+        frame_step: int,
+        total_frames: int,
+        engine: str | None,
+        heaviness: dict | None,
+        tier_budget_usd: float | None,
+        machine_ids: list[str] | None,
+        dispatch_context: DispatchContext,
+    ) -> SubmitInitialResult:
+        snapshot = self._snapshot_cache.get_or_build()
+        resources = self._adapt_resources(snapshot, machine_ids=machine_ids)
+        return self._facade.submit_initial(
+            group_id=group_id,
+            tier=tier,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            total_frames=total_frames,
+            resources=resources,
+            engine=engine,
+            heaviness=heaviness,
+            tier_budget_usd=tier_budget_usd,
+            machine_ids=machine_ids,
+            dispatch_context=dispatch_context,
+        )
+
+    def enqueue(
+        self,
+        group_id: str,
+        tasks: list[PlannedTask],
+        context: DispatchContext,
+    ) -> list[DispatchResult]:
+        """Enqueue an already-planned task list (no allocation step).
+        Used by the manual-retry pipeline only; initial submit + auto
+        retry use ``submit_*`` instead."""
+        return self._facade.enqueue(group_id, tasks, context)
+
+    def submit_retry(
+        self,
+        *,
+        chunk_request: AllocationChunkRequest,
+        tier: str | None,
+        dispatch_context: DispatchContext,
+    ) -> SubmitRetryResult:
+        snapshot = self._snapshot_cache.get_or_build()
+        resources = self._adapt_resources(snapshot, machine_ids=None)
         log.info(
-            "[RETRY_DEBUG] AllocationClient.plan_retry: tier=%s "
+            "[RETRY_DEBUG] AllocationClient.submit_retry: tier=%s "
             "snapshot(vast=%d, modal=%d, community=%d, in_flight=%s) "
             "adapted_resources(community=%d, serverless_caps=%d)",
             tier,
@@ -109,105 +168,22 @@ class AllocationClient:
             len(resources.community_machines),
             len(resources.serverless_capabilities),
         )
-        result = self._facade.plan_retry(
-            tier=tier,
+        return self._facade.submit_retry(
             chunk_request=chunk_request,
+            tier=tier,
             resources=resources,
-        )
-        log.info(
-            "[RETRY_DEBUG] AllocationClient.plan_retry: facade returned %s",
-            "None (no eligible target)" if result is None
-            else f"PlannedTask(fleet={result.fleet}, gpu={result.gpu_type})",
-        )
-        return result
-
-    # ------------------------------------------------------------------
-    # enqueue
-    # ------------------------------------------------------------------
-
-    def enqueue(
-        self,
-        group_id: str,
-        tasks: list[PlannedTask],
-        context: DispatchContext,
-    ) -> list[DispatchResult]:
-        return self._facade.enqueue(group_id, tasks, context)
-
-    # ------------------------------------------------------------------
-    # pending queue — escalate "no eligible target" cases for the daemon
-    # to re-evaluate on each tick
-    # ------------------------------------------------------------------
-
-    def enqueue_pending_retry(
-        self,
-        chunk_request: AllocationChunkRequest,
-        *,
-        tier: str | None,
-        input_filename: str,
-        render_overrides_json: str,
-        max_retries: int,
-        priority: int,
-    ) -> None:
-        self._facade.enqueue_pending(
-            AllocationPendingItem(
-                type=TYPE_RETRY_CHUNK,
-                group_id=chunk_request.group_id,
-                chunk_index=chunk_request.chunk_index,
-                attempt=chunk_request.attempt,
-                frame_start=chunk_request.frame_start,
-                frame_end=chunk_request.frame_end,
-                frame_step=chunk_request.frame_step,
-                total_frames=chunk_request.total_frames,
-                file_size_bytes=chunk_request.file_size_bytes,
-                engine=chunk_request.engine,
-                tier=tier,
-                excluded_machine_ids=chunk_request.excluded_machine_ids,
-                excluded_serverless_capabilities=chunk_request.excluded_serverless_capabilities,
-                render_overrides_json=render_overrides_json,
-                max_retries=max_retries,
-                priority=priority,
-                input_filename=input_filename,
-            )
+            dispatch_context=dispatch_context,
         )
 
-    def enqueue_pending_initial(
-        self,
-        *,
-        group_id: str,
-        frame_start: int,
-        frame_end: int,
-        frame_step: int,
-        total_frames: int,
-        tier: str | None,
-        engine: str | None,
-        heaviness: dict | None,
-        machine_ids: list[str] | None,
-        input_filename: str,
-        render_overrides_json: str,
-        max_retries: int,
-        priority: int,
-    ) -> None:
-        file_size_bytes = (heaviness or {}).get("file_size_bytes")
-        self._facade.enqueue_pending(
-            AllocationPendingItem(
-                type=TYPE_INITIAL_GROUP,
-                group_id=group_id,
-                chunk_index=None,
-                attempt=None,
-                frame_start=frame_start,
-                frame_end=frame_end,
-                frame_step=frame_step,
-                total_frames=total_frames,
-                file_size_bytes=int(file_size_bytes) if file_size_bytes else None,
-                engine=engine,
-                tier=tier,
-                machine_ids=tuple(machine_ids or ()),
-                render_overrides_json=render_overrides_json,
-                max_retries=max_retries,
-                priority=priority,
-                input_filename=input_filename,
-            )
-        )
+    # ------------------------------------------------------------------
+    # group-scoped delete (cancel path)
+    # ------------------------------------------------------------------
+
+    def drain_for_group(self, group_id: str) -> int:
+        """Cancel pipeline calls this to wipe a cancelled group's stale
+        rows from both queues.  Routes through the facade — the
+        RenderCanceler does not import either queue repo directly."""
+        return self._facade.drain_for_group(group_id)
 
     # ------------------------------------------------------------------
     # internals

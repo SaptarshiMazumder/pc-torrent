@@ -37,11 +37,13 @@ from serverV2.core.models import (
     DispatchResult,
     PlannedTask,
     RenderJob,
+    SubmitInitialResult,
 )
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.orchestrator.anti_affinity import AntiAffinityFacade
+from serverV2.orchestrator.repositories import PendingAllocationRepository
 from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.lifecycle_job_retry import (
     MANUAL_RETRY_PIPELINE,
@@ -89,6 +91,7 @@ class RenderLifecycle:
         in_progress_repo: InProgressChunkRepository,
         telemetry_repo: TelemetryRepository,
         output_frame_repo: OutputFrameRepository,
+        pending_allocation_repo: PendingAllocationRepository,
         fleet_registry: FleetRegistry,
         retry_executor: RetryExecutor,
         anti_affinity: AntiAffinityFacade,
@@ -104,6 +107,7 @@ class RenderLifecycle:
         self._in_progress = in_progress_repo
         self._telemetry = telemetry_repo
         self._output_frames = output_frame_repo
+        self._pending_allocation_repo = pending_allocation_repo
         self._fleet = fleet_registry
         self._retry_executor = retry_executor
         self._anti_affinity = anti_affinity
@@ -196,7 +200,7 @@ class RenderLifecycle:
     # Story 1: user submitted a render
     # ------------------------------------------------------------------
 
-    def escalate_initial_to_pending(
+    def submit_initial(
         self,
         *,
         group_id: str,
@@ -210,46 +214,22 @@ class RenderLifecycle:
         tier: str | None,
         input_filename: str,
         render_overrides_json: str,
-    ) -> None:
-        """Strategy returned no eligible target on the first plan pass —
-        park the request on ``pending_allocation_queue`` instead of
-        failing the group.  The dispatch daemon re-evaluates pending
-        rows every tick using the same strategies; once one finds a
-        target the row is promoted to ``dispatch_queue``.
+    ) -> SubmitInitialResult:
+        """Submit a whole render group: plan + (enqueue OR park) atomic.
+
+        Tick-driven dispatch: the actual fleet-API call fires later on
+        the daemon's tick, but the caller gets back stable job_ids
+        (pre-generated at enqueue time) inside ``dispatch_results`` so
+        the response DTO can be built synchronously.
+
+        ``parked=True`` on the result means the strategy found no
+        eligible target right now and the request sits on
+        ``pending_allocation_queue`` for re-evaluation.  ``planned``
+        and ``dispatch_results`` are both empty lists in that case.
         """
-        self._allocation_client.enqueue_pending_initial(
-            group_id=group_id,
-            frame_start=frame_start,
-            frame_end=frame_end,
-            frame_step=frame_step,
-            total_frames=total_frames,
-            tier=tiers.normalize(tier),
-            engine=engine,
-            heaviness=heaviness,
-            machine_ids=machine_ids,
-            input_filename=input_filename,
-            render_overrides_json=render_overrides_json,
-            max_retries=MAX_RETRIES,
-            priority=0,
-        )
-
-    def start_render(
-        self,
-        *,
-        group_id: str,
-        input_filename: str,
-        tasks: list[PlannedTask],
-        render_overrides_json: str,
-    ) -> list[DispatchResult]:
-        # Safety net: don't dispatch into a group that went terminal between
-        # submission and execution (e.g. user cancelled immediately).
-        grp = self._group_repo.get_by_id(group_id)
-        if grp and grp.get("status") in ("cancelled", "done"):
-            log.info("Group %s is %s — refusing to dispatch", group_id, grp["status"])
-            return []
-
-        engine = self._engine_from_overrides_json(render_overrides_json)
-        context = DispatchContext(
+        resolved_tier = tiers.normalize(tier)
+        tier_budget = self._tier_budget(resolved_tier, heaviness, total_frames)
+        dispatch_context = DispatchContext(
             group_id=group_id,
             input_filename=input_filename,
             render_overrides_json=render_overrides_json,
@@ -258,13 +238,19 @@ class RenderLifecycle:
             priority=0,
             engine=engine,
         )
-        # Tick-driven dispatch: enqueue is a pure write.  The
-        # AllocationDispatchQueueDaemon picks queued items up on its
-        # next tick (~2s) and dispatches within fleet caps.  The
-        # returned DispatchResults carry pre-generated job_ids so the
-        # caller can persist stable IDs immediately even though
-        # dispatch fires asynchronously.
-        return self._allocation_client.enqueue(group_id, tasks, context)
+        return self._allocation_client.submit_initial(
+            group_id=group_id,
+            tier=resolved_tier,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            total_frames=total_frames,
+            engine=engine,
+            heaviness=heaviness,
+            tier_budget_usd=tier_budget,
+            machine_ids=machine_ids,
+            dispatch_context=dispatch_context,
+        )
 
     # ------------------------------------------------------------------
     # Story 2: a chunk failed (full flow — retry decision + DB mutations)
@@ -587,11 +573,18 @@ class RenderLifecycle:
             total_frames,
             self._output_frames.count_for_group(group_id),
         )
+        # Aggregator needs to know about parked work (no jobs row yet,
+        # but live and waiting on the daemon's re-eval) so the group
+        # doesn't flip to "failed" while a retry sits in
+        # pending_allocation_queue.  Read goes through the orchestrator-
+        # side repo; allocation owns writes.
+        has_pending_allocation = self._pending_allocation_repo.has_any_for_group(group_id)
         result = compute_group_status(
             current_group_status=group["status"],
             job_statuses=statuses,
             total_frames=total_frames,
             total_rendered=total_rendered,
+            has_pending_allocation=has_pending_allocation,
         )
         if not result.should_persist:
             return

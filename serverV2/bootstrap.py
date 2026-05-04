@@ -77,6 +77,7 @@ from serverV2.orchestrator.lifecycle_job_termination import (
     RenderCanceler,
 )
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
+from serverV2.orchestrator.repositories import PendingAllocationRepository
 from serverV2.allocation import AllocationDispatchQueueDaemon, AllocationFacade
 from serverV2.allocation.allocation_blend_url_resolver import (
     AllocationBlendUrlResolver,
@@ -471,11 +472,13 @@ def build(
     render_canceler = RenderCanceler(
         group_repo=group_repo,
         job_repo=job_repo,
-        queue_repo=queue_repo,
+        allocation_client=allocation_client,
         in_progress_repo=in_progress_repo,
         deps=lifecycle_deps,
         modal_active_jobs_hooks=modal_active_jobs_hooks,
     )
+
+    pending_allocation_repo = PendingAllocationRepository()
 
     lifecycle = RenderLifecycle(
         allocation_client=allocation_client,
@@ -486,6 +489,7 @@ def build(
         in_progress_repo=in_progress_repo,
         telemetry_repo=telemetry_repo,
         output_frame_repo=output_frame_repo,
+        pending_allocation_repo=pending_allocation_repo,
         fleet_registry=registry,
         retry_executor=retry_executor,
         anti_affinity=anti_affinity_facade,

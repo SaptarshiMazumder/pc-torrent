@@ -77,6 +77,7 @@ class AllocationDispatchQueueService:
         codec = AllocationQueueItemCodec()
         engine_resolver = AllocationEngineResolver()
         snapshot_mutator = AllocationSnapshotMutator()
+        self._queue_repo = queue_repo
         self._pending_repo = pending_repo
         self._enqueue_handler = AllocationEnqueueHandler(
             queue_repo=queue_repo,
@@ -137,3 +138,18 @@ class AllocationDispatchQueueService:
         self, snapshot: MutableFleetAvailabilitySnapshot,
     ) -> int:
         return self._pending_re_evaluator.re_evaluate(snapshot)
+
+    # ------------------------------------------------------------------
+    # group-scoped delete (cancel path)
+    # ------------------------------------------------------------------
+
+    def drain_for_group(self, group_id: str) -> int:
+        """Remove every queued row (dispatch_queue + pending_allocation_
+        queue) belonging to ``group_id``.  Called by the cancel pipeline
+        so a cancelled group's stale rows can't be promoted into
+        in-flight jobs by a later daemon tick.  Returns total rows
+        deleted across both tables.
+        """
+        dispatched = self._queue_repo.drain(group_id)
+        pending = self._pending_repo.delete_for_group(group_id)
+        return dispatched + pending

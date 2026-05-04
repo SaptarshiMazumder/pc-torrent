@@ -19,7 +19,6 @@ from __future__ import annotations
 from serverV2.orchestrator.lifecycle_job_retry.steps import (
     AbortIfGroupTerminalStep,
     AbortIfNoRemainingStep,
-    AllocateRetryTaskStep,
     BuildRetryChunkRequestStep,
     ComputeRemainingFramesStep,
     EnforceMaxRetriesStep,
@@ -30,14 +29,14 @@ from serverV2.orchestrator.lifecycle_job_retry.steps import (
     LogManualRetryStep,
     ManualRetryAllocateRetryTaskStep,
     ManualRetryBuildResultStep,
+    ManualRetryFlipGroupPendingStep,
     ManualRetryLoadGroupStep,
     ManualRetryRaiseIfActiveSiblingStep,
     ManualRetryRaiseIfNoRemainingStep,
-    ManualRetryReconcileGroupStep,
     ManualRetryResolveLatestSiblingStep,
     ManualRetrySetAttemptZeroStep,
-    MarkForceRetryStep,
     RetryStep,
+    SubmitRetryStep,
 )
 
 
@@ -66,8 +65,8 @@ class RetryPipelineBuilder:
         self._steps.append(EnforceMaxRetriesStep())
         return self
 
-    def allocate_retry_task(self) -> "RetryPipelineBuilder":
-        self._steps.append(AllocateRetryTaskStep())
+    def submit_retry(self) -> "RetryPipelineBuilder":
+        self._steps.append(SubmitRetryStep())
         return self
 
     def log_auto_retry(self) -> "RetryPipelineBuilder":
@@ -106,8 +105,8 @@ class RetryPipelineBuilder:
         self._steps.append(LogManualRetryStep())
         return self
 
-    def manual_retry_reconcile_group(self) -> "RetryPipelineBuilder":
-        self._steps.append(ManualRetryReconcileGroupStep())
+    def manual_retry_flip_group_pending(self) -> "RetryPipelineBuilder":
+        self._steps.append(ManualRetryFlipGroupPendingStep())
         return self
 
     def manual_retry_build_result(self) -> "RetryPipelineBuilder":
@@ -128,10 +127,6 @@ class RetryPipelineBuilder:
 
     def build_retry_chunk_request(self) -> "RetryPipelineBuilder":
         self._steps.append(BuildRetryChunkRequestStep())
-        return self
-
-    def mark_force_retry(self) -> "RetryPipelineBuilder":
-        self._steps.append(MarkForceRetryStep())
         return self
 
     def enqueue_retry_dispatch(self) -> "RetryPipelineBuilder":

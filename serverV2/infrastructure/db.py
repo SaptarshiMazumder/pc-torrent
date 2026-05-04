@@ -195,11 +195,6 @@ def init_db() -> None:
                     "max_retries INTEGER DEFAULT 0",
                     "priority INTEGER DEFAULT 0",
                     "job_id TEXT",
-                    # Manual retry sets this true so the dispatch daemon's
-                    # terminal-group guard lets the row through even when
-                    # the parent group is marked failed.  Auto-retry +
-                    # initial-dispatch leave it false.
-                    "force_retry BOOLEAN NOT NULL DEFAULT FALSE",
                 ):
                     cur.execute(
                         f"ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS {column_def}"
@@ -357,6 +352,16 @@ def init_db() -> None:
                 cur.execute(
                     "ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS "
                     "resolved_scene_json TEXT NOT NULL DEFAULT '{}'"
+                )
+
+                # force_retry on dispatch_queue was a workaround for the
+                # old "manual retry needs to bypass the terminal-group
+                # guard" problem.  Replaced by the much simpler:
+                # ``ManualRetryFlipGroupPendingStep`` flips the group out
+                # of terminal state before enqueueing, so the guard
+                # never has to be bypassed.
+                cur.execute(
+                    "ALTER TABLE dispatch_queue DROP COLUMN IF EXISTS force_retry"
                 )
 
                 # Phase 9 — dispatch_queue uniqueness.  Two concurrent

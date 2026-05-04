@@ -202,12 +202,6 @@ class DispatchContext:
     # strategies that need to vary infrastructure by engine — currently
     # VastFleetStrategy uses it to pick the eevee-vs-cycles docker image.
     engine: str | None = None
-    # True iff this dispatch was authorized by a manual retry — lets
-    # the daemon's dispatch handler bypass the terminal-group guard
-    # when the parent group is ``failed``.  Default False; only the
-    # manual-retry pipeline flips it via MarkForceRetryStep + the
-    # EnqueueRetryDispatchStep that copies it off the RetryContext.
-    force_retry: bool = False
 
 
 @dataclass(frozen=True)
@@ -217,6 +211,29 @@ class DispatchResult:
     status: str
     provider_job_id: str | None = None
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Submit results — atomic plan + (enqueue|park) outcome shapes returned
+# by AllocationFacade.submit_initial / submit_retry.  Caller never asks
+# "did it dispatch or did it park?" via separate API calls; that's the
+# whole point of the boundary.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SubmitInitialResult:
+    """Outcome of a whole-group initial plan + enqueue/park."""
+    planned: list  # list[PlannedTask]
+    dispatch_results: list  # list[DispatchResult]
+    parked: bool
+
+
+@dataclass(frozen=True)
+class SubmitRetryResult:
+    """Outcome of a single-chunk retry plan + enqueue/park."""
+    planned: object | None  # PlannedTask | None
+    dispatch_result: DispatchResult | None
+    parked: bool
 
 
 # ---------------------------------------------------------------------------

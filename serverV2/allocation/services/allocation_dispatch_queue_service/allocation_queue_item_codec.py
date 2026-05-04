@@ -42,7 +42,6 @@ class AllocationQueueItemCodec:
             attempt=task.attempt,
             chunk_index=task.chunk_index,
             job_id=job_id,
-            force_retry=context.force_retry,
         )
 
     @staticmethod

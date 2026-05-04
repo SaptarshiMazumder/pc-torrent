@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from serverV2.core.models import DispatchResult, PlannedTask
+from serverV2.core.models import PlannedTask, SubmitInitialResult
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 
 
@@ -69,22 +69,7 @@ class RenderOrchestrator:
             tier=tier,
         )
 
-    def execute(
-        self,
-        *,
-        group_id: str,
-        input_filename: str,
-        tasks: list[PlannedTask],
-        render_overrides_json: str,
-    ) -> list[DispatchResult]:
-        return self._lifecycle.start_render(
-            group_id=group_id,
-            input_filename=input_filename,
-            tasks=tasks,
-            render_overrides_json=render_overrides_json,
-        )
-
-    def escalate_initial_to_pending(
+    def submit_initial(
         self,
         *,
         group_id: str,
@@ -98,11 +83,12 @@ class RenderOrchestrator:
         tier: str | None,
         input_filename: str,
         render_overrides_json: str,
-    ) -> None:
-        """Park an initial render on ``pending_allocation_queue`` when
-        no fleet has an eligible target yet.  The dispatch daemon
-        re-evaluates pending rows every tick."""
-        self._lifecycle.escalate_initial_to_pending(
+    ) -> SubmitInitialResult:
+        """Plan + dispatch (or park) a whole render group.  Atomic from
+        the caller's POV — they get one result back and never have to
+        ask "did it dispatch or did it park?"  See ``Lifecycle.submit_initial``
+        and ``AllocationFacade.submit_initial`` for details."""
+        return self._lifecycle.submit_initial(
             group_id=group_id,
             frame_start=frame_start,
             frame_end=frame_end,

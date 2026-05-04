@@ -28,3 +28,11 @@ class ManualRetryBuildResultStep:
         # if the dispatch returned no results, ensure the key is present
         # with None so the API response shape is stable.
         ctx.result.setdefault("new_job_id", None)
+        # Surface the post-flip group status so the desktop's local
+        # state can merge it in — that re-enables polling for the
+        # group, which had been disabled while it was terminal.
+        # Read fresh from the repo so we capture the flip-step's write.
+        if ctx.group_id:
+            grp = ctx.deps.group_repo.get_by_id(ctx.group_id)
+            if grp:
+                ctx.result["group_status"] = grp.get("status")

@@ -19,7 +19,6 @@ from serverV2.core.value_objects import (
     sanitize_filename,
 )
 from serverV2.infrastructure import storage
-from serverV2.infrastructure.auth.firestore_client import write_render_group_record
 from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
 from serverV2.orchestrator.chunk_progress import ChunkProgress, ChunkProgressService
 from serverV2.orchestrator.config import MAX_RETRIES
@@ -28,10 +27,7 @@ from serverV2.services.assets.serializers import serialize_asset
 from serverV2.services.blend_parser.parser import BlendParseError, parse_upload
 from serverV2.services.pre_render import SceneResolver, resolve_frame_range
 from serverV2.services.pre_render.scene_resolver import SceneResolutionError
-from serverV2.services.render_groups.serializers import (
-    RenderGroupSerializer,
-    build_dispatch_task_entry,
-)
+from serverV2.services.render_groups.serializers import RenderGroupSerializer
 
 log = logging.getLogger(__name__)
 
@@ -269,11 +265,14 @@ class RenderGroupService:
         # server-side; workers don't need it.
         overrides_json = json.dumps(normalized_overrides)
 
-        # One call, one result.  Allocation owns the plan vs park
-        # decision internally; we don't see the dichotomy.  ``parked``
-        # on the result tells the UI "no fleet capacity yet, the daemon
-        # will pick it up" — both lists are empty in that case.
-        submit = self._orchestrator.submit_initial(
+        # Park the group on pending_allocation_queue.  The dispatch
+        # daemon plans + dispatches against its tick-local mutable
+        # snapshot on the next tick -- the only thread allowed to
+        # touch fleet availability state, so no cross-thread races.
+        # The UI receives this synchronous ack, navigates to the jobs
+        # list, and polls ``GET /render-groups/{id}`` to watch chunks
+        # land as the daemon dispatches.
+        self._orchestrator.submit_initial(
             group_id=group_id,
             frame_start=plan.frame_start,
             frame_end=plan.frame_end,
@@ -287,27 +286,6 @@ class RenderGroupService:
             render_overrides_json=overrides_json,
         )
 
-        tasks = [
-            build_dispatch_task_entry(pt, dr, scheduling)
-            for pt, dr in zip(submit.planned, submit.dispatch_results)
-        ]
-
-        uid = group.get("user_id")
-        if uid:
-            try:
-                write_render_group_record(uid, group_id, {
-                    "group_id": group_id,
-                    "filename": group["input_filename"],
-                    "status": "pending",
-                    "total_frames": plan.total_frames,
-                    "frame_start": plan.frame_start,
-                    "frame_end": plan.frame_end,
-                    "submitted_at": group.get("submitted_at"),
-                    "machine_count": len(tasks),
-                })
-            except Exception:
-                pass
-
         return {
             "group_id": group_id,
             "status": "pending",
@@ -318,7 +296,7 @@ class RenderGroupService:
             "frame_step": plan.frame_step,
             "resolved_render_settings": normalized_overrides,
             "scheduling": scheduling,
-            "tasks": tasks,
+            "tasks": [],
         }
 
     # ------------------------------------------------------------------

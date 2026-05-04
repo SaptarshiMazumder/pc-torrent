@@ -1,12 +1,9 @@
-"""Serializers — formatting helpers for render group responses.
+"""Serializers -- formatting helpers for render group responses.
 
-``RenderGroupSerializer`` is now a class (was a pure module) so it can
-hold an ``OutputFrameRepository`` reference.  Per-task fields that used
-to read the legacy ``jobs.output_files`` JSON column now read from the
-``output_frames`` table directly via the repo.
-
-``build_dispatch_task_entry`` stays a module-level pure function — it
-formats a freshly-planned task that has no DB-side state yet.
+``RenderGroupSerializer`` is a class (was a pure module) so it can
+hold an ``OutputFrameRepository`` reference.  Per-task fields that
+used to read the legacy ``jobs.output_files`` JSON column now read
+from the ``output_frames`` table directly via the repo.
 """
 
 from __future__ import annotations
@@ -109,28 +106,3 @@ class RenderGroupSerializer:
             "remaining_frame_end": remaining_end,
             "is_retryable": is_retryable,
         }
-
-
-def build_dispatch_task_entry(
-    planned_task: Any,
-    dispatch_result: Any,
-    scheduling: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "job_id": dispatch_result.job_id,
-        "machine_id": planned_task.machine_id,
-        "machine_gpu": planned_task.label,
-        "machine_vram": planned_task.vram_gb,
-        "frame_start": planned_task.frame_start,
-        "frame_end": planned_task.frame_end,
-        "frame_step": planned_task.frame_step,
-        "chunk_index": planned_task.chunk_index,
-        "total_frames": planned_task.total_frames,
-        "rendered_frames": 0,
-        "progress_pct": None,
-        "status": "pending",
-        "error": None,
-        "attempt": 0,
-        "max_retries": scheduling.get("max_retries_per_chunk", 0),
-        "priority": scheduling.get("priority", 0),
-    }

@@ -37,7 +37,6 @@ from serverV2.core.models import (
     DispatchResult,
     PlannedTask,
     RenderJob,
-    SubmitInitialResult,
 )
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
 from serverV2.fleets.registry import FleetRegistry
@@ -214,21 +213,16 @@ class RenderLifecycle:
         tier: str | None,
         input_filename: str,
         render_overrides_json: str,
-    ) -> SubmitInitialResult:
-        """Submit a whole render group: plan + (enqueue OR park) atomic.
+    ) -> None:
+        """Submit a whole render group: park to ``pending_allocation_queue``.
 
-        Tick-driven dispatch: the actual fleet-API call fires later on
-        the daemon's tick, but the caller gets back stable job_ids
-        (pre-generated at enqueue time) inside ``dispatch_results`` so
-        the response DTO can be built synchronously.
-
-        ``parked=True`` on the result means the strategy found no
-        eligible target right now and the request sits on
-        ``pending_allocation_queue`` for re-evaluation.  ``planned``
-        and ``dispatch_results`` are both empty lists in that case.
+        The daemon plans + enqueues against its tick-local mutable
+        snapshot on its next tick.  Returns nothing -- the caller's
+        confirm-upload response just acks the submission, then the UI
+        polls ``GET /render-groups/{id}`` for live chunk state as the
+        daemon dispatches.
         """
         resolved_tier = tiers.normalize(tier)
-        tier_budget = self._tier_budget(resolved_tier, heaviness, total_frames)
         dispatch_context = DispatchContext(
             group_id=group_id,
             input_filename=input_filename,
@@ -238,7 +232,7 @@ class RenderLifecycle:
             priority=0,
             engine=engine,
         )
-        return self._allocation_client.submit_initial(
+        self._allocation_client.submit_initial(
             group_id=group_id,
             tier=resolved_tier,
             frame_start=frame_start,
@@ -247,7 +241,6 @@ class RenderLifecycle:
             total_frames=total_frames,
             engine=engine,
             heaviness=heaviness,
-            tier_budget_usd=tier_budget,
             machine_ids=machine_ids,
             dispatch_context=dispatch_context,
         )

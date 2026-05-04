@@ -60,8 +60,15 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
       : Array.isArray(job?.tasks)
         ? job.tasks.length
         : 0;
+  // Freshly submitted groups (and any group whose pending allocation
+  // request the daemon hasn't yet promoted to dispatch) have no tasks
+  // attached.  Render "Queued" instead of "0 machines" so the empty
+  // state reads as intentional rather than broken.
+  const isTerminal = ["done", "failed", "cancelled"].includes(status);
   const machineLabel = job?.group_id
-    ? `${taskCount} machine${taskCount !== 1 ? "s" : ""}`
+    ? (taskCount === 0 && !isTerminal
+        ? "Queued"
+        : `${taskCount} machine${taskCount !== 1 ? "s" : ""}`)
     : job?.machine_gpu || "1 machine";
 
   return (

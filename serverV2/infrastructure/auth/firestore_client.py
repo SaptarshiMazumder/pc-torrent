@@ -54,10 +54,3 @@ def write_job_record(uid: str, job_id: str, data: dict[str, Any]) -> None:
         _db().collection("users").document(uid).collection("jobs").document(job_id).set(data, merge=True)
     except Exception as exc:
         log.warning("Failed to write Firestore job record %s: %s", job_id, exc)
-
-
-def write_render_group_record(uid: str, group_id: str, data: dict[str, Any]) -> None:
-    try:
-        _db().collection("users").document(uid).collection("render_groups").document(group_id).set(data, merge=True)
-    except Exception as exc:
-        log.warning("Failed to write Firestore group record %s: %s", group_id, exc)

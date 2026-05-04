@@ -6,13 +6,20 @@ orchestrator gets one import surface.
 Public entry points:
   * ``plan_initial`` -- pure compute, used by the pre-render cost
     preview.  No side effects.
-  * ``submit_initial`` -- plan + (enqueue OR park-on-pending-queue) for
-    a whole render group.  The only path that writes to
-    ``dispatch_queue`` directly (bypassing pending).
+  * ``submit_initial`` -- park a whole render group on
+    ``pending_allocation_queue``.  Daemon plans + enqueues on its next
+    tick.
   * ``park_retry`` -- park a single retry chunk on
     ``pending_allocation_queue``.  Both auto- and manual-retry use
     this; planning happens later inside the daemon's tick.
   * ``drain_for_group`` -- cancel-pipeline cleanup.
+
+Architectural invariant: NO public method here writes to
+``dispatch_queue``.  All allocation entry points park to
+``pending_allocation_queue``; the dispatch daemon is the sole writer
+of ``dispatch_queue`` (via its tick-local mutable snapshot).  This
+removes every cross-thread race between planning and dispatching that
+caused dogpile bugs in the old design.
 
 Constructed once at boot and shared.  Stateless beyond the injected
 service references.
@@ -38,7 +45,6 @@ from serverV2.core.models import (
     AvailableResources,
     DispatchContext,
     PlannedTask,
-    SubmitInitialResult,
 )
 
 
@@ -87,40 +93,17 @@ class AllocationFacade:
         frame_end: int,
         frame_step: int,
         total_frames: int,
-        resources: AvailableResources,
         engine: str | None,
         heaviness: dict | None,
-        tier_budget_usd: float | None,
         machine_ids: list[str] | None,
         dispatch_context: DispatchContext,
-    ) -> SubmitInitialResult:
-        """Plan + enqueue a whole render group.  If the strategy can't
-        find any eligible target right now, parks the request on
-        ``pending_allocation_queue`` for the daemon to re-evaluate every
-        tick.  Either way, the caller gets a single result back and
-        never has to know which path fired."""
-        planned = self._planning.plan_initial(
-            tier=tier,
-            frame_start=frame_start,
-            frame_end=frame_end,
-            frame_step=frame_step,
-            total_frames=total_frames,
-            resources=resources,
-            engine=engine,
-            heaviness=heaviness,
-            tier_budget_usd=tier_budget_usd,
-        )
-        if planned:
-            dispatch_results = self._dispatch_queue.enqueue(
-                group_id, planned, dispatch_context,
-            )
-            return SubmitInitialResult(
-                planned=planned,
-                dispatch_results=dispatch_results,
-                parked=False,
-            )
-        # No eligible target — park.  The daemon's per-tick re-eval
-        # will run plan_initial again with a fresher snapshot.
+    ) -> None:
+        """Park a whole render group on ``pending_allocation_queue``.
+        The daemon plans + enqueues against its tick-local mutable
+        snapshot on its next tick.  Returns nothing -- caller acks the
+        submission, then polls ``GET /render-groups/{id}`` for live
+        chunk state as the daemon dispatches.
+        """
         file_size_bytes = (heaviness or {}).get("file_size_bytes")
         self._dispatch_queue.enqueue_pending(AllocationPendingItem(
             type=TYPE_INITIAL_GROUP,
@@ -140,7 +123,6 @@ class AllocationFacade:
             priority=dispatch_context.priority,
             input_filename=dispatch_context.input_filename,
         ))
-        return SubmitInitialResult(planned=[], dispatch_results=[], parked=True)
 
     def park_retry(
         self,

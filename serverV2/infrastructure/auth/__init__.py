@@ -4,7 +4,6 @@ from serverV2.infrastructure.auth.firestore_client import (
     get_user_profile,
     update_user_profile,
     write_job_record,
-    write_render_group_record,
 )
 
 __all__ = [
@@ -13,5 +12,4 @@ __all__ = [
     "get_user_profile",
     "update_user_profile",
     "write_job_record",
-    "write_render_group_record",
 ]

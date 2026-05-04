@@ -78,6 +78,14 @@ class RetryContext:
     aborted: bool = False
 
     # ------------------------------------------------------------------
+    # Manual-retry flag — set by ``MarkForceRetryStep`` only.  Read by
+    # ``EnqueueRetryDispatchStep`` and stamped onto the ``DispatchContext``
+    # it builds, so the daemon's terminal-group guard lets the row
+    # through even when the parent group is ``failed``.
+    # ------------------------------------------------------------------
+    force_retry: bool = False
+
+    # ------------------------------------------------------------------
     # State written by load/resolve steps
     # ------------------------------------------------------------------
     rj: RenderJob | None = None

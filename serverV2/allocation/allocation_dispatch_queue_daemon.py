@@ -119,14 +119,16 @@ class AllocationDispatchQueueDaemon:
         return False
 
     def _tick(self) -> None:
-        # Idle-tick guard: if nothing is queued for any enabled fleet,
-        # skip the snapshot fetch and end-of-tick persist entirely.
-        # Saves a Redis GET + SET KEEPTTL on every idle tick, and (on
-        # cache expiry every 60s) saves the parallel rebuild that hits
-        # Vast HTTPS, Modal SCARDs, the community DB query, and the
-        # JobRepository COUNT.  One LIMIT 1 SELECT against an indexed
-        # column is the only DB cost on idle ticks.
-        if not self._dispatch_queue.has_any_for_fleets(self._enabled_fleets):
+        # Idle-tick guard: if BOTH the dispatch_queue (fleet-targeted
+        # rows) and the pending_allocation_queue (rows with no eligible
+        # target yet) are empty, skip the snapshot fetch + end-of-tick
+        # persist entirely.  Saves a Redis GET + SET KEEPTTL on every
+        # idle tick, and (on cache expiry every 60s) saves the parallel
+        # rebuild that hits Vast HTTPS, Modal SCARDs, the community DB
+        # query, and the JobRepository COUNT.
+        has_dispatch = self._dispatch_queue.has_any_for_fleets(self._enabled_fleets)
+        has_pending = self._dispatch_queue.has_any_pending()
+        if not (has_dispatch or has_pending):
             return
 
         snapshot = self._snapshot_cache.get_or_build()
@@ -139,4 +141,12 @@ class AllocationDispatchQueueDaemon:
                     "dispatch_pending_for_fleet(%s) failed in tick: %s",
                     fleet, exc,
                 )
+        # After the per-fleet dispatch loop, give the pending queue a
+        # chance to promote rows whose strategy now finds an eligible
+        # target.  Successful promotions land in dispatch_queue and are
+        # picked up on the next tick.
+        try:
+            self._dispatch_queue.re_evaluate_pending(mutable)
+        except Exception as exc:
+            log.warning("re_evaluate_pending failed in tick: %s", exc)
         self._snapshot_cache.persist(mutable.to_frozen())

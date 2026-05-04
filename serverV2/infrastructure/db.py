@@ -195,6 +195,11 @@ def init_db() -> None:
                     "max_retries INTEGER DEFAULT 0",
                     "priority INTEGER DEFAULT 0",
                     "job_id TEXT",
+                    # Manual retry sets this true so the dispatch daemon's
+                    # terminal-group guard lets the row through even when
+                    # the parent group is marked failed.  Auto-retry +
+                    # initial-dispatch leave it false.
+                    "force_retry BOOLEAN NOT NULL DEFAULT FALSE",
                 ):
                     cur.execute(
                         f"ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS {column_def}"
@@ -293,6 +298,67 @@ def init_db() -> None:
                     "CREATE INDEX IF NOT EXISTS output_frames_job_idx "
                     "ON output_frames (job_id)"
                 )
+                # Pending allocation queue — chunks/groups that couldn't
+                # be allocated to a fleet because nothing eligible existed
+                # at allocation time.  Dispatch daemon's per-tick re-eval
+                # iterates these and feeds them back through the same
+                # planning service strategies (allocate_initial /
+                # allocate_retry) until allocation succeeds.  On success,
+                # the row is converted into a dispatch_queue entry and
+                # deleted.  ``type`` discriminates between full-group
+                # initial-plan re-attempts and single-chunk retry
+                # re-attempts.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_allocation_queue (
+                        id              SERIAL PRIMARY KEY,
+                        type            TEXT NOT NULL CHECK (type IN ('initial_group', 'retry_chunk')),
+                        group_id        TEXT NOT NULL,
+                        chunk_index     INTEGER,
+                        attempt         INTEGER,
+                        frame_start     INTEGER NOT NULL,
+                        frame_end       INTEGER NOT NULL,
+                        frame_step      INTEGER NOT NULL,
+                        total_frames    INTEGER NOT NULL,
+                        file_size_bytes BIGINT,
+                        engine          TEXT,
+                        tier            TEXT,
+                        excluded_machine_ids                JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        excluded_serverless_capabilities    JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        render_overrides_json TEXT,
+                        max_retries     INTEGER NOT NULL DEFAULT 0,
+                        priority        INTEGER NOT NULL DEFAULT 0,
+                        machine_ids     JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        input_filename  TEXT,
+                        created_at      TEXT NOT NULL,
+                        last_attempted_at TEXT
+                    )
+                    """
+                )
+
+                # Pre-submit / submit boundary refactor — render_groups now
+                # carries a single ``resolved_scene_json`` column that is
+                # the merge of the analyzer snapshot and the user's
+                # render_overrides, computed once at confirm-upload time.
+                # The three legacy raw-JSON columns are gone; they were a
+                # two-source-of-truth trap (every reader had to remember
+                # to merge them, and the estimate path forgot).  The
+                # ``analysis_snapshot_json`` canonical home is on the
+                # ``user_input_files`` asset row, where it belongs.
+                cur.execute(
+                    "ALTER TABLE render_groups DROP COLUMN IF EXISTS analysis_snapshot_json"
+                )
+                cur.execute(
+                    "ALTER TABLE render_groups DROP COLUMN IF EXISTS render_overrides_json"
+                )
+                cur.execute(
+                    "ALTER TABLE render_groups DROP COLUMN IF EXISTS analysis_warnings_json"
+                )
+                cur.execute(
+                    "ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS "
+                    "resolved_scene_json TEXT NOT NULL DEFAULT '{}'"
+                )
+
                 # Phase 9 — dispatch_queue uniqueness.  Two concurrent
                 # retry signals for the same chunk used to insert two
                 # rows; with this constraint the second INSERT is a

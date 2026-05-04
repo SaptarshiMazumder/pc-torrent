@@ -80,9 +80,12 @@ AUTO_RETRY_PIPELINE = (
 #   9. manual_retry_allocate_retry_task()     -> ctx.retry_task;
 #                                                raise no_eligible_target
 #  10. log_manual_retry()                     -> "Manual retry for chunk ..."
-#  11. enqueue_retry_dispatch()               -> coordinator.enqueue_and_flush
-#  12. manual_retry_reconcile_group()         -> reconcile_group_status
-#  13. manual_retry_build_result()            -> ctx.result payload
+#  11. mark_force_retry()                     -> ctx.force_retry = True
+#                                                (bypasses terminal-group
+#                                                guard for "failed" groups)
+#  12. enqueue_retry_dispatch()               -> coordinator.enqueue_and_flush
+#  13. manual_retry_reconcile_group()         -> reconcile_group_status
+#  14. manual_retry_build_result()            -> ctx.result payload
 # ---------------------------------------------------------------------
 
 MANUAL_RETRY_PIPELINE = (
@@ -97,6 +100,7 @@ MANUAL_RETRY_PIPELINE = (
     .build_retry_chunk_request()
     .manual_retry_allocate_retry_task()
     .log_manual_retry()
+    .mark_force_retry()
     .enqueue_retry_dispatch()
     .manual_retry_reconcile_group()
     .manual_retry_build_result()

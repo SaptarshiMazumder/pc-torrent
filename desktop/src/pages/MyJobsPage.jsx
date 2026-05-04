@@ -24,7 +24,7 @@ import { useDownloads } from "../contexts/DownloadContext";
 
 const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
 
-export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onReRender, onNavigate }) {
+export default function MyJobsPage({ jobs, loading, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onNavigate }) {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [cancelingAll, setCancelingAll] = useState(false);
@@ -245,7 +245,6 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
         await removeJob(id);
         setSelectedJobId(null);
       },
-      onReRender: () => onReRender(job),
       onRefreshFrames: () => { void fetchFrameGallery(job, { silent: false }); },
     };
   };

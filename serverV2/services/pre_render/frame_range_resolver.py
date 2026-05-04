@@ -1,7 +1,9 @@
-"""Frame planning — resolve actual frame range for a render group.
+"""Frame range resolver — pre-submit helper.
 
-Pure function: takes the payload's requested range, timeline overrides,
-and blend-file analysis; returns the resolved frame parameters.
+Pure function: takes the payload's requested range, the user's timeline
+overrides, and (optionally) blend-file analysis output; returns the
+resolved frame parameters used for cost estimate AND, at the submit
+boundary, persisted into the render group row.
 """
 
 from __future__ import annotations

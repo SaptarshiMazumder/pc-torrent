@@ -1,9 +1,13 @@
 """EnqueueRetryDispatchStep — shared between auto and manual pipelines.
 
-Builds the ``DispatchContext`` from the resolved ``RenderJob`` and asks
-the coordinator to enqueue + flush the retry task.  Stores the dispatch
-results on ``ctx`` for downstream steps (manual retry uses them to
-build its return payload).
+Builds the ``DispatchContext`` from the resolved ``RenderJob`` (copying
+``force_retry`` off the ``RetryContext``) and asks the coordinator to
+enqueue the retry task.  Stores the dispatch results on ``ctx`` for
+downstream steps (manual retry uses them to build its return payload).
+
+The auto vs manual difference is encoded entirely in the upstream
+``MarkForceRetryStep``; this step stays oblivious to which pipeline
+ran it.
 
 # SOURCE: retry_dispatcher.py:152-167 (legacy auto)
 # SOURCE: lifecycle.py:433-446 (legacy manual)
@@ -36,6 +40,11 @@ class EnqueueRetryDispatchStep:
             raise RuntimeError(
                 f"job {ctx.rj.job_id} has no render_overrides_json — cannot retry"
             )
+        # ``force_retry`` is set upstream by ``MarkForceRetryStep`` (manual
+        # pipeline only); auto retry leaves it at False.  Stamping it on
+        # the DispatchContext routes it through the codec to the
+        # dispatch_queue row, where the dispatch handler reads it to
+        # decide whether the terminal-group guard applies.
         dispatch_context = DispatchContext(
             group_id=ctx.group_id,
             input_filename=ctx.rj.input_filename,
@@ -44,11 +53,13 @@ class EnqueueRetryDispatchStep:
             max_retries=ctx.rj.max_retries,
             priority=ctx.rj.priority,
             engine=ctx.engine,
+            force_retry=ctx.force_retry,
         )
         log.info(
             "[RETRY_DEBUG] EnqueueRetryDispatchStep(%s): calling allocation_client.enqueue "
-            "(group=%s, fleet=%s, attempt=%d)",
-            ctx.rj.job_id, ctx.group_id, ctx.retry_task.fleet, ctx.retry_task.attempt,
+            "(group=%s, fleet=%s, attempt=%d, force_retry=%s)",
+            ctx.rj.job_id, ctx.group_id, ctx.retry_task.fleet,
+            ctx.retry_task.attempt, ctx.force_retry,
         )
         results = ctx.deps.allocation_client.enqueue(
             ctx.group_id, [ctx.retry_task], dispatch_context,

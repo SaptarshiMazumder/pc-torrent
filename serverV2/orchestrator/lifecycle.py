@@ -196,6 +196,43 @@ class RenderLifecycle:
     # Story 1: user submitted a render
     # ------------------------------------------------------------------
 
+    def escalate_initial_to_pending(
+        self,
+        *,
+        group_id: str,
+        frame_start: int,
+        frame_end: int,
+        frame_step: int,
+        total_frames: int,
+        machine_ids: list[str] | None,
+        heaviness: dict | None,
+        engine: str | None,
+        tier: str | None,
+        input_filename: str,
+        render_overrides_json: str,
+    ) -> None:
+        """Strategy returned no eligible target on the first plan pass —
+        park the request on ``pending_allocation_queue`` instead of
+        failing the group.  The dispatch daemon re-evaluates pending
+        rows every tick using the same strategies; once one finds a
+        target the row is promoted to ``dispatch_queue``.
+        """
+        self._allocation_client.enqueue_pending_initial(
+            group_id=group_id,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            total_frames=total_frames,
+            tier=tiers.normalize(tier),
+            engine=engine,
+            heaviness=heaviness,
+            machine_ids=machine_ids,
+            input_filename=input_filename,
+            render_overrides_json=render_overrides_json,
+            max_retries=MAX_RETRIES,
+            priority=0,
+        )
+
     def start_render(
         self,
         *,
@@ -639,7 +676,7 @@ class RenderLifecycle:
             group = self._group_repo.get_by_id(group_id)
             if not group:
                 return {}
-            raw = group.get("analysis_snapshot_json")
+            raw = group.get("resolved_scene_json")
             if not raw:
                 return {}
             parsed = json.loads(raw)

@@ -62,6 +62,9 @@ from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_resolve_latest
 from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_set_attempt_zero_step import (
     ManualRetrySetAttemptZeroStep,
 )
+from serverV2.orchestrator.lifecycle_job_retry.steps.mark_force_retry_step import (
+    MarkForceRetryStep,
+)
 from serverV2.orchestrator.lifecycle_job_retry.steps.retry_step import RetryStep
 
 __all__ = [
@@ -88,4 +91,5 @@ __all__ = [
     "LoadDispatchContextStep",
     "BuildRetryChunkRequestStep",
     "EnqueueRetryDispatchStep",
+    "MarkForceRetryStep",
 ]

@@ -60,7 +60,7 @@ class AllocationDispatchHandler:
         dispatcher: AllocationDispatcher,
         blend_url_resolver: AllocationBlendUrlResolver,
         fleet_caps: dict[str, int],
-        is_group_terminal: Callable[[str], bool],
+        get_group_status: Callable[[str], str | None],
         codec: AllocationQueueItemCodec,
         engine_resolver: AllocationEngineResolver,
         snapshot_mutator: AllocationSnapshotMutator,
@@ -71,7 +71,7 @@ class AllocationDispatchHandler:
         self._dispatcher = dispatcher
         self._blend_url = blend_url_resolver
         self._fleet_caps = fleet_caps
-        self._is_group_terminal = is_group_terminal
+        self._get_group_status = get_group_status
         self._codec = codec
         self._engine_resolver = engine_resolver
         self._snapshot_mutator = snapshot_mutator
@@ -120,16 +120,35 @@ class AllocationDispatchHandler:
                 "group=%s chunk=%s attempt=%d",
                 fleet, item.job_id, item.group_id, item.chunk_index, item.attempt,
             )
-            # Terminal-group guard: if the group went terminal between
-            # enqueue and now, drop the row.  Do NOT claim the ledger,
-            # do NOT call the fleet strategy.
-            if item.group_id and self._is_group_terminal(item.group_id):
-                log.info(
-                    "dispatch_pending_for_fleet(%s): dropping queued chunk %s for "
-                    "terminal group %s (job_id=%s)",
-                    fleet, item.chunk_index, item.group_id, item.job_id,
-                )
-                continue
+            # Terminal-group guard.  Policy:
+            #   * cancelled / done       → always drop (group is closed)
+            #   * group missing          → drop (orphan)
+            #   * failed + force_retry   → dispatch (manual retry override)
+            #   * failed + !force_retry  → drop (auto-retry can't resurrect a failed group)
+            #   * any other status       → dispatch (normal case)
+            if item.group_id:
+                grp_status = self._get_group_status(item.group_id)
+                if grp_status in ("cancelled", "done"):
+                    log.info(
+                        "dispatch_pending_for_fleet(%s): dropping queued chunk %s — "
+                        "group %s is %s (job_id=%s)",
+                        fleet, item.chunk_index, item.group_id, grp_status, item.job_id,
+                    )
+                    continue
+                if grp_status is None:
+                    log.info(
+                        "dispatch_pending_for_fleet(%s): dropping queued chunk %s — "
+                        "group %s no longer exists (job_id=%s)",
+                        fleet, item.chunk_index, item.group_id, item.job_id,
+                    )
+                    continue
+                if grp_status == "failed" and not item.force_retry:
+                    log.info(
+                        "dispatch_pending_for_fleet(%s): dropping queued chunk %s — "
+                        "group %s is failed and row is not force_retry (job_id=%s)",
+                        fleet, item.chunk_index, item.group_id, item.job_id,
+                    )
+                    continue
             result = self._dispatch_one(item)
             if result is not None:
                 dispatched += 1

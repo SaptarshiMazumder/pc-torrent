@@ -85,6 +85,9 @@ from serverV2.allocation.allocation_dispatch_queue_repository import (
     AllocationDispatchQueueRepository as DispatchQueueRepository,
 )
 from serverV2.allocation.allocation_dispatcher import AllocationDispatcher
+from serverV2.allocation.allocation_pending_queue_repository import (
+    AllocationPendingQueueRepository,
+)
 from serverV2.allocation.services.allocation_dispatch_queue_service import (
     AllocationDispatchQueueService,
 )
@@ -115,6 +118,7 @@ from serverV2.services.assets.service import AssetService
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
 from serverV2.services.jobs.service import JobService
 from serverV2.services.machines.service import MachineService
+from serverV2.services.pre_render import PreRenderEstimator, SceneResolver
 from serverV2.services.render_groups.service import RenderGroupService
 from serverV2.services.upload.coordinator import UploadCoordinator
 
@@ -145,6 +149,8 @@ class Container:
         allocation_facade: AllocationFacade,
         allocation_dispatch_queue_daemon: AllocationDispatchQueueDaemon,
         fleet_availability_snapshot_cache: FleetAvailabilitySnapshotCache,
+        pre_render_estimator: PreRenderEstimator,
+        scene_resolver: SceneResolver,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -167,6 +173,11 @@ class Container:
         self.allocation_facade = allocation_facade
         self.allocation_dispatch_queue_daemon = allocation_dispatch_queue_daemon
         self.fleet_availability_snapshot_cache = fleet_availability_snapshot_cache
+        # Pre-submit RPC layer — stateless cost / wall-time estimator
+        # over the same planning service real submit uses.  Holds zero
+        # state; safe to share.
+        self.pre_render_estimator = pre_render_estimator
+        self.scene_resolver = scene_resolver
 
 
 def build(
@@ -325,6 +336,7 @@ def build(
 
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
+    pending_queue_repo = AllocationPendingQueueRepository()
 
     # -- fleet availability: per-step builders + factory.  The cache
     # holds the snapshot; the daemon and orchestrator both go through
@@ -372,25 +384,23 @@ def build(
         "vast_serverless": cfg.vast.max_parallel,
         "community": 10_000,  # per-machine queue, no fleet-wide cap
     }
-    _TERMINAL_GROUP_STATUSES = frozenset({"done", "failed", "cancelled"})
-
-    def _is_group_terminal(group_id: str) -> bool:
+    def _get_group_status(group_id: str) -> str | None:
         grp = group_repo.get_by_id(group_id)
         if grp is None:
-            # Group was deleted out from under us — treat as terminal so
-            # we drop the orphaned queue row rather than dispatching
-            # against a non-existent group.
-            return True
-        return str(grp.get("status") or "") in _TERMINAL_GROUP_STATUSES
+            return None
+        status = grp.get("status")
+        return str(status) if status else None
 
     allocation_dispatch_queue_service = AllocationDispatchQueueService(
         queue_repo=queue_repo,
+        pending_repo=pending_queue_repo,
         in_progress_repo=in_progress_repo,
         active_count_by_fleet=job_repo.count_active_by_fleet,
         dispatcher=allocation_dispatcher,
         blend_url_resolver=allocation_blend_resolver,
         fleet_caps=_allocation_fleet_caps,
-        is_group_terminal=_is_group_terminal,
+        get_group_status=_get_group_status,
+        planning_service=allocation_planning_service,
     )
     allocation_facade = AllocationFacade(
         planning=allocation_planning_service,
@@ -551,6 +561,11 @@ def build(
         presigner=lambda key, name: storage.generate_presigned_url(key, download_name=name),
     )
 
+    # Pre-submit / submit boundary helper.  RenderGroupService.confirm_upload
+    # uses this to merge analyzer snapshot + user overrides into the
+    # canonical resolved scene blob persisted on the row.
+    scene_resolver = SceneResolver()
+
     render_group_service = RenderGroupService(
         group_repo=group_repo,
         job_repo=job_repo,
@@ -561,6 +576,7 @@ def build(
         outputs_resolver=outputs_resolver,
         output_frame_repo=output_frame_repo,
         chunk_progress=chunk_progress_service,
+        scene_resolver=scene_resolver,
     )
 
     job_service = JobService(
@@ -589,6 +605,15 @@ def build(
 
     asset_service = AssetService(asset_repo=asset_repo)
 
+    # Pre-submit RPC layer.  Stateless cost / wall-time estimator over
+    # the same planning service that real submit uses.  ``scene_resolver``
+    # is shared with RenderGroupService — same merge rule applies in
+    # both pre-submit and submit phases, by design.
+    pre_render_estimator = PreRenderEstimator(
+        orchestrator=orchestrator,
+        scene_resolver=scene_resolver,
+    )
+
     return Container(
         config=cfg,
         orchestrator=orchestrator,
@@ -609,4 +634,6 @@ def build(
         allocation_facade=allocation_facade,
         allocation_dispatch_queue_daemon=allocation_dispatch_queue_daemon,
         fleet_availability_snapshot_cache=fleet_availability_snapshot_cache,
+        pre_render_estimator=pre_render_estimator,
+        scene_resolver=scene_resolver,
     )

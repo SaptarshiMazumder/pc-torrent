@@ -36,6 +36,7 @@ from serverV2.orchestrator.lifecycle_job_retry.steps import (
     ManualRetryReconcileGroupStep,
     ManualRetryResolveLatestSiblingStep,
     ManualRetrySetAttemptZeroStep,
+    MarkForceRetryStep,
     RetryStep,
 )
 
@@ -127,6 +128,10 @@ class RetryPipelineBuilder:
 
     def build_retry_chunk_request(self) -> "RetryPipelineBuilder":
         self._steps.append(BuildRetryChunkRequestStep())
+        return self
+
+    def mark_force_retry(self) -> "RetryPipelineBuilder":
+        self._steps.append(MarkForceRetryStep())
         return self
 
     def enqueue_retry_dispatch(self) -> "RetryPipelineBuilder":

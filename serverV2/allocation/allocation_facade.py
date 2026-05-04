@@ -10,14 +10,17 @@ service references.
 
 from __future__ import annotations
 
+from serverV2.allocation.allocation_pending_queue_repository import (
+    AllocationPendingItem,
+)
+from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
+    AllocationChunkRequest,
+)
 from serverV2.allocation.services.allocation_dispatch_queue_service import (
     AllocationDispatchQueueService,
 )
 from serverV2.allocation.services.allocation_planning_service import (
     AllocationPlanningService,
-)
-from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
-    AllocationChunkRequest,
 )
 from serverV2.core.models import (
     AvailableResources,
@@ -83,3 +86,6 @@ class AllocationFacade:
         context: DispatchContext,
     ) -> list[DispatchResult]:
         return self._dispatch_queue.enqueue(group_id, tasks, context)
+
+    def enqueue_pending(self, item: AllocationPendingItem) -> None:
+        self._dispatch_queue.enqueue_pending(item)

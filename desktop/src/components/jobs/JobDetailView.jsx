@@ -56,7 +56,7 @@ function StatTile({ icon, label, value }) {
 function RenderGroupDetail({
   job, backendUrl, authToken, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
-  onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove, onReRender,
+  onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
   onRefresh, onRefreshFrames,
 }) {
   const id = job.group_id;
@@ -121,10 +121,11 @@ function RenderGroupDetail({
       <ModalInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
       <CommunityInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
 
-      {/* Scene heaviness — async-friendly: skeleton until analysis_snapshot lands. */}
+      {/* Scene heaviness — backend resolves snapshot+overrides at submit
+          time and surfaces ``heaviness`` directly on the status DTO. */}
       <HeavinessPanel
-        heaviness={job.analysis_snapshot?.heaviness ?? null}
-        loading={!job.analysis_snapshot}
+        heaviness={job.heaviness ?? null}
+        loading={!job.heaviness}
       />
 
       {/* Frames — collapsible, below GPU instances */}
@@ -164,7 +165,6 @@ function RenderGroupDetail({
             {isDownloading ? (downloadState?.progress || "Downloading...") : job.status === "done" ? "Download All" : "Download Available"}
           </button>
         )}
-        <button className="btn btn-secondary" onClick={onReRender}>Re-render</button>
         <button className="btn btn-secondary" onClick={onRemove}>Remove</button>
       </div>
     </div>
@@ -251,7 +251,7 @@ function SingleJobDetail({
 export default function JobDetailView({
   job, backendUrl, authToken, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
-  onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove, onReRender,
+  onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
   onRefresh, onRefreshFrames,
 }) {
   const isGroup = !!job?.group_id;
@@ -305,7 +305,7 @@ export default function JobDetailView({
           downloadState={downloadState} downloadingId={downloadingId} canceling={canceling}
           galleryOpen={galleryOpen} galleryState={galleryState} openingFrameKey={openingFrameKey}
           onDownload={onDownload} onCancel={onCancel} onToggleGallery={onToggleGallery}
-          onOpenFrame={onOpenFrame} onRemove={onRemove} onReRender={onReRender}
+          onOpenFrame={onOpenFrame} onRemove={onRemove}
           onRefresh={onRefresh} onRefreshFrames={onRefreshFrames}
         />
       ) : (

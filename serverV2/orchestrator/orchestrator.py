@@ -84,6 +84,38 @@ class RenderOrchestrator:
             render_overrides_json=render_overrides_json,
         )
 
+    def escalate_initial_to_pending(
+        self,
+        *,
+        group_id: str,
+        frame_start: int,
+        frame_end: int,
+        frame_step: int,
+        total_frames: int,
+        machine_ids: list[str] | None,
+        heaviness: dict | None,
+        engine: str | None,
+        tier: str | None,
+        input_filename: str,
+        render_overrides_json: str,
+    ) -> None:
+        """Park an initial render on ``pending_allocation_queue`` when
+        no fleet has an eligible target yet.  The dispatch daemon
+        re-evaluates pending rows every tick."""
+        self._lifecycle.escalate_initial_to_pending(
+            group_id=group_id,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            total_frames=total_frames,
+            machine_ids=machine_ids,
+            heaviness=heaviness,
+            engine=engine,
+            tier=tier,
+            input_filename=input_filename,
+            render_overrides_json=render_overrides_json,
+        )
+
     # ---- chunk-level callbacks (full flow — adapters call these) ----
 
     def on_job_failed(self, job_id: str, error: str) -> None:

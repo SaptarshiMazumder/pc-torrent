@@ -4,7 +4,6 @@ import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import {
   createDistributedRenderGroup,
   confirmDistributedJob,
-  rerenderGroup,
   cancelRenderGroup,
   estimateRenderGroup,
   listInputFiles,
@@ -26,8 +25,6 @@ import {
   resolveTimestamp,
   getCachedAnalysis,
   setCachedAnalysis,
-  saveGroupAnalysis,
-  getGroupAnalysis,
 } from "../utils/blendAnalysis";
 import HeavinessPanel from "../components/jobs/HeavinessPanel";
 
@@ -68,9 +65,6 @@ const INITIAL_STATE = {
   file: null, // { name, path, size }
   savedInputId: "",
   savedInputAsset: null,
-  // Re-render mode
-  reRenderGroupId: "", // set when re-rendering an existing group
-  reRenderFilename: "",
   // Analysis
   analysis: null, // parsed JSON from headless Blender
   prepResult: null, // { prepared_path, filename, warnings, errors, ... }
@@ -155,17 +149,6 @@ function reducer(state, action) {
     case "ERROR":
       return { ...state, stage: action.returnTo || state.stage, error: action.message };
 
-    case "LOAD_RERENDER":
-      return {
-        ...INITIAL_STATE,
-        stage: STAGE.CONFIGURING,
-        reRenderGroupId: action.groupId,
-        reRenderFilename: action.filename,
-        groupId: action.groupId, // makes canStart truthy
-        analysis: action.analysis,
-        ...action.settings,
-      };
-
     case "RESET":
       return { ...INITIAL_STATE };
 
@@ -176,11 +159,10 @@ function reducer(state, action) {
 
 // ─── Component ──────────────────────────────────────────────
 
-export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderSource }) {
+export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const {
     stage, file, savedInputId, savedInputAsset,
-    reRenderGroupId, reRenderFilename,
     analysis, prepResult,
     frameStart, frameEnd, frameStep,
     sceneName, cameraMode, forceCameraName, viewLayerName, cameraRanges, renderEngine,
@@ -223,39 +205,6 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
       .catch(() => { blenderBinRef.current = null; });
   }, []);
 
-  // ── Re-render mode: pre-populate from existing job ──────
-  useEffect(() => {
-    if (!reRenderSource) return;
-    const local = getGroupAnalysis(reRenderSource.group_id);
-    const raw = local || reRenderSource.analysis_snapshot;
-    const snap = (raw && typeof raw === "object" && Array.isArray(raw.scenes) && raw.scenes.length > 0) ? raw : null;
-    const overrides = reRenderSource.resolved_render_settings || {};
-    const settings = snap ? applyAnalysis(snap) : {};
-
-    // Override with the saved render settings from the original job
-    if (typeof overrides.scene_name === "string") settings.sceneName = overrides.scene_name;
-    if (typeof overrides.camera_mode === "string") settings.cameraMode = overrides.camera_mode || "auto_markers";
-    if (typeof overrides.camera_name === "string") settings.forceCameraName = overrides.camera_name;
-    if (typeof overrides.view_layer === "string") settings.viewLayerName = overrides.view_layer;
-    if (typeof overrides.render?.engine === "string") settings.renderEngine = overrides.render.engine || "scene_default";
-    if (overrides.camera_mode === "camera_ranges" && Array.isArray(overrides.camera_ranges)) {
-      settings.cameraRanges = parseCameraRangeRows(overrides.camera_ranges);
-    }
-    // Use original frame range
-    settings.frameStart = String(reRenderSource.frame_start ?? "");
-    settings.frameEnd = String(reRenderSource.frame_end ?? "");
-    settings.frameStep = String(reRenderSource.frame_step || 1);
-
-    dispatch({
-      type: "LOAD_RERENDER",
-      groupId: reRenderSource.group_id,
-      filename: reRenderSource.input_filename || reRenderSource.filename || "input.blend",
-      analysis: snap,
-      settings,
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reRenderSource]);
-
   // ── Load saved inputs ───────────────────────────────────
   const loadSavedInputs = useCallback(async () => {
     savedInputsDispatch({ type: "LOADING" });
@@ -283,6 +232,48 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
     () => cameraMode === "camera_ranges" ? validateCameraRanges(cameraRanges, frameRange) : { ok: true, error: "" },
     [cameraMode, cameraRanges, frameRange],
   );
+
+  // Engine resolution mirrors handleStartRender's logic: explicit user
+  // override wins; otherwise fall back to whatever the analyzer detected
+  // for the active scene.  Used by both the pre-render estimate and the
+  // submit-time overrides body so cost preview matches the real submit.
+  const resolvedEngine = useMemo(() => {
+    if (renderEngine && renderEngine !== "scene_default") return renderEngine;
+    if (analysis && Array.isArray(analysis.scenes)) {
+      const active = analysis.scenes.find((s) => s?.is_active) || analysis.scenes[0] || null;
+      if (active?.engine) return active.engine;
+    }
+    return null;
+  }, [renderEngine, analysis]);
+
+  // Single source of truth for the render-overrides body.  Both
+  // /pre-render/estimate and confirm-upload consume the same dict — the
+  // backend's SceneResolver merges it with the analyzer snapshot at
+  // submit time.
+  const renderOverridesForServer = useMemo(() => ({
+    scene_name: sceneName || null,
+    camera_mode: cameraMode,
+    camera_name: forceCameraName || null,
+    view_layer: viewLayerName || null,
+    camera_ranges: cameraMode === "camera_ranges"
+      ? cameraValidation.rows?.map((r) => ({
+          camera_name: r.camera_name,
+          frame_start: r.frame_start,
+          frame_end: r.frame_end,
+          frame_step: r.frame_step,
+          enabled: r.enabled !== false,
+        })) || []
+      : [],
+    timeline: frameRange
+      ? { frame_start: frameRange.frame_start, frame_end: frameRange.frame_end, frame_step: frameRange.frame_step }
+      : {},
+    render: {
+      engine: resolvedEngine,
+      resolution_x: resolutionX,
+      resolution_y: resolutionY,
+      resolution_percentage: resolutionPercentage,
+    },
+  }), [sceneName, cameraMode, forceCameraName, viewLayerName, cameraValidation, frameRange, resolvedEngine, resolutionX, resolutionY, resolutionPercentage]);
   const rangeCounts = useMemo(() => {
     const m = new Map();
     if (!frameRange) return m;
@@ -324,21 +315,31 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
 
   const isBusy = stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING;
   const hasSource = Boolean(file) || Boolean(savedInputId);
-  const sourceLabel = reRenderFilename || (file ? file.name : resolvedSavedAsset ? (resolvedSavedAsset.display_name || resolvedSavedAsset.input_filename) : "");
+  const sourceLabel = file ? file.name : resolvedSavedAsset ? (resolvedSavedAsset.display_name || resolvedSavedAsset.input_filename) : "";
   const canStart = stage === STAGE.CONFIGURING && groupId && (cameraMode !== "camera_ranges" || cameraValidation.ok);
   const needsUpload = stage === STAGE.CONFIGURING && !groupId && Boolean(file);
 
-  // Phase 9 — fetch per-tier cost preview once we have a groupId in the
-  // CONFIGURING stage.  The estimate is honest: the backend dry-runs the
-  // same orchestrator.plan() the real submit will use.
+  // Stateless cost preview.  Fires whenever we have an analyzer
+  // snapshot + a parseable frame range — no group_id needed; the
+  // backend computes off (snapshot, overrides) sent in the body and
+  // returns without persisting anything.  Refreshes when overrides
+  // change so the user can tweak resolution / samples / camera mode
+  // and watch the estimate update.
   useEffect(() => {
-    if (!groupId || stage !== STAGE.CONFIGURING) {
+    if (stage !== STAGE.CONFIGURING || !analysis || !frameRange) {
       setTierEstimate(null);
       return;
     }
     let cancelled = false;
     setTierEstimateLoading(true);
-    estimateRenderGroup(backendUrl, groupId)
+    estimateRenderGroup(backendUrl, {
+      analysisSnapshot: analysis,
+      renderOverrides: renderOverridesForServer,
+      frameStart: frameRange.frame_start,
+      frameEnd: frameRange.frame_end,
+      frameStep: frameRange.frame_step,
+      fileSizeBytes: file?.size || savedInputAsset?.r2_input_size_bytes || null,
+    })
       .then((data) => {
         if (cancelled) return;
         setTierEstimate(data?.tiers || null);
@@ -351,7 +352,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
         }
       });
     return () => { cancelled = true; };
-  }, [groupId, stage, backendUrl]);
+  }, [stage, analysis, frameRange, renderOverridesForServer, backendUrl, file, savedInputAsset]);
 
   // ── Helpers ─────────────────────────────────────────────
   function applyAnalysis(parsed) {
@@ -654,25 +655,16 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
     };
 
     try {
-      let result;
-      if (reRenderGroupId) {
-        result = await rerenderGroup(backendUrl, reRenderGroupId, {
-          frameStart: frameRange?.frame_start,
-          frameEnd: frameRange?.frame_end,
-          frameStep: frameRange?.frame_step || 1,
-          renderOverrides: overrides,
-        });
-      } else {
-        result = await confirmDistributedJob(backendUrl, groupId, null, frameRange, overrides, null, analysis, tier, controller.signal);
-        if (result.needs_frame_input) {
-          dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
-          return;
-        }
+      const result = await confirmDistributedJob(
+        backendUrl, groupId, null, frameRange, overrides, null, analysis, tier, controller.signal,
+      );
+      if (result.needs_frame_input) {
+        dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
+        return;
       }
 
       dispatch({ type: "CONFIRMED" });
-      if (analysis && result.group_id) saveGroupAnalysis(result.group_id, analysis);
-      onJobSubmitted(result.group_id, reRenderFilename || file?.name || result.input_filename || "input.blend", result.tasks || [], result.total_frames);
+      onJobSubmitted(result.group_id, file?.name || result.input_filename || "input.blend", result.tasks || [], result.total_frames);
       void loadSavedInputs();
     } catch (err) {
       dispatch({ type: "ERROR", message: err?.name === "AbortError" ? "Cancelled" : (err?.message || "Failed to start render"), returnTo: STAGE.CONFIGURING });
@@ -745,7 +737,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
   const stageLabel = {
     [STAGE.IDLE]: "Select a file",
     [STAGE.ANALYZING]: "Analyzing...",
-    [STAGE.CONFIGURING]: reRenderGroupId ? "Re-render — adjust settings" : groupId ? "Ready to render" : "Configure & upload",
+    [STAGE.CONFIGURING]: groupId ? "Ready to render" : "Configure & upload",
     [STAGE.UPLOADING]: `Uploading... ${Math.min(100, uploadProgress).toFixed(0)}%`,
     [STAGE.CONFIRMING]: "Starting render...",
     [STAGE.DONE]: "Submitted",
@@ -930,7 +922,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, reRenderS
             <span className="cr-file-bar-status">{stageLabel}</span>
           </div>
           <button type="button" className="btn btn-secondary" onClick={handleReset} disabled={isBusy}>
-            {reRenderGroupId ? "Cancel" : "Change File"}
+            Change File
           </button>
         </div>
       )}

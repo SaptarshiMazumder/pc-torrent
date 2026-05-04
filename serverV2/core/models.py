@@ -202,6 +202,12 @@ class DispatchContext:
     # strategies that need to vary infrastructure by engine — currently
     # VastFleetStrategy uses it to pick the eevee-vs-cycles docker image.
     engine: str | None = None
+    # True iff this dispatch was authorized by a manual retry — lets
+    # the daemon's dispatch handler bypass the terminal-group guard
+    # when the parent group is ``failed``.  Default False; only the
+    # manual-retry pipeline flips it via MarkForceRetryStep + the
+    # EnqueueRetryDispatchStep that copies it off the RetryContext.
+    force_retry: bool = False
 
 
 @dataclass(frozen=True)

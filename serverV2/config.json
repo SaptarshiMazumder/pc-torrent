@@ -1,13 +1,41 @@
 {
   "modal": {
     "max_parallel": 30,
-    "per_gpu_max_parallel": 5
+    "per_gpu_max_parallel": 5,
+    "dispatch_timeout_sec": 21600,
+    "in_queue_timeout_sec": 120,
+    "endpoint_url_prefix": "",
+    "provisioning_enabled": true
   },
   "vast": {
-    "max_parallel": 30
+    "max_parallel": 30,
+    "disk_gb": 20,
+    "max_price_per_gpu": 1.00,
+    "secure_cloud_only": true,
+    "poll_interval_sec": 15,
+    "startup_timeout_sec": 300,
+    "heartbeat_timeout_sec": 45,
+    "heartbeat_grace_sec": 90,
+    "provisioning_enabled": true
+  },
+  "orchestrator": {
+    "max_retries": 1
   },
   "community": {
     "price_per_hour": 0.01
+  },
+  "monitor": {
+    "in_progress_stale_sec": 1800
+  },
+  "stall": {
+    "cpu_threshold_pct": 5.0,
+    "cpu_window_sec": 180,
+    "rss_noise_bytes": 67108864,
+    "download_bytes_stall_sec": 300,
+    "download_secs_per_gb": 120,
+    "download_phase_min_sec": 300,
+    "download_phase_max_sec": 1800,
+    "hard_max_chunk_sec": 14400
   },
   "vast_instances": [
     {

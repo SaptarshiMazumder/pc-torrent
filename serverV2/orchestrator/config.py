@@ -1,18 +1,14 @@
-"""Orchestration config — all dispatch/retry/cancel tunables live here."""
+"""Orchestration config — all dispatch/retry/cancel tunables live here.
+
+Reads from config.json's ``orchestrator`` block.  Required field, fails
+loud if missing — caps that govern retry budget shouldn't have hidden
+defaults.
+"""
 
 from __future__ import annotations
 
-import os
+from serverV2.config import _require_block, _require_field_int
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw or not raw.strip():
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-MAX_RETRIES = _env_int("ORCHESTRATOR_MAX_RETRIES", 0)
+_block = _require_block("orchestrator")
+MAX_RETRIES: int = _require_field_int(_block, "orchestrator", "max_retries")

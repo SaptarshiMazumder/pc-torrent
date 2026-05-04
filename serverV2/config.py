@@ -19,37 +19,6 @@ log = logging.getLogger(__name__)
 def _env_str(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw or not raw.strip():
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        log.warning("Invalid %s='%s', using default %s", name, raw, default)
-        return default
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if not raw or not raw.strip():
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        log.warning("Invalid %s='%s', using default %s", name, raw, default)
-        return default
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if not raw or not raw.strip():
-        return default
-    v = raw.strip().lower()
-    if v in {"1", "true", "yes", "on"}:
-        return True
-    if v in {"0", "false", "no", "off"}:
-        return False
-    return default
-
 # ---------------------------------------------------------------------------
 # Vast
 # ---------------------------------------------------------------------------
@@ -102,21 +71,24 @@ class VastConfig:
 
     @classmethod
     def from_env(cls, config_json_path: str | None = None) -> VastConfig:
+        # Tunables come from config.json's ``vast`` block; secrets / image
+        # tags / per-environment toggles stay in env vars.
+        block = _require_block("vast", config_json_path)
         return cls(
             api_key=_env_str("VAST_API_KEY"),
             docker_image=_env_str("VAST_DOCKER_IMAGE"),
             docker_image_eevee=_env_str("VAST_DOCKER_IMAGE_EEVEE") or None,
-            provisioning_enabled=_env_bool("VAST_PROVISIONING_ENABLED", True),
-            disk_gb=_env_float("VAST_DISK_GB", 20.0),
-            max_price_per_gpu=_env_float("VAST_MAX_PRICE_PER_GPU", 1.00),
-            secure_cloud_only=_env_bool("VAST_SECURE_CLOUD_ONLY", True),
-            poll_interval_sec=_env_float("VAST_POLL_INTERVAL_SEC", 15.0),
-            startup_timeout_sec=_env_float("VAST_STARTUP_TIMEOUT_SEC", 300.0),
-            in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 30 * 60),
+            provisioning_enabled=_require_field_bool(block, "vast", "provisioning_enabled"),
+            disk_gb=_require_field_float(block, "vast", "disk_gb"),
+            max_price_per_gpu=_require_field_float(block, "vast", "max_price_per_gpu"),
+            secure_cloud_only=_require_field_bool(block, "vast", "secure_cloud_only"),
+            poll_interval_sec=_require_field_float(block, "vast", "poll_interval_sec"),
+            startup_timeout_sec=_require_field_float(block, "vast", "startup_timeout_sec"),
+            in_progress_stale_sec=_load_monitor_in_progress_stale_sec(config_json_path),
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             heartbeat_interval_sec=10,
-            heartbeat_timeout_sec=_env_float("VAST_HEARTBEAT_TIMEOUT_SEC", 45.0),
-            heartbeat_grace_sec=_env_float("VAST_HEARTBEAT_GRACE_SEC", 90.0),
+            heartbeat_timeout_sec=_require_field_float(block, "vast", "heartbeat_timeout_sec"),
+            heartbeat_grace_sec=_require_field_float(block, "vast", "heartbeat_grace_sec"),
             max_parallel=_require_fleet_int("vast", "max_parallel", config_json_path),
             endpoints=tuple(_parse_vast_endpoints(config_json_path)),
         )
@@ -164,6 +136,72 @@ def _require_fleet_int(
     return value
 
 
+def _require_block(
+    block_name: str, config_json_path: str | None = None,
+) -> dict:
+    """Load a top-level block from config.json.  Fails loud if missing —
+    every caller of the typed-field helpers below expects to read REQUIRED
+    fields, which is meaningless without the parent block.
+    """
+    cfg = _load_config_json(config_json_path)
+    block = cfg.get(block_name)
+    if not isinstance(block, dict):
+        raise FleetException(f"config.json missing required block: {block_name!r}")
+    return block
+
+
+def _require_field_float(block: dict, block_name: str, key: str) -> float:
+    if key not in block:
+        raise FleetException(
+            f"config.json missing required key: {block_name}.{key}"
+        )
+    try:
+        return float(block[key])
+    except (TypeError, ValueError) as exc:
+        raise FleetException(
+            f"config.json {block_name}.{key} is not a valid number: "
+            f"{block[key]!r}"
+        ) from exc
+
+
+def _require_field_int(block: dict, block_name: str, key: str) -> int:
+    if key not in block:
+        raise FleetException(
+            f"config.json missing required key: {block_name}.{key}"
+        )
+    try:
+        return int(block[key])
+    except (TypeError, ValueError) as exc:
+        raise FleetException(
+            f"config.json {block_name}.{key} is not a valid int: "
+            f"{block[key]!r}"
+        ) from exc
+
+
+def _require_field_bool(block: dict, block_name: str, key: str) -> bool:
+    if key not in block:
+        raise FleetException(
+            f"config.json missing required key: {block_name}.{key}"
+        )
+    value = block[key]
+    if isinstance(value, bool):
+        return value
+    raise FleetException(
+        f"config.json {block_name}.{key} is not a valid bool: {value!r}"
+    )
+
+
+def _optional_field_str(block: dict, key: str, default: str = "") -> str:
+    """Read an OPTIONAL string field.  Used for values where 'absent' has
+    a defined fallback semantic (e.g. ``modal.endpoint_url_prefix`` empty
+    means 'derive from workspace + app_name').
+    """
+    value = block.get(key, default)
+    if isinstance(value, str):
+        return value.strip()
+    return default
+
+
 def _load_community_price_per_hour(config_json_path: str | None = None) -> float:
     """Read ``community.price_per_hour`` from config.json.  Default 1.00 if absent.
     Used by the bootstrap wiring so every CommunityMachine carries a price the
@@ -176,6 +214,41 @@ def _load_community_price_per_hour(config_json_path: str | None = None) -> float
     except (TypeError, ValueError):
         value = 1.0
     return max(0.0, value)
+
+
+def _load_monitor_in_progress_stale_sec(
+    config_json_path: str | None = None,
+) -> float:
+    """Read ``monitor.in_progress_stale_sec`` from config.json.
+
+    Both Vast and Modal monitors use this — frame-progress hasn't
+    advanced for this many seconds → kill the job.  Single value
+    shared across fleets; per-fleet override would be a future
+    nice-to-have but isn't needed today.
+
+    Required field — fails loud if missing.  Tunables that shape
+    job-failure semantics shouldn't have hidden defaults.
+    """
+    cfg = _load_config_json(config_json_path)
+    block = cfg.get("monitor")
+    if not isinstance(block, dict):
+        raise FleetException("config.json missing required block: 'monitor'")
+    if "in_progress_stale_sec" not in block:
+        raise FleetException(
+            "config.json missing required key: monitor.in_progress_stale_sec"
+        )
+    try:
+        value = float(block["in_progress_stale_sec"])
+    except (TypeError, ValueError) as exc:
+        raise FleetException(
+            f"config.json monitor.in_progress_stale_sec is not a valid number: "
+            f"{block['in_progress_stale_sec']!r}"
+        ) from exc
+    if value <= 0:
+        raise FleetException(
+            f"config.json monitor.in_progress_stale_sec must be > 0, got {value}"
+        )
+    return value
 
 
 def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpoint]:
@@ -259,19 +332,22 @@ class ModalConfig:
 
     @classmethod
     def from_env(cls) -> ModalConfig:
-        raw_timeout = _env_float("MODAL_DISPATCH_TIMEOUT_SEC", 6 * 60 * 60)
+        # Tunables come from config.json's ``modal`` block; secrets /
+        # workspace / per-environment toggles stay in env vars.
+        block = _require_block("modal")
+        raw_timeout = _require_field_float(block, "modal", "dispatch_timeout_sec")
         return cls(
             token_id=_env_str("MODAL_TOKEN_ID"),
             token_secret=_env_str("MODAL_TOKEN_SECRET"),
             app_name=_env_str("MODAL_APP_NAME", "pcrent-render"),
-            provisioning_enabled=_env_bool("MODAL_PROVISIONING_ENABLED", True),
+            provisioning_enabled=_require_field_bool(block, "modal", "provisioning_enabled"),
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             heartbeat_interval_sec=10,
             monitor_interval_sec=30,
             dispatch_timeout_sec=None if raw_timeout <= 0 else raw_timeout,
-            in_queue_timeout_sec=_env_float("IN_QUEUE_TIMEOUT_SEC", 120),
-            in_progress_stale_sec=_env_float("IN_PROGRESS_STALE_SEC", 30 * 60),
-            endpoint_url_prefix=_env_str("MODAL_ENDPOINT_URL_PREFIX").strip().rstrip("/"),
+            in_queue_timeout_sec=_require_field_float(block, "modal", "in_queue_timeout_sec"),
+            in_progress_stale_sec=_load_monitor_in_progress_stale_sec(),
+            endpoint_url_prefix=_optional_field_str(block, "endpoint_url_prefix").rstrip("/"),
             workspace=_env_str("MODAL_WORKSPACE").strip(),
             max_parallel=_require_fleet_int("modal", "max_parallel"),
             per_gpu_max_parallel=_require_fleet_int("modal", "per_gpu_max_parallel"),
@@ -355,15 +431,18 @@ class StallDetectionConfig:
 
     @classmethod
     def from_env(cls) -> StallDetectionConfig:
+        # Pre-render stall thresholds — all from config.json's ``stall``
+        # block.  No env-var overrides; tunables live in one place.
+        block = _require_block("stall")
         return cls(
-            cpu_stall_threshold_pct=_env_float("STALL_CPU_PCT", 5.0),
-            cpu_stall_window_sec=_env_float("STALL_WINDOW_SEC", 180.0),
-            rss_noise_bytes=_env_int("STALL_RSS_NOISE_BYTES", 64 * 1024 * 1024),
-            download_bytes_stall_sec=_env_float("STALL_DOWNLOAD_BYTES_SEC", 300.0),
-            download_secs_per_gb=_env_float("STALL_DOWNLOAD_SECS_PER_GB", 120.0),
-            download_phase_min_sec=_env_float("STALL_DOWNLOAD_PHASE_MIN_SEC", 300.0),
-            download_phase_max_sec=_env_float("STALL_DOWNLOAD_PHASE_MAX_SEC", 1800.0),
-            hard_max_chunk_sec=_env_float("STALL_HARD_MAX_CHUNK_SEC", 4 * 60 * 60.0),
+            cpu_stall_threshold_pct=_require_field_float(block, "stall", "cpu_threshold_pct"),
+            cpu_stall_window_sec=_require_field_float(block, "stall", "cpu_window_sec"),
+            rss_noise_bytes=_require_field_int(block, "stall", "rss_noise_bytes"),
+            download_bytes_stall_sec=_require_field_float(block, "stall", "download_bytes_stall_sec"),
+            download_secs_per_gb=_require_field_float(block, "stall", "download_secs_per_gb"),
+            download_phase_min_sec=_require_field_float(block, "stall", "download_phase_min_sec"),
+            download_phase_max_sec=_require_field_float(block, "stall", "download_phase_max_sec"),
+            hard_max_chunk_sec=_require_field_float(block, "stall", "hard_max_chunk_sec"),
         )
 
 

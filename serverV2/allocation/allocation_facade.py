@@ -1,13 +1,18 @@
-"""AllocationFacade — the only public symbol of the allocation module.
+"""AllocationFacade -- the only public symbol of the allocation module.
 
 Combines the planning service and the dispatch-queue service so the
-orchestrator gets one import surface.  The two ``submit_*`` methods
-are the canonical entry points — they collapse plan + (enqueue OR
-park-on-pending-queue) into a single atomic operation, so callers
-never need to know about the pending queue at all.
+orchestrator gets one import surface.
 
-``plan_initial`` / ``plan_retry`` stay public for the dry-run cost
-preview (pre-render estimate).  Those have no side effects.
+Public entry points:
+  * ``plan_initial`` -- pure compute, used by the pre-render cost
+    preview.  No side effects.
+  * ``submit_initial`` -- plan + (enqueue OR park-on-pending-queue) for
+    a whole render group.  The only path that writes to
+    ``dispatch_queue`` directly (bypassing pending).
+  * ``park_retry`` -- park a single retry chunk on
+    ``pending_allocation_queue``.  Both auto- and manual-retry use
+    this; planning happens later inside the daemon's tick.
+  * ``drain_for_group`` -- cancel-pipeline cleanup.
 
 Constructed once at boot and shared.  Stateless beyond the injected
 service references.
@@ -32,10 +37,8 @@ from serverV2.allocation.services.allocation_planning_service import (
 from serverV2.core.models import (
     AvailableResources,
     DispatchContext,
-    DispatchResult,
     PlannedTask,
     SubmitInitialResult,
-    SubmitRetryResult,
 )
 
 
@@ -73,19 +76,6 @@ class AllocationFacade:
             engine=engine,
             heaviness=heaviness,
             tier_budget_usd=tier_budget_usd,
-        )
-
-    def plan_retry(
-        self,
-        *,
-        tier: str | None,
-        chunk_request: AllocationChunkRequest,
-        resources: AvailableResources,
-    ) -> PlannedTask | None:
-        return self._planning.plan_retry(
-            tier=tier,
-            chunk_request=chunk_request,
-            resources=resources,
         )
 
     def submit_initial(
@@ -152,42 +142,23 @@ class AllocationFacade:
         ))
         return SubmitInitialResult(planned=[], dispatch_results=[], parked=True)
 
-    def enqueue(
-        self,
-        group_id: str,
-        tasks: list[PlannedTask],
-        context: DispatchContext,
-    ) -> list[DispatchResult]:
-        """Enqueue an already-planned task list (skipping the plan step).
-        Used by the manual-retry pipeline, which plans separately so it
-        can raise ``ManualRetryError`` on no-target instead of parking.
-        Initial submit + auto retry go through ``submit_*`` instead."""
-        return self._dispatch_queue.enqueue(group_id, tasks, context)
-
-    def submit_retry(
+    def park_retry(
         self,
         *,
         chunk_request: AllocationChunkRequest,
         tier: str | None,
-        resources: AvailableResources,
         dispatch_context: DispatchContext,
-    ) -> SubmitRetryResult:
-        """Plan + enqueue a single retry attempt.  Parks on
-        ``pending_allocation_queue`` if no eligible target right now."""
-        planned = self._planning.plan_retry(
-            tier=tier,
-            chunk_request=chunk_request,
-            resources=resources,
-        )
-        if planned is not None:
-            results = self._dispatch_queue.enqueue(
-                chunk_request.group_id, [planned], dispatch_context,
-            )
-            return SubmitRetryResult(
-                planned=planned,
-                dispatch_result=results[0] if results else None,
-                parked=False,
-            )
+    ) -> None:
+        """Park a retry attempt onto ``pending_allocation_queue`` without
+        any synchronous planning.  The dispatch daemon picks it up on its
+        next tick, plans against its tick-local mutable snapshot, and
+        either enqueues to ``dispatch_queue`` or leaves it parked.
+
+        Both auto-retry callbacks (Vast/Modal monitor threads) and
+        manual-retry endpoint flow through here.  No thread other than
+        the daemon's tick reads the cache, so there is no read-after-
+        mutate race possible.
+        """
         self._dispatch_queue.enqueue_pending(AllocationPendingItem(
             type=TYPE_RETRY_CHUNK,
             group_id=chunk_request.group_id,
@@ -207,7 +178,6 @@ class AllocationFacade:
             priority=dispatch_context.priority,
             input_filename=dispatch_context.input_filename,
         ))
-        return SubmitRetryResult(planned=None, dispatch_result=None, parked=True)
 
     def drain_for_group(self, group_id: str) -> int:
         """Remove every queued row (dispatch + pending) for ``group_id``.

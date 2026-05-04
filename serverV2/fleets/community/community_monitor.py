@@ -72,6 +72,7 @@ class CommunityMonitor:
         stall_detector: IPreRenderStallDetector,
         lock_repo: MonitorLockRepository,
         instance_id: str,
+        dispatch_claim_timeout_sec: int,
         demote_seconds: int = 90,
         interval_sec: int = 10,
     ) -> None:
@@ -96,6 +97,11 @@ class CommunityMonitor:
         # race window.  Render-phase liveness goes through the per-job
         # heartbeat directly, not this threshold.
         self._demote_sec = demote_seconds
+        # Mirrors Modal/Vast: a community job stuck in status='pending'
+        # past this threshold means the agent never claimed it (most
+        # likely crashed between dispatch and next poll).  Failing it
+        # routes through the standard CallbackRouter -> retry pipeline.
+        self._dispatch_claim_timeout = dispatch_claim_timeout_sec
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
@@ -165,6 +171,14 @@ class CommunityMonitor:
             except Exception:
                 log.exception("CommunityMonitor error for group %s", group["id"])
 
+        # Cross-group sweep: pending community rows whose agent never
+        # claimed the dispatch.  One query for the whole fleet rather
+        # than re-checking every active group's job list.
+        try:
+            self._check_pending_dispatch_timeout()
+        except Exception:
+            log.exception("CommunityMonitor pending-dispatch sweep failed")
+
         # Demote ghost machines: status='available' in Postgres but
         # absent from the WIDE liveness window (90s).  Only 'available'
         # -- 'processing' machines are exempt because their liveness
@@ -179,6 +193,27 @@ class CommunityMonitor:
                 self._machine_hb.prune_stale(self._demote_sec)
             except Exception:
                 log.exception("Ghost demote / prune failed")
+
+    def _check_pending_dispatch_timeout(self) -> None:
+        """Fail community jobs stuck in 'pending' past the claim timeout.
+        Mirrors ``VastInstanceMonitor`` startup-timeout and
+        ``ModalJobMonitor`` in-queue-timeout: dispatch happened, agent
+        never claimed.  Failure flows through CallbackRouter ->
+        release_machine_step (flips machine back to 'available') ->
+        retry pipeline.
+        """
+        rows = self._job_repo.get_stale_pending_community(
+            self._dispatch_claim_timeout,
+        )
+        for row in rows:
+            log.warning(
+                "Community job %s stuck pending > %ds on machine %s -- failing",
+                row["id"], self._dispatch_claim_timeout, row.get("machine_id"),
+            )
+            self._on_failure(
+                row["id"],
+                f"Agent did not claim within {self._dispatch_claim_timeout}s",
+            )
 
     def _check_group_terminal(self, group: dict, job: RenderJob) -> None:
         if job.status in ("done", "failed", "cancelled"):

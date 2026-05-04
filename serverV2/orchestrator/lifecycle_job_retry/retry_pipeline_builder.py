@@ -22,12 +22,10 @@ from serverV2.orchestrator.lifecycle_job_retry.steps import (
     BuildRetryChunkRequestStep,
     ComputeRemainingFramesStep,
     EnforceMaxRetriesStep,
-    EnqueueRetryDispatchStep,
     LoadDispatchContextStep,
     LoadJobAndGroupStep,
     LogAutoRetryStep,
     LogManualRetryStep,
-    ManualRetryAllocateRetryTaskStep,
     ManualRetryBuildResultStep,
     ManualRetryFlipGroupPendingStep,
     ManualRetryLoadGroupStep,
@@ -35,8 +33,8 @@ from serverV2.orchestrator.lifecycle_job_retry.steps import (
     ManualRetryRaiseIfNoRemainingStep,
     ManualRetryResolveLatestSiblingStep,
     ManualRetrySetAttemptZeroStep,
+    ParkRetryToPendingStep,
     RetryStep,
-    SubmitRetryStep,
 )
 
 
@@ -63,10 +61,6 @@ class RetryPipelineBuilder:
 
     def enforce_max_retries(self) -> "RetryPipelineBuilder":
         self._steps.append(EnforceMaxRetriesStep())
-        return self
-
-    def submit_retry(self) -> "RetryPipelineBuilder":
-        self._steps.append(SubmitRetryStep())
         return self
 
     def log_auto_retry(self) -> "RetryPipelineBuilder":
@@ -97,10 +91,6 @@ class RetryPipelineBuilder:
         self._steps.append(ManualRetrySetAttemptZeroStep())
         return self
 
-    def manual_retry_allocate_retry_task(self) -> "RetryPipelineBuilder":
-        self._steps.append(ManualRetryAllocateRetryTaskStep())
-        return self
-
     def log_manual_retry(self) -> "RetryPipelineBuilder":
         self._steps.append(LogManualRetryStep())
         return self
@@ -129,8 +119,8 @@ class RetryPipelineBuilder:
         self._steps.append(BuildRetryChunkRequestStep())
         return self
 
-    def enqueue_retry_dispatch(self) -> "RetryPipelineBuilder":
-        self._steps.append(EnqueueRetryDispatchStep())
+    def park_retry_to_pending(self) -> "RetryPipelineBuilder":
+        self._steps.append(ParkRetryToPendingStep())
         return self
 
     # ------------------------------------------------------------------

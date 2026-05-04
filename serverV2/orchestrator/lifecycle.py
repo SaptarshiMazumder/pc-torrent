@@ -348,8 +348,11 @@ class RenderLifecycle:
         The two ``not_found`` checks below happen pre-pipeline because
         the anti-affinity resolver needs a valid ``group_id`` to query;
         every other validation (group_cancelled, active_sibling_exists,
-        not_retryable, no_remaining_frames, no_eligible_target) is enforced
-        by the pipeline as it runs.
+        not_retryable, no_remaining_frames) is enforced by the pipeline
+        as it runs.  ``no_eligible_target`` is no longer a synchronous
+        refusal -- the manual-retry pipeline parks the request on
+        ``pending_allocation_queue`` and the daemon plans a target on
+        its next tick (or leaves it parked if no target is available).
 
         Anti-affinity is the union of every prior failed/cancelled
         attempt of this chunk — resolved here before the pipeline,

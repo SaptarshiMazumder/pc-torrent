@@ -217,6 +217,32 @@ class JobRepository:
             (machine_id,),
         )
 
+    def get_stale_pending_community(self, threshold_sec: int) -> list[dict[str, Any]]:
+        """Community jobs stuck in ``status='pending'`` for longer than
+        ``threshold_sec`` -- the agent never claimed the dispatch (likely
+        crashed between dispatch and its next poll).  CommunityMonitor's
+        equivalent of Modal's ``in_queue_timeout_sec`` and Vast's
+        ``startup_timeout_sec`` detectors.
+
+        ``submitted_at`` is stored as an ISO-8601 UTC text column (not
+        timestamptz), so the comparison uses an ISO string threshold.
+        UTC ISO timestamps sort lexicographically, so this is correct
+        and avoids a per-row cast.
+        """
+        from datetime import datetime, timedelta, timezone
+        threshold_iso = (
+            datetime.now(timezone.utc) - timedelta(seconds=threshold_sec)
+        ).isoformat()
+        return query_all(
+            """
+            SELECT id, machine_id FROM jobs
+            WHERE status = 'pending'
+              AND machine_type = 'windows'
+              AND submitted_at < %s
+            """,
+            (threshold_iso,),
+        )
+
     def claim_next_for_machine(self, machine_id: str) -> dict[str, Any] | None:
         """Claim the oldest pending job for this machine and flip it to
         'running'.  Does NOT touch the machines row -- the caller

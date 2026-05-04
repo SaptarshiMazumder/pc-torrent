@@ -322,7 +322,10 @@ def build(
     registry.register(modal_strategy)
 
     # -- community fleet --
-    community_strategy = CommunityStrategy(job_repo=job_repo)
+    community_strategy = CommunityStrategy(
+        job_repo=job_repo,
+        machine_state_writer=machine_state_writer,
+    )
     registry.register(community_strategy)
 
     # -- allocation + dispatch --
@@ -533,6 +536,7 @@ def build(
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
         demote_seconds=cfg.community_machine_demote_seconds,
+        dispatch_claim_timeout_sec=cfg.community_dispatch_claim_timeout_sec,
     )
 
     # -- monitor lock facade --

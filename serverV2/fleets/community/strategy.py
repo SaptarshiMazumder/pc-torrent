@@ -21,6 +21,7 @@ from serverV2.core.models import (
     PlannedTask,
 )
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.services.machines.machine_state_writer import MachineStateWriter
 
 
 _FLEET = "community"
@@ -28,8 +29,14 @@ _FLEET = "community"
 
 class CommunityStrategy:
 
-    def __init__(self, *, job_repo: JobRepository) -> None:
+    def __init__(
+        self,
+        *,
+        job_repo: JobRepository,
+        machine_state_writer: MachineStateWriter,
+    ) -> None:
         self._job_repo = job_repo
+        self._machine_state_writer = machine_state_writer
 
     @property
     def fleet(self) -> str:
@@ -65,6 +72,12 @@ class CommunityStrategy:
             attempt=task.attempt,
             price_per_hour_at_dispatch=None,   # telemetry skipped for community in v1
         ))
+        # Flip the machine to 'processing' on dispatch (not on agent claim).
+        # Closes the dispatch -> claim race window: subsequent allocator
+        # ticks read 'machines:status' from Redis and exclude this machine
+        # immediately, instead of seeing it as 'available' for the
+        # 5-15s gap until the agent's next poll.
+        self._machine_state_writer.set_status(task.machine_id, "processing")
         return DispatchResult(
             job_id=job_id,
             machine_id=task.machine_id,

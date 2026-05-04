@@ -1,4 +1,4 @@
-"""Retry pipeline steps — one class per file, all re-exported here.
+"""Retry pipeline steps -- one class per file, all re-exported here.
 
 Steps are reused across the auto- and manual-retry pipelines.  The two
 flows differ in which steps they include and the order, not in step
@@ -20,9 +20,6 @@ from serverV2.orchestrator.lifecycle_job_retry.steps.compute_remaining_frames_st
 from serverV2.orchestrator.lifecycle_job_retry.steps.enforce_max_retries_step import (
     EnforceMaxRetriesStep,
 )
-from serverV2.orchestrator.lifecycle_job_retry.steps.enqueue_retry_dispatch_step import (
-    EnqueueRetryDispatchStep,
-)
 from serverV2.orchestrator.lifecycle_job_retry.steps.load_dispatch_context_step import (
     LoadDispatchContextStep,
 )
@@ -34,9 +31,6 @@ from serverV2.orchestrator.lifecycle_job_retry.steps.log_auto_retry_step import 
 )
 from serverV2.orchestrator.lifecycle_job_retry.steps.log_manual_retry_step import (
     LogManualRetryStep,
-)
-from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_allocate_retry_task_step import (
-    ManualRetryAllocateRetryTaskStep,
 )
 from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_build_result_step import (
     ManualRetryBuildResultStep,
@@ -59,8 +53,8 @@ from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_resolve_latest
 from serverV2.orchestrator.lifecycle_job_retry.steps.manual_retry_set_attempt_zero_step import (
     ManualRetrySetAttemptZeroStep,
 )
-from serverV2.orchestrator.lifecycle_job_retry.steps.submit_retry_step import (
-    SubmitRetryStep,
+from serverV2.orchestrator.lifecycle_job_retry.steps.park_retry_to_pending_step import (
+    ParkRetryToPendingStep,
 )
 from serverV2.orchestrator.lifecycle_job_retry.steps.retry_step import RetryStep
 
@@ -71,7 +65,6 @@ __all__ = [
     "AbortIfGroupTerminalStep",
     "AbortIfNoRemainingStep",
     "EnforceMaxRetriesStep",
-    "SubmitRetryStep",
     "LogAutoRetryStep",
     # Manual-retry steps
     "ManualRetryLoadGroupStep",
@@ -79,7 +72,6 @@ __all__ = [
     "ManualRetryResolveLatestSiblingStep",
     "ManualRetryRaiseIfNoRemainingStep",
     "ManualRetrySetAttemptZeroStep",
-    "ManualRetryAllocateRetryTaskStep",
     "ManualRetryFlipGroupPendingStep",
     "ManualRetryBuildResultStep",
     "LogManualRetryStep",
@@ -87,5 +79,5 @@ __all__ = [
     "ComputeRemainingFramesStep",
     "LoadDispatchContextStep",
     "BuildRetryChunkRequestStep",
-    "EnqueueRetryDispatchStep",
+    "ParkRetryToPendingStep",
 ]

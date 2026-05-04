@@ -26,5 +26,4 @@ RETRY_REASON_HTTP_STATUS: dict[str, int] = {
     "active_sibling_exists": 409,
     "group_cancelled": 409,
     "no_remaining_frames": 409,
-    "no_eligible_target": 503,
 }

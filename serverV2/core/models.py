@@ -214,10 +214,10 @@ class DispatchResult:
 
 
 # ---------------------------------------------------------------------------
-# Submit results — atomic plan + (enqueue|park) outcome shapes returned
-# by AllocationFacade.submit_initial / submit_retry.  Caller never asks
-# "did it dispatch or did it park?" via separate API calls; that's the
-# whole point of the boundary.
+# Submit result -- atomic plan + (enqueue|park) outcome shape returned
+# by AllocationFacade.submit_initial.  Caller never asks "did it
+# dispatch or did it park?" via separate API calls; that's the whole
+# point of the boundary.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -225,14 +225,6 @@ class SubmitInitialResult:
     """Outcome of a whole-group initial plan + enqueue/park."""
     planned: list  # list[PlannedTask]
     dispatch_results: list  # list[DispatchResult]
-    parked: bool
-
-
-@dataclass(frozen=True)
-class SubmitRetryResult:
-    """Outcome of a single-chunk retry plan + enqueue/park."""
-    planned: object | None  # PlannedTask | None
-    dispatch_result: DispatchResult | None
     parked: bool
 
 

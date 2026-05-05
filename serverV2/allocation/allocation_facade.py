@@ -181,7 +181,6 @@ class AllocationFacade:
     def cost_estimate_for_dry_run(
         self,
         *,
-        tier: str | None,
         frame_start: int,
         frame_end: int,
         frame_step: int,
@@ -191,12 +190,11 @@ class AllocationFacade:
     ) -> GroupCostEstimate:
         """Pre-submit cost preview for a hypothetical group.  Reads the
         cached fleet-availability snapshot (no persist), runs the
-        planner against the user's tier + heaviness, and aggregates the
+        planner against the user's heaviness, and aggregates the
         resulting per-task estimates.  No DB reads, no DB writes."""
         snapshot = self._snapshot_cache.get_or_build()
         resources = _adapt_frozen_snapshot_to_resources(snapshot)
         return self._planning.cost_for_dry_run(
-            tier=tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,

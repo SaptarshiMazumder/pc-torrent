@@ -125,7 +125,6 @@ class RenderLifecycle:
     def cost_estimate_for_dry_run(
         self,
         *,
-        tier: str | None,
         frame_start: int,
         frame_end: int,
         frame_step: int,
@@ -134,7 +133,6 @@ class RenderLifecycle:
         heaviness: dict | None = None,
     ) -> GroupCostEstimate:
         return self._allocation_client.cost_estimate_for_dry_run(
-            tier=tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,

@@ -26,9 +26,11 @@ function formatNumber(n) {
   return String(n);
 }
 
-function effectiveMegapixels(heaviness) {
-  const px = heaviness.effective_pixels;
-  if (typeof px !== "number" || px <= 0) return null;
+function effectiveMegapixels(x, y, pct) {
+  if (typeof x !== "number" || typeof y !== "number" || x <= 0 || y <= 0) return null;
+  const p = typeof pct === "number" && pct > 0 ? pct : 100;
+  const px = x * y * (p / 100) ** 2;
+  if (px <= 0) return null;
   return (px / 1_000_000).toFixed(1);
 }
 
@@ -137,7 +139,7 @@ export default function HeavinessPanel({
   heaviness,
   loading = false,
   onResolutionChange = null,
-  resolutionOverride = null,
+  overrides = null,
 }) {
   if (loading && !heaviness) {
     return (
@@ -156,7 +158,11 @@ export default function HeavinessPanel({
     );
   }
 
-  const eMp = effectiveMegapixels(heaviness);
+  const effX = overrides?.resolution_x ?? heaviness.resolution_x;
+  const effY = overrides?.resolution_y ?? heaviness.resolution_y;
+  const effPct = overrides?.resolution_percentage ?? heaviness.resolution_percentage;
+  const eMp = effectiveMegapixels(effX, effY, effPct);
+  const effSamples = overrides?.cycles_samples ?? heaviness.samples;
 
   return (
     <div className="jd-card hp-panel">
@@ -166,14 +172,14 @@ export default function HeavinessPanel({
         <Row label="Engine" value={heaviness.render_engine || "—"} />
         <ResolutionRow
           heaviness={heaviness}
-          override={resolutionOverride}
+          override={overrides}
           onChange={onResolutionChange}
         />
         <Row
           label="Effective pixels"
           value={eMp ? `${eMp} MP` : "—"}
         />
-        <Row label="Samples" value={formatNumber(heaviness.samples)} />
+        <Row label="Samples" value={formatNumber(effSamples)} />
       </Section>
 
       <Section title="Geometry">

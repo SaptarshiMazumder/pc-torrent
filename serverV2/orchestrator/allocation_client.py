@@ -89,7 +89,6 @@ class AllocationClient:
     def cost_estimate_for_dry_run(
         self,
         *,
-        tier: str | None,
         frame_start: int,
         frame_end: int,
         frame_step: int,
@@ -98,7 +97,6 @@ class AllocationClient:
         heaviness: dict | None = None,
     ) -> GroupCostEstimate:
         return self._facade.cost_estimate_for_dry_run(
-            tier=tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,

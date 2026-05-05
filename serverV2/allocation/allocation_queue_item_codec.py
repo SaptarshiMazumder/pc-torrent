@@ -52,6 +52,9 @@ class AllocationQueueItemCodec:
             estimated_cost_usd=task.estimated_cost_usd,
             estimated_seconds_per_frame=task.estimated_seconds_per_frame,
             estimated_startup_seconds=task.estimated_startup_seconds,
+            offer_id=task.offer_id,
+            cuda_version=task.cuda_version,
+            host_os=task.host_os,
         )
 
     @staticmethod
@@ -74,4 +77,7 @@ class AllocationQueueItemCodec:
             estimated_cost_usd=item.estimated_cost_usd,
             estimated_seconds_per_frame=item.estimated_seconds_per_frame,
             estimated_startup_seconds=item.estimated_startup_seconds,
+            offer_id=item.offer_id,
+            cuda_version=item.cuda_version,
+            host_os=item.host_os,
         )

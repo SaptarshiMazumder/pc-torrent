@@ -1,26 +1,28 @@
-"""EconomyAllocationStrategy -- cost-first tier shell.
+"""AllocationStrategy -- the only strategy.
 
-Thin wrapper around ``AllocationPlanner``.  Holds the ECONOMY weights
-preset and forwards every call.  No allocation logic here -- the
-planner is the single source of truth for the algorithm; tiers differ
-only in the weights they pass.
+Replaces the prior Economy / Standard / Premium tier shells.  Cost is
+no longer a scoring factor; tier semantics moved to dispatch-queue
+priority (Phase F, future).  This class is now a thin wrapper around
+``AllocationPlanner`` -- exists for API compatibility with the
+planning service surface and to keep dependency injection one-step
+explicit.
 """
 
 from __future__ import annotations
 
-from serverV2.allocation.allocation_strategies.allocation_planner import (
-    AllocationPlanner,
-)
-from serverV2.allocation.allocation_strategies.allocation_weights import ECONOMY
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
+from serverV2.allocation.allocation_strategies.allocation_planner import (
+    AllocationPlanner,
+)
+from serverV2.allocation.allocation_strategies.allocation_weights import DEFAULT
 from serverV2.core.models import AvailableResources, PlannedTask
 
 
-class EconomyAllocationStrategy:
+class AllocationStrategy:
 
-    WEIGHTS = ECONOMY
+    WEIGHTS = DEFAULT
 
     def __init__(self, planner: AllocationPlanner) -> None:
         self._planner = planner

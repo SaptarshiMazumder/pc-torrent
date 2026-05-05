@@ -58,6 +58,12 @@ class AllocationQueueItem:
     estimated_cost_usd: float = 0.0
     estimated_seconds_per_frame: float = 0.0
     estimated_startup_seconds: float = 0.0
+    # Per-offer fields for Vast (None for Modal/community).  offer_id is
+    # the rentable bundle id chosen at planning time; cuda_version /
+    # host_os are captured for telemetry + post-dispatch logging.
+    offer_id: int | None = None
+    cuda_version: str | None = None
+    host_os: str | None = None
 
 
 class AllocationDispatchQueueRepository:
@@ -84,6 +90,7 @@ class AllocationDispatchQueueRepository:
                 price_per_hour,
                 estimated_seconds, estimated_cost_usd,
                 estimated_seconds_per_frame, estimated_startup_seconds,
+                offer_id, cuda_version, host_os,
                 created_at)
                VALUES (%s, %s, %s, %s,
                        %s, %s, %s,
@@ -94,6 +101,7 @@ class AllocationDispatchQueueRepository:
                        %s,
                        %s, %s,
                        %s, %s,
+                       %s, %s, %s,
                        %s)
                ON CONFLICT (group_id, chunk_index) DO NOTHING""",
             (
@@ -106,6 +114,7 @@ class AllocationDispatchQueueRepository:
                 item.price_per_hour,
                 item.estimated_seconds, item.estimated_cost_usd,
                 item.estimated_seconds_per_frame, item.estimated_startup_seconds,
+                item.offer_id, item.cuda_version, item.host_os,
                 _now_iso(),
             ),
         )
@@ -191,6 +200,8 @@ class AllocationDispatchQueueRepository:
 # ----------------------------------------------------------------------
 
 def _row_to_item(row: dict) -> AllocationQueueItem:
+    offer_raw = row.get("offer_id")
+    offer_id = int(offer_raw) if offer_raw is not None else None
     return AllocationQueueItem(
         frame_start=row["frame_start"],
         frame_end=row["frame_end"],
@@ -215,4 +226,7 @@ def _row_to_item(row: dict) -> AllocationQueueItem:
         estimated_cost_usd=float(row.get("estimated_cost_usd") or 0.0),
         estimated_seconds_per_frame=float(row.get("estimated_seconds_per_frame") or 0.0),
         estimated_startup_seconds=float(row.get("estimated_startup_seconds") or 0.0),
+        offer_id=offer_id,
+        cuda_version=row.get("cuda_version"),
+        host_os=row.get("host_os"),
     )

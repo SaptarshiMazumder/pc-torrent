@@ -1,48 +1,39 @@
 """AllocationPlanner -- the unified allocation algorithm.
 
-ONE pipeline.  Strategies (Economy / Standard / Premium) are thin
-shells holding an ``AllocationWeights`` preset; they call this planner
-which actually does the work.
+ONE pipeline, one strategy.  The earlier Economy / Standard / Premium
+shells were collapsed: cost is no longer a scoring factor (tier
+semantics moved to dispatch-queue priority).  Per-offer ranking
+(individual Vast offers, each with its own price / CUDA / OS) replaced
+per-gpu_type aggregation.
 
 Pipeline (``plan_initial``):
 
-  1. VRAM feasibility filter
+  1. Validators + VRAM feasibility filter
        required = estimate_required_vram_gb(heaviness)
        eligible = [t for t in resources if t.vram_gb >= required * weights.vram_safety_factor]
        fall back to "drop the floor" if empty -- better to try than refuse.
 
-  2. Ideal mix size
-       max_by_frames = total_frames // weights.min_frames_per_chunk
-       ideal_count   = min(weights.max_targets, max_by_frames, len(eligible))
-       even_chunk    = total_frames // ideal_count
+  2. Knapsack-aware mix size (the K-decision)
+       Per-chunk render time should be at least
+       ``weights.startup_amortization_ratio`` * startup, otherwise a big
+       chunk of total spend goes to overhead.  Cap K against
+       ``max_targets`` and ``total_frames // min_frames_per_chunk``.
+
+         total_render_sec = total_frames * representative_spf
+         worst_startup    = baseline_startup + max(fleet_buffer)
+         K_max_amortized  = total_render_sec / (worst_startup * ratio)
+         K = min(max_targets, K_max_amortized, total_frames / min_frames_per_chunk)
 
   3. Score every eligible target
-       composite_scorer.score_target(...) reads weights.{speed,cost}
-       Returns one float per target.  Higher = better.
+       composite_scorer.score_target(...) returns
+       speed * cuda * os linear combination (no cost).  Per-target
+       fleet buffer applied to chunk_seconds.
 
-  4. Pick top-N with fleet diversification
-       Greedy walk of sorted-by-score eligibles, capping any single
-       fleet at ``weights.fleet_diversification_cap`` of the picks.
-       Backfills from the rejected pool if diversification leaves us
-       under the count.
+  4. Pick top-N with fleet + per-gpu_type diversification.
 
-  5. Time-balanced frame distribution
-       Each target's spf differs.  Distribute frames inversely
-       proportional to spf so all chunks finish at ~the same wall
-       clock time -- minimises both wall time AND total cost (no GPU
-       sits idle while a slower one finishes).
+  5. Time-balanced frame distribution.
 
-  6. Stamp estimate fields onto every PlannedTask
-       estimated_seconds          = chunk_seconds_for(task.frames)
-       estimated_cost_usd         = chunk_cost_for(task.frames)
-       estimated_seconds_per_frame = estimate_seconds_per_frame(...)
-       estimated_startup_seconds   = estimate_startup_seconds(heaviness)
-
-       The cost service later sums these across a group for "estimated
-       total" and combines with telemetry for live projections.
-
-Validator hook: target validators (engine compat today; future: tier
-gates) run as the FIRST filter, before VRAM.
+  6. Stamp estimate fields onto every PlannedTask.
 
 Retry path (``plan_retry``) uses the same scorer with a single-target
 return + anti-affinity exclusions.
@@ -81,6 +72,7 @@ from serverV2.allocation.allocation_strategies.validators.allocation_target_vali
 from serverV2.allocation.allocation_strategies.validators.allocation_validation_context import (
     AllocationValidationContext,
 )
+from serverV2.config import StartupBufferConfig
 from serverV2.core.models import (
     AvailableResources,
     CommunityMachine,
@@ -105,9 +97,11 @@ class AllocationPlanner:
     def __init__(
         self,
         registry: FleetRegistry,
+        startup_buffer: StartupBufferConfig | None = None,
         validators: list[AllocationTargetValidator] | None = None,
     ) -> None:
         self._registry = registry
+        self._startup_buffer = startup_buffer or StartupBufferConfig()
         self._validators: tuple[AllocationTargetValidator, ...] = tuple(validators or ())
 
     # ------------------------------------------------------------------
@@ -140,26 +134,40 @@ class AllocationPlanner:
         if not eligible:
             return []
 
-        # Step 2: ideal mix size with adaptive frames-per-chunk floor.
-        # Each chunk pays a startup tax (BVH build + texture upload +
-        # shader compile) -- we want the per-chunk render work to be at
-        # least that much, otherwise a big chunk of total spend goes
-        # to overhead.  Take median spf across the eligible pool as
-        # representative; the time-balanced distributor will then give
-        # faster GPUs more frames within each chunk.
-        startup_seconds = estimate_startup_seconds(heaviness)
+        # Step 2: knapsack-aware mix size.
+        # max_targets is an upper bound, NOT a goal.  For each render we
+        # pick K such that per-chunk render time is meaningfully larger
+        # than per-chunk startup; otherwise a big chunk of total compute
+        # is wasted on overhead.  The amortization ratio (default 0.5)
+        # says "render >= 50% of startup".  Worst-case startup uses the
+        # largest fleet buffer (Vast) since at K-decision time we don't
+        # yet know which fleet will get the chunk.
         spfs = [
             estimate_seconds_per_frame(heaviness, t.render_speed)
             for t in eligible
         ]
         median_spf = max(0.001, median(spfs)) if spfs else 1.0
-        adaptive_min = max(1, math.ceil(startup_seconds / median_spf))
-        target_frames_per_chunk = max(weights.min_frames_per_chunk, adaptive_min)
-        max_by_frames = max(1, total_frames // target_frames_per_chunk)
-        ideal_count = min(weights.max_targets, max_by_frames, len(eligible))
+        worst_startup = (
+            estimate_startup_seconds(heaviness)
+            + max(self._startup_buffer.vast,
+                  self._startup_buffer.modal,
+                  self._startup_buffer.community)
+        )
+        ratio = max(0.05, weights.startup_amortization_ratio)
+        total_render_sec = total_frames * median_spf
+        k_amortized = max(1, math.ceil(total_render_sec / (worst_startup * ratio)))
+        max_by_frames = max(1, total_frames // weights.min_frames_per_chunk)
+        ideal_count = min(weights.max_targets, k_amortized, max_by_frames, len(eligible))
         if ideal_count <= 0:
             return []
         even_chunk = max(1, total_frames // ideal_count)
+
+        log.info(
+            "[ALLOC] knapsack: total_frames=%d median_spf=%.1fs worst_startup=%.0fs"
+            " ratio=%.2f k_amortized=%d max_by_frames=%d eligible=%d -> K=%d",
+            total_frames, median_spf, worst_startup, ratio,
+            k_amortized, max_by_frames, len(eligible), ideal_count,
+        )
 
         # Step 3: score every eligible target with composite scorer
         scored = [
@@ -167,10 +175,14 @@ class AllocationPlanner:
                 target=t,
                 score=score_target(
                     render_speed=t.render_speed,
-                    price_per_hour=t.price_per_hour,
                     heaviness=heaviness,
                     estimated_chunk_frames=even_chunk,
                     weights=weights,
+                    cuda_version=_target_cuda(t),
+                    host_os=_target_host_os(t),
+                    engine=engine,
+                    fleet=_target_fleet(t),
+                    fleet_buffer_sec=self._buffer_for_target(t),
                 ),
                 fleet_key=_fleet_key(t),
                 gpu_type_key=_gpu_type_key(t),
@@ -245,10 +257,14 @@ class AllocationPlanner:
             eligible,
             key=lambda t: score_target(
                 render_speed=t.render_speed,
-                price_per_hour=t.price_per_hour,
                 heaviness=heaviness,
                 estimated_chunk_frames=chunk_frames,
                 weights=weights,
+                cuda_version=_target_cuda(t),
+                host_os=_target_host_os(t),
+                engine=chunk_request.engine,
+                fleet=_target_fleet(t),
+                fleet_buffer_sec=self._buffer_for_target(t),
             ),
         )
         return self._target_to_task(
@@ -300,18 +316,31 @@ class AllocationPlanner:
         for cap in resources.serverless_capabilities:
             if not self._registry.is_enabled(cap.fleet):
                 continue
-            headroom = cap.fleet_max_parallel - in_flight.get(cap.fleet, 0)
-            if headroom <= 0:
-                continue
             if cap.vram_gb < vram_floor:
                 continue
             if not self._passes_validators(cap, context):
                 continue
-            # One virtual slot per headroom unit -- the picker can take
-            # several slots from the same capability up to the diversification
-            # cap and the fleet's own capacity.
-            for _ in range(headroom):
+            headroom = max(
+                0, cap.fleet_max_parallel - in_flight.get(cap.fleet, 0),
+            )
+            if headroom <= 0:
+                continue
+            if cap.offer_id is not None:
+                # Vast (per-offer): each offer is exactly one rentable
+                # instance.  Append once.  Total slots per fleet =
+                # number of offers, naturally bounded by the live
+                # marketplace pool.
                 out.append(cap)
+            else:
+                # Modal / serverless-without-offer-id: one capability
+                # represents "I can spawn N of these gpu_type".
+                # Materialize up to ``headroom`` virtual slots per
+                # gpu_type so the picker can take multiple chunks of
+                # the same class.  Total may exceed fleet max_parallel
+                # across gpu_types -- dispatch-time fleet cap enforces
+                # the absolute ceiling.
+                for _ in range(headroom):
+                    out.append(cap)
         return out
 
     def _passes_validators(self, target, context: AllocationValidationContext) -> bool:
@@ -464,8 +493,8 @@ class AllocationPlanner:
     # PlannedTask construction with estimate stamping
     # ------------------------------------------------------------------
 
-    @staticmethod
     def _target_to_task(
+        self,
         *,
         target,
         heaviness: dict,
@@ -476,18 +505,21 @@ class AllocationPlanner:
         chunk_index: int | None,
         attempt: int,
     ) -> PlannedTask:
+        fleet_buffer = self._buffer_for_target(target)
         spf = estimate_seconds_per_frame(heaviness, target.render_speed)
-        startup = estimate_startup_seconds(heaviness)
+        startup = estimate_startup_seconds(heaviness) + fleet_buffer
         seconds = chunk_seconds_for(
             render_speed=target.render_speed,
             heaviness=heaviness,
             estimated_chunk_frames=total_frames,
+            fleet_buffer_sec=fleet_buffer,
         )
         cost = chunk_cost_for(
             render_speed=target.render_speed,
             price_per_hour=target.price_per_hour,
             heaviness=heaviness,
             estimated_chunk_frames=total_frames,
+            fleet_buffer_sec=fleet_buffer,
         )
 
         if isinstance(target, CommunityMachine):
@@ -519,6 +551,9 @@ class AllocationPlanner:
             vram_gb=target.vram_gb,
             render_speed=target.render_speed,
             price_per_hour=target.price_per_hour,
+            offer_id=target.offer_id,
+            cuda_version=target.cuda_version,
+            host_os=target.host_os,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
@@ -554,3 +589,41 @@ def _gpu_type_key(target) -> str:
     if isinstance(target, FleetCapability):
         return f"{target.fleet}:{target.gpu_type}"
     return ""
+
+
+def _target_fleet(target) -> str | None:
+    if isinstance(target, CommunityMachine):
+        return "community"
+    if isinstance(target, FleetCapability):
+        return target.fleet
+    return None
+
+
+def _target_cuda(target) -> str | None:
+    """Per-target CUDA version, or None if untracked.  Community
+    machines and Modal capabilities always None for now.  Vast
+    capabilities carry their offer's ``cuda_max_good`` string.
+    """
+    if isinstance(target, FleetCapability):
+        return target.cuda_version
+    return None
+
+
+def _target_host_os(target) -> str | None:
+    """Per-target host OS, or None if untracked.  Same shape as
+    ``_target_cuda`` -- only Vast capabilities populate this today.
+    """
+    if isinstance(target, FleetCapability):
+        return target.host_os
+    return None
+
+
+# Bound method on the planner instance: forwards to the StartupBufferConfig.
+def _buffer_for_target(self: "AllocationPlanner", target) -> float:
+    return self._startup_buffer.for_fleet(_target_fleet(target))
+
+
+# Attach as a method on AllocationPlanner so the per-target call sites
+# above can use ``self._buffer_for_target(t)`` without an unbound free
+# function.  Keeps the resolution clean in one place.
+AllocationPlanner._buffer_for_target = _buffer_for_target

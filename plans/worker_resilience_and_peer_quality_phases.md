@@ -1,452 +1,239 @@
-# Worker Resilience + Peer Quality — Phased Plan
+# Allocation Refactor — Per-Offer Ranking, No Cost, Single Strategy
 
-Sequential plan for closing three production-pain gaps observed during
-2026-05-05 renders:
+Replaces the prior "Worker Resilience + Peer Quality" plan. The OPTIX→CUDA
+fallback (formerly Stage A) was already implemented in shell — see the
+`log_should_fallback_device` predicates in `vast_worker/scripts/render.sh`,
+`render.eevee.sh`, and `community_worker/render.sh`. The OS / CUDA peer-quality
+concept (formerly Stage D) is now broader: a full allocation pipeline rewrite.
 
-1. **Vast peer host OptiX kernel compile failures** → wasted retries
-2. **Container restart loops on Vast** (same job_id rendered twice
-   on the same instance after the worker exited) → wasted compute
-   billed to us, dashboard stays out of sync with reality
-3. **Cost / time blow-ups when peer drivers are old** — manifests as
-   the OptiX failure above, but root cause is "we rented a peer
-   without checking driver vintage"
-
-The fix space spans both the **worker repo** (lives outside this
-codebase — wherever `render_driver.py` and the heartbeat sender are)
-and the **orchestrator repo** (this codebase). Stages are ordered by
-implementation order; cross-stage dependencies called out per stage.
+The original Stage B (410 Gone on terminal jobs) and Stage C (worker
+self-terminate trio) for the zombie restart loop are NOT in this plan and
+remain deferred — see "Deferred" at the bottom.
 
 Last updated: 2026-05-05.
 
 ---
 
-## Stage A — OPTIX → CUDA fallback in the worker `[URGENT]`
+## Why
 
-**Where:** worker repo only. Single file: the render driver script
-that Blender's `--python` flag invokes (`render_driver.py`).
+Current allocation:
+- One `FleetCapability` per Vast `gpu_type`, hardcoded `price_per_hour` in `config.json`
+- Three tier strategies (Economy / Standard / Premium) with different `speed_weight`/`cost_weight`
+- Composite scorer = `speed_w × speed_factor + cost_w × cost_factor`
 
-**What:** when `bpy.ops.render.render(...)` fails with an OptiX kernel
-compile error, switch Cycles to CUDA and retry the same render once.
-CUDA is ~15–25% slower than OPTIX on the same GPU but doesn't trip
-the kernel-compile bug — saves the chunk on the same Vast instance
-instead of paying for a retry on a different peer.
+Production pain:
+1. **Hardcoded Vast prices are fictional.** Vast is a marketplace; real `dph_total` per offer differs from config. Cost telemetry is wrong.
+2. **No driver-quality signal.** RTX A5000 hosts skew toward old NVIDIA drivers (525.x / 535.x), causing repeated OPTIX kernel compile failures. Planner picks them anyway because they score well on cost.
+3. **No OS signal.** EEVEE on Windows Vast peers fails silently (broken EGL surface init in headless mode).
+4. **Tier-as-strategy is the wrong axis.** Cost-weighted scoring forces Economy renders to pick cheap-flaky GPUs. Cost belongs on the *dispatch* axis (queue priority), not the *allocation* axis (what to pick).
+5. **Per-gpu_type aggregation hides individual offer quality.** Two RTX 4090 offers can have very different drivers; today the planner sees them as identical.
 
-**Triggering error patterns** (from production logs):
+The fix: **rank every live Vast offer individually**. Drop cost from scoring. Collapse three strategies to one. Cost re-enters at the dispatch queue (Phase F, future).
+
+---
+
+## Phase A — Per-offer Vast capabilities (data layer)
+
+**Goal:** every live Vast offer becomes its own `FleetCapability`, carrying its own `dph_total`, `cuda_version`, `host_os`, and `offer_id` for direct dispatch.
+
+**Files:**
+- `serverV2/fleets/vast/client.py` — `VastOfferSearcher.search()` returns `list[VastOffer]`. Each `VastOffer` parses from a Vast bundle entry:
+  - `id` → `offer_id`
+  - `dph_total` → marketplace price USD/hr
+  - `cuda_max_good` → driver-supported CUDA version (e.g. `13.0`)
+  - `driver_version` → NVIDIA driver string (e.g. `"580.126.09"`) — captured for telemetry; not used in scoring (CUDA version is the higher-signal proxy)
+  - `os_version` → normalised to `"Linux <version>"`. Vast hosts are virtually all Linux (especially under `secure_cloud_only=true` — datacenter only), so we treat any non-null `os_version` as Linux. The string format keeps downstream `"linux" in host_os.lower()` matching honest. Verified against live `/bundles/` 2026-05-05.
+- `serverV2/fleets/fleet_availability/steps/vast_availability_builder.py` — emits **one `FleetCapability` per offer** (was one per `gpu_type`). Per-gpu_type metadata (vram_gb, render_speed, cpu/ram) still comes from `config.json`'s lookup; per-offer fields (cuda, os, price) come from `VastOffer`.
+- `serverV2/core/models.py` — `FleetCapability` adds:
+  - `host_os: str | None`
+  - `cuda_version: str | None`
+  - `offer_id: int | None` (Vast-only)
+  - `price_per_hour: float` becomes per-offer for Vast (Modal/community keep config-derived value)
+- `serverV2/fleets/vast/strategy.py` — at dispatch:
+  - Use the picked capability's `offer_id` directly; no second offer search
+  - Stamp `price_per_hour_at_dispatch` from the capability's actual `dph_total`
+- `serverV2/fleets/fleet_availability/steps/modal_availability_builder.py` — **skipped.** Modal is fully managed, every container is identical, drivers / OS are controlled by us. Leave `cuda_version=None` and `host_os=None` on Modal capabilities and let the scorer's "None means trust" rule give Modal full credit.
+- `serverV2/services/machines/machine_repository.py` — `CommunityMachine` already gets `cuda_version=None, host_os=None` via FleetCapability defaults. Agent self-report is a follow-up if we ever want to discriminate within the community pool.
+
+**No scoring changes in Phase A.** Existing scorer keeps working with the new shape because its API is per-target.
+
+**Smoke check:** boot orchestrator, hit fleet-availability endpoint, confirm Vast targets list shows individual offers with non-null `cuda_version` and `dph_total`.
+
+---
+
+## Phase B — Single strategy, cost stripped, knapsack-aware fan-out
+
+**Goal:** one strategy, no cost in scoring, intelligent K (chunk count) selection. **`max_targets` is an upper bound, not a goal.**
+
+### Strategy collapse
+
+- **Delete**: `economy_allocation_strategy.py`, `standard_allocation_strategy.py`, `premium_allocation_strategy.py`
+- **Delete**: `allocation_helpers/allocation_strategy_selector.py`
+- `allocation_weights.py` — collapse to a single `DEFAULT` bundle. Drop `speed_weight`/`cost_weight`. Fields:
+  - `max_targets: int = 60` — UPPER BOUND
+  - `min_frames_per_chunk: int = 4`
+  - `gpu_type_diversification_cap: float = 0.40` — prevent failure-correlated concentration
+  - `vram_safety_factor: float = 1.20`
+  - `startup_amortization_ratio: float = 0.5` — NEW. Knapsack knob.
+- `allocation_facade.py` — drop strategy selector; one `AllocationStrategy` always.
+- `tier` column on render rows stays. Allocator ignores it for now. Phase F revives it as queue priority.
+
+### Knapsack-aware fan-out (THE CRITICAL PIECE)
+
+`max_targets=60` does NOT mean every render uses 60 GPUs. For each render the planner computes K based on amortizing per-chunk startup over real render work:
 
 ```
-OPTIX_ERROR_INTERNAL_COMPILER_ERROR
-Failed to load OptiX kernel
-COMPILE ERROR: Module compilation failed
+total_render_seconds  = total_frames × representative_spf
+K_max_amortized       = total_render_seconds / (startup_seconds × ratio)
+                      # ratio defaults to 0.5 → render must be ≥ 50% of startup
+K = min(max_targets, K_max_amortized, total_frames // min_frames_per_chunk)
+K = max(1, K)
 ```
 
-Match any of those in either the raised `RuntimeError`'s message OR
-the captured Blender log lines from this render attempt.
+Where:
+- `representative_spf` = seconds per frame on the median-speed available capability
+- `startup_seconds` = `estimate_startup_seconds(heaviness, fleet="vast")` — worst-case fleet, since allocation is fleet-agnostic at K-decision time
+- `ratio = 0.5` means per-chunk render time must be at least half the startup; lower ratio → more fragmentation allowed → faster wall time at cost of more startup tax
 
-**Implementation outline:**
+Concrete cases (assuming Vast startup ≈ 180s after Phase D):
+
+| Render | spf (s) | total_render (s) | K_max_amortized | K (after caps) |
+|---|---|---|---|---|
+| 5 frames, light scene | 5 | 25 | 0.28 | **1** |
+| 50 frames, light scene | 5 | 250 | 2.78 | **2** |
+| 50 frames, medium scene | 10 | 500 | 5.56 | **5** |
+| 50 frames, heavy scene | 60 | 3000 | 33.3 | **12** (cap by `frames/min_frames`) |
+| 200 frames, medium scene | 10 | 2000 | 22.2 | **22** |
+| 500 frames, medium scene | 10 | 5000 | 55.6 | **55** |
+| 1000 frames, medium scene | 10 | 10000 | 111 | **60** (cap by `max_targets`) |
+
+The 50-frame case lands at K=2..12 depending on scene heaviness — far below the 60 cap. That is the intended behaviour: no over-fan for small renders, no startup tax inflation.
+
+### Scorer rewrite
+
+`composite_scorer` becomes:
+
+```
+score = speed_weight × speed_factor
+      + cuda_weight  × cuda_factor    # Phase C populates the data
+      + os_weight    × os_factor      # Phase C populates the data
+```
+
+Default weights: `speed=0.70, cuda=0.20, os=0.10`. Tunable.
+
+`chunk_cost_for()` stays — telemetry still records per-chunk cost — but it is no longer a scoring factor.
+
+### Smoke tests for Phase B
+
+Standalone script: `scripts/smoke_allocation_strategy.py`. Builds synthetic scenes + capability lists, runs the planner, prints K + picks, asserts expected behaviour. Each scenario is a single function with named inputs so failures point to the rule that broke.
+
+Scenarios:
+
+1. **Tiny render** — 5 frames, light scene → expect K=1
+2. **Short light** — 50 frames, simple scene → expect K ≈ 2-5
+3. **Short heavy** — 50 frames, heavy scene (50M verts, 4096 samples, volumetrics) → expect K capped at `total_frames / min_frames_per_chunk` = 12
+4. **Medium** — 200 frames, medium scene → expect K ≈ 15-25
+5. **Big** — 1000 frames, medium scene → expect K = 60 (max_targets cap)
+6. **CUDA discrimination** — 50 frames, two RTX 4090 offers identical except CUDA 11.8 vs 12.8 → expect 12.8 wins
+7. **OS discrimination (EEVEE)** — 50 frames EEVEE, two L40 offers identical except Linux vs Windows → expect Linux wins by clear margin (Phase C makes the EEVEE penalty harsh)
+8. **Diversification cap** — 50 frames, available pool has 10 RTX 4090 with great scores + 5 of other classes; with cap=0.40 and K=12, expect ≤5 RTX 4090 picks
+
+Run on every Phase B/C/D code change. Failures = real algorithm bugs caught pre-deploy.
+
+---
+
+## Phase C — CUDA + OS scoring (the ranking axes)
+
+**Goal:** populate `cuda_factor` and `os_factor` from Phase B's scorer with real driver / OS quality logic.
+
+**"None means trust" rule:** absence of a CUDA / OS signal means full credit (1.0), not neutral (0.5). Penalties only kick in when we have data showing the offer is bad. This way Modal and community (always None) score on speed alone, and only Vast offers that actually report old drivers / Windows get marked down.
+
+### `cuda_factor`
 
 ```python
-# render_driver.py (sketch)
-_OPTIX_KERNEL_COMPILE_PATTERNS = (
-    re.compile(r"OPTIX_ERROR_INTERNAL_COMPILER_ERROR"),
-    re.compile(r"Failed to load OptiX kernel"),
-    re.compile(r"COMPILE ERROR:\s+Module compilation failed"),
-)
-
-def _is_optix_kernel_compile_error(exc, recent_log_lines):
-    haystack = str(exc) + "\n" + "\n".join(recent_log_lines)
-    return any(p.search(haystack) for p in _OPTIX_KERNEL_COMPILE_PATTERNS)
-
-def _activate_devices(compute_type):
-    prefs = bpy.context.preferences.addons["cycles"].preferences
-    prefs.compute_device_type = compute_type     # "OPTIX" | "CUDA"
-    prefs.get_devices()
-    for device in prefs.devices:
-        device.use = (device.type == compute_type)
-    bpy.context.scene.cycles.device = "GPU"
-
-def render_with_fallback(scene, *, output_path, frames, ...):
-    # First attempt: OPTIX (current default)
-    _activate_devices("OPTIX")
-    log.info("[RENDER_DRIVER] Rendering with: OPTIX (GPU)")
+def cuda_factor(cuda_version: str | None) -> float:
+    if cuda_version is None:
+        return 1.0      # no signal = trust (Modal/community)
     try:
-        bpy.ops.render.render(animation=True, ...)
-        log.info("[RENDER_DRIVER] compiled_with=optix")
-        return
-    except RuntimeError as exc:
-        if not _is_optix_kernel_compile_error(exc, _recent_blender_logs()):
-            raise
-        log.warning(
-            "[RENDER_DRIVER] OPTIX kernel compile failed: %s; "
-            "falling back to CUDA", exc,
-        )
-
-    # Reset Blender state to clear failed Cycles init.  Reloading the
-    # .blend is heavier than necessary but the cleanest way to wipe
-    # OPTIX context state that lingers in the running process.
-    bpy.ops.wm.revert_mainfile(use_scripts=False)
-    _activate_devices("CUDA")
-    log.info("[RENDER_DRIVER] Rendering with: CUDA (GPU) [fallback]")
-    bpy.ops.render.render(animation=True, ...)
-    log.info("[RENDER_DRIVER] compiled_with=cuda_fallback")
+        v = float(cuda_version)
+    except ValueError:
+        return 1.0
+    return max(0.0, min(1.0, v - 12.0))   # 12.0 → 0.0, 13.0 → 1.0
 ```
 
-**Why this works:** OPTIX kernel compile is the JIT step where NVIDIA's
-runtime compiles Blender's PTX kernel for the specific GPU + driver
-combination. Old/buggy drivers fail here. CUDA path-tracing uses a
-completely different kernel pipeline (no PTX JIT, pre-compiled CUDA
-binaries) and is robust against the same drivers.
+CUDA <12.0 = old Hopper-era drivers, OPTIX-failure-prone. CUDA 12.8+ = current.
 
-**Edge cases handled in the plan:**
-
-- **Infinite retry guard.** Fall back to CUDA exactly once. If the
-  CUDA retry also fails, bubble up the original exception. Do not
-  attempt CPU fallback (CPU rendering on a GPU-rented instance burns
-  hours of expensive compute for low return).
-- **Lingering OPTIX state.** Blender holds onto failed-Cycles-init
-  state in the running process. `revert_mainfile()` is the cleanest
-  reset. Alternative: spawn a fresh Blender subprocess for the retry,
-  but that doubles container startup cost.
-- **Output path collision.** The first OPTIX attempt may have written
-  partial output frames before crashing. The subsequent CUDA retry
-  overwrites them. Fine — Blender frame writes are atomic per-file
-  via `os.replace`-style semantics. Worst case: a stale partial PNG
-  briefly exists on local disk, gets overwritten, never gets uploaded.
-- **Scene context loss.** After `revert_mainfile`, `bpy.context.scene`
-  is a fresh object. Re-resolve scene name + view layer + camera mode
-  from the original render-overrides JSON (already in scope from the
-  initial setup) before invoking the render again.
-
-**Telemetry:**
-
-- Log `[RENDER_DRIVER] compiled_with=optix` on first-try success.
-- Log `[RENDER_DRIVER] compiled_with=cuda_fallback` after fallback
-  success.
-- Log `[RENDER_DRIVER] OPTIX kernel compile failed: <msg>; falling
-  back to CUDA` on the trigger.
-
-These show up in Cloud Run logs (worker stdout is captured) so we
-can grep/count occurrences after deploy:
-
-```
-gcloud logging read 'textPayload=~"compiled_with=cuda_fallback"' \
-  --freshness=24h --format='value(timestamp,textPayload)'
-```
-
-Tells us how often Stage A is firing, i.e., how often we'd otherwise
-have lost a chunk.
-
-**Open questions:**
-
-- **A1.** Reload .blend via `revert_mainfile` (clean, ~1-2s) or spawn
-  a fresh Blender subprocess (cleanest, ~10-30s — full Blender boot)?
-  Recommend revert_mainfile.
-- **A2.** Capture Blender logs via `bpy.app.handlers` hooks or via
-  redirecting `sys.stderr` during the render? Recommend the simpler
-  stderr redirect — Blender's logging is already on stderr in
-  headless mode.
-- **A3.** Should we ALSO try OPTIX-only-on-Cycles-feature-set?
-  Some scenes have `cycles.feature_set = 'EXPERIMENTAL'` which uses
-  experimental OptiX paths more likely to fail. Could downgrade
-  to `'SUPPORTED'` for the OPTIX retry before the CUDA fallback.
-  Out of scope for now; flag for later.
-
-**Cost / risk profile:**
-
-- ~30-50 lines of Python, single file, no architectural change.
-- No orchestrator change.
-- Worst case: the fallback masks a real driver issue. The telemetry
-  line surfaces it; we'd add anti-affinity contribution if telemetry
-  shows specific GPU classes failing OPTIX repeatedly.
-- Best case: ~5-20% of Vast renders that today die on OPTIX kernel
-  compile would succeed instead, on the same instance, ~25% slower.
-
-**Dependencies:** none. Ships standalone. Worker image rebuild + Vast
-template update.
-
-**Smoke test plan:**
-
-1. Find a Vast offer with old NVIDIA drivers (~535.x range historically
-   has the most issues). Rent it manually.
-2. Force-render a known-OPTIX-failing scene on it.
-3. Confirm the fallback kicks in, the chunk completes via CUDA, the
-   `[RENDER_DRIVER] compiled_with=cuda_fallback` line appears.
-4. Tail Cloud Run logs after deploy and count `compiled_with=` entries
-   per day for the first week to validate the live rate.
-
----
-
-## Stage B — `[reject-terminal-callbacks]`
-
-**Where:** orchestrator only. Two files: `services/jobs/service.py`
-and `api/routers/jobs.py`.
-
-**What:** `PUT /jobs/{id}/heartbeat`, `PUT /jobs/{id}/progress`, and
-`POST /jobs/{id}/request-upload-urls` check the job's `status` column
-before doing any work. If status is in `{done, failed, cancelled}`,
-return HTTP **410 Gone** with a structured body:
-
-```json
-{ "error": "job_terminal", "status": "failed", "reason": "..." }
-```
-
-**Why 410:** semantic match for "the resource is no longer available."
-HTTP clients that respect 410 will not retry it (vs 5xx where most
-clients retry). We want zombies to STOP, not retry.
-
-**Endpoints in scope:**
-
-| Endpoint | Reject on terminal? | Why |
-|---|---|---|
-| `PUT /jobs/{id}/heartbeat` | yes | the explicit kill switch for zombies |
-| `PUT /jobs/{id}/progress` | yes | same reason — wasted Redis writes |
-| `POST /jobs/{id}/request-upload-urls` | yes | no point signing R2 URLs for a dead job |
-| `POST /jobs/{id}/register-outputs` | **no** | frames already on R2; let them dedupe via output_frames PK |
-| `PUT /jobs/{id}/status` | **no** | the worker MUST be able to report terminal status; rejecting 410 here would leak state |
-
-**Cost per heartbeat:** one extra DB read. Current heartbeat cadence
-is ~5s/worker × ~10 active workers = ~2 reads/sec. Negligible.
-
-**Optional optimization (out of scope for now):** cache terminal flag
-in Redis (`job:{id}:terminal`, 5min TTL set on terminal transition).
-Heartbeat reads Redis first, falls back to PG. Skip until heartbeat
-volume justifies it.
-
-**Open questions:**
-
-- **B1.** Do we want a structured body, or just the 410 status code?
-  Structured body lets the worker log a clean reason; raw 410 is
-  simpler. Recommend structured body — cheap, useful in worker logs.
-
-**Dependencies:** none for this stage in isolation. To actually break
-the live-zombie loop, also needs Stage C.1 (worker handles 410).
-
----
-
-## Stage C — Worker self-terminate trio
-
-Three coordinated worker-side changes that together break every shape
-of zombie / orphan-work loop on Vast.
-
-### C.1 — Worker handles 410 from heartbeat/progress
-
-**Where:** worker repo. Heartbeat sender thread + progress poster.
-
-**What:** when the heartbeat or progress HTTP response is 410, set a
-process-global `should_exit` event. The render driver checks this
-event between frames (or via `render_pre`/`render_post` callbacks
-in Blender) and exits cleanly with code 0 if set.
+### `os_factor`
 
 ```python
-# heartbeat_sender.py (sketch)
-SHOULD_EXIT = threading.Event()
-
-def _send_heartbeat(...):
-    resp = requests.put(...)
-    if resp.status_code == 410:
-        body = resp.json()
-        log.warning(
-            "Orchestrator says job is %s (%s); exiting",
-            body.get("status"), body.get("reason"),
-        )
-        SHOULD_EXIT.set()
-        return
-    resp.raise_for_status()
+def os_factor(host_os: str | None, engine: str | None) -> float:
+    if host_os is None:
+        return 1.0      # no signal = trust (Modal/community)
+    s = host_os.lower()
+    is_linux = "linux" in s or "ubuntu" in s or "debian" in s
+    if engine in {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"}:
+        return 1.0 if is_linux else 0.0   # hard penalty for Windows on EEVEE
+    return 1.0 if is_linux else 0.7        # soft penalty otherwise
 ```
 
-Render driver checks `SHOULD_EXIT.is_set()` between frames; on True,
-break out of the render loop, run cleanup, exit 0.
+Subsumes the old "Stage E" EEVEE-Linux-only filter — penalty is harsh enough that a Windows EEVEE offer's combined score loses even with good speed/cuda.
 
-**Pairs with Stage B.** Without B, the orchestrator never returns 410.
-Without C.1, B is a no-op for workers.
+### Optional hard validator (defer)
 
-### C.2 — Worker checks job status at startup
-
-**Where:** worker repo. Top of the entrypoint script, before the
-.blend download.
-
-**What:** one HTTP call: `GET /jobs/{JOB_ID}` (or `/jobs/{JOB_ID}/status`
-if a lighter endpoint exists). If response shows `status` in
-`{done, failed, cancelled}`, log "job already terminal, no work to do"
-and exit 0 immediately — before downloading anything.
-
-```python
-# entrypoint sketch
-job_status = _get_job_status(JOB_ID)
-if job_status in {"done", "failed", "cancelled"}:
-    log.info("Job %s already %s; exiting before download", JOB_ID, job_status)
-    sys.exit(0)
-```
-
-**Cost:** one HTTP roundtrip per container start (~50ms). Container
-starts a handful of times per Vast instance lifetime. Negligible.
-
-**Why this matters:** prevents the FIRST iteration of the zombie
-restart loop. After a crash, Vast respawns the container with the
-same env vars. Without this check, the respawn re-runs the whole
-pipeline. With this check, the respawn exits in <100ms.
-
-### C.3 — Worker self-destroys the Vast instance
-
-**Where:** worker repo + tiny orchestrator addition.
-
-**Two design options:**
-
-- **(a)** Worker calls Vast API directly. Needs `VAST_API_KEY`
-  injected into the container env. Reliable, but **leaks the key** to
-  anyone who can read the container env (other tenants on the same
-  peer? unclear).
-- **(b)** Worker calls orchestrator endpoint. New
-  `POST /jobs/{job_id}/self-destroy`. Orchestrator looks up
-  `vast_job_id` from the row, calls `client.instances.destroy(...)`,
-  returns 204. Idempotent — destroy() on already-destroyed is a no-op.
-  Adds one HTTP hop but no credential leak.
-
-**Recommend (b).** The orchestrator-side destroy() is the same call
-the existing failure pipeline uses; we're just letting the worker
-trigger it explicitly after success/failure terminal reporting,
-rather than waiting for the orchestrator's monitor to notice.
-
-**What this adds beyond C.1+C.2:** stops Vast billing immediately
-after success. C.1/C.2 prevent zombies from doing useless work; C.3
-stops PAYING for the instance even if Vast's restart policy would
-keep it idle but billable until orchestrator-side cleanup.
-
-**Worker needs to know its `instance_id`:** inject as
-`VAST_INSTANCE_ID` env var at dispatch time (Vast strategy already
-has it in scope when launching).
-
-**Dependencies:** can ship independently of C.1/C.2 but most useful
-in combination.
+If the soft EEVEE+Windows penalty is insufficient in practice (worst case: no Linux offers, planner falls back to Windows + black frames), add `EeveeLinuxOnlyValidator` that excludes non-Linux Vast capabilities for EEVEE renders. Ship soft-only, observe telemetry, harden if needed.
 
 ---
 
-## Stage D — Peer-quality enrichment + ranking `[NEW]`
+## Phase D — Vast load-up time buffer
 
-**Where:** orchestrator only. Touches Vast availability fetching +
-the planner's composite scorer.
+**Goal:** model Vast provisioning latency in `estimate_startup_seconds`. Today's estimate counts download + BVH + shader compile (~20-90s); Vast adds another 1-3 min for offer-accepted-to-container-running. Without it, short Vast chunks score better than reality.
 
-**What:** when fetching Vast offers, also capture per-offer:
+**Files:**
+- `serverV2/allocation/allocation_strategies/analyzers/allocation_time_analyzer.py` — `estimate_startup_seconds(heaviness, fleet=None)` gains a `fleet` kwarg, adds a fleet additive on top of the heaviness-based baseline:
+  - vast: +180s, modal: +120s, community: +0s
+  - Buffer values come from config, not constants
+- `serverV2/config.json` — new block:
+  ```json
+  "startup_buffer_sec": { "vast": 180, "modal": 120, "community": 0 }
+  ```
+- `serverV2/config.py` — `StartupBufferConfig` dataclass loaded from that block. No env vars (per house rule).
 
-- `price_per_hour` (already capture? confirm)
-- `host_os` (`Ubuntu 22.04`, `Windows Server 2022`, etc.)
-- `cuda_version` (driver-reported, e.g. `12.2`, `12.4`, `12.6`, `12.8`)
-
-Surface these on `FleetCapability` (the value object the planner reads
-when scoring targets). Currently `FleetCapability` carries `gpu_type`,
-`vram_gb`, `cpu_cores`, `ram_gb`, `render_speed`, `price_per_hour`.
-
-Add: `host_os: str | None`, `cuda_version: str | None`.
-
-**Ranking change in `composite_scorer`:**
-
-For two candidate offers of the same `gpu_type`, prefer the one with
-the higher CUDA version. Concretely:
-
-```
-score = speed_weight * speed_term
-      + cost_weight  * cost_term
-      + cuda_bonus_weight * cuda_term      # NEW
-```
-
-Where `cuda_term` is a normalized 0..1 value derived from the offer's
-CUDA version (e.g., 12.8 → 1.0, 12.6 → 0.8, 12.4 → 0.6, 12.2 → 0.4,
-older → 0.0). `cuda_bonus_weight` is small (~0.1-0.15) so it's a
-tiebreaker between otherwise-similar offers, not the dominant signal.
-
-**Why:** OPTIX kernel compile failures correlate with old CUDA / driver
-versions. Preferring newer CUDA reduces the rate of Stage A's
-fallback (which is already a recovery, but each fallback is ~20%
-slower than the first try). Direct prevention beats recovery.
-
-**Universal across tiers:** Economy / Standard / Premium all get the
-same CUDA preference. The cuda_bonus_weight is identical across
-tier presets — newer drivers are always desirable, never a tradeoff.
-
-**Implementation outline:**
-
-1. **Vast offer search:** add `host_os` and `cuda_version` to the
-   query response parser. Vast's `/asks/` API returns these fields
-   per offer; we currently drop them.
-2. **`FleetCapability`:** add the two new optional fields.
-3. **`FleetAvailabilitySnapshot`:** unchanged shape; the new fields
-   ride along on each `FleetCapability` already in `vast_available[]`.
-4. **`composite_scorer`:** parse the cuda version string into a
-   numeric score (e.g., `12.8` → `12.8` as float), normalize against
-   a maximum (~13.0), apply the bonus weight.
-5. **`AllocationWeights`:** add `cuda_bonus_weight` field, default
-   `0.10` for all three tier presets. Small ratio relative to the
-   primary `speed_weight + cost_weight = 1.0` budget.
-6. **Modal availability:** Modal's CUDA version is fixed by the
-   container image we deploy; can hardcode (e.g., `"12.4"`) or
-   leave as None and have the scorer treat None as average.
-   Recommend hardcoding to whatever our Modal image actually runs.
-7. **Community machines:** the agent can self-report its CUDA version
-   in the heartbeat; surface on `CommunityMachine`. For now, leave
-   community CUDA as None and have the scorer treat None as average
-   so it doesn't penalize community.
-
-**Open questions for Stage D:**
-
-- **D1.** What's the right `cuda_bonus_weight`? 0.10 means a CUDA
-  12.8 offer scores ~10% better than a CUDA 12.2 offer of the same
-  speed/price. Too high and we'd skip a much-cheaper-but-older
-  offer; too low and the bonus is meaningless. Start at 0.10, tune
-  via telemetry.
-- **D2.** Hard floor? Should we exclude offers below CUDA 12.0
-  entirely (driver too old to reliably run our worker image)?
-  Recommend: don't hard-exclude in Stage D; revisit if Stage A
-  telemetry shows old-CUDA offers are net-negative even after the
-  fallback.
-- **D3.** OS field — store and surface, but Stage D doesn't FILTER
-  on it. That's Stage E.
-
-**Dependencies:** Stage D ships after Stage B (because the worker
-behavioral fixes need to land first; no point adding more complexity
-to the planner while we're still bleeding zombies).
+**Smoke check:** with two identical capabilities except `fleet`, score them on a 5-frame render. Vast scores lower because the unamortized startup buffer dominates.
 
 ---
 
-## Stage E — EEVEE Linux-only filter `[NEW]`
+## Phase E — Config cleanup
 
-**Where:** orchestrator only. Add a target validator (similar to
-existing `EngineCompatibilityValidator`).
+**Goal:** stop carrying hardcoded Vast prices, drop GPUs that don't pull their weight, fix the RTX 4080 SUPER VRAM typo, add modern GPUs Vast offers.
 
-**What:** when the render's engine is `BLENDER_EEVEE` or
-`BLENDER_EEVEE_NEXT`, exclude any Vast offer whose `host_os` is not
-Linux from eligibility.
+**Files:**
+- `serverV2/config.json`:
+  - **Drop** `RTX A5000` (failure-prone, old-driver Ampere workstation)
+  - **Drop** `RTX A4000` (same story + 16GB VRAM is too tight)
+  - **Fix** `RTX 4080S` `vram_gb` 32 → 16 (RTX 4080 SUPER is a 16GB card; current value lets the planner pick it for scenes that won't fit and OOM at runtime)
+  - **Add** `RTX 5090` (32GB, Blackwell consumer — best $/perf for non-datacenter)
+  - **Add** `A100 SXM` 80GB and `A100 PCIE` 80GB (VRAM-hungry-scene candidates)
+  - **Add** `RTX 6000 Pro` (96GB, Blackwell workstation — newest drivers)
+  - **Drop** `price_per_hour` from every `vast_instances[]` entry — Vast pricing is per-offer now (Phase A)
+  - **Add** the `startup_buffer_sec` block (Phase D)
+- `serverV2/config.py`:
+  - `VastEndpoint.price_per_hour` removed (or kept optional/None and ignored). Modal/community price fields stay.
+  - `StartupBufferConfig` added.
 
-**Why:** EEVEE requires a working OpenGL/EGL stack. On Linux Vast
-peers this is reliable (Mesa or NVIDIA EGL); on Windows Vast peers
-the GL surface init in headless mode is finicky and produces silent
-black-frame renders or kernel-init failures. EEVEE also performs
-better on Linux in our testing.
+**Verification:** boot server with new config, hit fleet-availability, confirm A5000/A4000 are gone, RTX 5090 / A100 80GB / RTX 6000 Pro appear with `price_per_hour` populated from real Vast offers (not config). Existing render preview cards may need follow-up if the UI reads config price for tier estimates — flag during execution.
 
-Per the project memory: "EEVEE in cloud = Vast (and future RunPod)
-only" — i.e., Modal is already excluded for EEVEE. Stage E narrows
-the Vast subset to Linux peers.
+---
 
-**Implementation outline:**
+## Phase F — Future: tier as dispatch priority
 
-1. **Validator:** `EeveeLinuxOnlyValidator` (or extend the existing
-   `EngineCompatibilityValidator` with this rule).
-2. **Engine check:** `engine in {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"}`
-3. **OS check:** for Vast offers (`fleet == "vast_serverless"`),
-   require `host_os` to start with `"Linux"` or `"Ubuntu"` or contain
-   case-insensitive `"linux"`. Be permissive — Vast OS strings vary.
-4. **Community / Modal:** unchanged. Modal is already filtered for
-   EEVEE by the existing engine-compat rule. Community is by
-   definition the user's own machine, OS-agnostic from our side.
+**Out of scope for this plan.** Sketch for when it returns:
 
-**Depends on Stage D** (need `host_os` in `FleetCapability` first).
-Trivial code addition once D is in.
-
-**Open questions for Stage E:**
-
-- **E1.** Match strategy on `host_os` string? Vast may return
-  variations like `"Ubuntu 22.04 LTS"`, `"Linux Mint"`, `"Debian 12"`.
-  Safe match: `"linux" in host_os.lower()` OR `"ubuntu" in ...`.
-  Reject anything starting with `"Windows"`. Recommend permissive
-  (assume Linux unless explicitly Windows).
+`tier` column on render rows becomes a queue priority, not a strategy selector:
+- `pending_allocation_queue` gains a `priority` column derived from `render.tier`: premium=2, standard=1, economy=0
+- Dequeue order: `priority DESC, queued_at ASC` — premium jumps the queue, FIFO within tier
+- Allocator unchanged — same single strategy regardless of tier
+- Pricing recovers economic differentiation: premium pays more because they jump the queue
+- Optionally: tier-specific `startup_amortization_ratio` (premium=0.25 fans out wider for faster wall time, economy=1.0 fans out narrowest)
 
 ---
 
@@ -454,51 +241,32 @@ Trivial code addition once D is in.
 
 ### Deploy ordering
 
-Stages A and B can ship independently and in either order:
+A → B → C → D → E.
+- A is foundational; everything else uses the new `FleetCapability` shape.
+- B's smoke tests are more realistic with A's data in place.
+- C plugs into B's scorer.
+- D is independent but smoke tests benefit from it.
+- E is the final cleanup pass; doing it earlier risks dropping GPUs before the new scoring proves itself.
 
-- **Stage A** is worker-only — needs a worker image rebuild + Vast
-  template update.
-- **Stage B** is orchestrator-only — needs a backend deploy.
+### Telemetry
 
-The C trio needs to ship as a coordinated worker rebuild. C.1 needs
-B already deployed (or C.1 silently does nothing on 410 since the
-backend never sends one).
-
-Stage D is orchestrator-only, independent of A/B/C. Ships any time.
-
-Stage E depends on D. Ships after D.
-
-**Recommended order:** A → B → C (all three) → D → E.
-
-### Telemetry surface
-
-After all stages land, we should have these grep-able log lines for
-production observability:
+Grep-able log lines after the refactor:
 
 ```
-[RENDER_DRIVER] compiled_with=optix             # A: normal path
-[RENDER_DRIVER] compiled_with=cuda_fallback     # A: rescue fired
-Heartbeat returned 410; worker exiting          # C.1: live zombie killed
-Job ... already terminal at startup; exiting    # C.2: cold zombie killed
-Worker self-destroyed Vast instance             # C.3: clean teardown
-AntiAffinity: ignored N sibling(s) ...          # (already shipped today)
+[ALLOC] knapsack: total_frames=N spf=Xs startup=Ys K=Z
+[ALLOC] picked: <fleet> <gpu> cuda=X.Y os=<linux|windows> price=$Z/hr offer=<id>
+[ALLOC] cuda_factor=0.X os_factor=0.Y for <gpu>@<offer_id>
 ```
 
-Daily greps quantify each stage's effectiveness.
+Daily greps tell us whether the new ranking axes are actually exercised or whether the score collapses to a single dimension.
 
-### What this DOESN'T fix
+---
 
-- The "Dispatch failed: No Vast.ai offers" / "400 Bad Request"
-  marketplace race — that's a TOCTOU between the snapshot cache
-  and the dispatch call. Mitigation requires a snapshot TTL drop
-  for high-demand GPU classes or pre-validation at dispatch time.
-  Separate plan.
-- Cold-start latency mis-modeling in the cost preview — the
-  planner's `BASELINE_STARTUP_SEC` doesn't account for Vast
-  provisioning (1-3 min) or Modal cold-start (1-3 min). Separate
-  plan; flagged after today's calibration discussion.
-- The "fragile per-fleet liveness" issue — backup_monitor cron
-  reads only the Redis heartbeat key. A reconciler that compares
-  `output_frames` count to expected frames would catch
-  successfully-rendered-but-callback-lost cases that today drift
-  to "failed" on the orchestrator side. Separate plan.
+## Deferred (not in this plan)
+
+The original "Worker Resilience" plan included two stages still unfinished. Tracking here for traceability:
+
+- **Old Stage B — terminal-callback rejection (410 Gone).** Heartbeat / progress / request-upload-urls return 410 if the job is in a terminal state. Worker exits clean on 410. Breaks the live-zombie feedback loop (cause: Cloud Run latency spikes orphan-flagged jobs that were rendering fine).
+- **Old Stage C — worker self-terminate trio.** Worker handles 410, checks status at startup, self-destroys its Vast instance after success/failure. Breaks the Docker `--restart=always` zombie respawn cycle.
+
+Independent of the allocation refactor. Don't conflict with anything in Phases A–F.

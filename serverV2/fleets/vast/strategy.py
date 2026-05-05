@@ -54,14 +54,16 @@ class VastFleetStrategy:
             raise RuntimeError(
                 f"Vast dispatch requires task.gpu_type to be set; got None for job {job_id}"
             )
+        if task.offer_id is None:
+            raise RuntimeError(
+                f"Vast dispatch requires task.offer_id to be set; got None for job {job_id}. "
+                f"Per-offer ranking is the source of truth — the planner must pick a specific offer."
+            )
         gpu_name = task.gpu_type
 
-        # Snapshot price at dispatch time for telemetry — looked up from
-        # config so the row is immune to later config edits.
-        price_at_dispatch = next(
-            (ep.price_per_hour for ep in self._cfg.endpoints if ep.gpu_name == gpu_name),
-            None,
-        )
+        # Real per-offer price at dispatch time, captured by the planner
+        # from the live Vast bundle.  Stamped onto the row for telemetry.
+        price_at_dispatch = task.price_per_hour or None
 
         self._job_repo.create(CreateJobParams(
             job_id=job_id,
@@ -88,6 +90,11 @@ class VastFleetStrategy:
 
         try:
             image = self._cfg.image_for_engine(context.engine)
+            log.info(
+                "[ALLOC] dispatching vast offer=%s gpu=%s cuda=%s os=%s price=$%.3f/hr job=%s",
+                task.offer_id, gpu_name, task.cuda_version, task.host_os,
+                task.price_per_hour, job_id,
+            )
             instance_id = self._client.dispatch_job(
                 job_id=job_id,
                 blend_url=context.blend_url,
@@ -95,7 +102,7 @@ class VastFleetStrategy:
                 frame_end=task.frame_end,
                 frame_step=task.frame_step,
                 render_overrides_json=context.render_overrides_json,
-                gpu_name=gpu_name,
+                offer_id=task.offer_id,
                 image=image,
             )
             provider_job_id = str(instance_id)

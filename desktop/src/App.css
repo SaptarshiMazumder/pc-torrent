@@ -1239,71 +1239,20 @@ body {
   font-weight: 700;
 }
 
-/* Phase 8 — tier picker (Economy / Standard / Premium) */
-.cr-tier-picker {
+/* Inline cost / wall-time pill, sits next to Start Rendering. */
+.cr-cost-pill {
   display: inline-flex;
-  gap: 6px;
-  align-items: stretch;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 8px;
   background: var(--bg-secondary, #1a1c2c);
   border: 1px solid var(--border, #2c2f44);
-  border-radius: 10px;
-  padding: 4px;
-}
-
-.cr-tier-option {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  padding: 6px 12px;
-  border-radius: 7px;
-  cursor: pointer;
-  user-select: none;
-  min-width: 95px;
-  border: 1px solid transparent;
-  transition: background 0.12s, border-color 0.12s;
-}
-
-.cr-tier-option:hover:not(.disabled) {
-  background: var(--bg-tertiary, #232639);
-}
-
-.cr-tier-option.selected {
-  background: var(--accent-bg, rgba(232, 114, 74, 0.12));
-  border-color: var(--accent, #e8724a);
-}
-
-.cr-tier-option.disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.cr-tier-option input[type="radio"] {
-  display: none;
-}
-
-.cr-tier-label {
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--text-primary, #f0f0f0);
-}
-
-.cr-tier-subtitle {
-  font-size: 10px;
-  color: var(--text-secondary, #888);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.cr-tier-est {
-  font-size: 11px;
-  color: var(--text-secondary, #aaa);
-  margin-top: 2px;
   font-variant-numeric: tabular-nums;
-}
-
-.cr-tier-option.selected .cr-tier-est {
-  color: var(--accent, #e8724a);
+  margin-right: 8px;
+  white-space: nowrap;
 }
 
 /* ── Source picker section ── */

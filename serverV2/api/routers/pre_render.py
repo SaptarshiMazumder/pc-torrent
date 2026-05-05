@@ -16,6 +16,10 @@ from serverV2.services.pre_render import (
     PreRenderEstimateRequest,
     PreRenderEstimator,
 )
+from serverV2.services.pre_render.pre_render_estimator import (
+    FrameRangeResolutionError,
+)
+from serverV2.services.pre_render.scene_resolver import SceneResolutionError
 
 router = APIRouter(tags=["pre_render"])
 
@@ -38,10 +42,13 @@ def estimate(
     payload: PreRenderEstimatePayload,
     user: dict = Depends(get_current_user),
 ):
-    """Per-tier cost + wall-time estimate.
+    """Cost + wall-time estimate for the configured render.
 
-    Returns ``{tiers, frame_plan, analysis_warnings, resolved_render_settings}``.
+    Returns ``{estimate, frame_plan, analysis_warnings, resolved_render_settings}``.
     See :meth:`PreRenderEstimator.estimate` for the response shape.
+
+    Maps user-input failures (bad analysis snapshot, unresolvable frame
+    range) to HTTP 422.  Planner exceptions bubble as 500s.
     """
     request = PreRenderEstimateRequest(
         analysis_snapshot=payload.analysis_snapshot or {},
@@ -52,4 +59,7 @@ def estimate(
         machine_ids=payload.machine_ids,
         file_size_bytes=payload.file_size_bytes,
     )
-    return _get().estimate(request)
+    try:
+        return _get().estimate(request)
+    except (SceneResolutionError, FrameRangeResolutionError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

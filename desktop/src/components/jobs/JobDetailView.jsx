@@ -125,6 +125,7 @@ function RenderGroupDetail({
           time and surfaces ``heaviness`` directly on the status DTO. */}
       <HeavinessPanel
         heaviness={job.heaviness ?? null}
+        overrides={job.resolved_render_settings?.render ?? null}
         loading={!job.heaviness}
       />
 

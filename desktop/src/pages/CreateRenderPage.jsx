@@ -190,13 +190,10 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const uploadIdRef = useRef("");
   const abortRef = useRef(null);
 
-  // Phase 8 — user-selected allocation tier (Economy / Standard / Premium).
-  // Default Standard.  Premium is disabled in the picker (allocator not built yet).
-  const [tier, setTier] = useState("standard");
-  // Phase 9 — per-tier cost estimate, populated after analysis completes.
-  // Shape: { economy: {cost_low_usd, cost_high_usd, ...}, standard: {...}, premium: null }
-  const [tierEstimate, setTierEstimate] = useState(null);
-  const [tierEstimateLoading, setTierEstimateLoading] = useState(false);
+  // Cost / wall-time estimate, populated after analysis completes.
+  // Shape: { wall_time_seconds, cost_low_usd, cost_mid_usd, cost_high_usd, machines } | null
+  const [costEstimate, setCostEstimate] = useState(null);
+  const [costEstimateLoading, setCostEstimateLoading] = useState(false);
 
   // ── Blender detection ───────────────────────────────────
   useEffect(() => {
@@ -331,14 +328,14 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   // useEffect's dep tracking (otherwise hitting the button when no
   // tracked dep changed would be a no-op).  The ref-based cancellation
   // ensures the latest call always wins if the user spams the button.
-  const tierEstimateCallSeq = useRef(0);
-  const refreshTierEstimate = useCallback(() => {
+  const costEstimateCallSeq = useRef(0);
+  const refreshCostEstimate = useCallback(() => {
     if (stage !== STAGE.CONFIGURING || !analysis || !frameRange) {
-      setTierEstimate(null);
+      setCostEstimate(null);
       return;
     }
-    const seq = ++tierEstimateCallSeq.current;
-    setTierEstimateLoading(true);
+    const seq = ++costEstimateCallSeq.current;
+    setCostEstimateLoading(true);
     estimateRenderGroup(backendUrl, {
       analysisSnapshot: analysis,
       renderOverrides: renderOverridesForServer,
@@ -348,20 +345,20 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       fileSizeBytes: file?.size || savedInputAsset?.r2_input_size_bytes || null,
     })
       .then((data) => {
-        if (seq !== tierEstimateCallSeq.current) return;  // superseded
-        setTierEstimate(data?.tiers || null);
-        setTierEstimateLoading(false);
+        if (seq !== costEstimateCallSeq.current) return;  // superseded
+        setCostEstimate(data?.estimate || null);
+        setCostEstimateLoading(false);
       })
       .catch(() => {
-        if (seq !== tierEstimateCallSeq.current) return;
-        setTierEstimate(null);
-        setTierEstimateLoading(false);
+        if (seq !== costEstimateCallSeq.current) return;
+        setCostEstimate(null);
+        setCostEstimateLoading(false);
       });
   }, [stage, analysis, frameRange, renderOverridesForServer, backendUrl, file, savedInputAsset]);
 
   useEffect(() => {
-    refreshTierEstimate();
-  }, [refreshTierEstimate]);
+    refreshCostEstimate();
+  }, [refreshCostEstimate]);
 
   // ── Helpers ─────────────────────────────────────────────
   function applyAnalysis(parsed) {
@@ -665,7 +662,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
     try {
       const result = await confirmDistributedJob(
-        backendUrl, groupId, null, frameRange, overrides, null, analysis, tier, controller.signal,
+        backendUrl, groupId, null, frameRange, overrides, null, analysis, null, controller.signal,
       );
       if (result.needs_frame_input) {
         dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
@@ -759,13 +756,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   // ── Render ──────────────────────────────────────────────
   const totalFrameCount = frameRange ? countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step) : null;
 
-  const formatTierCost = (entry) => {
+  const formatCost = (entry) => {
     if (!entry) return null;
     const lo = entry.cost_low_usd ?? 0;
     const hi = entry.cost_high_usd ?? 0;
     return `$${lo.toFixed(2)}-$${hi.toFixed(2)}`;
   };
-  const formatTierTime = (entry) => {
+  const formatTime = (entry) => {
     if (!entry?.wall_time_seconds) return null;
     const s = entry.wall_time_seconds;
     if (s < 60) return `${s}s`;
@@ -789,16 +786,16 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
             )}
             {canStart && (
               <button
-                className="btn btn-ghost cr-tier-recalc-btn"
+                className="btn btn-ghost cr-cost-recalc-btn"
                 type="button"
-                onClick={refreshTierEstimate}
-                disabled={tierEstimateLoading}
+                onClick={refreshCostEstimate}
+                disabled={costEstimateLoading}
                 title="Re-fetch the cost / wall-time estimate from the backend (useful while tuning the analyzer constants)"
                 style={{
                   padding: "6px 12px",
                   fontSize: 12,
                   marginRight: 8,
-                  opacity: tierEstimateLoading ? 0.6 : 1,
+                  opacity: costEstimateLoading ? 0.6 : 1,
                 }}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ marginRight: 5, verticalAlign: "middle" }}>
@@ -806,45 +803,19 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                   <polyline points="1 20 1 14 7 14" />
                   <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                 </svg>
-                {tierEstimateLoading ? "Recalculating…" : "Recalculate"}
+                {costEstimateLoading ? "Recalculating…" : "Recalculate"}
               </button>
             )}
-            {canStart && (
-              <div className="cr-tier-picker">
-                {[
-                  { key: "economy", label: "Economy", subtitle: "Cheap, slow" },
-                  { key: "standard", label: "Standard", subtitle: "Balanced" },
-                  { key: "premium", label: "Premium", subtitle: "Coming soon", disabled: true },
-                ].map((t) => {
-                  const est = tierEstimate?.[t.key];
-                  const cost = formatTierCost(est);
-                  const time = formatTierTime(est);
-                  return (
-                    <label
-                      key={t.key}
-                      className={`cr-tier-option${tier === t.key ? " selected" : ""}${t.disabled ? " disabled" : ""}`}
-                    >
-                      <input
-                        type="radio"
-                        name="tier"
-                        value={t.key}
-                        checked={tier === t.key}
-                        disabled={t.disabled}
-                        onChange={() => setTier(t.key)}
-                      />
-                      <span className="cr-tier-label">{t.label}</span>
-                      <span className="cr-tier-subtitle">{t.subtitle}</span>
-                      {!t.disabled && (
-                        <span className="cr-tier-est">
-                          {tierEstimateLoading && !est ? "…" : cost ? `${cost}` : "—"}
-                          {time ? ` • ${time}` : ""}
-                        </span>
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
-            )}
+            {canStart && (() => {
+              const cost = formatCost(costEstimate);
+              const time = formatTime(costEstimate);
+              return (
+                <span className="cr-cost-pill" title="Estimated cost range and wall-clock time for this render">
+                  {costEstimateLoading && !costEstimate ? "…" : cost || "—"}
+                  {time ? ` • ${time}` : ""}
+                </span>
+              );
+            })()}
             {canStart && (
               <button className="btn btn-primary cr-start-btn" type="button" onClick={handleStartRender}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="5 3 19 12 5 21 5 3" /></svg>
@@ -1093,7 +1064,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
           {analysis?.heaviness && (
             <HeavinessPanel
               heaviness={analysis.heaviness}
-              resolutionOverride={{
+              overrides={{
                 resolution_x: resolutionX,
                 resolution_y: resolutionY,
                 resolution_percentage: resolutionPercentage,

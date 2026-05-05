@@ -35,7 +35,6 @@ class RenderOrchestrator:
     def cost_estimate_for_dry_run(
         self,
         *,
-        tier: str | None,
         frame_start: int,
         frame_end: int,
         frame_step: int,
@@ -43,11 +42,8 @@ class RenderOrchestrator:
         engine: str | None = None,
         heaviness: dict | None = None,
     ) -> GroupCostEstimate:
-        """Pre-submit cost preview for a hypothetical group.  PreRender
-        iterates this once per tier (ECONOMY/STANDARD/PREMIUM) to build
-        the side-by-side comparison the UI shows."""
+        """Pre-submit cost preview for a hypothetical group."""
         return self._lifecycle.cost_estimate_for_dry_run(
-            tier=tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,

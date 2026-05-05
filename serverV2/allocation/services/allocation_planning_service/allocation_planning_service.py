@@ -98,7 +98,6 @@ class AllocationPlanningService:
     def cost_for_dry_run(
         self,
         *,
-        tier: str | None = None,    # accepted for compat, ignored
         frame_start: int,
         frame_end: int,
         frame_step: int,

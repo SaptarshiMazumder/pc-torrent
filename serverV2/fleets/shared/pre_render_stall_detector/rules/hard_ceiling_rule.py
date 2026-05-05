@@ -20,7 +20,10 @@ class HardCeilingRule:
         self._max_sec = max_sec
 
     def evaluate(
-        self, window: HeartbeatWindow, job_age_sec: float,
+        self,
+        window: HeartbeatWindow,
+        job_age_sec: float,
+        **_unused: object,
     ) -> StallReason | None:
         if job_age_sec < self._max_sec:
             return None

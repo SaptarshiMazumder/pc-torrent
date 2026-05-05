@@ -31,7 +31,10 @@ class CpuStallRule:
         self._rss_noise_bytes = rss_noise_bytes
 
     def evaluate(
-        self, window: HeartbeatWindow, job_age_sec: float,
+        self,
+        window: HeartbeatWindow,
+        job_age_sec: float,
+        **_unused: object,
     ) -> StallReason | None:
         latest = window.latest
         if latest is None:

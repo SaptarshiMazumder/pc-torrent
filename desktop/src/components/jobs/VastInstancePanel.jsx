@@ -46,6 +46,7 @@ const vastProvider = {
       elapsedSec: live?.elapsed_sec ?? null,
       cost: dph != null ? `$${Number(dph).toFixed(3)}/hr` : null,
       error: live?.error || (task.status === "failed" ? task.error : "") || "",
+      stallRule: task.stall_rule || null,
       statusMsg: live?.status_msg || "",
       logs: live?.logs || "",
       history: live?.status_history || [],

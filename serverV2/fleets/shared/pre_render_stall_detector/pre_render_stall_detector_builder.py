@@ -31,6 +31,7 @@ from serverV2.fleets.shared.pre_render_stall_detector.rules import (
     CpuStallRule,
     DownloadCeilingRule,
     HardCeilingRule,
+    LoadingStallRule,
     StallRule,
 )
 
@@ -62,6 +63,14 @@ class PreRenderStallDetectorBuilder:
     ) -> "PreRenderStallDetectorBuilder":
         self._rules.append(DownloadCeilingRule(
             secs_per_gb=secs_per_gb, min_sec=min_sec, max_sec=max_sec,
+        ))
+        return self
+
+    def with_loading_stall(
+        self, *, multiplier: float, min_sec: float, max_sec: float,
+    ) -> "PreRenderStallDetectorBuilder":
+        self._rules.append(LoadingStallRule(
+            multiplier=multiplier, min_sec=min_sec, max_sec=max_sec,
         ))
         return self
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from serverV2.config import ModalConfig
 from serverV2.fleets.modal.client import ModalClient
@@ -54,6 +54,7 @@ class ModalJobMonitor:
         lock_repo: MonitorLockRepository,
         lock_key: str,
         owner_id: str,
+        estimated_startup_sec: float = 0.0,
     ) -> None:
         self._job_id = job_id
         self._provider_job_id = provider_job_id
@@ -72,6 +73,7 @@ class ModalJobMonitor:
         self._lock_repo = lock_repo
         self._lock_key = lock_key
         self._owner_id = owner_id
+        self._estimated_startup_sec = float(estimated_startup_sec or 0.0)
 
         self._started_at = time.monotonic()
 
@@ -188,9 +190,10 @@ class ModalJobMonitor:
             )
             return True
 
-        # Block: pre-render stall (CPU idle, byte stall, download/hard ceiling).
+        # Block: pre-render stall (CPU idle, byte stall, download/hard ceiling,
+        # loading-phase ceiling).
         if local_status == "running":
-            stall = self._evaluate_stall()
+            stall = self._evaluate_stall(job)
             if stall is not None:
                 self._handle_failure(
                     f"Pre-render stall ({stall.rule}): {stall.message}"
@@ -199,13 +202,21 @@ class ModalJobMonitor:
 
         return False
 
-    def _evaluate_stall(self) -> StallReason | None:
+    def _evaluate_stall(self, job: dict[str, Any]) -> StallReason | None:
         samples = self._heartbeat_repo.get_recent(self._job_id, n=30)
         if not samples:
             return None
         window = HeartbeatWindow.from_raw(samples)
         elapsed = time.monotonic() - self._started_at
-        return self._stall_detector.evaluate(window, elapsed)
+        # ``has_rendered`` is the LoadingStallRule's "have we left the
+        # loading phase yet?" gate.  Source of truth = output_frames count.
+        has_rendered = self._counts.uploaded(job) > 0
+        return self._stall_detector.evaluate(
+            window,
+            elapsed,
+            has_rendered=has_rendered,
+            estimated_startup_sec=self._estimated_startup_sec,
+        )
 
     # ------------------------------------------------------------------
     # Terminal plumbing

@@ -76,6 +76,7 @@ class VastMonitorManager:
         blend_url: str,
         render_overrides_json: str,
         group_id: str,
+        estimated_startup_sec: float = 0.0,
     ) -> None:
         if self._orchestrator is None:
             raise RuntimeError(
@@ -130,6 +131,7 @@ class VastMonitorManager:
             lock_repo=self._lock_repo,
             lock_key=lock_key,
             owner_id=self._instance_id,
+            estimated_startup_sec=estimated_startup_sec,
         )
 
         def _run_and_cleanup() -> None:

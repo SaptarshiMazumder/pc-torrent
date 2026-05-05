@@ -80,6 +80,10 @@ class VastFleetStrategy:
             chunk_index=task.chunk_index,
             attempt=task.attempt,
             price_per_hour_at_dispatch=price_at_dispatch,
+            estimated_seconds=task.estimated_seconds,
+            estimated_cost_usd=task.estimated_cost_usd,
+            estimated_seconds_per_frame=task.estimated_seconds_per_frame,
+            estimated_startup_seconds=task.estimated_startup_seconds,
         ))
 
         try:

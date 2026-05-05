@@ -184,6 +184,14 @@ class PlannedTask:
     # CommunityMachine) at allocation time.  Phase 9 cost preview reads
     # this to build MixSlots without re-looking-up prices.
     price_per_hour: float = 0.0
+    # Per-chunk estimates stamped by ``AllocationPlanner`` at planning
+    # time.  Persisted onto the ``jobs`` row at dispatch so the cost
+    # service can sum them across a group for "estimated total" and
+    # project mid-render totals.  All in seconds / USD.
+    estimated_seconds: float = 0.0
+    estimated_cost_usd: float = 0.0
+    estimated_seconds_per_frame: float = 0.0
+    estimated_startup_seconds: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +257,13 @@ class CreateJobParams:
     # telemetry write is immune to later config edits.  None for community
     # jobs (telemetry is skipped for them in v1).
     price_per_hour_at_dispatch: float | None = None
+    # Per-chunk estimates produced by ``AllocationPlanner`` and persisted
+    # onto the ``jobs`` row.  Read by the cost service for total / live
+    # projection sums.
+    estimated_seconds: float = 0.0
+    estimated_cost_usd: float = 0.0
+    estimated_seconds_per_frame: float = 0.0
+    estimated_startup_seconds: float = 0.0
 
 
 # ---------------------------------------------------------------------------

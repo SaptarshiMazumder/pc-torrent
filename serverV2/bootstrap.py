@@ -49,14 +49,17 @@ from serverV2.fleets.vast.client import VastClient
 from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.redis_client import RedisClient
-from serverV2.allocation.allocation_strategies.default_allocation_strategy import (
-    DefaultAllocationStrategy,
+from serverV2.allocation.allocation_strategies.allocation_planner import (
+    AllocationPlanner,
 )
 from serverV2.allocation.allocation_strategies.economy_allocation_strategy import (
     EconomyAllocationStrategy,
 )
-from serverV2.allocation.allocation_strategies.fast_render_allocation_strategy import (
-    FastRenderAllocationStrategy,
+from serverV2.allocation.allocation_strategies.standard_allocation_strategy import (
+    StandardAllocationStrategy,
+)
+from serverV2.allocation.allocation_strategies.premium_allocation_strategy import (
+    PremiumAllocationStrategy,
 )
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
@@ -79,6 +82,9 @@ from serverV2.orchestrator.lifecycle_job_termination import (
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.orchestrator.repositories import PendingAllocationRepository
 from serverV2.allocation import AllocationDispatchQueueDaemon, AllocationFacade
+from serverV2.allocation.services.allocation_cost_service import (
+    AllocationCostService,
+)
 from serverV2.allocation.allocation_blend_url_resolver import (
     AllocationBlendUrlResolver,
 )
@@ -152,6 +158,7 @@ class Container:
         fleet_availability_snapshot_cache: FleetAvailabilitySnapshotCache,
         pre_render_estimator: PreRenderEstimator,
         scene_resolver: SceneResolver,
+        allocation_cost_service: AllocationCostService,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -179,6 +186,9 @@ class Container:
         # state; safe to share.
         self.pre_render_estimator = pre_render_estimator
         self.scene_resolver = scene_resolver
+        # Phase 2A -- read-side aggregator over the per-chunk estimate
+        # columns the planner stamps at dispatch time.
+        self.allocation_cost_service = allocation_cost_service
 
 
 def build(
@@ -329,14 +339,14 @@ def build(
     registry.register(community_strategy)
 
     # -- allocation + dispatch --
-    # Two strategies are constructed; the lifecycle picks one per render
-    # based on file size + frame count (heuristic in RenderLifecycle).
-    # Both share the same validator list — per-target eligibility rules
+    # Single planner does the work; the three strategy shells just hold
+    # the tier-specific weights.  The planner owns target validators
     # (engine compatibility today; tier / price caps in the future).
     target_validators = [AllocationEngineCompatibilityValidator()]
-    default_strategy = DefaultAllocationStrategy(registry, validators=target_validators)
-    fast_render_strategy = FastRenderAllocationStrategy(registry, validators=target_validators)
-    economy_strategy = EconomyAllocationStrategy(registry, validators=target_validators)
+    allocation_planner = AllocationPlanner(registry, validators=target_validators)
+    economy_strategy = EconomyAllocationStrategy(allocation_planner)
+    standard_strategy = StandardAllocationStrategy(allocation_planner)
+    premium_strategy = PremiumAllocationStrategy(allocation_planner)
 
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
@@ -377,9 +387,9 @@ def build(
     allocation_strategy_selector = AllocationStrategySelector()
     allocation_planning_service = AllocationPlanningService(
         strategies={
-            "default": default_strategy,
-            "fast_render": fast_render_strategy,
             "economy": economy_strategy,
+            "standard": standard_strategy,
+            "premium": premium_strategy,
         },
         selector=allocation_strategy_selector,
     )
@@ -622,6 +632,11 @@ def build(
         scene_resolver=scene_resolver,
     )
 
+    # Phase 2A -- read-side aggregator over the per-chunk estimate
+    # columns ``AllocationPlanner`` stamps at dispatch time.  Pure read,
+    # no writes, one repo dependency.
+    allocation_cost_service = AllocationCostService(job_repo=job_repo)
+
     return Container(
         config=cfg,
         orchestrator=orchestrator,
@@ -644,4 +659,5 @@ def build(
         fleet_availability_snapshot_cache=fleet_availability_snapshot_cache,
         pre_render_estimator=pre_render_estimator,
         scene_resolver=scene_resolver,
+        allocation_cost_service=allocation_cost_service,
     )

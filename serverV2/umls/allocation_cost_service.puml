@@ -1,0 +1,275 @@
+@startuml allocation_cost_service
+title serverV2/allocation -- module structure with Phase 2A AllocationCostService
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+' ============================================================
+' INBOUND callers (outside the module)
+' ============================================================
+package "<<inbound>>" <<Cloud>> #c7d2fe {
+    class "AllocationClient\nserverV2/orchestrator" as Client
+    class "Bootstrap\nserverV2/bootstrap" as Boot
+    class "API routers\nrender_groups.py" as Router <<endpoint>> #fed8a4 {
+        POST /confirm-upload
+        POST /jobs/{id}/retry
+        GET /render-groups/{id}/cost (NEW)
+        GET /render-groups/{id}/cost/estimate (NEW)
+    }
+}
+
+' ============================================================
+' INSIDE serverV2/allocation/
+' ============================================================
+package "serverV2/allocation" <<Frame>> #d4e3fc {
+
+    class AllocationFacade <<entry>> #b9e3a3 {
+        submit_initial(...)
+        park_retry(...)
+        plan_initial(...)
+        drain_for_group(group_id)
+    }
+
+    class AllocationDispatchQueueDaemon <<background, singleton>> #fcd34d {
+        per-tick loop:
+        1. dispatch existing queue items
+        2. plan pending rows -> queue items
+        3. persist mutated snapshot
+    }
+
+    class AllocationDispatcher {
+        dispatch_one(task, ctx, job_id)
+    }
+
+    class AllocationBlendUrlResolver
+
+    ' --- THE TWO QUEUES (clearly separated) ----------------
+    class AllocationPendingQueueRepository <<repo, queue>> #f9c1c1 {
+        pending_allocation_queue
+        --
+        TYPE_INITIAL_GROUP
+        TYPE_RETRY_CHUNK
+        --
+        rows = un-planned requests
+        (entry point for ALL
+        new work after submit /
+        retry)
+    }
+
+    class AllocationDispatchQueueRepository <<repo, queue>> #f9c1c1 {
+        dispatch_queue
+        --
+        rows = planned and
+        committed PlannedTasks
+        ready to fire at fleet
+        strategies
+    }
+
+    ' --- STRATEGIES + ALGORITHM ---------------------------
+    package "allocation_strategies" <<Frame>> #e0e7ff {
+
+        class EconomyAllocationStrategy <<shell>> #fde68a {
+            WEIGHTS = ECONOMY
+        }
+        class StandardAllocationStrategy <<shell>> #fde68a {
+            WEIGHTS = STANDARD
+        }
+        class PremiumAllocationStrategy <<shell>> #fde68a {
+            WEIGHTS = PREMIUM
+        }
+
+        class AllocationPlanner <<algorithm>> #b9e3a3 {
+            plan_initial(weights, heaviness, ...)
+            plan_retry(weights, ...)
+            --
+            VRAM filter
+            score targets
+            diversify (fleet + gpu_type)
+            time-balanced distribute
+            stamp per-chunk estimates
+        }
+
+        class AllocationWeights <<value>> {
+            speed_weight, cost_weight
+            max_targets, min_frames_per_chunk
+            *_diversification_cap
+            vram_safety_factor
+        }
+
+        package "analyzers" <<Frame>> #ddd6fe {
+            class allocation_time_analyzer
+            class allocation_vram_estimator
+            class allocation_composite_scorer
+            class allocation_cost_analyzer
+        }
+
+        class "allocation_helpers/*" as Helpers
+        class "validators/*" as Validators
+    }
+
+    ' --- SERVICES ------------------------------------------
+    package "services" <<Frame>> #fde2e4 {
+
+        class AllocationPlanningService {
+            tier -> strategy router
+            plan_initial / plan_retry
+        }
+
+        package "allocation_dispatch_queue_service" <<Frame>> #fee2e2 {
+            class AllocationDispatchQueueService <<entry>> {
+                enqueue(group, tasks, ctx)
+                enqueue_pending(item)
+                dispatch_pending_for_fleet(fleet)
+                plan_pending(snapshot)
+            }
+            class AllocationEnqueueHandler
+            class AllocationDispatchHandler
+            class AllocationPendingPlanner <<background>> {
+                planner-of-pending-rows
+                runs inside daemon tick
+                mutates snapshot per pick
+            }
+            class AllocationSnapshotMutator
+            class AllocationQueueItemCodec
+            class AllocationEngineResolver
+        }
+
+        package "allocation_cost_service (NEW)" <<Frame>> #b9e3a3 {
+            class AllocationCostService <<entry>> #b9e3a3 {
+                static_estimate_for_group(id) : GroupCostEstimate
+                live_projection_for_group(id) : GroupCostProjection
+            }
+            class ChunkCostProjector {
+                project(job, telem) : Bucket
+            }
+            class GroupCostEstimate <<value>> #fde68a
+            class GroupCostProjection <<value>> #fde68a
+        }
+    }
+}
+
+' ============================================================
+' EXTERNAL — persistence + orchestrator-side reads
+' ============================================================
+package "<<external>>" <<Cloud>> #fef3c7 {
+    class "jobs (table)\nserverV2/repositories/job_repository" as JobsTable <<repo>> #f9c1c1 {
+        estimated_seconds
+        estimated_cost_usd
+        estimated_seconds_per_frame
+        estimated_startup_seconds
+        started_at, completed_at
+        price_per_hour_at_dispatch
+        status, ...
+    }
+    class "render_groups\n.resolved_scene_json" as RGTable <<repo>> #f9c1c1
+    class "FleetAvailabilitySnapshotCache\nserverV2/fleets/fleet_availability" as Snap
+    class "FleetRegistry\n+ fleet strategies\nserverV2/fleets/*" as Fleets
+    class "OutputFrameRepository\nProgressRepository" as ProgressRepos
+}
+
+' ============================================================
+' RELATIONSHIPS
+' ============================================================
+
+' Inbound
+Client --> AllocationFacade : submit_initial / park_retry
+Boot --> AllocationFacade
+Boot --> AllocationDispatchQueueDaemon
+Router --> AllocationFacade
+Router --> AllocationCostService : NEW
+
+' Facade -> services and queues
+AllocationFacade --> AllocationPlanningService
+AllocationFacade --> AllocationDispatchQueueService
+AllocationFacade --> AllocationPendingQueueRepository : enqueue_pending\n(submit_initial / park_retry)
+
+' Daemon orchestrates the dispatch_queue and the planner-of-pending
+AllocationDispatchQueueDaemon --> AllocationDispatchQueueService : tick
+
+AllocationDispatchQueueService --> AllocationEnqueueHandler
+AllocationDispatchQueueService --> AllocationDispatchHandler
+AllocationDispatchQueueService --> AllocationPendingPlanner
+
+AllocationEnqueueHandler --> AllocationDispatchQueueRepository
+AllocationDispatchHandler --> AllocationDispatchQueueRepository : dequeue_for_fleet
+AllocationDispatchHandler --> AllocationDispatcher
+AllocationDispatchHandler --> AllocationBlendUrlResolver
+
+AllocationPendingPlanner --> AllocationPendingQueueRepository : list_all / delete
+AllocationPendingPlanner --> AllocationPlanningService : plan
+AllocationPendingPlanner --> AllocationEnqueueHandler : enqueue planned tasks
+AllocationPendingPlanner --> AllocationSnapshotMutator : commit per pick
+
+AllocationDispatcher --> Fleets
+
+' Planning service -> strategies -> algorithm
+AllocationPlanningService --> EconomyAllocationStrategy
+AllocationPlanningService --> StandardAllocationStrategy
+AllocationPlanningService --> PremiumAllocationStrategy
+
+EconomyAllocationStrategy --> AllocationPlanner
+StandardAllocationStrategy --> AllocationPlanner
+PremiumAllocationStrategy --> AllocationPlanner
+EconomyAllocationStrategy ..> AllocationWeights
+StandardAllocationStrategy ..> AllocationWeights
+PremiumAllocationStrategy ..> AllocationWeights
+
+AllocationPlanner --> analyzers
+AllocationPlanner --> Helpers
+AllocationPlanner --> Validators
+
+' Persistence -- planner stamps estimates onto jobs
+AllocationDispatchHandler --> JobsTable : write incl. estimates
+AllocationPlanner ..> RGTable : reads heaviness via planner client
+
+' Daemon snapshot
+AllocationDispatchQueueDaemon ..> Snap : get_or_build / persist
+
+' Cost service (Phase 2A) -- READ ONLY from jobs + telemetry
+AllocationCostService --> ChunkCostProjector
+AllocationCostService ..> JobsTable : SELECT by group_id
+ChunkCostProjector ..> JobsTable : reads estimates + timestamps
+ChunkCostProjector ..> ProgressRepos : observed frames + chunk progress
+AllocationCostService ..> GroupCostEstimate : returns
+AllocationCostService ..> GroupCostProjection : returns
+
+' ============================================================
+' Layout hints
+' ============================================================
+note right of AllocationPendingQueueRepository
+  Universal entry queue.
+  EVERYTHING parks here:
+  initial submit, auto retry,
+  manual retry.  Daemon plans
+  rows out to dispatch_queue.
+end note
+
+note right of AllocationDispatchQueueRepository
+  Already-planned commitments.
+  Each row -> one PlannedTask
+  ready to fire at a fleet.
+  Daemon drains per tick.
+end note
+
+note left of AllocationPlanner
+  THE ALGORITHM.  Pure
+  function: heaviness +
+  resources + weights ->
+  list[PlannedTask] with
+  per-chunk estimates stamped.
+  Strategies are 1-line wrappers
+  that pick the weights preset.
+end note
+
+note bottom of AllocationCostService
+  Phase 2A read-side.  No
+  writes.  Aggregates the
+  estimate columns the planner
+  already stamped, plus live
+  telemetry for running chunks.
+end note
+
+@enduml

@@ -105,4 +105,24 @@ class RenderGroupSerializer:
             "remaining_frame_start": remaining_start,
             "remaining_frame_end": remaining_end,
             "is_retryable": is_retryable,
+            # Per-chunk estimates stamped at allocation time by
+            # ``AllocationPlanner``.  Cost service / UI sum these for
+            # group totals and live projections.
+            "estimated_seconds": _maybe_float(job.get("estimated_seconds")),
+            "estimated_cost_usd": _maybe_float(job.get("estimated_cost_usd")),
+            "estimated_seconds_per_frame": _maybe_float(job.get("estimated_seconds_per_frame")),
+            "estimated_startup_seconds": _maybe_float(job.get("estimated_startup_seconds")),
         }
+
+
+def _maybe_float(value: Any) -> float | None:
+    """Pass through float values, normalise None / missing to None.
+    Old jobs pre-migration have NULL in the estimate columns; surface
+    that to the UI so it can branch (rather than rendering ``0``).
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

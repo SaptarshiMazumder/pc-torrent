@@ -1,10 +1,14 @@
-"""AllocationQueueItemCodec — convert between ``PlannedTask`` and
+"""AllocationQueueItemCodec -- convert between ``PlannedTask`` and
 ``AllocationQueueItem``.
 
 One responsibility: shape translation across the queue boundary.
 Enqueue path needs PlannedTask -> AllocationQueueItem; dispatch path
 needs AllocationQueueItem -> PlannedTask.  No I/O, no logic beyond
 field copying.
+
+Carries the per-chunk estimate fields (price_per_hour and the four
+``estimated_*`` numbers) through the queue so the dispatch handler
+can stamp them onto the jobs row without re-running the planner.
 """
 
 from __future__ import annotations
@@ -42,6 +46,11 @@ class AllocationQueueItemCodec:
             attempt=task.attempt,
             chunk_index=task.chunk_index,
             job_id=job_id,
+            price_per_hour=task.price_per_hour,
+            estimated_seconds=task.estimated_seconds,
+            estimated_cost_usd=task.estimated_cost_usd,
+            estimated_seconds_per_frame=task.estimated_seconds_per_frame,
+            estimated_startup_seconds=task.estimated_startup_seconds,
         )
 
     @staticmethod
@@ -59,4 +68,9 @@ class AllocationQueueItemCodec:
             total_frames=item.total_frames,
             chunk_index=item.chunk_index,
             attempt=item.attempt,
+            price_per_hour=item.price_per_hour,
+            estimated_seconds=item.estimated_seconds,
+            estimated_cost_usd=item.estimated_cost_usd,
+            estimated_seconds_per_frame=item.estimated_seconds_per_frame,
+            estimated_startup_seconds=item.estimated_startup_seconds,
         )

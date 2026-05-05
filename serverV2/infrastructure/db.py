@@ -436,6 +436,21 @@ def init_db() -> None:
                     "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
                     "estimated_startup_seconds DOUBLE PRECISION"
                 )
+                # Per-offer Vast fields — captured at planning time so the
+                # dispatch handler can rent THIS exact offer (offer_id) and
+                # log its driver/OS metadata.  All NULL for Modal/community.
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
+                    "offer_id BIGINT"
+                )
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
+                    "cuda_version TEXT"
+                )
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
+                    "host_os TEXT"
+                )
 
                 # Phase 9 — dispatch_queue uniqueness.  Two concurrent
                 # retry signals for the same chunk used to insert two

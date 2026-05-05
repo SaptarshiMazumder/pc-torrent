@@ -40,15 +40,27 @@
     "loading_phase_max_sec": 1800,
     "hard_max_chunk_sec": 14400
   },
+  "startup_buffer_sec": {
+    "vast": 180,
+    "modal": 120,
+    "community": 0
+  },
   "vast_instances": [
+    {
+      "gpu_name": "RTX PRO 6000",
+      "label": "Vast RTX PRO 6000 Blackwell 96GB",
+      "vram_gb": 96,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 2.3
+    },
     {
       "gpu_name": "H200 NVL",
       "label": "Vast H200 NVL 141GB",
       "vram_gb": 141,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 2.8,
-      "price_per_hour": 3.5
+      "render_speed": 2.8
     },
     {
       "gpu_name": "H100 NVL",
@@ -56,8 +68,7 @@
       "vram_gb": 94,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 2.45,
-      "price_per_hour": 2.2
+      "render_speed": 2.45
     },
     {
       "gpu_name": "H100 SXM",
@@ -65,8 +76,15 @@
       "vram_gb": 80,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 2.5,
-      "price_per_hour": 1.5
+      "render_speed": 2.5
+    },
+    {
+      "gpu_name": "RTX 5090",
+      "label": "Vast RTX 5090 32GB",
+      "vram_gb": 32,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 2.0
     },
     {
       "gpu_name": "RTX 6000Ada",
@@ -74,17 +92,23 @@
       "vram_gb": 48,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.85,
-      "price_per_hour": 0.6
+      "render_speed": 1.85
     },
     {
       "gpu_name": "A100 SXM4",
-      "label": "Vast A100 SXM4 40GB",
-      "vram_gb": 40,
+      "label": "Vast A100 SXM4 80GB",
+      "vram_gb": 80,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.8,
-      "price_per_hour": 0.85
+      "render_speed": 1.85
+    },
+    {
+      "gpu_name": "A100 PCIE",
+      "label": "Vast A100 PCIE 80GB",
+      "vram_gb": 80,
+      "cpu_cores": 8,
+      "ram_gb": 32,
+      "render_speed": 1.7
     },
     {
       "gpu_name": "L40S",
@@ -92,17 +116,7 @@
       "vram_gb": 48,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.75,
-      "price_per_hour": 0.55
-    },
-    {
-      "gpu_name": "A100 PCIE",
-      "label": "Vast A100 PCIE 40GB",
-      "vram_gb": 40,
-      "cpu_cores": 8,
-      "ram_gb": 32,
-      "render_speed": 1.65,
-      "price_per_hour": 0.5
+      "render_speed": 1.75
     },
     {
       "gpu_name": "L40",
@@ -110,8 +124,7 @@
       "vram_gb": 48,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.55,
-      "price_per_hour": 0.55
+      "render_speed": 1.55
     },
     {
       "gpu_name": "RTX 5880Ada",
@@ -119,8 +132,7 @@
       "vram_gb": 48,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.5,
-      "price_per_hour": 0.45
+      "render_speed": 1.5
     },
     {
       "gpu_name": "RTX 4090",
@@ -128,17 +140,15 @@
       "vram_gb": 24,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.45,
-      "price_per_hour": 0.45
+      "render_speed": 1.45
     },
     {
       "gpu_name": "RTX 4080S",
-      "label": "Vast RTX 4080 SUPER 32GB",
-      "vram_gb": 32,
+      "label": "Vast RTX 4080 SUPER 16GB",
+      "vram_gb": 16,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.3,
-      "price_per_hour": 0.18
+      "render_speed": 1.3
     },
     {
       "gpu_name": "RTX A6000",
@@ -146,17 +156,7 @@
       "vram_gb": 48,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.3,
-      "price_per_hour": 0.4
-    },
-    {
-      "gpu_name": "RTX A5000",
-      "label": "Vast RTX A5000 24GB",
-      "vram_gb": 24,
-      "cpu_cores": 8,
-      "ram_gb": 32,
-      "render_speed": 1.0,
-      "price_per_hour": 0.5
+      "render_speed": 1.3
     },
     {
       "gpu_name": "A40",
@@ -164,17 +164,7 @@
       "vram_gb": 48,
       "cpu_cores": 8,
       "ram_gb": 32,
-      "render_speed": 1.0,
-      "price_per_hour": 0.4
-    },
-    {
-      "gpu_name": "RTX A4000",
-      "label": "Vast RTX A4000 16GB",
-      "vram_gb": 16,
-      "cpu_cores": 8,
-      "ram_gb": 32,
-      "render_speed": 0.5,
-      "price_per_hour": 0.1
+      "render_speed": 1.0
     }
   ],
   "modal_instances": [

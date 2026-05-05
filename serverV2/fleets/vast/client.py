@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from serverV2.config import VastConfig
+from serverV2.fleets.vast.vast_offer import VastOffer
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class VastOfferSearcher:
     def __init__(self, config: VastConfig) -> None:
         self._cfg = config
 
-    def search(self, gpu_name: str) -> list[dict[str, Any]]:
+    def search(self, gpu_name: str) -> list[VastOffer]:
         filters: dict = {
             "gpu_name": {"eq": gpu_name},
             "num_gpus": {"eq": 1},
@@ -44,7 +45,8 @@ class VastOfferSearcher:
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json().get("offers", [])
+        bundles = resp.json().get("offers", [])
+        return [VastOffer.from_bundle(b) for b in bundles]
 
 
 class VastInstanceManager:
@@ -158,16 +160,12 @@ class VastClient:
         frame_end: int,
         frame_step: int,
         render_overrides_json: str,
-        gpu_name: str,
+        offer_id: int,
         image: str | None = None,
     ) -> int:
-        """Search for an offer, rent it, return the instance_id."""
-        offers = self.offers.search(gpu_name)
-        if not offers:
-            raise RuntimeError(f"No Vast.ai offers found for {gpu_name}")
-        offer = offers[0]
+        """Rent a specific offer chosen at planning time, return instance_id."""
         return self.instances.create(
-            offer_id=offer["id"],
+            offer_id=offer_id,
             job_id=job_id,
             blend_url=blend_url,
             frame_start=frame_start,

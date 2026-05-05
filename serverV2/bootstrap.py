@@ -53,14 +53,8 @@ from serverV2.infrastructure.redis_client import RedisClient
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
-from serverV2.allocation.allocation_strategies.economy_allocation_strategy import (
-    EconomyAllocationStrategy,
-)
-from serverV2.allocation.allocation_strategies.standard_allocation_strategy import (
-    StandardAllocationStrategy,
-)
-from serverV2.allocation.allocation_strategies.premium_allocation_strategy import (
-    PremiumAllocationStrategy,
+from serverV2.allocation.allocation_strategies.allocation_strategy import (
+    AllocationStrategy,
 )
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
@@ -111,9 +105,6 @@ from serverV2.allocation.allocation_snapshot_mutator import (
 from serverV2.allocation.services.allocation_planning_service import (
     AllocationCostAggregator,
     AllocationPlanningService,
-)
-from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_strategy_selector import (
-    AllocationStrategySelector,
 )
 from serverV2.fleets.fleet_availability.fleet_availability_snapshot_cache import (
     FleetAvailabilitySnapshotCache,
@@ -370,10 +361,12 @@ def build(
     # the tier-specific weights.  The planner owns target validators
     # (engine compatibility today; tier / price caps in the future).
     target_validators = [AllocationEngineCompatibilityValidator()]
-    allocation_planner = AllocationPlanner(registry, validators=target_validators)
-    economy_strategy = EconomyAllocationStrategy(allocation_planner)
-    standard_strategy = StandardAllocationStrategy(allocation_planner)
-    premium_strategy = PremiumAllocationStrategy(allocation_planner)
+    allocation_planner = AllocationPlanner(
+        registry,
+        startup_buffer=cfg.startup_buffer,
+        validators=target_validators,
+    )
+    allocation_strategy = AllocationStrategy(allocation_planner)
 
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
@@ -411,15 +404,9 @@ def build(
     # ------------------------------------------------------------------
     allocation_dispatcher = AllocationDispatcher(registry)
     allocation_blend_resolver = AllocationBlendUrlResolver(cfg)
-    allocation_strategy_selector = AllocationStrategySelector()
     allocation_cost_aggregator = AllocationCostAggregator()
     allocation_planning_service = AllocationPlanningService(
-        strategies={
-            "economy": economy_strategy,
-            "standard": standard_strategy,
-            "premium": premium_strategy,
-        },
-        selector=allocation_strategy_selector,
+        strategy=allocation_strategy,
         cost_aggregator=allocation_cost_aggregator,
     )
     _allocation_fleet_caps: dict[str, int] = {

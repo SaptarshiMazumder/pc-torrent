@@ -31,7 +31,12 @@ class VastEndpoint:
     cpu_cores: int
     ram_gb: float
     render_speed: float
-    price_per_hour: float
+    # Vast pricing is per-offer (marketplace) -- no longer in config.
+    # FleetCapability.price_per_hour comes from the live offer's
+    # ``dph_total`` at availability-build time.  This field stays as
+    # an optional zero default for back-compat with anything that
+    # still reads it.
+    price_per_hour: float = 0.0
 
 @dataclass(frozen=True)
 class VastConfig:
@@ -260,7 +265,10 @@ def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpo
             raise ValueError(
                 f"vast_instances entry has missing gpu_name: {entry!r}"
             )
-        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed", "price_per_hour"):
+        # ``price_per_hour`` is no longer required in config -- Vast
+        # pricing is per-offer (marketplace).  Tolerate it being absent;
+        # if present (legacy entries) it's loaded for back-compat.
+        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed"):
             if required not in entry:
                 raise ValueError(
                     f"vast_instances entry {gpu_name!r} is missing required field {required!r}"
@@ -272,7 +280,7 @@ def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpo
             cpu_cores=int(entry["cpu_cores"]),
             ram_gb=float(entry["ram_gb"]),
             render_speed=float(entry["render_speed"]),
-            price_per_hour=float(entry["price_per_hour"]),
+            price_per_hour=float(entry.get("price_per_hour") or 0.0),
         ))
     return results
 
@@ -453,6 +461,40 @@ class StallDetectionConfig:
 
 
 @dataclass(frozen=True)
+class StartupBufferConfig:
+    """Per-fleet startup-time additive in seconds.  Modelled in the
+    allocation time analyzer so short chunks don't make Vast look
+    artificially fast (Vast pays 1-3 min of provisioning latency on top
+    of the heaviness-based estimate).  Modal cold starts are similar but
+    shorter.  Community machines are already running, so the buffer is
+    zero by default.
+    """
+    vast: float = 180.0
+    modal: float = 120.0
+    community: float = 0.0
+
+    def for_fleet(self, fleet: str | None) -> float:
+        if not fleet:
+            return 0.0
+        if fleet == "vast_serverless":
+            return self.vast
+        if fleet == "modal_serverless":
+            return self.modal
+        if fleet == "community":
+            return self.community
+        return 0.0
+
+    @classmethod
+    def from_env(cls) -> StartupBufferConfig:
+        block = _require_block("startup_buffer_sec")
+        return cls(
+            vast=_require_field_float(block, "startup_buffer_sec", "vast"),
+            modal=_require_field_float(block, "startup_buffer_sec", "modal"),
+            community=_require_field_float(block, "startup_buffer_sec", "community"),
+        )
+
+
+@dataclass(frozen=True)
 class AppConfig:
     vast: VastConfig
     modal: ModalConfig
@@ -488,6 +530,7 @@ class AppConfig:
     # string disables the endpoint (returns 503 to all callers).
     orphan_secret: str = ""
     stall: StallDetectionConfig = field(default_factory=StallDetectionConfig)
+    startup_buffer: StartupBufferConfig = field(default_factory=StartupBufferConfig)
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -504,4 +547,5 @@ class AppConfig:
             ),
             orphan_secret=_env_str("ORPHAN_SECRET", ""),
             stall=StallDetectionConfig.from_env(),
+            startup_buffer=StartupBufferConfig.from_env(),
         )

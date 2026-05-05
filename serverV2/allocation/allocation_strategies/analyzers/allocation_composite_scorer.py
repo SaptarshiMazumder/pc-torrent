@@ -1,31 +1,37 @@
-"""CompositeScorer -- single-target ranking score combining speed and cost.
+"""CompositeScorer -- single-target ranking score (speed + CUDA + OS).
 
 Pure module.  Given:
 
-  * a target's specs (``render_speed``, ``price_per_hour``)
+  * a target's specs (``render_speed``, optional ``cuda_version`` /
+    ``host_os``, optional ``fleet`` for the per-fleet startup buffer)
   * the scene's heaviness (full dict from ``parse_analysis_heaviness``)
+  * the current render's engine (so EEVEE-on-Windows can be penalised
+    harshly even when speed/cuda look great)
   * an estimated chunk size (frames the target will own)
   * an ``AllocationWeights`` instance from the calling strategy
 
 returns a single float -- higher = better.  The planner sorts the
 eligible pool by this score to pick the mix.
 
+Cost is NOT a scoring axis.  ``chunk_cost_for()`` stays for telemetry
+(per-chunk USD estimate stamped on every PlannedTask) but is not folded
+into the rank.  Cost re-enters at dispatch time as queue priority.
+
 Composite shape::
 
-    chunk_seconds = startup(heaviness) + spf(heaviness, render_speed) * frames
-    chunk_cost    = chunk_seconds / 3600 * price_per_hour
+    chunk_seconds = startup(heaviness, fleet) + spf(heaviness, render_speed) * frames
     speed_factor  = REF_SECONDS / max(chunk_seconds, 1.0)
-    cost_factor   = REF_COST    / max(chunk_cost,    0.001)
-    score         = w.speed * speed_factor + w.cost * cost_factor
+    cuda_factor   = 0..1 from cuda_max_good (None = trust = 1.0)
+    os_factor     = 0..1 from host_os + engine (None = trust = 1.0)
+    score         = w.speed * speed_factor + w.cuda * cuda_factor + w.os * os_factor
 
-The reference values normalise the two factors so they live in roughly
-the same range.  The composite is unit-less; only relative ordering
-matters across a single scoring pass.
+Speed dominates because its factor scales with chunk wall time (often
+many multiples of 1.0 for fast chunks).  CUDA and OS factors live in
+0..1 and act as tiebreakers among similar-speed targets -- e.g. two RTX
+4090 offers with identical render_speed but different driver vintage.
 
-Both ``estimate_seconds_per_frame`` and ``estimate_startup_seconds``
-already account for vertex_count, shader_node_count, samples,
-volumetrics, SSS, particles, geometry_nodes, etc. -- nothing in
-heaviness is ignored.
+The reference value normalises the speed factor so a baseline scene on
+baseline hardware yields ~1.0.
 """
 
 from __future__ import annotations
@@ -41,26 +47,56 @@ from serverV2.allocation.allocation_strategies.analyzers.allocation_time_analyze
 )
 
 
-# Reference values for normalising the two factors so they live in the
-# same numeric range.  Picked so a "baseline scene on baseline hardware"
-# yields ~1.0 for both factors.
-#
-# REF_SECONDS: 5 minutes of render = 300 s.  A target that completes a
-#              chunk in 300s gets speed_factor = 1.0; faster -> >1.0.
-#
-# REF_COST: $0.05 per chunk.  A target costing $0.05 gets cost_factor =
-#           1.0; cheaper -> >1.0.
-#
-# These are deliberately on the cheap-and-fast side so most real
-# targets score below 1.0 on both axes; the weighted sum still preserves
-# correct ordering and the constants don't need empirical tuning.
+# 5 minutes of render = 300s.  A target completing a chunk in 300s
+# yields speed_factor = 1.0; faster -> >1.0.
 REF_SECONDS = 300.0
-REF_COST = 0.05
-
 
 # Floors to avoid divide-by-zero / runaway scores on misconfigured inputs.
 _MIN_CHUNK_SECONDS = 1.0
 _MIN_CHUNK_COST = 0.001
+
+_EEVEE_ENGINES = frozenset({"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"})
+
+
+# ---------------------------------------------------------------------
+# Quality factors -- "None means trust"
+# ---------------------------------------------------------------------
+# Absence of a CUDA / OS signal means full credit (1.0), not neutral
+# (0.5).  Rationale: penalties only fire when we have data showing the
+# offer is bad.  Modal and community always carry None for both fields,
+# so they score on speed alone -- no implicit demotion.
+
+def cuda_factor(cuda_version: str | None) -> float:
+    """0..1 score from a driver-reported max-CUDA string.
+
+    12.0 -> 0.0  (old Hopper-era driver, OPTIX-failure-prone)
+    13.0 -> 1.0  (current).
+    None / unparseable -> 1.0 (trust the fleet).
+    """
+    if cuda_version is None:
+        return 1.0
+    try:
+        v = float(cuda_version)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(0.0, min(1.0, v - 12.0))
+
+
+def os_factor(host_os: str | None, engine: str | None) -> float:
+    """0..1 score from host OS + engine.
+
+    For EEVEE/EEVEE_NEXT renders: Windows hosts get 0.0 (broken EGL
+    surface init in headless mode causes silent black-frame renders).
+    Other engines: Windows gets 0.7 (soft penalty).  Linux always 1.0.
+    None -> 1.0 (trust the fleet -- Modal/community).
+    """
+    if host_os is None:
+        return 1.0
+    s = host_os.lower()
+    is_linux = "linux" in s or "ubuntu" in s or "debian" in s
+    if engine in _EEVEE_ENGINES:
+        return 1.0 if is_linux else 0.0
+    return 1.0 if is_linux else 0.7
 
 
 # ---------------------------------------------------------------------
@@ -70,26 +106,34 @@ _MIN_CHUNK_COST = 0.001
 def score_target(
     *,
     render_speed: float,
-    price_per_hour: float,
     heaviness: dict[str, Any],
     estimated_chunk_frames: int,
     weights: AllocationWeights,
+    cuda_version: str | None = None,
+    host_os: str | None = None,
+    engine: str | None = None,
+    fleet: str | None = None,
+    fleet_buffer_sec: float = 0.0,
 ) -> float:
-    """Composite speed+cost score for a single target.  Higher = better."""
+    """Composite speed+cuda+os score for a single target.  Higher = better.
+
+    ``fleet`` and ``fleet_buffer_sec`` together model fleet-specific
+    startup latency (Vast provisioning ~180s, Modal cold start ~120s,
+    community 0s).  Caller passes the right buffer for the target's
+    fleet.
+    """
     seconds = chunk_seconds_for(
         render_speed=render_speed,
         heaviness=heaviness,
         estimated_chunk_frames=estimated_chunk_frames,
-    )
-    cost = chunk_cost_for(
-        render_speed=render_speed,
-        price_per_hour=price_per_hour,
-        heaviness=heaviness,
-        estimated_chunk_frames=estimated_chunk_frames,
+        fleet_buffer_sec=fleet_buffer_sec,
     )
     speed_factor = REF_SECONDS / max(seconds, _MIN_CHUNK_SECONDS)
-    cost_factor = REF_COST / max(cost, _MIN_CHUNK_COST)
-    return weights.speed_weight * speed_factor + weights.cost_weight * cost_factor
+    return (
+        weights.speed_weight * speed_factor
+        + weights.cuda_weight * cuda_factor(cuda_version)
+        + weights.os_weight * os_factor(host_os, engine)
+    )
 
 
 def chunk_seconds_for(
@@ -97,16 +141,16 @@ def chunk_seconds_for(
     render_speed: float,
     heaviness: dict[str, Any],
     estimated_chunk_frames: int,
+    fleet_buffer_sec: float = 0.0,
 ) -> float:
-    """Estimated wall-time (seconds) for a chunk of ``estimated_chunk_frames``
-    frames running on a target with this ``render_speed``.
+    """Estimated wall-time (seconds) for a chunk of N frames on a target.
 
-    Splits cleanly into startup (one-time per chunk) + per-frame work.
-    Used both internally by the scorer and externally to stamp
-    ``estimated_seconds`` onto the resulting ``PlannedTask``.
+    Splits cleanly into per-chunk startup (paid once) + per-frame work.
+    The fleet-specific startup buffer (Vast provisioning, Modal cold
+    start) is added ON TOP of the heaviness-based startup estimate.
     """
     spf = estimate_seconds_per_frame(heaviness, render_speed)
-    startup = estimate_startup_seconds(heaviness)
+    startup = estimate_startup_seconds(heaviness) + max(0.0, float(fleet_buffer_sec))
     return startup + spf * max(0, int(estimated_chunk_frames))
 
 
@@ -116,87 +160,17 @@ def chunk_cost_for(
     price_per_hour: float,
     heaviness: dict[str, Any],
     estimated_chunk_frames: int,
+    fleet_buffer_sec: float = 0.0,
 ) -> float:
-    """Estimated USD cost for a chunk on a target.  Hourly billing is
-    Vast/Modal's model; community machines are nominally free at the
-    moment (price_per_hour very low) but the formula still applies.
+    """Estimated USD cost for a chunk on a target.  Telemetry only --
+    not a scoring factor.  Hourly billing is Vast/Modal's model;
+    community machines are nominally free at the moment (price_per_hour
+    very low) but the formula still applies.
     """
     seconds = chunk_seconds_for(
         render_speed=render_speed,
         heaviness=heaviness,
         estimated_chunk_frames=estimated_chunk_frames,
+        fleet_buffer_sec=fleet_buffer_sec,
     )
     return (seconds / 3600.0) * max(0.0, float(price_per_hour or 0.0))
-
-
-# ---------------------------------------------------------------------
-# Smoke test
-# ---------------------------------------------------------------------
-
-def _smoke() -> None:
-    print("=== CompositeScorer smoke test ===\n")
-    from serverV2.core.value_objects import parse_analysis_heaviness
-    from serverV2.allocation.allocation_strategies.allocation_weights import (
-        ECONOMY, STANDARD, PREMIUM,
-    )
-
-    base = parse_analysis_heaviness(None)
-
-    # ----- Cheap+slow vs expensive+fast on baseline scene -----
-    cheap_slow = {"render_speed": 0.5, "price_per_hour": 0.10}     # community-ish
-    expensive_fast = {"render_speed": 2.5, "price_per_hour": 1.50} # H100-ish
-
-    for label, w in [("ECONOMY", ECONOMY), ("STANDARD", STANDARD), ("PREMIUM", PREMIUM)]:
-        s_cheap = score_target(
-            render_speed=cheap_slow["render_speed"],
-            price_per_hour=cheap_slow["price_per_hour"],
-            heaviness=base, estimated_chunk_frames=10, weights=w,
-        )
-        s_fast = score_target(
-            render_speed=expensive_fast["render_speed"],
-            price_per_hour=expensive_fast["price_per_hour"],
-            heaviness=base, estimated_chunk_frames=10, weights=w,
-        )
-        winner = "cheap" if s_cheap > s_fast else "fast"
-        print(f"{label:9} cheap_slow={s_cheap:7.2f}  expensive_fast={s_fast:7.2f}  -> {winner} wins")
-
-    # ECONOMY should pick cheap_slow.  PREMIUM should pick expensive_fast.
-    s_e_cheap = score_target(render_speed=0.5, price_per_hour=0.10,
-                              heaviness=base, estimated_chunk_frames=10, weights=ECONOMY)
-    s_e_fast = score_target(render_speed=2.5, price_per_hour=1.50,
-                             heaviness=base, estimated_chunk_frames=10, weights=ECONOMY)
-    assert s_e_cheap > s_e_fast, "Economy should prefer cheap-slow"
-
-    s_p_cheap = score_target(render_speed=0.5, price_per_hour=0.10,
-                              heaviness=base, estimated_chunk_frames=10, weights=PREMIUM)
-    s_p_fast = score_target(render_speed=2.5, price_per_hour=1.50,
-                             heaviness=base, estimated_chunk_frames=10, weights=PREMIUM)
-    assert s_p_fast > s_p_cheap, "Premium should prefer expensive-fast"
-
-    # ----- Heavy scene amplifies the speed advantage of fast cards -----
-    heavy = parse_analysis_heaviness(None)
-    heavy["vertex_count_total"] = 50_000_000
-    heavy["uses_volumetrics"] = True
-    heavy["samples"] = 4096
-
-    for label, w in [("ECONOMY", ECONOMY), ("STANDARD", STANDARD), ("PREMIUM", PREMIUM)]:
-        s_cheap = score_target(render_speed=0.5, price_per_hour=0.10,
-                                heaviness=heavy, estimated_chunk_frames=10, weights=w)
-        s_fast = score_target(render_speed=2.5, price_per_hour=1.50,
-                               heaviness=heavy, estimated_chunk_frames=10, weights=w)
-        print(f"HEAVY {label:9} cheap_slow={s_cheap:7.2f}  expensive_fast={s_fast:7.2f}")
-
-    # ----- chunk_seconds + chunk_cost helpers -----
-    sec = chunk_seconds_for(render_speed=1.0, heaviness=base, estimated_chunk_frames=10)
-    cost = chunk_cost_for(render_speed=1.0, price_per_hour=0.30,
-                           heaviness=base, estimated_chunk_frames=10)
-    expected_cost = sec / 3600.0 * 0.30
-    assert abs(cost - expected_cost) < 0.001
-    print(f"\nchunk_seconds (1.0x speed, 10 frames) -> {sec:6.1f} s")
-    print(f"chunk_cost ($0.30/hr, 10 frames)      -> ${cost:.4f}")
-
-    print("\nAll smoke tests passed.")
-
-
-if __name__ == "__main__":
-    _smoke()

@@ -1,29 +1,16 @@
 """AllocationPlanningService -- the cost-intelligence module.
 
-Owns BOTH planning and cost projection: the planner is the only thing
-that calculates per-chunk cost (it stamps ``estimated_cost_usd`` and
-``estimated_seconds`` on every ``PlannedTask``), and this service is
-the only place those numbers get aggregated into a group-level
-``GroupCostEstimate`` -- whether the items came from a just-now
-planner run (pre-submit dry-run) or from already-stored ``jobs`` rows
-(post-submit live group).
+Owns planning (via the single ``AllocationStrategy``) and cost
+projection (via ``AllocationCostAggregator``).  The planner stamps
+``estimated_cost_usd`` and ``estimated_seconds`` on every PlannedTask;
+this service aggregates them into a group-level GroupCostEstimate --
+whether the items came from a just-now planner run (pre-submit
+dry-run) or from already-stored ``jobs`` rows (post-submit live group).
 
-Public surface:
-
-  Planning (used by the daemon's pending tick processor):
-
-    * ``plan_initial`` -- whole-group planning.  list[PlannedTask].
-    * ``plan_retry``   -- single-chunk re-planning.  PlannedTask | None.
-
-  Cost (used by ``AllocationFacade``):
-
-    * ``cost_for_dry_run`` -- pre-submit preview.  Plans, projects, sums.
-    * ``cost_for_committed_jobs`` -- post-submit live group.  Sums over
-      jobs rows whose estimates were stamped at planning time.
-
-Tier -> strategy mapping is handled by ``AllocationStrategySelector``;
-projection + summation by ``AllocationCostAggregator``.  This class
-just routes between them.
+The ``tier`` parameter on the planning surface is accepted for API
+compatibility but ignored: cost is no longer a scoring factor and there
+is only one strategy.  Tier semantics moved to dispatch-queue priority
+(Phase F, future).
 
 Stateless given its constructor deps.
 """
@@ -35,8 +22,8 @@ from typing import Any
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
-from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_strategy_selector import (
-    AllocationStrategySelector,
+from serverV2.allocation.allocation_strategies.allocation_strategy import (
+    AllocationStrategy,
 )
 from serverV2.allocation.services.allocation_planning_service.allocation_cost_aggregator import (
     AllocationCostAggregator,
@@ -52,12 +39,10 @@ class AllocationPlanningService:
     def __init__(
         self,
         *,
-        strategies: dict[str, Any],
-        selector: AllocationStrategySelector,
+        strategy: AllocationStrategy,
         cost_aggregator: AllocationCostAggregator,
     ) -> None:
-        self._strategies = strategies
-        self._selector = selector
+        self._strategy = strategy
         self._cost_aggregator = cost_aggregator
 
     # ------------------------------------------------------------------
@@ -67,7 +52,7 @@ class AllocationPlanningService:
     def plan_initial(
         self,
         *,
-        tier: str | None,
+        tier: str | None = None,    # accepted for compat, ignored
         frame_start: int,
         frame_end: int,
         frame_step: int,
@@ -76,8 +61,8 @@ class AllocationPlanningService:
         engine: str | None = None,
         heaviness: dict | None = None,
     ) -> list[PlannedTask]:
-        strategy = self._get(self._selector.select_name(tier=tier))
-        return strategy.allocate_initial(
+        del tier
+        return self._strategy.allocate_initial(
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
@@ -90,13 +75,13 @@ class AllocationPlanningService:
     def plan_retry(
         self,
         *,
-        tier: str | None,
+        tier: str | None = None,    # accepted for compat, ignored
         chunk_request: AllocationChunkRequest,
         resources: AvailableResources,
         heaviness: dict | None = None,
     ) -> PlannedTask | None:
-        strategy = self._get(self._selector.select_name(tier=tier))
-        return strategy.allocate_retry(chunk_request, resources, heaviness=heaviness)
+        del tier
+        return self._strategy.allocate_retry(chunk_request, resources, heaviness=heaviness)
 
     # ------------------------------------------------------------------
     # cost surface (used by AllocationFacade)
@@ -105,7 +90,7 @@ class AllocationPlanningService:
     def cost_for_dry_run(
         self,
         *,
-        tier: str | None,
+        tier: str | None = None,    # accepted for compat, ignored
         frame_start: int,
         frame_end: int,
         frame_step: int,
@@ -115,7 +100,6 @@ class AllocationPlanningService:
         heaviness: dict | None = None,
     ) -> GroupCostEstimate:
         tasks = self.plan_initial(
-            tier=tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
@@ -132,17 +116,3 @@ class AllocationPlanningService:
     ) -> GroupCostEstimate:
         items = self._cost_aggregator.from_jobs_rows(rows)
         return self._cost_aggregator.aggregate(items)
-
-    # ------------------------------------------------------------------
-    # internals
-    # ------------------------------------------------------------------
-
-    def _get(self, name: str):
-        try:
-            return self._strategies[name]
-        except KeyError:
-            known = ", ".join(sorted(self._strategies.keys()))
-            raise ValueError(
-                f"Unknown allocation strategy: {name!r}. "
-                f"Registered strategies: [{known}]"
-            )

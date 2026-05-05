@@ -59,9 +59,20 @@ class FleetCapability:
     ram_gb: float
     render_speed: float
     fleet_max_parallel: int
-    # Per-hour rental cost.  Read by cost-aware allocators (Phase 5+).
-    # Wired in bootstrap from VastEndpoint/ModalEndpoint.price_per_hour.
+    # Per-hour rental cost.  For Vast this is the offer's actual dph_total
+    # (per-offer marketplace price); for Modal it's the config-fixed price.
     price_per_hour: float = 0.0
+    # Vast-only: the rentable bundle id for this exact offer.  None for
+    # Modal/community.  When set, the dispatch path rents THIS offer
+    # rather than re-searching by gpu_type.
+    offer_id: int | None = None
+    # Driver-reported CUDA version (e.g. "12.8").  Vast surfaces this per
+    # offer; Modal/community leave it None.  Scorer's "None means trust"
+    # rule gives None full credit instead of penalising it.
+    cuda_version: str | None = None
+    # Host OS string (e.g. "Linux", "Ubuntu 22.04", "Windows Server").
+    # Same "None means trust" rule applies.
+    host_os: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +199,14 @@ class PlannedTask:
     # CommunityMachine) at allocation time.  Phase 9 cost preview reads
     # this to build MixSlots without re-looking-up prices.
     price_per_hour: float = 0.0
+    # Vast-only: the exact offer chosen at planning time.  Carried through
+    # the dispatch_queue so the dispatcher rents THIS offer (not a
+    # re-search match).  None for Modal/community.
+    offer_id: int | None = None
+    # Per-offer CUDA / OS metadata captured at planning time so the
+    # dispatch handler can log / telemetry without re-querying Vast.
+    cuda_version: str | None = None
+    host_os: str | None = None
     # Per-chunk estimates stamped by ``AllocationPlanner`` at planning
     # time.  Persisted onto the ``jobs`` row at dispatch so the cost
     # service can sum them across a group for "estimated total" and

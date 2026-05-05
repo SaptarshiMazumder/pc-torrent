@@ -1603,14 +1603,17 @@ def main():
         gpu_error = docker_result.get("gpu_error", "GPU verification failed.")
         _log(f"[AGENT] WARNING: GPU not accessible in Docker. {gpu_error}")
 
-    # Step 3: Render image is engine-specific (cycles vs eevee) — we
-    # don't know which one the next job will need until it arrives, so
-    # skip the connect-time pre-pull.  ``execute_job`` lazily pulls the
-    # right variant when a job is claimed.
+    # Step 3: Refresh the render image so peers with a cached copy pick up
+    # any new digest pushed to GHCR.  docker pull is a no-op on digest
+    # match.  On failure (offline etc) any cached copy stays usable; the
+    # per-job fallback in the polling loop handles the genuinely-missing
+    # case.
+    _log("[AGENT] Refreshing render image...")
+    ensure_docker_image()
     if check_image_loaded():
-        _log("[AGENT] At least one render image is cached locally.")
+        _log("[AGENT] Render image ready.")
     else:
-        _log("[AGENT] No render image cached yet — will pull on first job.")
+        _log("[AGENT] No render image available — will retry on first job.")
 
     # Step 4: Detect hardware specs
     _log("[AGENT] Detecting hardware specs...")

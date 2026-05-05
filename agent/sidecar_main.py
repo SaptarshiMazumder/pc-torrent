@@ -454,16 +454,18 @@ def run_connect_flow():
         agent.pause_event.clear()
         agent.shutdown_event.clear()
 
-        # Render images are engine-specific (cycles vs eevee).  We don't
-        # know which one the next job will need until it's claimed, so
-        # skip the connect-time pre-pull.  ``execute_job`` lazily pulls
-        # the right variant when a job arrives.
-        emit_status("downloading_image", "Checking render image cache...")
+        # Always run docker pull at startup so peers with a cached image
+        # pick up new digests pushed to GHCR without manual refresh.
+        # docker pull is a no-op on digest match (a single registry HEAD).
+        # On failure (offline etc) any cached copy stays usable; the per-job
+        # fallback below handles the genuinely-missing case.
+        emit_status("downloading_image", "Refreshing render image...")
+        agent.ensure_docker_image(on_stage=on_image_stage, on_progress=on_image_progress)
         if agent.check_image_loaded():
             update_runtime(
                 image_present=True,
                 image_stage="ready",
-                image_status="Render image cached.",
+                image_status="Render image ready.",
                 image_downloaded_bytes=None,
                 image_total_bytes=None,
                 image_progress_pct=100,
@@ -472,7 +474,7 @@ def run_connect_flow():
             update_runtime(
                 image_present=False,
                 image_stage="missing",
-                image_status="No render image cached yet — will pull on first job.",
+                image_status="No render image available — will retry on first job.",
                 image_downloaded_bytes=None,
                 image_total_bytes=None,
                 image_progress_pct=None,

@@ -40,6 +40,5 @@ class BuildRetryChunkRequestStep:
             excluded_serverless_capabilities=(
                 ctx.exclusions.excluded_serverless_capabilities
             ),
-            file_size_bytes=ctx.file_size_bytes,
             engine=ctx.engine,
         )

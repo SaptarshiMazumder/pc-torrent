@@ -315,7 +315,6 @@ def init_db() -> None:
                         frame_end       INTEGER NOT NULL,
                         frame_step      INTEGER NOT NULL,
                         total_frames    INTEGER NOT NULL,
-                        file_size_bytes BIGINT,
                         engine          TEXT,
                         tier            TEXT,
                         excluded_machine_ids                JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -329,6 +328,14 @@ def init_db() -> None:
                         last_attempted_at TEXT
                     )
                     """
+                )
+                # Drop legacy ``file_size_bytes`` column on existing
+                # deployments.  After Phase E, the pending tick reads
+                # full heaviness from ``render_groups.resolved_scene_json``;
+                # the per-row file size shortcut is redundant.
+                cur.execute(
+                    "ALTER TABLE pending_allocation_queue "
+                    "DROP COLUMN IF EXISTS file_size_bytes"
                 )
 
                 # Pre-submit / submit boundary refactor — render_groups now

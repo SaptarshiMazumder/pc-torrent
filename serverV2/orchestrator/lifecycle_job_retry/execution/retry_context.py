@@ -90,7 +90,6 @@ class RetryContext:
     # ------------------------------------------------------------------
     remaining: tuple[int, int, int] | None = None  # (frame_start, frame_end, frame_step)
     next_attempt: int = 0
-    file_size_bytes: int | None = None
     engine: str | None = None
     tier: str | None = None
 

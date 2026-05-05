@@ -1,4 +1,8 @@
-"""Token verifier — FastAPI dependency that validates Firebase ID tokens."""
+"""Token verifier — FastAPI dependency that validates Firebase ID tokens.
+
+Firebase Admin SDK init happens once at boot in ``bootstrap.build``;
+this dependency assumes the default app already exists.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +14,6 @@ from fastapi.security import HTTPBearer
 
 from firebase_admin import auth
 
-from serverV2.infrastructure.auth.firebase_app import init_firebase
-
 log = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(auto_error=False)
@@ -21,8 +23,6 @@ def get_current_user(
     request: Request,
     creds=Security(_bearer),
 ) -> dict[str, Any]:
-    init_firebase()
-
     token: str | None = None
     if creds and getattr(creds, "credentials", None):
         token = creds.credentials

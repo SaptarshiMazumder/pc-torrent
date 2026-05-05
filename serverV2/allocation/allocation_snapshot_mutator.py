@@ -1,10 +1,10 @@
 """AllocationSnapshotMutator -- fleet-specific snapshot mutations.
 
-Called by the pending-queue planner immediately after it enqueues a
-``PlannedTask`` to ``dispatch_queue``.  The mutation is the
-"commitment" -- once the snapshot reflects the resource as taken, the
-next iteration of the planner's loop (within the SAME daemon tick)
-sees it gone and won't pick the same target again.
+Called by ``AllocationPendingTickProcessor`` immediately after it
+enqueues a ``PlannedTask`` to ``dispatch_queue``.  The mutation is
+the "commitment" -- once the snapshot reflects the resource as
+taken, the next iteration of the planner's loop (within the SAME
+daemon tick) sees it gone and won't pick the same target again.
 
 That makes the planner's loop race-free intra-tick: every promotion
 mutates the shared mutable snapshot before the next row is planned.

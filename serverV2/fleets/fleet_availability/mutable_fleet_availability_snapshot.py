@@ -44,7 +44,7 @@ class MutableFleetAvailabilitySnapshot:
         self.serverless_in_flight: dict[str, int] = dict(serverless_in_flight)
 
     # ------------------------------------------------------------------
-    # mutations called by AllocationDispatchQueueService after dispatch
+    # mutations called by AllocationPendingTickProcessor after enqueue
     # ------------------------------------------------------------------
 
     def mark_vast_dispatched(self, gpu_type: str | None) -> None:

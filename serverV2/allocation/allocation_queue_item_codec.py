@@ -1,14 +1,15 @@
 """AllocationQueueItemCodec -- convert between ``PlannedTask`` and
 ``AllocationQueueItem``.
 
-One responsibility: shape translation across the queue boundary.
-Enqueue path needs PlannedTask -> AllocationQueueItem; dispatch path
-needs AllocationQueueItem -> PlannedTask.  No I/O, no logic beyond
-field copying.
+One responsibility: shape translation across the dispatch_queue
+boundary.  Enqueue path needs PlannedTask -> AllocationQueueItem;
+dispatch path needs AllocationQueueItem -> PlannedTask.  No I/O,
+no logic beyond field copying.
 
 Carries the per-chunk estimate fields (price_per_hour and the four
-``estimated_*`` numbers) through the queue so the dispatch handler
-can stamp them onto the jobs row without re-running the planner.
+``estimated_*`` numbers) through the queue so the dispatch tick
+processor can stamp them onto the jobs row without re-running the
+planner.
 """
 
 from __future__ import annotations

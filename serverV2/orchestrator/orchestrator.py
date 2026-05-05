@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from serverV2.core.models import PlannedTask
+from serverV2.allocation.services.allocation_planning_service import (
+    GroupCostEstimate,
+)
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 
 
@@ -23,50 +25,35 @@ class RenderOrchestrator:
     def __init__(self, lifecycle: RenderLifecycle) -> None:
         self._lifecycle = lifecycle
 
-    # ---- planning + execution ----
+    # ---- cost intelligence ----
 
-    def plan(
+    def cost_estimate_for_group(self, group_id: str) -> GroupCostEstimate:
+        """Post-submit live group: SUM of per-chunk estimates the planner
+        stamped on every jobs row.  Static for the lifetime of the group."""
+        return self._lifecycle.cost_estimate_for_group(group_id)
+
+    def cost_estimate_for_dry_run(
         self,
         *,
+        tier: str | None,
         frame_start: int,
         frame_end: int,
         frame_step: int,
         total_frames: int,
-        machine_ids: list[str] | None = None,
-        heaviness: dict | None = None,
         engine: str | None = None,
-        tier: str | None = None,
-    ) -> list[PlannedTask]:
-        """Plan an initial allocation.
-
-        ``machine_ids``: when set, restrict allocation to those community
-        machines (serverless fleets are excluded — the user picked specific
-        boxes).  When None, the full pool of community machines + enabled
-        serverless capabilities is considered.
-
-        ``heaviness``: parsed analysis_snapshot["heaviness"] dict with
-        ``file_size_bytes`` injected (see ``parse_analysis_heaviness``).
-        Used by cost-aware strategies (FastRender, Economy) for both
-        target selection and the soft budget cap.  ``None`` is fine —
-        treated as a defaulted dict with file_size=0.
-
-        ``engine``: render engine string ("BLENDER_EEVEE", "CYCLES", ...).
-        Forwarded to the strategy's TargetValidators for fleet-compatibility
-        filtering.
-
-        ``tier``: user-selected allocation tier ("economy" | "standard" |
-        "premium").  Routes to the matching allocator and (for Standard)
-        derives a soft budget cap.  ``None`` defaults to "standard".
-        """
-        return self._lifecycle.plan(
+        heaviness: dict | None = None,
+    ) -> GroupCostEstimate:
+        """Pre-submit cost preview for a hypothetical group.  PreRender
+        iterates this once per tier (ECONOMY/STANDARD/PREMIUM) to build
+        the side-by-side comparison the UI shows."""
+        return self._lifecycle.cost_estimate_for_dry_run(
+            tier=tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
             total_frames=total_frames,
-            machine_ids=machine_ids,
-            heaviness=heaviness,
             engine=engine,
-            tier=tier,
+            heaviness=heaviness,
         )
 
     def submit_initial(

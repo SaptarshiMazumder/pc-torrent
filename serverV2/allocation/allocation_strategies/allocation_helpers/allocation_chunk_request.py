@@ -25,9 +25,6 @@ class AllocationChunkRequest:
     excluded_serverless_capabilities: tuple[tuple[str, str], ...] = field(
         default_factory=tuple
     )
-    # Heaviness signal for FastRender-style strategies on retry.  ``None``
-    # means heaviness is unknown (legacy rows pre-Phase-3).
-    file_size_bytes: int | None = None
     # Render engine ("BLENDER_EEVEE", "CYCLES", ...) — fed into the validator
     # context so EngineCompatibilityValidator can keep retries off fleets
     # that can't run the engine.

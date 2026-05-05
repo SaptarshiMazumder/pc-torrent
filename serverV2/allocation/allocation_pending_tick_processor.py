@@ -1,18 +1,37 @@
-"""AllocationPendingPlanner -- per-tick pass over the pending queue.
+"""AllocationPendingTickProcessor -- one phase of the daemon's tick.
 
-Pure orchestration.  Pulls each pending row, hands it to
-``AllocationPlanningService`` (the strategies), and on success writes
-the resulting tasks to ``dispatch_queue``, mutates the in-tick
-mutable snapshot to reflect committed resources, and deletes the
-pending row.  On still-no-target, stamps ``last_attempted_at`` so we
-can see whether the planner is making progress.
+Called by ``AllocationDispatchQueueDaemon._tick`` once per tick after
+the dispatch phase.  Walks the ``pending_allocation_queue``, plans
+each row through the strategies, and writes the resulting tasks to
+``dispatch_queue`` -- mutating the in-tick mutable snapshot per pick
+so subsequent rows see committed resources.
 
-Race-free intra-tick: every promotion mutates the shared mutable
-snapshot via ``AllocationSnapshotMutator.mark_planned_dispatched``
-BEFORE the next row in the loop is planned, so two pending rows can
-never pick the same target.
+Per-row work:
 
-This is the FIRST and ONLY place these rows are planned.  All
+  1. Look up row type (TYPE_INITIAL_GROUP or TYPE_RETRY_CHUNK).
+  2. Read the FULL heaviness sub-dict from
+     ``render_groups.resolved_scene_json`` (one row read per pending
+     item).  This is the canonical scene context the planner reads
+     for cost / time / VRAM math; both initial and retry rows go
+     through the same fetch.
+  3. Adapt the mutable snapshot to ``AvailableResources`` for the
+     strategy's consumption.
+  4. Call ``AllocationPlanningService.plan_initial`` /
+     ``plan_retry``; receive ``list[PlannedTask]``.
+  5. For each task:
+        - skip if the in-progress ledger already owns the chunk
+        - generate a fresh job_id
+        - encode PlannedTask -> AllocationQueueItem via codec
+        - write the row to ``dispatch_queue``
+  6. ``mark_planned_dispatched`` on the snapshot for each task --
+     the COMMITMENT.  Next pending row in the same loop sees the
+     resource as taken and won't pick it again.
+  7. Delete the pending row.
+
+Race-free intra-tick by construction: the mutation in step 6
+happens BEFORE the next row's planning in step 4.
+
+This is the FIRST and ONLY place pending rows get planned.  All
 allocation entry points (initial submit, auto-retry, manual-retry)
 park to ``pending_allocation_queue`` first; the daemon picks them up
 here.  Nothing was "previously planned" -- so no "re" anywhere.
@@ -21,21 +40,25 @@ here.  Nothing was "previously planned" -- so no "re" anywhere.
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 
+from serverV2.allocation.allocation_dispatch_queue_repository import (
+    AllocationDispatchQueueRepository,
+)
 from serverV2.allocation.allocation_pending_queue_repository import (
     AllocationPendingItem,
     AllocationPendingQueueRepository,
     TYPE_INITIAL_GROUP,
     TYPE_RETRY_CHUNK,
 )
+from serverV2.allocation.allocation_queue_item_codec import (
+    AllocationQueueItemCodec,
+)
+from serverV2.allocation.allocation_snapshot_mutator import (
+    AllocationSnapshotMutator,
+)
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
-)
-from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_enqueue_handler import (
-    AllocationEnqueueHandler,
-)
-from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_snapshot_mutator import (
-    AllocationSnapshotMutator,
 )
 from serverV2.allocation.services.allocation_planning_service import (
     AllocationPlanningService,
@@ -48,32 +71,41 @@ from serverV2.core.models import (
 from serverV2.fleets.fleet_availability.mutable_fleet_availability_snapshot import (
     MutableFleetAvailabilitySnapshot,
 )
+from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
+from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 log = logging.getLogger(__name__)
 
 
-class AllocationPendingPlanner:
+class AllocationPendingTickProcessor:
 
     def __init__(
         self,
         *,
         pending_repo: AllocationPendingQueueRepository,
+        dispatch_repo: AllocationDispatchQueueRepository,
+        in_progress_repo: InProgressChunkRepository,
+        render_group_repository: RenderGroupRepository,
         planning_service: AllocationPlanningService,
-        enqueue_handler: AllocationEnqueueHandler,
+        codec: AllocationQueueItemCodec,
         snapshot_mutator: AllocationSnapshotMutator,
     ) -> None:
         self._pending_repo = pending_repo
+        self._dispatch_repo = dispatch_repo
+        self._in_progress = in_progress_repo
+        self._rg_repo = render_group_repository
         self._planning = planning_service
-        self._enqueue = enqueue_handler
+        self._codec = codec
         self._snapshot_mutator = snapshot_mutator
 
     def has_any(self) -> bool:
+        """Idle-tick guard: returns True iff at least one row is parked
+        in ``pending_allocation_queue``."""
         return self._pending_repo.has_any()
 
-    def plan(self, snapshot: MutableFleetAvailabilitySnapshot) -> int:
+    def process(self, snapshot: MutableFleetAvailabilitySnapshot) -> int:
         """One pass over the pending queue.  Returns the number of rows
-        promoted to ``dispatch_queue``.
-        """
+        promoted to ``dispatch_queue``."""
         moved = 0
         rows = self._pending_repo.list_all()
         for row in rows:
@@ -84,12 +116,12 @@ class AllocationPendingPlanner:
                     self._pending_repo.update_last_attempted_at(row.id)  # type: ignore[arg-type]
             except Exception as exc:
                 log.error(
-                    "AllocationPendingPlanner: row %s (type=%s, group=%s) raised: %r",
+                    "AllocationPendingTickProcessor: row %s (type=%s, group=%s) raised: %r",
                     row.id, row.type, row.group_id, exc,
                 )
         if moved:
             log.info(
-                "AllocationPendingPlanner: promoted %d row(s) from pending to dispatch_queue",
+                "AllocationPendingTickProcessor: promoted %d row(s) from pending to dispatch_queue",
                 moved,
             )
         return moved
@@ -109,7 +141,7 @@ class AllocationPendingPlanner:
             tasks = self._plan_for_initial(row, snapshot)
         else:
             log.warning(
-                "AllocationPendingPlanner: unknown row type=%r (id=%s) -- skipping",
+                "AllocationPendingTickProcessor: unknown row type=%r (id=%s) -- skipping",
                 row.type, row.id,
             )
             return False
@@ -126,11 +158,30 @@ class AllocationPendingPlanner:
             priority=row.priority,
             engine=row.engine,
         )
-        self._enqueue.enqueue(row.group_id, tasks, ctx)
+
+        # Inline enqueue (was AllocationEnqueueHandler -- only one caller
+        # post-refactor, no need for a separate class).  For each task:
+        # check the in-progress ledger first; skip duplicates; otherwise
+        # generate a job_id, encode, and write the dispatch_queue row.
+        for task in tasks:
+            chunk_index = task.chunk_index or 0
+            owner = self._in_progress.current_job_for(row.group_id, chunk_index)
+            if owner is not None:
+                log.info(
+                    "Group %s chunk %s already in progress (job %s) -- skipping enqueue",
+                    row.group_id, chunk_index, owner,
+                )
+                continue
+            job_id = str(uuid4())
+            self._dispatch_repo.enqueue(
+                row.group_id,
+                self._codec.encode(task, ctx, job_id=job_id),
+            )
+
         # Commit each planned target into the in-tick mutable snapshot
-        # immediately.  This is what prevents the dogpile: the next row
-        # in the planner's loop sees the resource as taken and the
-        # strategy picks something else.
+        # immediately.  This is what prevents the dogpile: the next
+        # row in the planner's loop sees the resource as taken and
+        # the strategy picks something else.
         for task in tasks:
             self._snapshot_mutator.mark_planned_dispatched(snapshot, task)
         self._pending_repo.delete(row.id)  # type: ignore[arg-type]
@@ -151,14 +202,15 @@ class AllocationPendingPlanner:
             attempt=row.attempt or 0,
             excluded_machine_ids=row.excluded_machine_ids,
             excluded_serverless_capabilities=row.excluded_serverless_capabilities,
-            file_size_bytes=row.file_size_bytes,
             engine=row.engine,
         )
         resources = _adapt_resources(snapshot, machine_ids=None)
+        heaviness = self._load_heaviness(row.group_id)
         task = self._planning.plan_retry(
             tier=row.tier,
             chunk_request=chunk_request,
             resources=resources,
+            heaviness=heaviness,
         )
         return [task] if task is not None else []
 
@@ -167,11 +219,7 @@ class AllocationPendingPlanner:
         row: AllocationPendingItem,
         snapshot: MutableFleetAvailabilitySnapshot,
     ) -> list[PlannedTask]:
-        heaviness: dict | None
-        if row.file_size_bytes is not None:
-            heaviness = {"file_size_bytes": row.file_size_bytes}
-        else:
-            heaviness = None
+        heaviness = self._load_heaviness(row.group_id)
         resources = _adapt_resources(
             snapshot,
             machine_ids=list(row.machine_ids) if row.machine_ids else None,
@@ -186,6 +234,15 @@ class AllocationPendingPlanner:
             engine=row.engine,
             heaviness=heaviness,
         )
+
+    def _load_heaviness(self, group_id: str) -> dict:
+        """Fetch the canonical heaviness dict the planner reads.  Source
+        of truth: ``render_groups.resolved_scene_json``, persisted by
+        ``RenderGroupService`` at confirm-upload time via
+        ``SceneResolver``.  Both initial and retry pending rows share
+        this fetch so heaviness is identical to what the user's tier
+        choice was costed against at submit time."""
+        return self._rg_repo.get_resolved_heaviness(group_id)
 
 
 def _adapt_resources(

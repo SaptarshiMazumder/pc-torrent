@@ -112,7 +112,7 @@ def _wire_routers(c: Container) -> None:
 
     machines.init(c.machine_service, machine_repo=c.machine_repo)
     jobs.init(c.job_service, orchestrator=c.orchestrator, callback_router=c.callback_router)
-    render_groups.init(c.render_group_service, c.upload_coordinator, c.allocation_cost_service)
+    render_groups.init(c.render_group_service, c.upload_coordinator, c.allocation_facade)
     pre_render.init(c.pre_render_estimator)
     assets.init(c.asset_service)
     debug.init(aggregator=c.status_aggregator)

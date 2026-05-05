@@ -1,11 +1,22 @@
-"""PreRenderEstimator — stateless cost / wall-time preview.
+"""PreRenderEstimator -- stateless cost / wall-time preview.
 
 Frontend already holds the analyzer snapshot (desktop-app local Blender
 runs analysis at .blend pick time) and the user's render overrides
 (edited in-UI).  POST /pre-render/estimate ships both in the request
-body; this estimator merges them via :class:`SceneResolver`, runs the
-existing planning service per implemented tier, and returns the per-tier
-``{wall_time_seconds, cost_*_usd, machines}`` shape the UI consumes.
+body; this estimator merges them via :class:`SceneResolver`, then asks
+the orchestrator for a per-tier cost estimate by calling
+``orchestrator.cost_estimate_for_dry_run`` once per implemented tier.
+
+The orchestrator delegates through allocation_client -> facade ->
+planning_service -> planner; the planner stamps per-chunk estimates
+that the planning service aggregates into a single
+``GroupCostEstimate``.  This estimator turns each tier's estimate into
+the ``{wall_time_seconds, cost_low/mid/high_usd, machines}`` shape the
+UI consumes.
+
+The low/mid/high cost range is a UI-only widening of the canonical
+``total_cost_usd`` -- a fixed +/- spread so the UI can show "expected
++/- N%" without the planner having to model variance internally.
 
 No DB reads.  No DB writes.  No render group needs to exist yet.
 """
@@ -19,9 +30,8 @@ from typing import Any
 from serverV2.allocation.allocation_strategies.allocation_helpers import (
     allocation_tiers as tiers,
 )
-from serverV2.allocation.allocation_strategies.analyzers.allocation_cost_analyzer import (
-    AllocationMixSlot,
-    estimate_cost_for_mix,
+from serverV2.allocation.services.allocation_planning_service import (
+    GroupCostEstimate,
 )
 from serverV2.core.value_objects import extract_analysis_warnings
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -35,14 +45,21 @@ log = logging.getLogger(__name__)
 
 
 # Tiers the estimate produces.  Premium is reserved (allocator not
-# implemented) — returned as null so the UI can show "Coming soon".
+# implemented) -- returned as null so the UI can show "Coming soon".
 _PREVIEW_TIERS: tuple[str, ...] = (tiers.ECONOMY, tiers.STANDARD)
+
+# Fixed UI-only widening band around the canonical ``total_cost_usd``.
+# Planner produces a single deterministic number; the UI displays a +/-
+# spread so users see "expected, optimistic, pessimistic" instead of a
+# false-precision single value.  Tweak if the band feels too narrow/
+# wide; the planner does NOT model variance.
+_COST_WIDENING_BAND: float = 0.25
 
 
 @dataclass
 class PreRenderEstimateRequest:
     """Inputs the estimator needs.  Constructed in the router from the
-    request body — keeps the estimator decoupled from FastAPI shapes.
+    request body -- keeps the estimator decoupled from FastAPI shapes.
     """
 
     analysis_snapshot: dict[str, Any] = field(default_factory=dict)
@@ -150,38 +167,43 @@ class PreRenderEstimator:
         out: dict[str, Any] = {}
         for tier in _PREVIEW_TIERS:
             try:
-                planned = self._orchestrator.plan(
+                estimate = self._orchestrator.cost_estimate_for_dry_run(
+                    tier=tier,
                     frame_start=plan_frame_start,
                     frame_end=plan_frame_end,
                     frame_step=plan_frame_step,
                     total_frames=plan_total_frames,
-                    machine_ids=None,           # no pinning at preview time
                     heaviness=heaviness,
                     engine=engine,
-                    tier=tier,
                 )
             except Exception as exc:
-                log.warning("pre-render estimate(tier=%s) plan failed: %s", tier, exc)
-                out[tier] = None
-                continue
-            if not planned:
-                out[tier] = None
-                continue
-            mix = [
-                AllocationMixSlot(
-                    render_speed=t.render_speed,
-                    price_per_hour=t.price_per_hour,
-                    frames_assigned=t.total_frames,
+                log.warning(
+                    "pre-render estimate(tier=%s) failed: %s", tier, exc,
                 )
-                for t in planned
-            ]
-            cost = estimate_cost_for_mix(heaviness, mix)
-            out[tier] = {
-                "wall_time_seconds": int(cost.wall_time_seconds),
-                "cost_mid_usd": round(cost.cost_mid_usd, 4),
-                "cost_low_usd": round(cost.cost_low_usd, 4),
-                "cost_high_usd": round(cost.cost_high_usd, 4),
-                "machines": len(planned),
-            }
+                out[tier] = None
+                continue
+            if estimate.chunks == 0:
+                out[tier] = None
+                continue
+            out[tier] = _to_ui_dto(estimate)
         out[tiers.PREMIUM] = None
         return out
+
+
+def _to_ui_dto(estimate: GroupCostEstimate) -> dict[str, Any]:
+    """Project a ``GroupCostEstimate`` into the UI's per-tier shape.
+
+    The planner's ``total_cost_usd`` is the canonical mid value; we
+    widen by a fixed +/- band purely for display so the UI can show a
+    plausible-range card instead of a single false-precision number.
+    Variance is NOT modelled in the planner.
+    """
+    mid = float(estimate.total_cost_usd)
+    band = _COST_WIDENING_BAND
+    return {
+        "wall_time_seconds": int(estimate.wall_time_seconds),
+        "cost_mid_usd": round(mid, 4),
+        "cost_low_usd": round(mid * (1.0 - band), 4),
+        "cost_high_usd": round(mid * (1.0 + band), 4),
+        "machines": estimate.chunks,
+    }

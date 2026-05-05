@@ -255,6 +255,14 @@ _HEAVINESS_DEFAULTS: dict[str, Any] = {
     "geometry_nodes_complexity": 0,
     "uses_subsurface_scattering": False,
     "uses_volumetrics": False,
+    # Whether the scene has Cycles adaptive sampling enabled (or the
+    # EEVEE equivalent).  When True, the time analyzer applies a
+    # per-engine speedup multiplier (~0.5 for Cycles, ~0.7 for EEVEE)
+    # because adaptive sampling targets noisy regions and skips clean
+    # ones, cutting the effective sample count.  Defaulted to False
+    # because older heaviness snapshots don't include the field; the
+    # multiplier becomes a no-op (1.0) in that case.
+    "uses_adaptive_sampling": False,
     # Server-side fact (render_groups.r2_input_size_bytes); injected by
     # ``parse_analysis_heaviness(snapshot, file_size_bytes=...)``.  Kept
     # in the heaviness dict so analyzers/allocators take a single

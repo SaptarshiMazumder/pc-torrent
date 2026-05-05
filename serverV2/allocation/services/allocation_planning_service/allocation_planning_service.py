@@ -31,6 +31,7 @@ from serverV2.allocation.services.allocation_planning_service.allocation_cost_ag
 from serverV2.allocation.services.allocation_planning_service.group_cost_estimate import (
     GroupCostEstimate,
 )
+from serverV2.config import FailureRateConfig
 from serverV2.core.models import AvailableResources, PlannedTask
 
 
@@ -41,9 +42,16 @@ class AllocationPlanningService:
         *,
         strategy: AllocationStrategy,
         cost_aggregator: AllocationCostAggregator,
+        failure_rate: FailureRateConfig | None = None,
     ) -> None:
         self._strategy = strategy
         self._cost_aggregator = cost_aggregator
+        # Per-fleet first-attempt failure probability; applied as a
+        # widening factor on the dry-run cost preview so the UI doesn't
+        # advertise the happy-path-only number.  None disables the
+        # widening (default-constructed FailureRateConfig already does
+        # the same thing with all-zero rates).
+        self._failure_rate = failure_rate
 
     # ------------------------------------------------------------------
     # planning surface (used by AllocationPendingTickProcessor)
@@ -108,7 +116,11 @@ class AllocationPlanningService:
             engine=engine,
             heaviness=heaviness,
         )
-        items = self._cost_aggregator.from_planned_tasks(tasks)
+        # Dry-run only: widen by per-fleet failure rate so the UI shows
+        # an expected-value projection, not the optimistic happy path.
+        items = self._cost_aggregator.from_planned_tasks(
+            tasks, failure_rate=self._failure_rate,
+        )
         return self._cost_aggregator.aggregate(items)
 
     def cost_for_committed_jobs(

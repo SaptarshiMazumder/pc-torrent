@@ -56,6 +56,9 @@ from serverV2.allocation.allocation_strategies.allocation_planner import (
 from serverV2.allocation.allocation_strategies.allocation_strategy import (
     AllocationStrategy,
 )
+from serverV2.allocation.allocation_strategies.validators.allocation_eevee_linux_only_validator import (
+    AllocationEeveeLinuxOnlyValidator,
+)
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
 )
@@ -363,10 +366,23 @@ def build(
     registry.register(community_strategy)
 
     # -- allocation + dispatch --
-    # Single planner does the work; the three strategy shells just hold
-    # the tier-specific weights.  The planner owns target validators
-    # (engine compatibility today; tier / price caps in the future).
-    target_validators = [AllocationEngineCompatibilityValidator()]
+    # Push render-time calibration (per-engine baselines, feature
+    # multipliers, startup additives) from config.json into the time
+    # analyzer module.  Must happen before the planner runs so the
+    # first dry-run estimate uses production calibration rather than
+    # the module's hand-tuned defaults.
+    if cfg.render_time is not None:
+        from serverV2.allocation.allocation_strategies.analyzers import (
+            allocation_time_analyzer,
+        )
+        allocation_time_analyzer.configure(cfg.render_time)
+
+    # Single planner does the work.  Owns target validators (engine
+    # compatibility, EEVEE-Linux-only on Vast; future: tier / price caps).
+    target_validators = [
+        AllocationEngineCompatibilityValidator(),
+        AllocationEeveeLinuxOnlyValidator(),
+    ]
     allocation_planner = AllocationPlanner(
         registry,
         startup_buffer=cfg.startup_buffer,
@@ -414,6 +430,7 @@ def build(
     allocation_planning_service = AllocationPlanningService(
         strategy=allocation_strategy,
         cost_aggregator=allocation_cost_aggregator,
+        failure_rate=cfg.failure_rate,
     )
     _allocation_fleet_caps: dict[str, int] = {
         "modal_serverless": cfg.modal.max_parallel,

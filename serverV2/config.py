@@ -495,6 +495,122 @@ class StartupBufferConfig:
 
 
 @dataclass(frozen=True)
+class EngineFactors:
+    """Per-engine multipliers for heavy-feature flags + adaptive
+    sampling.  All express "render takes N times longer when this flag
+    is on" relative to the same scene without it.  ``adaptive_sampling``
+    is < 1.0 (it speeds renders up).
+    """
+    subdivision: float
+    displacement: float
+    particles: float
+    subsurface: float
+    volumetrics: float
+    adaptive_sampling: float
+
+
+@dataclass(frozen=True)
+class RenderStartupSec:
+    """Per-chunk startup additive components in seconds."""
+    baseline: float
+    download_per_gb: float
+    bvh_per_million_verts: float
+    texture_upload_per_gb: float
+    shader_compile_base: float
+    shader_compile_per_node: float
+    max_total: float
+
+
+@dataclass(frozen=True)
+class RenderTimeConfig:
+    """Calibration knobs for ``allocation_time_analyzer``.  Lifted from
+    module constants so they can be tuned via config.json without code
+    changes.  Telemetry-driven calibration (separate workstream) will
+    eventually fit these from real render data; until then they're
+    eyeballed defaults.
+    """
+    baseline_sec_cycles: float
+    baseline_sec_eevee: float
+    factors_cycles: EngineFactors
+    factors_eevee: EngineFactors
+    startup: RenderStartupSec
+
+    @classmethod
+    def from_env(cls) -> RenderTimeConfig:
+        block = _require_block("render_time")
+
+        def _factors(key: str) -> EngineFactors:
+            sub = block.get(key)
+            if not isinstance(sub, dict):
+                raise FleetException(f"render_time.{key} missing or not an object")
+            return EngineFactors(
+                subdivision=_require_field_float(sub, f"render_time.{key}", "subdivision"),
+                displacement=_require_field_float(sub, f"render_time.{key}", "displacement"),
+                particles=_require_field_float(sub, f"render_time.{key}", "particles"),
+                subsurface=_require_field_float(sub, f"render_time.{key}", "subsurface"),
+                volumetrics=_require_field_float(sub, f"render_time.{key}", "volumetrics"),
+                adaptive_sampling=_require_field_float(sub, f"render_time.{key}", "adaptive_sampling"),
+            )
+
+        startup_block = block.get("startup_sec")
+        if not isinstance(startup_block, dict):
+            raise FleetException("render_time.startup_sec missing or not an object")
+
+        return cls(
+            baseline_sec_cycles=_require_field_float(block, "render_time", "baseline_sec_cycles"),
+            baseline_sec_eevee=_require_field_float(block, "render_time", "baseline_sec_eevee"),
+            factors_cycles=_factors("factors_cycles"),
+            factors_eevee=_factors("factors_eevee"),
+            startup=RenderStartupSec(
+                baseline=_require_field_float(startup_block, "render_time.startup_sec", "baseline"),
+                download_per_gb=_require_field_float(startup_block, "render_time.startup_sec", "download_per_gb"),
+                bvh_per_million_verts=_require_field_float(startup_block, "render_time.startup_sec", "bvh_per_million_verts"),
+                texture_upload_per_gb=_require_field_float(startup_block, "render_time.startup_sec", "texture_upload_per_gb"),
+                shader_compile_base=_require_field_float(startup_block, "render_time.startup_sec", "shader_compile_base"),
+                shader_compile_per_node=_require_field_float(startup_block, "render_time.startup_sec", "shader_compile_per_node"),
+                max_total=_require_field_float(startup_block, "render_time.startup_sec", "max_total"),
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class FailureRateConfig:
+    """Per-fleet first-attempt failure probability (0..1).  Used to
+    widen the dry-run cost and wall-time estimates so the UI doesn't
+    advertise the happy-path-only number.  Not used in allocation
+    scoring -- this is purely a display projection.
+
+    Vast is the highest because the marketplace mixes hosts of
+    varying driver / network quality.  Modal is lowest (managed,
+    homogeneous).  Community sits in between (user PCs are stable
+    but vary in network reliability).
+    """
+    vast: float = 0.20
+    modal: float = 0.05
+    community: float = 0.10
+
+    def for_fleet(self, fleet: str | None) -> float:
+        if not fleet:
+            return 0.0
+        if fleet == "vast_serverless":
+            return self.vast
+        if fleet == "modal_serverless":
+            return self.modal
+        if fleet == "community":
+            return self.community
+        return 0.0
+
+    @classmethod
+    def from_env(cls) -> FailureRateConfig:
+        block = _require_block("failure_rate")
+        return cls(
+            vast=_require_field_float(block, "failure_rate", "vast"),
+            modal=_require_field_float(block, "failure_rate", "modal"),
+            community=_require_field_float(block, "failure_rate", "community"),
+        )
+
+
+@dataclass(frozen=True)
 class AppConfig:
     vast: VastConfig
     modal: ModalConfig
@@ -531,6 +647,12 @@ class AppConfig:
     orphan_secret: str = ""
     stall: StallDetectionConfig = field(default_factory=StallDetectionConfig)
     startup_buffer: StartupBufferConfig = field(default_factory=StartupBufferConfig)
+    failure_rate: FailureRateConfig = field(default_factory=FailureRateConfig)
+    # Render-time calibration knobs (per-engine baselines, feature
+    # multipliers, startup additives).  Loaded from config.json's
+    # ``render_time`` block; ``allocation_time_analyzer`` reads via
+    # module-level configure() at boot.
+    render_time: RenderTimeConfig | None = None
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -548,4 +670,6 @@ class AppConfig:
             orphan_secret=_env_str("ORPHAN_SECRET", ""),
             stall=StallDetectionConfig.from_env(),
             startup_buffer=StartupBufferConfig.from_env(),
+            failure_rate=FailureRateConfig.from_env(),
+            render_time=RenderTimeConfig.from_env(),
         )

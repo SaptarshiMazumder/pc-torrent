@@ -39,26 +39,49 @@ from serverV2.core.value_objects import parse_analysis_heaviness
 # Tunables — all factors are 1.0 for the baseline scene.
 # ---------------------------------------------------------------------------
 
-# Per-engine baselines.  Same baseline scene shape (1080p, baseline
-# samples for the engine, simple shaders, no heavy features) but
-# wildly different render times -- EEVEE's rasterization + TAA is
-# 10x cheaper than Cycles' path tracing for the same wall output.
-# A single ``BASELINE_SEC`` constant collapsed both engines onto the
-# Cycles cost curve and was overestimating EEVEE renders by ~10x.
-_BASELINE_SEC_BY_ENGINE: dict[str, float] = {
-    "BLENDER_EEVEE":      3.0,    # 64 TAA samples @ 1080p baseline
-    "BLENDER_EEVEE_NEXT": 3.0,
-    "CYCLES":             30.0,   # 1024 path samples @ 1080p baseline
-}
-# Fallback for unknown engines (older snapshots, future engines).
-# Cycles-conservative: better to overestimate than under.
-_DEFAULT_BASELINE_SEC = 30.0
+# Per-engine baselines + multipliers are tuned via config.json's
+# ``render_time`` block.  ``configure(cfg)`` at boot replaces the
+# module-level singleton; until then a sensible default is used so
+# imports / tests / ad-hoc scripts work without bootstrap.  See
+# :class:`RenderTimeConfig` in serverV2.config for the schema.
+from serverV2.config import (
+    EngineFactors,
+    RenderStartupSec,
+    RenderTimeConfig,
+)
+
+_DEFAULT_CALIBRATION = RenderTimeConfig(
+    baseline_sec_cycles=90.0,
+    baseline_sec_eevee=9.0,
+    factors_cycles=EngineFactors(
+        subdivision=1.3, displacement=1.3, particles=1.5,
+        subsurface=1.4, volumetrics=2.0, adaptive_sampling=0.5,
+    ),
+    factors_eevee=EngineFactors(
+        subdivision=1.15, displacement=1.15, particles=1.25,
+        subsurface=1.20, volumetrics=1.50, adaptive_sampling=0.7,
+    ),
+    startup=RenderStartupSec(
+        baseline=90.0, download_per_gb=30.0, bvh_per_million_verts=3.0,
+        texture_upload_per_gb=100.0, shader_compile_base=5.0,
+        shader_compile_per_node=0.05, max_total=30 * 60.0,
+    ),
+)
+_calibration: RenderTimeConfig = _DEFAULT_CALIBRATION
+
+
+def configure(cfg: RenderTimeConfig) -> None:
+    """Replace the module-level calibration with the one loaded from
+    config.json.  Called once at boot from bootstrap.py.  Tests can
+    omit this and the defaults above are used.
+    """
+    global _calibration
+    _calibration = cfg
 
 # Back-compat alias.  External callers historically read BASELINE_SEC
-# expecting the Cycles baseline (it was the only one).  Keep the name
-# pointing at Cycles so the smoke tests / cost analyzer / consumers
-# don't break.
-BASELINE_SEC = _BASELINE_SEC_BY_ENGINE["CYCLES"]
+# expecting the Cycles baseline.  Kept for the smoke tests and any
+# legacy consumers; new code should read via ``_calibration``.
+BASELINE_SEC = _DEFAULT_CALIBRATION.baseline_sec_cycles
 
 # Reference values for "1.0x factor"
 BASELINE_PIXELS = 1920 * 1080            # 1080p
@@ -70,25 +93,12 @@ BASELINE_TEX_BYTES = 256 * 1024 * 1024   # 256 MB of textures (estimated VRAM co
 CYCLES_BASELINE_SAMPLES = 1024
 EEVEE_BASELINE_SAMPLES = 64
 
-# Heavy-feature multipliers (each compounds independently).
-# Cycles values (path-tracing penalty).
-SUBDIVISION_FACTOR = 1.3
-DISPLACEMENT_FACTOR = 1.3
-PARTICLES_FACTOR = 1.5
-SUBSURFACE_FACTOR = 1.4
-VOLUMETRICS_FACTOR = 2.0
+# Heavy-feature multipliers, EEVEE-damped variants, and startup
+# additives are tuned via config.json's ``render_time`` block; the
+# functions below read from the module-level ``_calibration``.  See
+# RenderTimeConfig for the schema.
 
-# EEVEE-damped variants: rasterization shrugs at extra geometry far
-# more than path tracing does.  Subdivision/displacement add draw-call
-# cost only; particles in EEVEE are typically billboard quads.
-# Subsurface and volumetrics still compound (screen-space SSS /
-# volumetric passes), but less than Cycles' path-traced equivalents.
 _EEVEE_ENGINES = frozenset({"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"})
-_EEVEE_SUBDIVISION_FACTOR  = 1.15
-_EEVEE_DISPLACEMENT_FACTOR = 1.15
-_EEVEE_PARTICLES_FACTOR    = 1.25
-_EEVEE_SUBSURFACE_FACTOR   = 1.20
-_EEVEE_VOLUMETRICS_FACTOR  = 1.50
 
 # Geometry-nodes — base penalty + complexity-scaled, capped
 GEOMETRY_NODES_BASE = 1.2
@@ -114,23 +124,22 @@ MIN_RENDER_SPEED = 0.1                    # also guards against /0
 # ---------------------------------------------------------------------------
 # Per-chunk startup overhead — fixed cost paid once per chunk regardless of
 # how many frames it owns.  Heavy scenes can spend 5-20 minutes here.
+# Constants tuned in config.json's ``render_time.startup_sec`` block.
 #
-#   startup_sec = BASELINE_STARTUP_SEC
-#               + file_size_bytes / GB        * DOWNLOAD_SEC_PER_GB
-#               + vertex_count_total / 1M     * BVH_SEC_PER_MILLION_VERTS
-#               + texture_total_bytes / GB    * TEX_UPLOAD_SEC_PER_GB
-#               + SHADER_COMPILE_SEC_BASE
-#               + shader_node_count_total     * SHADER_COMPILE_SEC_PER_NODE
-#   clamped to [BASELINE_STARTUP_SEC, MAX_STARTUP_SEC]
+#   startup_sec = baseline
+#               + file_size_bytes / GB        * download_per_gb
+#               + vertex_count_total / 1M     * bvh_per_million_verts
+#               + texture_total_bytes / GB    * texture_upload_per_gb
+#               + shader_compile_base
+#               + shader_node_count_total     * shader_compile_per_node
+#   clamped to [baseline, max_total]
 # ---------------------------------------------------------------------------
 
-BASELINE_STARTUP_SEC = 90.0          # container boot + Blender start + small fixed costs
-DOWNLOAD_SEC_PER_GB = 30.0           # R2-to-worker bandwidth (~33 MB/s sustained)
-BVH_SEC_PER_MILLION_VERTS = 3.0      # Cycles geometry pre-process
-TEX_UPLOAD_SEC_PER_GB = 100.0        # VRAM upload + mipmap + decompression
-SHADER_COMPILE_SEC_BASE = 5.0        # one-time OptiX/EEVEE kernel compile cost
-SHADER_COMPILE_SEC_PER_NODE = 0.05   # heavy-shader-graph multiplier
-MAX_STARTUP_SEC = 30 * 60            # 30-minute cap — runaway guard
+# Back-compat aliases for the smoke tests / legacy consumers.  Point at
+# the default calibration -- production overrides via configure() at
+# boot but the constants reflect the same values.
+BASELINE_STARTUP_SEC = _DEFAULT_CALIBRATION.startup.baseline
+MAX_STARTUP_SEC = _DEFAULT_CALIBRATION.startup.max_total
 
 _BYTES_PER_GB = 1024 ** 3
 
@@ -179,12 +188,17 @@ def _texture_factor(tex_bytes: int) -> float:
     return min(TEX_PRESSURE_CAP, 1.0 + TEX_PRESSURE_RAMP_RATE * (ratio - 1.0))
 
 
+def _factors_for(engine: str) -> EngineFactors:
+    """Per-engine multiplier bundle from the active calibration."""
+    if engine in _EEVEE_ENGINES:
+        return _calibration.factors_eevee
+    return _calibration.factors_cycles
+
+
 def _shader_factor(
     node_count: int, uses_sss: bool, uses_volumetrics: bool, engine: str = "",
 ) -> float:
-    is_eevee = engine in _EEVEE_ENGINES
-    sss_factor = _EEVEE_SUBSURFACE_FACTOR if is_eevee else SUBSURFACE_FACTOR
-    vol_factor = _EEVEE_VOLUMETRICS_FACTOR if is_eevee else VOLUMETRICS_FACTOR
+    factors = _factors_for(engine)
     f = 1.0
     if node_count > SHADER_NODE_BASE_THRESHOLD:
         excess = min(
@@ -193,9 +207,9 @@ def _shader_factor(
         )
         f *= 1.0 + excess * SHADER_NODE_RAMP
     if uses_sss:
-        f *= sss_factor
+        f *= factors.subsurface
     if uses_volumetrics:
-        f *= vol_factor
+        f *= factors.volumetrics
     return f
 
 
@@ -207,21 +221,28 @@ def _feature_factor(
     gn_complexity: int,
     engine: str = "",
 ) -> float:
-    is_eevee = engine in _EEVEE_ENGINES
-    sub_factor  = _EEVEE_SUBDIVISION_FACTOR  if is_eevee else SUBDIVISION_FACTOR
-    disp_factor = _EEVEE_DISPLACEMENT_FACTOR if is_eevee else DISPLACEMENT_FACTOR
-    part_factor = _EEVEE_PARTICLES_FACTOR    if is_eevee else PARTICLES_FACTOR
+    factors = _factors_for(engine)
     f = 1.0
     if uses_subdivision:
-        f *= sub_factor
+        f *= factors.subdivision
     if uses_displacement:
-        f *= disp_factor
+        f *= factors.displacement
     if uses_particles:
-        f *= part_factor
+        f *= factors.particles
     if uses_geometry_nodes:
         gn_extra = min(GEOMETRY_NODES_CAP, gn_complexity * GEOMETRY_NODES_PER_NODE)
         f *= GEOMETRY_NODES_BASE + gn_extra
     return f
+
+
+def _adaptive_sampling_factor(uses_adaptive_sampling: bool, engine: str = "") -> float:
+    """When adaptive sampling is on, Cycles skips clean regions and
+    reaches the same noise floor with fewer effective samples.  Returns
+    a multiplier < 1.0 (~0.5 Cycles, ~0.7 EEVEE) when on, 1.0 when off.
+    """
+    if not uses_adaptive_sampling:
+        return 1.0
+    return _factors_for(engine).adaptive_sampling
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +266,12 @@ def estimate_seconds_per_frame(
     not a wall-time prediction — see module docstring.
     """
     engine = str(heaviness.get("render_engine") or "")
-    baseline_sec = _BASELINE_SEC_BY_ENGINE.get(engine, _DEFAULT_BASELINE_SEC)
+    if engine in _EEVEE_ENGINES:
+        baseline_sec = _calibration.baseline_sec_eevee
+    elif engine == "CYCLES":
+        baseline_sec = _calibration.baseline_sec_cycles
+    else:
+        baseline_sec = _calibration.baseline_sec_cycles  # conservative fallback
 
     multiplier = (
         _sample_factor(heaviness.get("samples", 0), engine)
@@ -264,6 +290,10 @@ def estimate_seconds_per_frame(
             bool(heaviness.get("uses_particles", False)),
             bool(heaviness.get("uses_geometry_nodes", False)),
             int(heaviness.get("geometry_nodes_complexity", 0)),
+            engine,
+        )
+        * _adaptive_sampling_factor(
+            bool(heaviness.get("uses_adaptive_sampling", False)),
             engine,
         )
     )
@@ -300,28 +330,29 @@ def estimate_startup_seconds(heaviness: dict[str, Any]) -> float:
     5-20 minute range here.  The constants are coarse heuristics;
     Phase 5 telemetry will refine.
     """
-    startup = BASELINE_STARTUP_SEC
+    s = _calibration.startup
+    startup = s.baseline
 
     # File download from R2 to the worker.  Takes the full file size,
     # which already includes packed textures.
     file_size_bytes = int(heaviness.get("file_size_bytes", 0) or 0)
     if file_size_bytes > 0:
-        startup += (file_size_bytes / _BYTES_PER_GB) * DOWNLOAD_SEC_PER_GB
+        startup += (file_size_bytes / _BYTES_PER_GB) * s.download_per_gb
 
     verts = int(heaviness.get("vertex_count_total", 0) or 0)
     if verts > 0:
-        startup += (verts / 1_000_000) * BVH_SEC_PER_MILLION_VERTS
+        startup += (verts / 1_000_000) * s.bvh_per_million_verts
 
     tex_bytes = int(heaviness.get("texture_total_bytes", 0) or 0)
     if tex_bytes > 0:
-        startup += (tex_bytes / _BYTES_PER_GB) * TEX_UPLOAD_SEC_PER_GB
+        startup += (tex_bytes / _BYTES_PER_GB) * s.texture_upload_per_gb
 
     nodes = int(heaviness.get("shader_node_count_total", 0) or 0)
     materials = int(heaviness.get("material_count", 0) or 0)
     if materials > 0 or nodes > 0:
-        startup += SHADER_COMPILE_SEC_BASE + nodes * SHADER_COMPILE_SEC_PER_NODE
+        startup += s.shader_compile_base + nodes * s.shader_compile_per_node
 
-    return min(MAX_STARTUP_SEC, startup)
+    return min(s.max_total, startup)
 
 
 def estimate_startup_seconds_from_snapshot(
@@ -374,7 +405,7 @@ def _smoke() -> None:
     # ------- EEVEE 64 TAA = EEVEE baseline (NOT Cycles baseline) -------
     # EEVEE rasterization + TAA is ~10x cheaper than Cycles path tracing.
     # Per-engine BASELINE_SEC enforces that gap.
-    eevee_baseline_sec = _BASELINE_SEC_BY_ENGINE["BLENDER_EEVEE"]
+    eevee_baseline_sec = _calibration.baseline_sec_eevee
     eevee = dict(baseline)
     eevee["render_engine"] = "BLENDER_EEVEE"
     eevee["samples"] = EEVEE_BASELINE_SAMPLES   # 64

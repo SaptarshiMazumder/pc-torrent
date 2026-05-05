@@ -27,6 +27,7 @@ from serverV2.allocation.services.allocation_planning_service.cost_bearing_item 
 from serverV2.allocation.services.allocation_planning_service.group_cost_estimate import (
     GroupCostEstimate,
 )
+from serverV2.config import FailureRateConfig
 from serverV2.core.models import PlannedTask
 
 
@@ -48,15 +49,34 @@ class AllocationCostAggregator:
         )
 
     def from_planned_tasks(
-        self, tasks: list[PlannedTask],
+        self,
+        tasks: list[PlannedTask],
+        failure_rate: FailureRateConfig | None = None,
     ) -> list[CostBearingItem]:
-        return [
-            CostBearingItem(
-                estimated_cost_usd=float(t.estimated_cost_usd or 0.0),
-                estimated_seconds=float(t.estimated_seconds or 0.0),
-            )
-            for t in tasks
-        ]
+        """Project PlannedTasks to CostBearingItems.
+
+        ``failure_rate`` (optional): per-fleet first-attempt failure
+        probability.  When supplied, each task's cost and seconds are
+        widened by ``(1 + p_fleet)`` -- a chunk has ``p`` chance of
+        retrying once on a fresh container (full startup + render),
+        roughly doubling that chunk's contribution.  Used by the
+        dry-run preview so the UI doesn't advertise the happy-path-only
+        number; NOT applied to ``from_jobs_rows`` (that path reads
+        actuals, retries are already in the data).
+        """
+        items: list[CostBearingItem] = []
+        for t in tasks:
+            cost = float(t.estimated_cost_usd or 0.0)
+            secs = float(t.estimated_seconds or 0.0)
+            if failure_rate is not None:
+                p = failure_rate.for_fleet(t.fleet)
+                cost = cost * (1.0 + p)
+                secs = secs * (1.0 + p)
+            items.append(CostBearingItem(
+                estimated_cost_usd=cost,
+                estimated_seconds=secs,
+            ))
+        return items
 
     def from_jobs_rows(
         self, rows: list[dict[str, Any]],

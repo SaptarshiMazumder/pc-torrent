@@ -38,16 +38,33 @@ from serverV2.allocation.allocation_strategies.allocation_planner import (
 from serverV2.allocation.allocation_strategies.allocation_strategy import (
     AllocationStrategy,
 )
+from serverV2.allocation.allocation_strategies.analyzers import (
+    allocation_time_analyzer,
+)
+from serverV2.allocation.allocation_strategies.validators.allocation_eevee_linux_only_validator import (
+    AllocationEeveeLinuxOnlyValidator,
+)
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
 )
-from serverV2.config import StartupBufferConfig
+from serverV2.config import RenderTimeConfig, StartupBufferConfig
 from serverV2.core.models import (
     AvailableResources,
     CommunityMachine,
     FleetCapability,
 )
 from serverV2.core.value_objects import parse_analysis_heaviness
+
+
+# Push production calibration into the time analyzer so the smoke
+# scenarios reflect what the live planner will actually do (rather
+# than the module's hand-tuned defaults).  Falls back silently if
+# config.json is unreadable -- the defaults still produce valid output.
+try:
+    allocation_time_analyzer.configure(RenderTimeConfig.from_env())
+except Exception as _exc:  # noqa: BLE001
+    print(f"[smoke] warning: failed to load render_time config: {_exc}")
+    print("[smoke] continuing with module-default calibration")
 
 
 # ---------------------------------------------------------------------
@@ -211,7 +228,10 @@ def _build_strategy() -> AllocationStrategy:
     planner = AllocationPlanner(
         registry=_AllEnabledRegistry(),
         startup_buffer=StartupBufferConfig(),  # vast=180, modal=120, community=0
-        validators=[AllocationEngineCompatibilityValidator()],
+        validators=[
+            AllocationEngineCompatibilityValidator(),
+            AllocationEeveeLinuxOnlyValidator(),
+        ],
     )
     return AllocationStrategy(planner)
 
@@ -253,7 +273,10 @@ def scenario_2_short_light() -> None:
         resources=_diverse_pool(), engine="CYCLES", heaviness=_light_scene(),
     )
     _summarise(tasks, "2. Short light (50 frames, light scene)")
-    assert 1 <= len(tasks) <= 8, f"expected K in [1, 8], got {len(tasks)}"
+    # Upper bound is total_frames // min_frames_per_chunk = 50/4 = 12
+    # under realistic Cycles BASELINE_SEC; render time is high enough
+    # that the knapsack rule justifies full fan-out.
+    assert 1 <= len(tasks) <= 12, f"expected K in [1, 12], got {len(tasks)}"
 
 
 def scenario_3_short_heavy() -> None:
@@ -317,8 +340,9 @@ def scenario_6_cuda_discrimination() -> None:
 
 def scenario_7_eevee_os_discrimination() -> None:
     """EEVEE render + two L40S offers identical except Linux vs Windows.
-    os_factor returns 0.0 for Windows on EEVEE (hard penalty), so
-    Linux must win.
+    The hard validator (AllocationEeveeLinuxOnlyValidator) removes the
+    Windows offer from the eligible pool entirely -- Windows must
+    NEVER appear in the picks, regardless of how many slots K wants.
     """
     strategy = _build_strategy()
     pool = AvailableResources(
@@ -336,9 +360,18 @@ def scenario_7_eevee_os_discrimination() -> None:
         resources=pool, engine="BLENDER_EEVEE", heaviness=_eevee_scene(),
     )
     _summarise(tasks, "7. EEVEE OS discrimination (Linux vs Windows L40S)")
-    first = tasks[0]
-    assert "linux" in (first.host_os or "").lower(), \
-        f"expected Linux to win on EEVEE, got host_os={first.host_os}"
+    # Hard validator: zero Windows offers in the picks.
+    windows_picks = [
+        t for t in tasks if "windows" in (t.host_os or "").lower()
+    ]
+    assert not windows_picks, (
+        f"expected no Windows picks on EEVEE; got "
+        f"{[t.offer_id for t in windows_picks]}"
+    )
+    # Sanity: the Linux offer should be picked at least once.
+    assert any("linux" in (t.host_os or "").lower() for t in tasks), (
+        f"expected at least one Linux pick on EEVEE, got 0"
+    )
 
 
 def scenario_8_diversification_cap() -> None:

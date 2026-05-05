@@ -35,6 +35,9 @@
     "download_secs_per_gb": 120,
     "download_phase_min_sec": 300,
     "download_phase_max_sec": 1800,
+    "loading_multiplier": 3.0,
+    "loading_phase_min_sec": 60,
+    "loading_phase_max_sec": 1800,
     "hard_max_chunk_sec": 14400
   },
   "vast_instances": [

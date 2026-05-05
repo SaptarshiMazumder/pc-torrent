@@ -289,12 +289,21 @@ def build(
     # false-positives.  Re-enable once ProcessSampler walks children.
     def _make_pre_render_stall_detector() -> IPreRenderStallDetector:
         s = cfg.stall
+        # Rule order matters: first match wins.  Download rules fire while
+        # phase=='download'; loading_stall fires while phase!='download'
+        # AND no frame has uploaded yet; hard_ceiling is the last-resort
+        # safety net regardless of phase.
         return (PreRenderStallDetectorBuilder()
             .with_bytes_stall(stall_sec=s.download_bytes_stall_sec)
             .with_download_ceiling(
                 secs_per_gb=s.download_secs_per_gb,
                 min_sec=s.download_phase_min_sec,
                 max_sec=s.download_phase_max_sec,
+            )
+            .with_loading_stall(
+                multiplier=s.loading_multiplier,
+                min_sec=s.loading_phase_min_sec,
+                max_sec=s.loading_phase_max_sec,
             )
             .with_hard_ceiling(max_sec=s.hard_max_chunk_sec)
             .build())

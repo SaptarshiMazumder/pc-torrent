@@ -194,9 +194,21 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
   );
 }
 
+// Maps backend stall-rule names (parsed from job.error in the
+// serializer) to compact UI labels.  Add new entries here when new
+// rules are added to PreRenderStallDetector.
+const STALL_RULE_LABELS = {
+  loading_stall: "loading stall",
+  bytes_stall: "bytes stall",
+  download_ceiling: "download ceiling",
+  cpu_stall: "cpu stall",
+  hard_ceiling: "hard ceiling",
+};
+
 function FinishedRow({ data }) {
   const dot = statusColor(data.displayStatus);
   const [showError, setShowError] = useState(false);
+  const stallLabel = data.stallRule ? (STALL_RULE_LABELS[data.stallRule] || data.stallRule) : null;
 
   return (
     <div className="inst-fin-row" style={{ "--inst-color": dot }}>
@@ -204,6 +216,15 @@ function FinishedRow({ data }) {
         <span className="inst-fin-dot" style={{ background: dot, boxShadow: `0 0 6px ${dot}55` }} />
         <span className="inst-fin-gpu">{data.gpuLabel}</span>
         <span className="inst-fin-pill" style={{ background: dot + "18", color: dot }}>{data.displayStatus}</span>
+        {stallLabel && (
+          <span
+            className="inst-fin-pill"
+            style={{ background: "#f59e0b18", color: "#f59e0b", fontWeight: 600 }}
+            title={`Stall rule: ${data.stallRule}`}
+          >
+            {stallLabel}
+          </span>
+        )}
         <span className="inst-fin-stat">{data.rendered}{data.total != null ? ` / ${data.total}` : ""} frames</span>
         {data.rangeLabel && <span className="inst-fin-stat inst-fin-range">{data.rangeLabel}</span>}
         {data.error && (

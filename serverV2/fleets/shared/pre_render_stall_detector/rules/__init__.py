@@ -17,6 +17,9 @@ from serverV2.fleets.shared.pre_render_stall_detector.rules.download_ceiling_rul
 from serverV2.fleets.shared.pre_render_stall_detector.rules.hard_ceiling_rule import (
     HardCeilingRule,
 )
+from serverV2.fleets.shared.pre_render_stall_detector.rules.loading_stall_rule import (
+    LoadingStallRule,
+)
 from serverV2.fleets.shared.pre_render_stall_detector.rules.stall_rule import StallRule
 
 __all__ = [
@@ -25,4 +28,5 @@ __all__ = [
     "BytesStallRule",
     "DownloadCeilingRule",
     "HardCeilingRule",
+    "LoadingStallRule",
 ]

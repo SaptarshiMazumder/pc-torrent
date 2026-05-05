@@ -121,6 +121,7 @@ class VastFleetStrategy:
             blend_url=context.blend_url,
             render_overrides_json=context.render_overrides_json,
             group_id=context.group_id,
+            estimated_startup_sec=task.estimated_startup_seconds,
         )
 
         return DispatchResult(

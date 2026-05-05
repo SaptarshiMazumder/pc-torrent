@@ -31,7 +31,10 @@ class DownloadCeilingRule:
         self._max_sec = max_sec
 
     def evaluate(
-        self, window: HeartbeatWindow, job_age_sec: float,
+        self,
+        window: HeartbeatWindow,
+        job_age_sec: float,
+        **_unused: object,
     ) -> StallReason | None:
         latest = window.latest
         if latest is None or latest.phase != "download":

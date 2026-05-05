@@ -22,7 +22,12 @@ from serverV2.fleets.shared.pre_render_stall_detector.stall_reason import StallR
 class IPreRenderStallDetector(Protocol):
 
     def evaluate(
-        self, window: HeartbeatWindow, job_age_sec: float,
+        self,
+        window: HeartbeatWindow,
+        job_age_sec: float,
+        *,
+        has_rendered: bool = False,
+        estimated_startup_sec: float = 0.0,
     ) -> StallReason | None:
         ...
 
@@ -33,10 +38,20 @@ class PreRenderStallDetector:
         self._rules = rules
 
     def evaluate(
-        self, window: HeartbeatWindow, job_age_sec: float,
+        self,
+        window: HeartbeatWindow,
+        job_age_sec: float,
+        *,
+        has_rendered: bool = False,
+        estimated_startup_sec: float = 0.0,
     ) -> StallReason | None:
         for rule in self._rules:
-            reason = rule.evaluate(window, job_age_sec)
+            reason = rule.evaluate(
+                window,
+                job_age_sec,
+                has_rendered=has_rendered,
+                estimated_startup_sec=estimated_startup_sec,
+            )
             if reason is not None:
                 return reason
         return None

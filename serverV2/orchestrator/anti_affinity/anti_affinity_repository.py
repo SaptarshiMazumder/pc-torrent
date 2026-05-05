@@ -24,11 +24,18 @@ class AntiAffinityRepository:
     def get_terminal_siblings(
         self, group_id: str, chunk_index: int,
     ) -> list[dict[str, Any]]:
-        """Return ``(machine_type, gpu_type, machine_id)`` for every prior
-        failed/cancelled attempt of this chunk.  Empty list if no history."""
+        """Return ``(machine_type, gpu_type, machine_id, error)`` for every
+        prior failed/cancelled attempt of this chunk.  Empty list if no
+        history.
+
+        ``error`` is included so the service layer can classify failures
+        and filter out infrastructure-only failures (dispatch errors,
+        peer host startup faults) that don't reflect on the GPU class
+        itself -- those should not contribute to the chunk's anti-
+        affinity exclusion set."""
         return query_all(
             """
-            SELECT machine_type, gpu_type, machine_id
+            SELECT machine_type, gpu_type, machine_id, error
             FROM jobs
             WHERE group_id = %s
               AND chunk_index = %s

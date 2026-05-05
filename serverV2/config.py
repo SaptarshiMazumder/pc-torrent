@@ -425,6 +425,11 @@ class StallDetectionConfig:
     download_secs_per_gb: float = 120.0
     download_phase_min_sec: float = 300.0
     download_phase_max_sec: float = 1800.0
+    # Loading-phase watchdog: post-download / pre-first-frame budget.
+    # ``allowed = clamp(estimated_startup_sec * multiplier, min, max)``.
+    loading_multiplier: float = 3.0
+    loading_phase_min_sec: float = 60.0
+    loading_phase_max_sec: float = 1800.0
     hard_max_chunk_sec: float = 4 * 60 * 60.0
 
     @classmethod
@@ -440,6 +445,9 @@ class StallDetectionConfig:
             download_secs_per_gb=_require_field_float(block, "stall", "download_secs_per_gb"),
             download_phase_min_sec=_require_field_float(block, "stall", "download_phase_min_sec"),
             download_phase_max_sec=_require_field_float(block, "stall", "download_phase_max_sec"),
+            loading_multiplier=_require_field_float(block, "stall", "loading_multiplier"),
+            loading_phase_min_sec=_require_field_float(block, "stall", "loading_phase_min_sec"),
+            loading_phase_max_sec=_require_field_float(block, "stall", "loading_phase_max_sec"),
             hard_max_chunk_sec=_require_field_float(block, "stall", "hard_max_chunk_sec"),
         )
 

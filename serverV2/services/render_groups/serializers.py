@@ -8,6 +8,7 @@ from the ``output_frames`` table directly via the repo.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from serverV2.core.value_objects import (
@@ -15,6 +16,13 @@ from serverV2.core.value_objects import (
     output_frame_sort_key,
 )
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
+
+# Stall-rule extractor for the per-task DTO.  When a job fails because
+# a PreRenderStallDetector rule fired, the failure handler writes the
+# error string in the form ``"Pre-render stall (RULE_NAME): ..."``.
+# We parse that out so the UI can render a structured badge alongside
+# the existing free-text error.
+_STALL_RULE_RE = re.compile(r"^Pre-render stall \(([a-z_]+)\)")
 
 
 class RenderGroupSerializer:
@@ -97,6 +105,7 @@ class RenderGroupSerializer:
             ),
             "status": job.get("status", "pending"),
             "error": job.get("error"),
+            "stall_rule": _extract_stall_rule(job.get("error")),
             "attempt": job.get("attempt") or 0,
             "max_retries": job.get("max_retries") or 0,
             "priority": job.get("priority") or 0,
@@ -126,3 +135,19 @@ def _maybe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _extract_stall_rule(error: str | None) -> str | None:
+    """Pull the stall rule name out of a stall-shaped error string.
+
+    Failures originating from the ``PreRenderStallDetector`` flow are
+    written as ``"Pre-render stall (rule_name): ..."`` by the fleet
+    monitors' ``_on_stall`` handlers.  This parser surfaces ``rule_name``
+    on the DTO so the UI can render a structured badge (loading_stall,
+    bytes_stall, etc.) without the frontend having to string-match the
+    error text itself.
+    """
+    if not isinstance(error, str) or not error:
+        return None
+    match = _STALL_RULE_RE.match(error)
+    return match.group(1) if match else None

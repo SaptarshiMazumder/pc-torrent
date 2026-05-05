@@ -52,6 +52,7 @@ const modalProvider = {
       elapsedSec: live?.elapsed_sec ?? null,
       cost: null,
       error: live?.error || (task.status === "failed" ? task.error : "") || "",
+      stallRule: task.stall_rule || null,
       statusMsg: live?.monitor_action || "",
       logs: live?.logs || "",
       history: Array.isArray(live?.status_history) ? live.status_history : [],

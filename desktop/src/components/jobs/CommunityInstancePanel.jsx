@@ -46,6 +46,7 @@ const communityProvider = {
       elapsedSec: null,
       cost: null,
       error: task.status === "failed" ? (task.error || "") : "",
+      stallRule: task.stall_rule || null,
       statusMsg: "",
       logs: "",
       history: [],

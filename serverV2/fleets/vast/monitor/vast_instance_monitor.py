@@ -63,6 +63,7 @@ class VastInstanceMonitor:
         lock_repo: MonitorLockRepository,
         lock_key: str,
         owner_id: str,
+        estimated_startup_sec: float = 0.0,
     ) -> None:
         self._job_id = job_id
         self._instance_id = instance_id
@@ -82,6 +83,7 @@ class VastInstanceMonitor:
         self._lock_repo = lock_repo
         self._lock_key = lock_key
         self._owner_id = owner_id
+        self._estimated_startup_sec = float(estimated_startup_sec or 0.0)
 
         self._started_at = time.monotonic()
         self._became_running_at: float | None = None
@@ -218,7 +220,7 @@ class VastInstanceMonitor:
                 return self._on_stale()
             if self._liveness.heartbeat_dead(self._job_id):
                 return self._on_heartbeat_dead()
-            stall = self._evaluate_stall()
+            stall = self._evaluate_stall(job)
             if stall is not None:
                 return self._on_stall(stall)
 
@@ -278,13 +280,22 @@ class VastInstanceMonitor:
         self._on_failure(self._job_id, err)
         return True
 
-    def _evaluate_stall(self) -> StallReason | None:
+    def _evaluate_stall(self, job: dict[str, Any]) -> StallReason | None:
         samples = self._heartbeat_repo.get_recent(self._job_id, n=30)
         if not samples:
             return None
         window = HeartbeatWindow.from_raw(samples)
         elapsed = time.monotonic() - self._started_at
-        return self._stall_detector.evaluate(window, elapsed)
+        # ``has_rendered`` is the LoadingStallRule's "have we left the
+        # loading phase yet?" gate.  Source of truth = output_frames count;
+        # > 0 means at least one frame physically uploaded to R2.
+        has_rendered = self._counts.uploaded(job) > 0
+        return self._stall_detector.evaluate(
+            window,
+            elapsed,
+            has_rendered=has_rendered,
+            estimated_startup_sec=self._estimated_startup_sec,
+        )
 
     def _on_stall(self, reason: StallReason) -> bool:
         err = f"Pre-render stall ({reason.rule}): {reason.message}"

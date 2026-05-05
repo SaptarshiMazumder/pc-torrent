@@ -100,6 +100,9 @@ class RenderJob:
     render_overrides_json: str | None
     chunk_index: int | None
     priority: int
+    # Planner-stamped startup budget; CommunityMonitor's loading-stall
+    # check reads this off the row to size the per-job allowance.
+    estimated_startup_seconds: float = 0.0
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RenderJob:
@@ -122,6 +125,7 @@ class RenderJob:
             render_overrides_json=row.get("render_overrides_json"),
             chunk_index=row.get("chunk_index"),
             priority=row.get("priority") or 0,
+            estimated_startup_seconds=float(row.get("estimated_startup_seconds") or 0.0),
         )
 
     @property

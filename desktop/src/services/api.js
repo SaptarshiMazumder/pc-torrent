@@ -309,8 +309,9 @@ export async function deleteInputFile(baseUrl, assetId) {
   });
 }
 
-export async function listRenderGroups(baseUrl) {
-  return apiFetch(baseUrl, "/render-groups");
+export async function listRenderGroups(baseUrl, { limit = 5, offset = 0 } = {}) {
+  const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  return apiFetch(baseUrl, `/render-groups?${qs.toString()}`);
 }
 
 export async function createDistributedRenderGroup(

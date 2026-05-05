@@ -142,14 +142,23 @@ class RenderGroupRepository:
         execute("DELETE FROM jobs WHERE group_id = %s", (group_id,))
         execute("DELETE FROM render_groups WHERE id = %s", (group_id,))
 
-    def get_by_user(self, user_id: str) -> list[dict[str, Any]]:
-        """Full rows — the list endpoint reads snapshot columns straight off
-        the row for terminal groups and only fetches children for the
-        active ones."""
-        return query_all(
-            "SELECT * FROM render_groups WHERE user_id = %s ORDER BY submitted_at DESC",
-            (user_id,),
+    def get_by_user_page(
+        self, user_id: str, *, limit: int, offset: int,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Paginated slice of a user's groups, newest-first.  Returns
+        ``(rows, has_more)``.  ``has_more`` is detected by selecting one
+        extra row beyond ``limit`` -- avoids a second ``COUNT(*)`` query.
+
+        Tie-break on ``id DESC`` so groups submitted in the same second
+        keep a stable order across pages.
+        """
+        rows = query_all(
+            "SELECT * FROM render_groups WHERE user_id = %s "
+            "ORDER BY submitted_at DESC, id DESC LIMIT %s OFFSET %s",
+            (user_id, limit + 1, offset),
         )
+        has_more = len(rows) > limit
+        return rows[:limit], has_more
 
     def get_active_groups(self) -> list[dict[str, Any]]:
         return query_all("SELECT * FROM render_groups WHERE status IN ('pending', 'running')")

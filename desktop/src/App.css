@@ -2482,6 +2482,16 @@ body {
   margin-top: 8px;
 }
 
+.myjobs-load-more {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 40px;
+  margin-top: 20px;
+  color: var(--text-secondary, #888);
+  font-size: 13px;
+}
+
 /* Job detail loading state — shown briefly on first open of a terminal
    group while the full DTO is fetched (active groups never show this). */
 .detail-loading {

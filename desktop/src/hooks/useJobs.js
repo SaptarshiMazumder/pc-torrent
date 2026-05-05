@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { listRenderGroups, getRenderGroup, deleteRenderGroup } from "../services/api";
 
 const POLL_INTERVAL = 3000;
+const PAGE_SIZE = 5;
 
 function toTimestamp(value) {
   const parsed = Date.parse(value || "");
@@ -51,8 +52,15 @@ function normalizeGroups(groups) {
 export function useJobs(backendUrl) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const backendUrlRef = useRef(backendUrl);
   const jobsRef = useRef(jobs);
+  const offsetRef = useRef(0);
+  // ref-mirror of loadingMore so loadMore's identity stays stable
+  // (the observer effect re-creates the observer every time onLoadMore
+  // changes, which would churn observers with each in-flight flip).
+  const loadingMoreRef = useRef(false);
 
   useEffect(() => {
     jobsRef.current = jobs;
@@ -62,20 +70,51 @@ export function useJobs(backendUrl) {
     backendUrlRef.current = backendUrl;
   }, [backendUrl]);
 
-  const fetchAll = useCallback(async (url) => {
+  const fetchFirstPage = useCallback(async (url) => {
     if (!url) return;
     setLoading(true);
     try {
-      const groups = await listRenderGroups(url).catch(() => []);
+      const data = await listRenderGroups(url, { limit: PAGE_SIZE, offset: 0 });
+      const groups = data?.groups || [];
       setJobs(normalizeGroups(groups));
+      setHasMore(Boolean(data?.has_more));
+      offsetRef.current = groups.length;
     } finally {
       setLoading(false);
     }
   }, []);
 
+  const loadMore = useCallback(async () => {
+    const url = backendUrlRef.current;
+    if (!url || loadingMoreRef.current) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const data = await listRenderGroups(url, {
+        limit: PAGE_SIZE, offset: offsetRef.current,
+      });
+      const incoming = normalizeGroups(data?.groups || []);
+      if (incoming.length > 0) {
+        setJobs((prev) => {
+          const seen = new Set(prev.map((j) => j.group_id));
+          const merged = prev.slice();
+          for (const g of incoming) {
+            if (!seen.has(g.group_id)) merged.push(g);
+          }
+          return merged;
+        });
+        offsetRef.current += incoming.length;
+      }
+      setHasMore(Boolean(data?.has_more));
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, []);
+
   useEffect(() => {
-    if (backendUrl) fetchAll(backendUrl);
-  }, [backendUrl, fetchAll]);
+    if (backendUrl) fetchFirstPage(backendUrl);
+  }, [backendUrl, fetchFirstPage]);
 
   const addRenderGroup = useCallback((groupId, filename, tasks, totalFrames) => {
     setJobs((prev) => [
@@ -167,7 +206,17 @@ export function useJobs(backendUrl) {
     return () => clearInterval(id);
   }, []);
 
-  const refresh = useCallback(() => fetchAll(backendUrlRef.current), [fetchAll]);
+  const refresh = useCallback(() => fetchFirstPage(backendUrlRef.current), [fetchFirstPage]);
 
-  return { jobs, loading, addRenderGroup, removeJob, markRenderGroupCancelled, refresh };
+  return {
+    jobs,
+    loading,
+    hasMore,
+    loadingMore,
+    loadMore,
+    addRenderGroup,
+    removeJob,
+    markRenderGroupCancelled,
+    refresh,
+  };
 }

@@ -323,18 +323,24 @@ class RenderGroupService:
         machines_by_id = self._machines.get_raw_by_ids(machine_ids)
         return self._build_active_status_dto(group, jobs, machines_by_id)
 
-    def list_with_status(self, user_id: str) -> list[dict[str, Any]]:
-        """List endpoint hot path.
+    def list_with_status_page(
+        self, user_id: str, *, limit: int, offset: int,
+    ) -> dict[str, Any]:
+        """List endpoint hot path -- paginated.
 
         Two-tier read: terminal groups serve from snapshot columns on the
         ``render_groups`` row alone (no children loaded).  Active groups
-        load their jobs in a single batched query and machines in a single
-        batched query — N+1 collapsed to 3 queries total regardless of
-        how many groups the user has.
+        in the page slice load their jobs in a single batched query and
+        machines in a single batched query — N+1 collapsed to 3 queries
+        regardless of page size.
+
+        Returns ``{"groups": [...], "has_more": bool}``.
         """
-        groups = self._groups.get_by_user(user_id)
+        groups, has_more = self._groups.get_by_user_page(
+            user_id, limit=limit, offset=offset,
+        )
         if not groups:
-            return []
+            return {"groups": [], "has_more": False}
 
         active_ids = [g["id"] for g in groups if g.get("status") in _ACTIVE_GROUP_STATUSES]
 
@@ -358,7 +364,7 @@ class RenderGroupService:
                 ))
             else:
                 results.append(self._build_terminal_status_dto(g))
-        return results
+        return {"groups": results, "has_more": has_more}
 
     def _build_active_status_dto(
         self,

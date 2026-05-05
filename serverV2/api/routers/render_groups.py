@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse, StreamingResponse
 
 from serverV2.api.dependencies import get_current_user
@@ -60,8 +60,12 @@ def _get_facade() -> AllocationFacade:
 
 
 @router.get("/render-groups")
-def list_render_groups(user: dict = Depends(get_current_user)):
-    return _get().list_with_status(user["uid"])
+def list_render_groups(
+    user: dict = Depends(get_current_user),
+    limit: int = Query(5, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+):
+    return _get().list_with_status_page(user["uid"], limit=limit, offset=offset)
 
 
 @router.post("/render-groups/create")

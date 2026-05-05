@@ -18,6 +18,19 @@ def _now_iso() -> str:
 
 class JobRepository:
 
+    def __init__(self, terminal_cache=None) -> None:
+        # Optional ``JobTerminalCache``.  When wired (production), every
+        # method below that transitions a row to a terminal status also
+        # marks the cache so worker heartbeats bounce with 410 without
+        # doing a Postgres SELECT each time.  When None (older callers /
+        # ad-hoc scripts), terminal writes still land in PG; readers
+        # fall back to whatever path they had before.
+        self._terminal_cache = terminal_cache
+
+    def _mark_terminal_in_cache(self, job_id: str) -> None:
+        if self._terminal_cache is not None:
+            self._terminal_cache.mark_terminal(job_id)
+
     # ---- create ----
 
     def create(self, params: CreateJobParams) -> str:
@@ -132,6 +145,7 @@ class JobRepository:
                 "UPDATE jobs SET status = %s, completed_at = %s, error = %s WHERE id = %s",
                 (status, _now_iso(), error, job_id),
             )
+            self._mark_terminal_in_cache(job_id)
         else:
             execute("UPDATE jobs SET status = %s WHERE id = %s", (status, job_id))
 
@@ -140,19 +154,26 @@ class JobRepository:
             "UPDATE jobs SET status = 'done', completed_at = %s WHERE id = %s",
             (_now_iso(), job_id),
         )
+        self._mark_terminal_in_cache(job_id)
 
     def mark_failed(self, job_id: str, error: str) -> None:
         execute(
             "UPDATE jobs SET status = 'failed', completed_at = %s, error = %s WHERE id = %s",
             (_now_iso(), error, job_id),
         )
+        self._mark_terminal_in_cache(job_id)
 
     def cancel_active_by_group(self, group_id: str) -> None:
-        execute(
+        rows = query_all(
             "UPDATE jobs SET status = 'cancelled', completed_at = %s "
-            "WHERE group_id = %s AND status IN ('pending', 'running')",
+            "WHERE group_id = %s AND status IN ('pending', 'running') "
+            "RETURNING id",
             (_now_iso(), group_id),
         )
+        if rows and self._terminal_cache is not None:
+            self._terminal_cache.mark_terminal_many(
+                [str(r["id"]) for r in rows if r.get("id")]
+            )
 
     # ---- failover ----
 

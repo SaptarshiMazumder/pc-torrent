@@ -1466,12 +1466,22 @@ def execute_job(job):
                 )
             raise RuntimeError("Render produced no output files")
 
-        # The server marks the job done when /register-outputs receives
-        # the final frame (see JobService.register_outputs).  Workers
-        # cannot self-report "done" — the schema rejects it
-        # (UpdateJobStatusPayload accepts only "running" / "failed").
-        # By the time we reach this line, the chunk is already terminal
-        # on the server side.
+        # Two paths now mark the job done server-side:
+        #   1. /register-outputs counting in JobService -- when the
+        #      uploaded count reaches total_frames, schedules
+        #      notify_completion as a FastAPI BackgroundTask.
+        #   2. The explicit ``status="done"`` PUT we issue in the
+        #      finally block below -- runs synchronously inside the
+        #      HTTP request, marks the row 'done' before the agent's
+        #      next poll.
+        #
+        # The second path closes the reclaim race
+        # (handle_community_machine_idle).  Without it, an agent
+        # restart between the last register-outputs call and the
+        # BackgroundTask firing leaves the row at status='running' --
+        # next_for_machine's self-heal then marks the chunk failed
+        # ("Agent went idle while job was running -- previous session
+        # lost") even though all frames uploaded successfully.
         if missing_assets:
             final_error = MISSING_ASSETS_WARNING
             _log(f"[JOB] Done with warnings! Files: {output_files}")
@@ -1535,6 +1545,29 @@ def execute_job(job):
                 output_uploader.flush_final()
             except Exception as exc:
                 _log(f"[JOB] Failed to finalize incremental output uploader: {exc}", level="warn")
+
+        # Community self-mark done.  Server-side update_status writes
+        # status='done' synchronously inside the HTTP request, then
+        # schedules the success-notifier chain as a BackgroundTask
+        # (mirrors register_outputs).  The synchronous DB write is
+        # what closes the reclaim race.  Failure here is non-fatal --
+        # the existing /register-outputs counting path is the
+        # belt-and-suspenders fallback.
+        if final_status == "done":
+            try:
+                final_files = (
+                    output_uploader.uploaded_files
+                    if output_uploader is not None
+                    else []
+                )
+                update_job_status(job_id, "done", output_files=final_files)
+                _log(f"[JOB] Marked job {job_id} done on backend")
+            except Exception as exc:
+                _log(
+                    f"[JOB] Failed to mark job done "
+                    f"(server-side count is the fallback): {exc}",
+                    level="warn",
+                )
 
         if output_dir is not None:
             persist_job_outputs(job_id, output_dir, final_status, final_error)

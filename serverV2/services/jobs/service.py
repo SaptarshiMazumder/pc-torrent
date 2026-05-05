@@ -27,6 +27,27 @@ class JobServiceError(Exception):
         self.message = message
 
 
+class JobTerminalError(JobServiceError):
+    """Raised by worker-callback methods when the job has already reached
+    a terminal status (done / failed / cancelled).  Routed to HTTP 410
+    Gone with a structured body so worker clients can detect terminal
+    state and exit cleanly instead of retrying the call.
+    """
+
+    def __init__(self, job_id: str, current_status: str, reason: str) -> None:
+        super().__init__(410, f"Job {job_id} is {current_status}: {reason}")
+        self.job_id = job_id
+        self.current_status = current_status
+        self.reason = reason
+
+    def to_body(self) -> dict[str, str]:
+        return {
+            "error": "job_terminal",
+            "status": self.current_status,
+            "reason": self.reason,
+        }
+
+
 class JobService:
 
     def __init__(
@@ -43,6 +64,7 @@ class JobService:
         output_frame_repo: OutputFrameRepository,
         success_notifier: Callable[[str], None],
         community_idle_notifier: Callable[[str], None],
+        terminal_cache=None,
     ) -> None:
         self._jobs = job_repo
         self._machines = machine_repo
@@ -53,6 +75,10 @@ class JobService:
         self._worker_start = worker_start_repo
         self._outputs = outputs_resolver
         self._output_frames = output_frame_repo
+        # Redis-backed terminal-status cache.  ``_assert_not_terminal``
+        # reads from here so the heartbeat path doesn't do a Postgres
+        # SELECT on every call.
+        self._terminal_cache = terminal_cache
         # Called when ``register_outputs`` observes that the verified
         # upload count meets total_frames.  Wired to CallbackRouter in
         # bootstrap so completion routes through the standard success
@@ -78,7 +104,29 @@ class JobService:
 
     # ---- status callbacks (from workers) ----
 
-    _TERMINAL_STATUSES = frozenset({"cancelled", "done"})
+    _TERMINAL_STATUSES = frozenset({"cancelled", "done", "failed"})
+
+    def _assert_not_terminal(self, job_id: str) -> None:
+        """Guard for the heartbeat callback.  Reads from the Redis
+        terminal-status cache (``JobTerminalCache``) -- no Postgres
+        round-trip per heartbeat.  Cache is populated by every
+        ``JobRepository`` method that transitions a row to a terminal
+        status, so a worker hitting this guard sees the flag within
+        milliseconds of the orchestrator's terminal write.
+
+        Cache miss (Redis down, or status was set outside JobRepository
+        somehow) is treated as "not terminal" -- fail-open.  Workers
+        keep heartbeating; provider-side container kills + the cancel-
+        status poll path catch zombies that this guard misses.
+        """
+        if self._terminal_cache is None:
+            return
+        if self._terminal_cache.is_terminal(job_id):
+            raise JobTerminalError(
+                job_id=job_id,
+                current_status="terminal",
+                reason="orchestrator already considers this job terminal",
+            )
 
     def update_status(self, job_id: str, status: str, error: str | None = None) -> dict[str, Any]:
         job = self._jobs.get_raw_by_id(job_id)
@@ -91,7 +139,19 @@ class JobService:
             return {"job_id": job_id, "status": current, "success": False, "reason": "job already terminal"}
 
         self._jobs.update_status(job_id, status, error=error)
-        return {"job_id": job_id, "status": status}
+        # When the worker self-reports ``done`` (community path -- closes
+        # the reclaim race where a sidecar restart between "last upload"
+        # and "success_notifier BackgroundTask firing" leaves the row
+        # status='running' for handle_community_machine_idle to mark
+        # failed), tell the caller to schedule the success chain as a
+        # BackgroundTask.  We deliberately do NOT call success_notifier
+        # synchronously here -- the heavy work (telemetry, group
+        # reconcile, drain) would inflate the worker's HTTP response
+        # time and risk client-side timeout.  The synchronous DB write
+        # above is enough to close the race; the rest can run async,
+        # exactly mirroring the existing register_outputs flow.
+        needs_completion = status == "done"
+        return {"job_id": job_id, "status": status, "needs_completion": needs_completion}
 
     def update_progress(self, job_id: str, rendered_frames: int, total_frames: int) -> dict[str, Any]:
         self._progress.record(job_id, rendered_frames, total_frames)
@@ -107,6 +167,7 @@ class JobService:
         bytes_progressed: int | None = None,
         total_bytes: int | None = None,
     ) -> dict[str, Any]:
+        self._assert_not_terminal(job_id)
         self._heartbeats.record(
             job_id,
             phase=phase,
@@ -117,9 +178,41 @@ class JobService:
         )
         return {"job_id": job_id, "acknowledged": True}
 
-    # ---- cancel-status poll (community workers check this every 30s during render) ----
+    def request_upload_urls(
+        self, job_id: str, filenames: list[str],
+    ) -> dict[str, str]:
+        """Mint presigned R2 PUT URLs for the worker's output files.
 
-    _CANCEL_STATUSES = frozenset({"cancelled", "failed"})
+        Used to live inline in the router doing raw SQL + storage calls;
+        moved here as a layering cleanup (routers do HTTP only).  No
+        terminal-status guard -- the heartbeat / progress 410 mechanism
+        is what tells a worker to exit; this endpoint stays in its
+        original always-mint shape.
+        """
+        from serverV2.core.value_objects import sanitize_filename
+        from serverV2.infrastructure import storage
+
+        if not filenames:
+            raise JobServiceError(400, "No filenames provided")
+        job = self._jobs.get_raw_by_id(job_id)
+        if not job:
+            raise JobServiceError(404, "Job not found")
+        group_id = job.get("group_id") or job_id
+        urls = {
+            fname: storage.generate_presigned_upload_url(
+                f"jobs/{group_id}/output/{sanitize_filename(fname)}",
+                expires_in=3600,
+            )
+            for fname in filenames
+        }
+        return urls
+
+    # ---- cancel-status poll (workers check this; widened to include `done`
+    # ---- so a community sibling marking the chunk done aborts in-flight
+    # ---- duplicates, and serverless-respawn workers see "no work" at
+    # ---- startup via the same poll endpoint) -------------------------
+
+    _CANCEL_STATUSES = frozenset({"cancelled", "failed", "done"})
 
     def get_cancel_status(self, job_id: str) -> dict[str, Any]:
         """Tells a long-running worker whether to abort.  ``cancelled=true``

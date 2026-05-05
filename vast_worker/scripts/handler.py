@@ -264,7 +264,26 @@ def main() -> int:
 
     log.info(f"Job {job_id}: frames {frame_start}-{frame_end} step {frame_step}")
 
-    client = BackendClient(backend_url, job_id)
+    # Shared terminal-signal event.  Set when the orchestrator returns
+    # HTTP 410 Gone on heartbeat / progress / request-upload-urls
+    # (job is in a terminal status server-side).  HeartbeatSender +
+    # BackendClient both signal into it; the main subprocess-read loop
+    # reads it between progress lines and exits cleanly.
+    terminal_event = threading.Event()
+
+    client = BackendClient(backend_url, job_id, terminal_event=terminal_event)
+
+    # C.2 -- startup status check.  If the orchestrator already considers
+    # this job terminal (sibling completed it, user cancelled, prior
+    # attempt marked done), exit before downloading 5GB of blend.  Saves
+    # the entire boot+download pipeline on a zombie restart.
+    if client.poll_cancel_status():
+        log.info(
+            "Job %s already terminal at startup; exiting before download",
+            job_id,
+        )
+        return 0
+
     phase_tracker = PhaseTracker(allowed=_PHASES, initial="initializing")
     bytes_progress = BytesProgress()
     heartbeat = HeartbeatSender(
@@ -274,6 +293,7 @@ def main() -> int:
         process_sampler=ProcessSampler(),
         bytes_progress=bytes_progress,
         interval_sec=HEARTBEAT_INTERVAL,
+        terminal_event=terminal_event,
     )
     heartbeat.start()
 
@@ -392,6 +412,20 @@ def main() -> int:
             fatal_render_error = ""
 
             for line in proc.stdout:
+                # C.1 -- terminal signal from heartbeat / progress.
+                # Orchestrator already considers this job terminal; no
+                # point continuing the render.  Kill the subprocess and
+                # bail out of the read loop; caller's ``finally`` stops
+                # the heartbeat + uploader.
+                if terminal_event.is_set():
+                    log.warning(
+                        "Job %s flagged terminal mid-render; killing "
+                        "subprocess and exiting",
+                        job_id,
+                    )
+                    _kill_process_group(proc)
+                    break
+
                 line = line.rstrip()
                 if line:
                     log.info(line)
@@ -431,6 +465,15 @@ def main() -> int:
             proc.wait()
             egl_watchdog.stop()
             uploader.stop()
+            # C.1 -- if the subprocess was killed by the terminal signal,
+            # exit clean (no flush, no mark_failed -- orchestrator is
+            # already authoritative about the terminal status).
+            if terminal_event.is_set():
+                log.info(
+                    "Job %s terminal signal acknowledged; exiting 0",
+                    job_id,
+                )
+                return 0
             heartbeat.set_phase("uploading")
             try:
                 uploader.flush_final()

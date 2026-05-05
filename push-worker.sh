@@ -83,5 +83,20 @@ docker build -t "$IMAGE" -f "$DOCKERFILE" "$PROJECT_ROOT"
 echo "-> Pushing $IMAGE ..."
 docker push "$IMAGE"
 
+# Community workers: agent.py is hardcoded to pull
+# ghcr.io/.../pcrent-community-worker-cycles:latest at every startup
+# (see agent.py COMMUNITY_IMAGE).  Without also moving :latest to this
+# digest, community PCs would keep pulling the previous tag's image
+# and never pick up the new push.  Mirror :latest only for this variant
+# so vast/modal/base tags stay version-pinned (those consumers resolve
+# tags via env vars, not :latest).
+if [ "$VARIANT" = "community-cycles" ]; then
+    LATEST_IMAGE="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:latest"
+    echo "-> Tagging $LATEST_IMAGE -> $IMAGE ..."
+    docker tag "$IMAGE" "$LATEST_IMAGE"
+    echo "-> Pushing $LATEST_IMAGE ..."
+    docker push "$LATEST_IMAGE"
+fi
+
 echo ""
 echo "Done. Image: $IMAGE"

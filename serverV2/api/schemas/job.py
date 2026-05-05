@@ -8,10 +8,16 @@ class RequestUploadPayload(BaseModel):
     file_size_bytes: int | None = None
 
 
-# Workers may only report liveness and failure.  "done" is orchestrator-owned
-# and determined by verified output_files count, not worker self-report.
+# Workers report liveness, failure, AND success.  Community workers
+# explicitly self-mark "done" after their final upload to close the
+# reclaim race -- if the agent restarts between "last register-outputs"
+# and the success-notifier BackgroundTask firing, the next poll's
+# self-heal would otherwise mark the row failed even though all frames
+# uploaded successfully (handle_community_machine_idle).  Vast/Modal
+# don't need this -- the orchestrator's per-job monitor + register-
+# outputs counting still drive their success path.
 class UpdateJobStatusPayload(BaseModel):
-    status: Literal["running", "failed"]
+    status: Literal["running", "failed", "done"]
     error: str | None = None
     output_files: list[str] | None = None
 

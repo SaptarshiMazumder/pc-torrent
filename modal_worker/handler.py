@@ -39,6 +39,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 import time
 
 from modal_worker.blend_file_discovery import (
@@ -47,6 +48,7 @@ from modal_worker.blend_file_discovery import (
 )
 from modal_worker.egl_watchdog import EGLWatchdog, WEDGE_PATTERNS
 from modal_worker.memory_watchdog import MemoryWatchdog
+from modal_worker.process_group_killer import kill_process_group
 from worker_core import (
     BackendClient,
     BlendDownloader,
@@ -99,7 +101,14 @@ def handler(job: dict) -> dict:
 
     log.info(f"Job {job_id}: frames {frame_start}-{frame_end} step {frame_step}")
 
-    client = BackendClient(backend_url, job_id)
+    # Shared terminal-signal event.  Set when the orchestrator returns
+    # HTTP 410 Gone on heartbeat / progress / request-upload-urls
+    # (job is in a terminal status server-side).  HeartbeatSender +
+    # BackendClient both signal into it; the main subprocess-read loop
+    # reads it between progress lines and exits cleanly.
+    terminal_event = threading.Event()
+
+    client = BackendClient(backend_url, job_id, terminal_event=terminal_event)
 
     # First thing: claim the worker-start.  If another container already
     # claimed this job_id, Modal re-queued us behind our backs — refuse
@@ -116,6 +125,18 @@ def handler(job: dict) -> dict:
             "status": "failed",
             "error": "Duplicate Modal invocation refused",
         }
+
+    # C.2 -- startup status check.  If the orchestrator already considers
+    # this job terminal (sibling completed it, user cancelled, prior
+    # attempt marked done), exit before downloading the blend.  Saves
+    # the boot+download pipeline on a Modal re-invocation that
+    # try_worker_start didn't catch.
+    if client.poll_cancel_status():
+        log.info(
+            "Job %s already terminal at startup; exiting before download",
+            job_id,
+        )
+        return {"status": "skipped", "reason": "job already terminal"}
 
     with tempfile.TemporaryDirectory() as workdir:
         input_dir = os.path.join(workdir, "input")
@@ -142,6 +163,7 @@ def handler(job: dict) -> dict:
             phase_tracker=phase_tracker,
             process_sampler=ProcessSampler(),
             bytes_progress=bytes_progress,
+            terminal_event=terminal_event,
         )
         heartbeat.start()
 
@@ -244,6 +266,18 @@ def handler(job: dict) -> dict:
         last_push = 0.0
 
         for line in proc.stdout:
+            # C.1 -- terminal signal from heartbeat / progress.  Orchestrator
+            # already considers this job terminal; kill the subprocess and
+            # bail out of the read loop.
+            if terminal_event.is_set():
+                log.warning(
+                    "Job %s flagged terminal mid-render; killing subprocess "
+                    "and exiting",
+                    job_id,
+                )
+                kill_process_group(proc)
+                break
+
             line = line.rstrip()
             if line:
                 log.info(line)
@@ -272,6 +306,17 @@ def handler(job: dict) -> dict:
         proc.wait()
         egl_watchdog.stop()
         mem_watchdog.stop()
+        # C.1 -- if the subprocess was killed by the terminal signal,
+        # exit clean.  Orchestrator is already authoritative about the
+        # terminal status; skip the mark_failed branch below.
+        if terminal_event.is_set():
+            heartbeat.stop()
+            uploader.stop()
+            log.info(
+                "Job %s terminal signal acknowledged; exiting cleanly",
+                job_id,
+            )
+            return {"status": "skipped", "reason": "job already terminal"}
         heartbeat.set_phase("uploading")
         uploader.stop()
         try:

@@ -1,9 +1,9 @@
-"""EconomyAllocationStrategy -- cost-first tier shell.
+"""PremiumAllocationStrategy -- speed-first tier shell.
 
-Thin wrapper around ``AllocationPlanner``.  Holds the ECONOMY weights
-preset and forwards every call.  No allocation logic here -- the
-planner is the single source of truth for the algorithm; tiers differ
-only in the weights they pass.
+Thin wrapper around ``AllocationPlanner`` with the PREMIUM weights.
+Heavily speed-biased (85/15 vs cost), wider fan-out (max=20), strict
+VRAM safety factor (1.30x).  For renders where the user explicitly
+trades cost for wall time.
 """
 
 from __future__ import annotations
@@ -11,16 +11,16 @@ from __future__ import annotations
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
-from serverV2.allocation.allocation_strategies.allocation_weights import ECONOMY
+from serverV2.allocation.allocation_strategies.allocation_weights import PREMIUM
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
 from serverV2.core.models import AvailableResources, PlannedTask
 
 
-class EconomyAllocationStrategy:
+class PremiumAllocationStrategy:
 
-    WEIGHTS = ECONOMY
+    WEIGHTS = PREMIUM
 
     def __init__(self, planner: AllocationPlanner) -> None:
         self._planner = planner
@@ -35,7 +35,7 @@ class EconomyAllocationStrategy:
         resources: AvailableResources,
         engine: str | None = None,
         heaviness: dict | None = None,
-        tier_budget_usd: float | None = None, # accepted for protocol compat
+        tier_budget_usd: float | None = None,
     ) -> list[PlannedTask]:
         return self._planner.plan_initial(
             frame_start=frame_start,

@@ -18,6 +18,9 @@ from serverV2.api.schemas.upload import (
     MultipartInitPayload,
     MultipartPartUrlsPayload,
 )
+from serverV2.allocation.services.allocation_cost_service import (
+    AllocationCostService,
+)
 from serverV2.services.render_groups.service import RenderGroupService, RenderGroupServiceError
 from serverV2.services.upload.coordinator import UploadCoordinator
 from serverV2.services.upload.validators import UploadValidationError
@@ -26,12 +29,18 @@ router = APIRouter(tags=["render_groups"])
 
 _svc: RenderGroupService | None = None
 _upload: UploadCoordinator | None = None
+_cost: AllocationCostService | None = None
 
 
-def init(service: RenderGroupService, upload_coordinator: UploadCoordinator) -> None:
-    global _svc, _upload
+def init(
+    service: RenderGroupService,
+    upload_coordinator: UploadCoordinator,
+    cost_service: AllocationCostService,
+) -> None:
+    global _svc, _upload, _cost
     _svc = service
     _upload = upload_coordinator
+    _cost = cost_service
 
 
 def _get() -> RenderGroupService:
@@ -44,6 +53,12 @@ def _up() -> UploadCoordinator:
     if _upload is None:
         raise HTTPException(500, "UploadCoordinator not initialized")
     return _upload
+
+
+def _get_cost() -> AllocationCostService:
+    if _cost is None:
+        raise HTTPException(500, "AllocationCostService not initialized")
+    return _cost
 
 
 @router.get("/render-groups")
@@ -192,3 +207,24 @@ def download_zip(group_id: str):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="group-{group_id[:8]}-output.zip"'},
     )
+
+
+# ---------- cost ----------
+
+@router.get("/render-groups/{group_id}/cost/estimate")
+def cost_estimate(group_id: str):
+    """Frozen-at-dispatch cost summary.  Sums the per-chunk estimates
+    the AllocationPlanner stamped on every jobs row at planning time;
+    static for the lifetime of the group.
+
+    All-zero fields when the group has no jobs yet (still parked on
+    pending_allocation_queue).  Caller can detect this via ``chunks ==
+    0`` and show "Queued" in the UI.
+    """
+    estimate = _get_cost().static_estimate_for_group(group_id)
+    return {
+        "chunks": estimate.chunks,
+        "total_cost_usd": estimate.total_cost_usd,
+        "total_seconds": estimate.total_seconds,
+        "wall_time_seconds": estimate.wall_time_seconds,
+    }

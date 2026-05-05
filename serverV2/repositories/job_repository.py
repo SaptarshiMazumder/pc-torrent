@@ -30,9 +30,11 @@ class JobRepository:
                 frame_start, frame_end, frame_step,
                 render_overrides_json, attempt, max_retries, priority,
                 chunk_index, submitted_at,
-                price_per_hour_at_dispatch
+                price_per_hour_at_dispatch,
+                estimated_seconds, estimated_cost_usd,
+                estimated_seconds_per_frame, estimated_startup_seconds
             )
-            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 params.job_id, params.machine_id, params.fleet, params.gpu_type,
@@ -41,6 +43,8 @@ class JobRepository:
                 params.render_overrides_json, params.attempt, params.max_retries,
                 params.priority, params.chunk_index, _now_iso(),
                 params.price_per_hour_at_dispatch,
+                params.estimated_seconds, params.estimated_cost_usd,
+                params.estimated_seconds_per_frame, params.estimated_startup_seconds,
             ),
         )
         return params.job_id
@@ -118,6 +122,43 @@ class JobRepository:
         return {
             (r["machine_type"], r["gpu_type"] or ""): int(r["n"])
             for r in rows if r.get("machine_type") and r.get("gpu_type")
+        }
+
+    def get_cost_aggregate_for_group(self, group_id: str) -> dict[str, Any]:
+        """SUM/MAX/COUNT over the per-chunk estimate columns for a group.
+
+        Returns a dict with:
+          * ``chunks``             COUNT(*)
+          * ``total_cost_usd``     SUM(estimated_cost_usd)
+          * ``total_seconds``      SUM(estimated_seconds)
+          * ``wall_time_seconds``  MAX(estimated_seconds)
+
+        Empty group / NULLs collapse to zeros so callers don't need to
+        defend.  Read by ``AllocationCostService.static_estimate_for_group``.
+        """
+        row = query_one(
+            """
+            SELECT COUNT(*)                              AS chunks,
+                   COALESCE(SUM(estimated_cost_usd), 0)  AS total_cost_usd,
+                   COALESCE(SUM(estimated_seconds), 0)   AS total_seconds,
+                   COALESCE(MAX(estimated_seconds), 0)   AS wall_time_seconds
+              FROM jobs
+             WHERE group_id = %s
+            """,
+            (group_id,),
+        )
+        if row is None:
+            return {
+                "chunks": 0,
+                "total_cost_usd": 0.0,
+                "total_seconds": 0.0,
+                "wall_time_seconds": 0.0,
+            }
+        return {
+            "chunks": int(row.get("chunks") or 0),
+            "total_cost_usd": float(row.get("total_cost_usd") or 0.0),
+            "total_seconds": float(row.get("total_seconds") or 0.0),
+            "wall_time_seconds": float(row.get("wall_time_seconds") or 0.0),
         }
 
     # ---- status mutations ----

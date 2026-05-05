@@ -387,6 +387,49 @@ def init_db() -> None:
                     """
                 )
 
+                # Per-chunk cost & time estimates from AllocationPlanner.
+                # Stamped on the jobs row at dispatch so the cost service
+                # can SUM across a group for "estimated total" and
+                # combine with telemetry for live-projection.  The
+                # dispatch_queue rows carry the same fields between
+                # planner-side stamping and dispatch-side persistence.
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS "
+                    "estimated_seconds DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS "
+                    "estimated_cost_usd DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS "
+                    "estimated_seconds_per_frame DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS "
+                    "estimated_startup_seconds DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
+                    "price_per_hour DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
+                    "estimated_seconds DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
+                    "estimated_cost_usd DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
+                    "estimated_seconds_per_frame DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
+                    "estimated_startup_seconds DOUBLE PRECISION"
+                )
+
                 # Phase 9 — dispatch_queue uniqueness.  Two concurrent
                 # retry signals for the same chunk used to insert two
                 # rows; with this constraint the second INSERT is a

@@ -50,6 +50,14 @@ class AllocationQueueItem:
     # synchronous start_render contract).  The same job_id is reused
     # at actual dispatch time.
     job_id: str = ""
+    # Per-chunk estimates carried through from AllocationPlanner so the
+    # dispatch handler can stamp them onto the jobs row without
+    # re-computing.
+    price_per_hour: float = 0.0
+    estimated_seconds: float = 0.0
+    estimated_cost_usd: float = 0.0
+    estimated_seconds_per_frame: float = 0.0
+    estimated_startup_seconds: float = 0.0
 
 
 class AllocationDispatchQueueRepository:
@@ -73,6 +81,9 @@ class AllocationDispatchQueueRepository:
                 input_filename, render_overrides_json,
                 max_retries, priority,
                 job_id,
+                price_per_hour,
+                estimated_seconds, estimated_cost_usd,
+                estimated_seconds_per_frame, estimated_startup_seconds,
                 created_at)
                VALUES (%s, %s, %s, %s,
                        %s, %s, %s,
@@ -80,6 +91,9 @@ class AllocationDispatchQueueRepository:
                        %s, %s,
                        %s, %s,
                        %s,
+                       %s,
+                       %s, %s,
+                       %s, %s,
                        %s)
                ON CONFLICT (group_id, chunk_index) DO NOTHING""",
             (
@@ -89,6 +103,9 @@ class AllocationDispatchQueueRepository:
                 item.input_filename, item.render_overrides_json,
                 item.max_retries, item.priority,
                 item.job_id,
+                item.price_per_hour,
+                item.estimated_seconds, item.estimated_cost_usd,
+                item.estimated_seconds_per_frame, item.estimated_startup_seconds,
                 _now_iso(),
             ),
         )
@@ -193,4 +210,9 @@ def _row_to_item(row: dict) -> AllocationQueueItem:
         chunk_index=row.get("chunk_index"),
         group_id=row.get("group_id") or "",
         job_id=row.get("job_id") or "",
+        price_per_hour=float(row.get("price_per_hour") or 0.0),
+        estimated_seconds=float(row.get("estimated_seconds") or 0.0),
+        estimated_cost_usd=float(row.get("estimated_cost_usd") or 0.0),
+        estimated_seconds_per_frame=float(row.get("estimated_seconds_per_frame") or 0.0),
+        estimated_startup_seconds=float(row.get("estimated_startup_seconds") or 0.0),
     )

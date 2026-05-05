@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "Bash(modal function-call *)",
+      "Bash(modal -h)",
+      "Bash(modal app *)"
     ]
   }
 }

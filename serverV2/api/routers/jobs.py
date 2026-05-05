@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from serverV2.api.dependencies import get_current_user
 from serverV2.api.schemas.job import (
@@ -18,7 +18,11 @@ from serverV2.orchestrator.lifecycle import (
     ManualRetryError,
 )
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
-from serverV2.services.jobs.service import JobService, JobServiceError
+from serverV2.services.jobs.service import (
+    JobService,
+    JobServiceError,
+    JobTerminalError,
+)
 
 router = APIRouter(tags=["jobs"])
 
@@ -59,13 +63,37 @@ def _get_callback_router() -> CallbackRouter:
 
 # ---- status callbacks ----
 
+def _terminal_response(exc: JobTerminalError) -> JSONResponse:
+    """410 Gone with structured body so worker clients can detect a
+    terminal job and exit cleanly instead of retrying the call."""
+    return JSONResponse(status_code=410, content=exc.to_body())
+
+
 @router.put("/jobs/{job_id}/status")
-def update_status(job_id: str, payload: UpdateJobStatusPayload):
+def update_status(
+    job_id: str,
+    payload: UpdateJobStatusPayload,
+    background_tasks: BackgroundTasks,
+):
     try:
         result = _get().update_status(job_id, payload.status, payload.error)
         if payload.output_files:
             _get().register_outputs(job_id, payload.output_files)
+        # Worker self-reported done (community path) -- run the success
+        # chain as a BackgroundTask, mirroring register_outputs.  The
+        # synchronous DB write inside update_status was enough to close
+        # the reclaim race; this task does the heavy follow-up
+        # (telemetry, group reconcile, drain).
+        if result.get("needs_completion"):
+            background_tasks.add_task(_get().notify_completion, job_id)
         return result
+    except JobTerminalError as e:
+        # Workers MUST be allowed to update terminal status -- but the
+        # service catches "already terminal" inside update_status and
+        # returns success=false instead of raising.  This branch
+        # exists for defensive symmetry and for any future call site
+        # that uses _assert_not_terminal here.
+        return _terminal_response(e)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
 
@@ -91,6 +119,8 @@ def heartbeat(job_id: str, payload: JobHeartbeatPayload | None = None):
             bytes_progressed=payload.bytes_progressed if payload else None,
             total_bytes=payload.total_bytes if payload else None,
         )
+    except JobTerminalError as e:
+        return _terminal_response(e)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
 
@@ -167,24 +197,11 @@ def next_for_machine(machine_id: str):
 
 @router.post("/jobs/{job_id}/request-upload-urls")
 def request_upload_urls(job_id: str, body: dict):
-    from serverV2.infrastructure import storage
-    from serverV2.core.value_objects import sanitize_filename
-    from serverV2.infrastructure.db import query_one
-
-    job = query_one("SELECT id, group_id FROM jobs WHERE id = %s", (job_id,))
-    if not job:
-        raise HTTPException(404, "Job not found")
-    filenames = body.get("filenames", [])
-    if not filenames:
-        raise HTTPException(400, "No filenames provided")
-
-    group_id = job.get("group_id") or job_id
-    urls = {
-        fname: storage.generate_presigned_upload_url(
-            f"jobs/{group_id}/output/{sanitize_filename(fname)}", expires_in=3600,
-        )
-        for fname in filenames
-    }
+    filenames = body.get("filenames", []) or []
+    try:
+        urls = _get().request_upload_urls(job_id, filenames)
+    except JobServiceError as e:
+        raise HTTPException(e.status, e.message)
     return {"urls": urls}
 
 

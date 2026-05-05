@@ -25,6 +25,7 @@ a slow-but-successful response as a failed call.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import requests
@@ -40,9 +41,29 @@ class BackendClient:
     _STATUS_RETRY_DEADLINE_SEC = 600
     _UPLOAD_RETRY_DEADLINE_SEC = 180
 
-    def __init__(self, backend_url: str, job_id: str) -> None:
+    def __init__(
+        self,
+        backend_url: str,
+        job_id: str,
+        terminal_event: threading.Event | None = None,
+    ) -> None:
         self._backend_url = backend_url.rstrip("/")
         self._job_id = job_id
+        # Set when the orchestrator returns 410 on push_progress /
+        # request_upload_urls / register_outputs.  Shared with
+        # HeartbeatSender so any of them can signal terminal; the
+        # handler's main loop reads it between subprocess progress
+        # lines.
+        self._terminal_event = terminal_event
+
+    def _signal_terminal(self, source: str) -> None:
+        if self._terminal_event is not None and not self._terminal_event.is_set():
+            log.warning(
+                "%s returned 410; orchestrator considers the job "
+                "terminal -- signalling worker to exit",
+                source,
+            )
+            self._terminal_event.set()
 
     # ------------------------------------------------------------------
     # Duplicate-start guard (PUT /jobs/{id}/worker-start)

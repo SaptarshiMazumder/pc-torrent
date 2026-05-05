@@ -112,6 +112,7 @@ from serverV2.fleets.fleet_availability.fleet_availability_snapshot_cache import
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.repositories.job_terminal_cache import JobTerminalCache
 from serverV2.services.machines.machine_heartbeat_repository import (
     MachineHeartbeatRepository,
 )
@@ -217,7 +218,12 @@ def build(
     validate_modal_endpoints(cfg.modal)
 
     # -- repositories --
-    job_repo = JobRepository()
+    # Redis-backed terminal-status cache so heartbeats don't hit Postgres
+    # for every "is this job dead?" check.  Wired into JobRepository
+    # (writer side: every terminal status transition marks the cache)
+    # and JobService (reader side: ``_assert_not_terminal``).
+    job_terminal_cache = JobTerminalCache(redis)
+    job_repo = JobRepository(terminal_cache=job_terminal_cache)
     machine_repo = MachineRepository(
         stale_seconds=cfg.machine_stale_seconds,
         community_price_per_hour=cfg.community_price_per_hour,
@@ -646,6 +652,7 @@ def build(
             job_id=jid, outcome=CallbackOutcome.SUCCESS,
         ),
         community_idle_notifier=orchestrator.handle_community_machine_idle,
+        terminal_cache=job_terminal_cache,
     )
 
     machine_service = MachineService(

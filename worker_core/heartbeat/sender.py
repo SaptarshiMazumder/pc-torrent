@@ -38,16 +38,24 @@ class HeartbeatSender:
         bytes_progress: BytesProgress | None = None,
         interval_sec: float = _DEFAULT_INTERVAL_SEC,
         on_error: Callable[[Exception], None] | None = None,
+        terminal_event: threading.Event | None = None,
     ) -> None:
         # ``on_error(exc)`` lets a caller route push failures through its
         # own logging pipeline (e.g. the agent's sidecar-IPC log bridge)
         # instead of the default module logger.  Defaults to log.warning.
+        # ``terminal_event`` is set when the orchestrator returns HTTP
+        # 410 Gone -- the job has reached a terminal status server-side
+        # (done / failed / cancelled).  The handler's main loop reads
+        # this event between subprocess progress lines and exits cleanly
+        # instead of waiting for heartbeat-staleness or the worker
+        # finishing a render the orchestrator no longer wants.
         self._url = f"{backend_url.rstrip('/')}/jobs/{job_id}/heartbeat"
         self._phase = phase_tracker
         self._sampler = process_sampler
         self._bytes = bytes_progress
         self._interval = interval_sec
         self._on_error = on_error
+        self._terminal_event = terminal_event
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -83,9 +91,20 @@ class HeartbeatSender:
 
     def _push(self) -> None:
         try:
-            requests.put(
-                self._url, json=self._payload(), timeout=15,
-            ).raise_for_status()
+            resp = requests.put(self._url, json=self._payload(), timeout=15)
+            if resp.status_code == 410:
+                # Job terminal -- orchestrator no longer wants this work.
+                # Signal and stop heartbeating; main loop reads the event
+                # and exits the worker.
+                if self._terminal_event is not None and not self._terminal_event.is_set():
+                    log.warning(
+                        "Heartbeat returned 410; orchestrator considers "
+                        "the job terminal -- signalling worker to exit"
+                    )
+                    self._terminal_event.set()
+                self._stop.set()
+                return
+            resp.raise_for_status()
         except Exception as e:
             if self._on_error is not None:
                 self._on_error(e)

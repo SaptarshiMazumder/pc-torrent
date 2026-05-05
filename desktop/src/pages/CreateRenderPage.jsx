@@ -320,17 +320,24 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const needsUpload = stage === STAGE.CONFIGURING && !groupId && Boolean(file);
 
   // Stateless cost preview.  Fires whenever we have an analyzer
-  // snapshot + a parseable frame range — no group_id needed; the
+  // snapshot + a parseable frame range -- no group_id needed; the
   // backend computes off (snapshot, overrides) sent in the body and
   // returns without persisting anything.  Refreshes when overrides
   // change so the user can tweak resolution / samples / camera mode
   // and watch the estimate update.
-  useEffect(() => {
+  //
+  // Extracted into a ref-tracked callback so the manual "Recalculate"
+  // button can re-fire the same fetch without round-tripping through
+  // useEffect's dep tracking (otherwise hitting the button when no
+  // tracked dep changed would be a no-op).  The ref-based cancellation
+  // ensures the latest call always wins if the user spams the button.
+  const tierEstimateCallSeq = useRef(0);
+  const refreshTierEstimate = useCallback(() => {
     if (stage !== STAGE.CONFIGURING || !analysis || !frameRange) {
       setTierEstimate(null);
       return;
     }
-    let cancelled = false;
+    const seq = ++tierEstimateCallSeq.current;
     setTierEstimateLoading(true);
     estimateRenderGroup(backendUrl, {
       analysisSnapshot: analysis,
@@ -341,18 +348,20 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       fileSizeBytes: file?.size || savedInputAsset?.r2_input_size_bytes || null,
     })
       .then((data) => {
-        if (cancelled) return;
+        if (seq !== tierEstimateCallSeq.current) return;  // superseded
         setTierEstimate(data?.tiers || null);
         setTierEstimateLoading(false);
       })
       .catch(() => {
-        if (!cancelled) {
-          setTierEstimate(null);
-          setTierEstimateLoading(false);
-        }
+        if (seq !== tierEstimateCallSeq.current) return;
+        setTierEstimate(null);
+        setTierEstimateLoading(false);
       });
-    return () => { cancelled = true; };
   }, [stage, analysis, frameRange, renderOverridesForServer, backendUrl, file, savedInputAsset]);
+
+  useEffect(() => {
+    refreshTierEstimate();
+  }, [refreshTierEstimate]);
 
   // ── Helpers ─────────────────────────────────────────────
   function applyAnalysis(parsed) {
@@ -776,6 +785,28 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
               <button className="btn btn-primary cr-start-btn" type="button" onClick={handleUpload} disabled={isBusy}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
                 Upload
+              </button>
+            )}
+            {canStart && (
+              <button
+                className="btn btn-ghost cr-tier-recalc-btn"
+                type="button"
+                onClick={refreshTierEstimate}
+                disabled={tierEstimateLoading}
+                title="Re-fetch the cost / wall-time estimate from the backend (useful while tuning the analyzer constants)"
+                style={{
+                  padding: "6px 12px",
+                  fontSize: 12,
+                  marginRight: 8,
+                  opacity: tierEstimateLoading ? 0.6 : 1,
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ marginRight: 5, verticalAlign: "middle" }}>
+                  <polyline points="23 4 23 10 17 10" />
+                  <polyline points="1 20 1 14 7 14" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                </svg>
+                {tierEstimateLoading ? "Recalculating…" : "Recalculate"}
               </button>
             )}
             {canStart && (

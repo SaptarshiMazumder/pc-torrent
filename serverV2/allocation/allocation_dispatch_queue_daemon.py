@@ -1,19 +1,30 @@
-"""AllocationDispatchQueueDaemon — background tick driver.
+"""AllocationDispatchQueueDaemon -- the SOLE orchestrator of allocation ticks.
 
 Every Cloud Run replica calls ``start()`` at boot.  The thread runs on
 every replica; the Redis singleton lock at ``allocation:dispatch:daemon``
 ensures only one replica's tick actually fires per interval.  Pattern
 mirrors ``CommunityMonitor`` / ``MonitorLockRepository``.
 
-Per tick:
-  1. Read fleet availability from the cache (one Redis hit, or a
-     parallel rebuild on cache miss).
-  2. Hand the mutable view to ``AllocationDispatchQueueService``,
-     which runs ``dispatch_pending_for_fleet(f)`` for each enabled
-     fleet.  The service mutates the snapshot after each successful
-     dispatch.
-  3. Persist the mutated snapshot back to the cache (KEEPTTL +
-     XX-only — never extends the freshness window).
+Per tick (byte-for-byte equivalent to the previous implementation,
+just with the orchestration moved up here from a service wrapper):
+
+  1. Idle-tick guard: skip if both queues are empty.
+  2. ``snapshot = snapshot_cache.get_or_build()``  -- Redis read.
+  3. ``mutable = snapshot.to_mutable()``           -- in-memory view.
+  4. For each enabled fleet, drain the dispatch_queue via
+     ``AllocationDispatchTickProcessor.process(fleet)``.  Each item
+     popped fires its fleet strategy and writes a ``jobs`` row.  No
+     mutation here -- commitment already happened upstream.
+  5. ``AllocationPendingTickProcessor.process(mutable)`` walks the
+     pending_queue, plans each row, writes resulting tasks to the
+     dispatch_queue, and mutates ``mutable`` per pick (preventing
+     intra-tick dogpile).
+  6. ``snapshot_cache.persist(mutable.to_frozen())`` -- Redis write
+     with ``KEEPTTL XX`` (preserves natural expiry; no-op if cache
+     expired between read and write).
+
+Helpers do their work; the daemon is the sole place orchestration
+order is encoded.
 """
 
 from __future__ import annotations
@@ -21,8 +32,17 @@ from __future__ import annotations
 import logging
 import threading
 
-from serverV2.allocation.services.allocation_dispatch_queue_service import (
-    AllocationDispatchQueueService,
+from serverV2.allocation.allocation_dispatch_queue_repository import (
+    AllocationDispatchQueueRepository,
+)
+from serverV2.allocation.allocation_dispatch_tick_processor import (
+    AllocationDispatchTickProcessor,
+)
+from serverV2.allocation.allocation_pending_queue_repository import (
+    AllocationPendingQueueRepository,
+)
+from serverV2.allocation.allocation_pending_tick_processor import (
+    AllocationPendingTickProcessor,
 )
 from serverV2.fleets.fleet_availability.fleet_availability_snapshot_cache import (
     FleetAvailabilitySnapshotCache,
@@ -41,14 +61,20 @@ class AllocationDispatchQueueDaemon:
     def __init__(
         self,
         *,
-        dispatch_queue: AllocationDispatchQueueService,
+        dispatch_repo: AllocationDispatchQueueRepository,
+        pending_repo: AllocationPendingQueueRepository,
+        dispatch_tick_processor: AllocationDispatchTickProcessor,
+        pending_tick_processor: AllocationPendingTickProcessor,
         snapshot_cache: FleetAvailabilitySnapshotCache,
         lock_repo: MonitorLockRepository,
         instance_id: str,
         enabled_fleets: list[str],
         tick_interval_s: float = DEFAULT_TICK_INTERVAL_S,
     ) -> None:
-        self._dispatch_queue = dispatch_queue
+        self._dispatch_repo = dispatch_repo
+        self._pending_repo = pending_repo
+        self._dispatch_tick = dispatch_tick_processor
+        self._pending_tick = pending_tick_processor
         self._snapshot_cache = snapshot_cache
         self._lock_repo = lock_repo
         self._instance_id = instance_id
@@ -90,7 +116,7 @@ class AllocationDispatchQueueDaemon:
         while not self._stop_event.is_set():
             try:
                 if not self._gate_lock():
-                    # Another replica owns the daemon — sleep and retry.
+                    # Another replica owns the daemon -- sleep and retry.
                     self._stop_event.wait(self._tick_interval_s)
                     continue
                 self._tick()
@@ -104,10 +130,10 @@ class AllocationDispatchQueueDaemon:
         if self._owns_lock:
             if self._lock_repo.refresh(_LOCK_KEY, self._instance_id):
                 return True
-            # Lost ownership — Redis hiccup or clock skew.  Drop the
+            # Lost ownership -- Redis hiccup or clock skew.  Drop the
             # flag and try to reacquire next iteration.
             log.info(
-                "AllocationDispatchQueueDaemon lost lock — yielding to "
+                "AllocationDispatchQueueDaemon lost lock -- yielding to "
                 "another replica",
             )
             self._owns_lock = False
@@ -119,35 +145,38 @@ class AllocationDispatchQueueDaemon:
         return False
 
     def _tick(self) -> None:
-        # Idle-tick guard: if BOTH the dispatch_queue (fleet-targeted
-        # rows) and the pending_allocation_queue (rows with no eligible
-        # target yet) are empty, skip the snapshot fetch + end-of-tick
-        # persist entirely.  Saves a Redis GET + SET KEEPTTL on every
-        # idle tick, and (on cache expiry every 60s) saves the parallel
-        # rebuild that hits Vast HTTPS, Modal SCARDs, the community DB
-        # query, and the JobRepository COUNT.
-        has_dispatch = self._dispatch_queue.has_any_for_fleets(self._enabled_fleets)
-        has_pending = self._dispatch_queue.has_any_pending()
+        # Idle-tick guard: if BOTH queues are empty, skip the snapshot
+        # fetch + end-of-tick persist entirely.  Saves a Redis GET +
+        # SET KEEPTTL on every idle tick, and (on cache expiry every
+        # 60s) saves the parallel rebuild that hits Vast HTTPS, Modal
+        # SCARDs, the community DB query, and the JobRepository COUNT.
+        has_dispatch = self._dispatch_tick.has_any_for_fleets(self._enabled_fleets)
+        has_pending = self._pending_tick.has_any()
         if not (has_dispatch or has_pending):
             return
 
+        # --- Redis read -------------------------------------------------
         snapshot = self._snapshot_cache.get_or_build()
         mutable = snapshot.to_mutable()
+
+        # --- Phase 1: drain dispatch_queue per fleet -------------------
         for fleet in self._enabled_fleets:
             try:
-                self._dispatch_queue.dispatch_pending_for_fleet(fleet)
+                self._dispatch_tick.process(fleet)
             except Exception as exc:
                 log.warning(
-                    "dispatch_pending_for_fleet(%s) failed in tick: %s",
+                    "dispatch tick (%s) failed: %s",
                     fleet, exc,
                 )
-        # After the per-fleet dispatch loop, plan the pending queue's
-        # rows.  The planner mutates ``mutable`` for every committed
-        # task before the next row is planned, so two pending rows
-        # never race on the same target.  Promotions land in
-        # dispatch_queue and are popped on the next tick.
+
+        # --- Phase 2: plan pending_queue rows -> dispatch_queue --------
+        # The planner mutates ``mutable`` for every committed task
+        # before the next row is planned, so two pending rows never
+        # race on the same target.
         try:
-            self._dispatch_queue.plan_pending(mutable)
+            self._pending_tick.process(mutable)
         except Exception as exc:
-            log.warning("plan_pending failed in tick: %s", exc)
+            log.warning("pending tick failed: %s", exc)
+
+        # --- Redis write (KEEPTTL XX -- preserves natural expiry) ------
         self._snapshot_cache.persist(mutable.to_frozen())

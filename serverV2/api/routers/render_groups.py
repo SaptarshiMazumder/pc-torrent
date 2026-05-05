@@ -18,9 +18,7 @@ from serverV2.api.schemas.upload import (
     MultipartInitPayload,
     MultipartPartUrlsPayload,
 )
-from serverV2.allocation.services.allocation_cost_service import (
-    AllocationCostService,
-)
+from serverV2.allocation.allocation_facade import AllocationFacade
 from serverV2.services.render_groups.service import RenderGroupService, RenderGroupServiceError
 from serverV2.services.upload.coordinator import UploadCoordinator
 from serverV2.services.upload.validators import UploadValidationError
@@ -29,18 +27,18 @@ router = APIRouter(tags=["render_groups"])
 
 _svc: RenderGroupService | None = None
 _upload: UploadCoordinator | None = None
-_cost: AllocationCostService | None = None
+_facade: AllocationFacade | None = None
 
 
 def init(
     service: RenderGroupService,
     upload_coordinator: UploadCoordinator,
-    cost_service: AllocationCostService,
+    allocation_facade: AllocationFacade,
 ) -> None:
-    global _svc, _upload, _cost
+    global _svc, _upload, _facade
     _svc = service
     _upload = upload_coordinator
-    _cost = cost_service
+    _facade = allocation_facade
 
 
 def _get() -> RenderGroupService:
@@ -55,10 +53,10 @@ def _up() -> UploadCoordinator:
     return _upload
 
 
-def _get_cost() -> AllocationCostService:
-    if _cost is None:
-        raise HTTPException(500, "AllocationCostService not initialized")
-    return _cost
+def _get_facade() -> AllocationFacade:
+    if _facade is None:
+        raise HTTPException(500, "AllocationFacade not initialized")
+    return _facade
 
 
 @router.get("/render-groups")
@@ -213,7 +211,7 @@ def download_zip(group_id: str):
 
 @router.get("/render-groups/{group_id}/cost/estimate")
 def cost_estimate(group_id: str):
-    """Frozen-at-dispatch cost summary.  Sums the per-chunk estimates
+    """Frozen-at-planning cost summary.  Sums the per-chunk estimates
     the AllocationPlanner stamped on every jobs row at planning time;
     static for the lifetime of the group.
 
@@ -221,7 +219,7 @@ def cost_estimate(group_id: str):
     pending_allocation_queue).  Caller can detect this via ``chunks ==
     0`` and show "Queued" in the UI.
     """
-    estimate = _get_cost().static_estimate_for_group(group_id)
+    estimate = _get_facade().cost_estimate_for_group(group_id)
     return {
         "chunks": estimate.chunks,
         "total_cost_usd": estimate.total_cost_usd,

@@ -1,9 +1,9 @@
-"""AllocationEngineResolver — extract the render engine string from a
+"""AllocationEngineResolver -- extract the render engine string from a
 JSON-encoded overrides payload.
 
 One responsibility: parse ``render.engine`` out of the overrides JSON.
-Used by the dispatch handler when re-building a ``DispatchContext``
-from a queue row.
+Used by the dispatch tick processor when re-building a
+``DispatchContext`` from a queue row.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ class AllocationEngineResolver:
     @staticmethod
     def from_overrides_json(render_overrides_json: str | None) -> str | None:
         """Return ``render.engine`` from a JSON-encoded overrides payload,
-        or ``None`` if the payload is empty.  Raises on malformed JSON —
+        or ``None`` if the payload is empty.  Raises on malformed JSON --
         at this point in the pipeline the payload was produced by trusted
         upstream code, so a parse failure is a real bug and should
         surface."""

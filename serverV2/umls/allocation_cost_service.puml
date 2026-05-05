@@ -1,275 +1,309 @@
 @startuml allocation_cost_service
-title serverV2/allocation -- module structure with Phase 2A AllocationCostService
+title serverV2/allocation -- module structure (post-refactor)\nplanning service owns ALL cost intelligence; aggregator is its private helper
 
 skinparam shadowing false
 skinparam BackgroundColor white
 skinparam classBackgroundColor #fafafa
 skinparam packageStyle rectangle
-skinparam linetype polyline
+skinparam linetype ortho
+skinparam nodesep 50
+skinparam ranksep 50
+
+top to bottom direction
 
 ' ============================================================
-' INBOUND callers (outside the module)
+' LAYER 1 -- inbound callers
 ' ============================================================
-package "<<inbound>>" <<Cloud>> #c7d2fe {
-    class "AllocationClient\nserverV2/orchestrator" as Client
-    class "Bootstrap\nserverV2/bootstrap" as Boot
-    class "API routers\nrender_groups.py" as Router <<endpoint>> #fed8a4 {
-        POST /confirm-upload
-        POST /jobs/{id}/retry
-        GET /render-groups/{id}/cost (NEW)
-        GET /render-groups/{id}/cost/estimate (NEW)
+together {
+    package "<<inbound>>" <<Cloud>> #c7d2fe {
+        class "AllocationClient\nserverV2/orchestrator" as Client
+        class "Bootstrap\nserverV2/bootstrap" as Boot
+        class "API routers\nrender_groups.py" as Router <<endpoint>> #fed8a4 {
+            POST /confirm-upload      (tier in body)
+            POST /jobs/{id}/retry     (tier from group)
+            DELETE /render-groups/{id}    (cancel)
+            GET .../cost/estimate    (post-submit)
+            POST /pre-render/estimate (pre-submit)
+        }
+        class "PreRenderEstimator\nserverV2/services/pre_render" as PreRender <<inbound>> {
+            estimate_for_payload(...)
+            ──
+            for tier in (ECONOMY, STANDARD):
+              orchestrator.cost_estimate_for_dry_run(
+                tier, heaviness, ...)
+            (PREMIUM reserved -> null)
+        }
     }
 }
 
 ' ============================================================
-' INSIDE serverV2/allocation/
+' LAYER 2 -- public entry point (the FACADE; thin)
 ' ============================================================
-package "serverV2/allocation" <<Frame>> #d4e3fc {
 
-    class AllocationFacade <<entry>> #b9e3a3 {
-        submit_initial(...)
-        park_retry(...)
-        plan_initial(...)
-        drain_for_group(group_id)
-    }
+class AllocationFacade <<entry>> #b9e3a3 {
+    ── writes ──
+    submit_initial(group_id, tier, ...)    parks TYPE_INITIAL_GROUP
+    park_retry(chunk_request, tier, ...)   parks TYPE_RETRY_CHUNK
+    drain_for_group(group_id)              cancel cleanup
+    ── reads (cost) ──
+    cost_estimate_for_group(group_id)      POST: jobs -> planning.cost_for_committed_jobs
+    cost_estimate_for_dry_run(tier, ...)   PRE:  snapshot -> planning.cost_for_dry_run
+}
 
-    class AllocationDispatchQueueDaemon <<background, singleton>> #fcd34d {
-        per-tick loop:
-        1. dispatch existing queue items
-        2. plan pending rows -> queue items
-        3. persist mutated snapshot
-    }
-
-    class AllocationDispatcher {
-        dispatch_one(task, ctx, job_id)
-    }
-
-    class AllocationBlendUrlResolver
-
-    ' --- THE TWO QUEUES (clearly separated) ----------------
+' ============================================================
+' LAYER 3 -- queues + daemon
+' ============================================================
+together {
     class AllocationPendingQueueRepository <<repo, queue>> #f9c1c1 {
-        pending_allocation_queue
-        --
-        TYPE_INITIAL_GROUP
-        TYPE_RETRY_CHUNK
-        --
-        rows = un-planned requests
-        (entry point for ALL
-        new work after submit /
-        retry)
+        ── PURE CRUD ──
+        enqueue(item)
+        list_all()
+        has_any()
+        delete / delete_for_group / update_last_attempted_at
+        ──
+        TYPE_INITIAL_GROUP   (whole render group)
+        TYPE_RETRY_CHUNK     (one failed chunk + exclusions)
+        ──
+        rows carry: group_id, tier, frame slice,
+                    type-specific fields
+        (heaviness lives on render_groups row,
+         NOT here)
+    }
+
+    class AllocationDispatchQueueDaemon <<orchestrator, singleton>> #fcd34d {
+        every ~2s under Redis lock
+        ── _tick() ──
+        1. idle guard
+        2. snapshot = cache.get_or_build()    [REDIS read]
+        3. mutable  = snapshot.to_mutable()
+        4. dispatch_tick.process(fleet) per fleet
+        5. pending_tick.process(mutable)
+        6. cache.persist(...)                 [REDIS write KEEPTTL XX]
     }
 
     class AllocationDispatchQueueRepository <<repo, queue>> #f9c1c1 {
-        dispatch_queue
-        --
-        rows = planned and
-        committed PlannedTasks
-        ready to fire at fleet
-        strategies
-    }
-
-    ' --- STRATEGIES + ALGORITHM ---------------------------
-    package "allocation_strategies" <<Frame>> #e0e7ff {
-
-        class EconomyAllocationStrategy <<shell>> #fde68a {
-            WEIGHTS = ECONOMY
-        }
-        class StandardAllocationStrategy <<shell>> #fde68a {
-            WEIGHTS = STANDARD
-        }
-        class PremiumAllocationStrategy <<shell>> #fde68a {
-            WEIGHTS = PREMIUM
-        }
-
-        class AllocationPlanner <<algorithm>> #b9e3a3 {
-            plan_initial(weights, heaviness, ...)
-            plan_retry(weights, ...)
-            --
-            VRAM filter
-            score targets
-            diversify (fleet + gpu_type)
-            time-balanced distribute
-            stamp per-chunk estimates
-        }
-
-        class AllocationWeights <<value>> {
-            speed_weight, cost_weight
-            max_targets, min_frames_per_chunk
-            *_diversification_cap
-            vram_safety_factor
-        }
-
-        package "analyzers" <<Frame>> #ddd6fe {
-            class allocation_time_analyzer
-            class allocation_vram_estimator
-            class allocation_composite_scorer
-            class allocation_cost_analyzer
-        }
-
-        class "allocation_helpers/*" as Helpers
-        class "validators/*" as Validators
-    }
-
-    ' --- SERVICES ------------------------------------------
-    package "services" <<Frame>> #fde2e4 {
-
-        class AllocationPlanningService {
-            tier -> strategy router
-            plan_initial / plan_retry
-        }
-
-        package "allocation_dispatch_queue_service" <<Frame>> #fee2e2 {
-            class AllocationDispatchQueueService <<entry>> {
-                enqueue(group, tasks, ctx)
-                enqueue_pending(item)
-                dispatch_pending_for_fleet(fleet)
-                plan_pending(snapshot)
-            }
-            class AllocationEnqueueHandler
-            class AllocationDispatchHandler
-            class AllocationPendingPlanner <<background>> {
-                planner-of-pending-rows
-                runs inside daemon tick
-                mutates snapshot per pick
-            }
-            class AllocationSnapshotMutator
-            class AllocationQueueItemCodec
-            class AllocationEngineResolver
-        }
-
-        package "allocation_cost_service (NEW)" <<Frame>> #b9e3a3 {
-            class AllocationCostService <<entry>> #b9e3a3 {
-                static_estimate_for_group(id) : GroupCostEstimate
-                live_projection_for_group(id) : GroupCostProjection
-            }
-            class ChunkCostProjector {
-                project(job, telem) : Bucket
-            }
-            class GroupCostEstimate <<value>> #fde68a
-            class GroupCostProjection <<value>> #fde68a
-        }
+        ── PURE CRUD ──
+        enqueue(group_id, item)
+        dequeue_for_fleet(fleet)
+        has_any_for_fleets(fleets)
+        drain(group_id)
+        ──
+        already-planned commitments
+        (rows carry stamped estimates)
     }
 }
 
 ' ============================================================
-' EXTERNAL — persistence + orchestrator-side reads
+' LAYER 4 -- tick processors
+' ============================================================
+together {
+    class AllocationPendingTickProcessor <<tick phase>> #fef3c7 {
+        process(mutable_snapshot) -> int
+        --
+        rows = pending_repo.list_all()
+        for each row:
+          // Read FULL heaviness (~20 fields)
+          // from the resolved scene blob
+          heaviness = rg_repo
+              .get_resolved_heaviness(row.group_id)
+          --
+          if row.type == TYPE_RETRY_CHUNK:
+            chunk_req = build from row
+            task = planning.plan_retry(
+                     tier=row.tier, chunk_request,
+                     resources, heaviness)
+            tasks = [task] if task else []
+          else:    // TYPE_INITIAL_GROUP
+            tasks = planning.plan_initial(
+                     tier=row.tier, heaviness,
+                     resources, ...)
+          --
+          for each task:
+            in_progress dedup, encode,
+            dispatch_repo.enqueue(...)
+          for each task:
+            snapshot_mutator.mark_planned_dispatched()
+          pending_repo.delete(row.id)
+    }
+
+    class AllocationDispatchTickProcessor <<tick phase>> #fef3c7 {
+        process(fleet) -> int
+        --
+        WHILE under fleet cap:
+          item = dispatch_repo.dequeue_for_fleet()
+          if group terminal: skip
+          decode + build DispatchContext
+          claim in_progress ledger
+          dispatcher.dispatch_one(...)
+              -> fleet strategy fires
+              -> writes jobs row
+                  (incl. stamped estimates
+                   from PlannedTask)
+        --
+        no snapshot mutation
+        (commitment already happened)
+    }
+}
+
+' ============================================================
+' LAYER 5 -- planning service (THE cost-intelligence module)
+' ============================================================
+package "services/allocation_planning_service" <<Frame>> #fde2e4 {
+
+    class AllocationPlanningService <<entry, planning>> #b9e3a3 {
+        ── planning surface (daemon) ──
+        plan_initial(
+          tier, heaviness, resources, ...)
+            -> list[PlannedTask]
+        plan_retry(
+          tier, chunk_request, resources, heaviness)
+            -> PlannedTask | None
+        ── cost surface (facade) ──
+        cost_for_dry_run(
+          tier, heaviness, resources, ...)
+            -> GroupCostEstimate
+        cost_for_committed_jobs(rows)
+            -> GroupCostEstimate
+    }
+
+    class AllocationStrategySelector <<helper>> {
+        select_name(tier) -> "economy" | "standard" | "premium"
+    }
+
+    class CostBearingItem <<value>> #fde68a {
+        estimated_cost_usd
+        estimated_seconds
+    }
+    class GroupCostEstimate <<value>> #fde68a {
+        chunks
+        total_cost_usd
+        total_seconds
+        wall_time_seconds
+    }
+
+    note right of AllocationPlanningService
+      private helpers (in same module):
+        _aggregate(items)            -> SUM/MAX/COUNT
+        _from_planned_tasks(tasks)   -> list[CostBearingItem]
+        _from_jobs_rows(rows)        -> list[CostBearingItem]
+      cost methods compose: plan -> project -> aggregate
+    end note
+
+    AllocationPlanningService --> AllocationStrategySelector
+    AllocationPlanningService ..> CostBearingItem : projects to
+    AllocationPlanningService ..> GroupCostEstimate : returns
+}
+
+' ============================================================
+' LAYER 6 -- strategy + algorithm (where cost is CALCULATED)
+' ============================================================
+package "allocation_strategies" <<Frame>> #e0e7ff {
+    together {
+        class "Economy / Standard / Premium\nstrategy shells" as Shells <<shell>>
+        class AllocationWeights <<value>>
+    }
+    class AllocationPlanner <<algorithm>> #b9e3a3 {
+        plan_initial(weights, heaviness, resources, ...)
+        plan_retry(weights, heaviness, chunk_request, resources)
+        ──
+        For each candidate target:
+           composite_scorer.chunk_seconds_for(...)
+           composite_scorer.chunk_cost_for(...)
+        Pick targets, distribute frames,
+        STAMP per-PlannedTask:
+           estimated_seconds_per_frame
+           estimated_startup_seconds
+           estimated_seconds
+           estimated_cost_usd        <-- COST ORIGINATES HERE
+        ──
+        retry path uses chunk_request.excluded_*
+        for anti-affinity; otherwise identical scoring
+    }
+    Shells --> AllocationPlanner : pass weights + heaviness
+    Shells ..> AllocationWeights
+}
+
+' ============================================================
+' LAYER 7 -- external deps
 ' ============================================================
 package "<<external>>" <<Cloud>> #fef3c7 {
-    class "jobs (table)\nserverV2/repositories/job_repository" as JobsTable <<repo>> #f9c1c1 {
-        estimated_seconds
-        estimated_cost_usd
-        estimated_seconds_per_frame
-        estimated_startup_seconds
-        started_at, completed_at
-        price_per_hour_at_dispatch
-        status, ...
+
+    together {
+        class "render_groups (table)\n.resolved_scene_json" as RGTable <<repo>> #f9c1c1
+        class "jobs (table)" as JobsTable <<repo>> #f9c1c1
     }
-    class "render_groups\n.resolved_scene_json" as RGTable <<repo>> #f9c1c1
-    class "FleetAvailabilitySnapshotCache\nserverV2/fleets/fleet_availability" as Snap
-    class "FleetRegistry\n+ fleet strategies\nserverV2/fleets/*" as Fleets
-    class "OutputFrameRepository\nProgressRepository" as ProgressRepos
+
+    package "fleet_availability\nserverV2/fleets/fleet_availability" <<Frame>> #ddd6fe {
+        class FleetAvailabilitySnapshotCache <<cache>> #fde68a {
+            get_or_build() -> FleetAvailabilitySnapshot
+            persist(frozen)             [KEEPTTL XX]
+            ──
+            Redis blob, 60s TTL
+            (single source of truth
+             for fleet availability)
+        }
+        class FleetAvailabilitySnapshot <<value>> {
+            vast_available[]
+            modal_available[]
+            community_available[]
+            serverless_in_flight{}
+        }
+        FleetAvailabilitySnapshotCache ..> FleetAvailabilitySnapshot : produces
+    }
+
+    class "AvailableResources\n(value object passed to planner)" as Resources <<value>>
+    class "FleetRegistry +\nfleet strategies" as Fleets
 }
 
 ' ============================================================
 ' RELATIONSHIPS
 ' ============================================================
 
-' Inbound
-Client --> AllocationFacade : submit_initial / park_retry
-Boot --> AllocationFacade
-Boot --> AllocationDispatchQueueDaemon
-Router --> AllocationFacade
-Router --> AllocationCostService : NEW
+' --- Inbound -> Facade ---
+Client -down-> AllocationFacade : submit_initial / park_retry / drain
+Boot   -down-> AllocationFacade
+Boot   -down-> AllocationDispatchQueueDaemon : start()
+Router -down-> AllocationFacade : drain (cancel)
+Router -down-> AllocationFacade : cost_estimate_for_group\n[GET /cost/estimate]
+Router -down-> PreRender         : preview\n[POST /pre-render/estimate]
+PreRender -down-> Client         : per tier:\ncost_estimate_for_dry_run
+Client    -down-> AllocationFacade : pass-through
 
-' Facade -> services and queues
-AllocationFacade --> AllocationPlanningService
-AllocationFacade --> AllocationDispatchQueueService
-AllocationFacade --> AllocationPendingQueueRepository : enqueue_pending\n(submit_initial / park_retry)
+' --- Facade writes (parking lot) ---
+AllocationFacade -down-> AllocationPendingQueueRepository  : enqueue\n[submit_initial / park_retry,\nstamps tier on row]
+AllocationFacade -down-> AllocationDispatchQueueRepository : drain\n[cancel]
 
-' Daemon orchestrates the dispatch_queue and the planner-of-pending
-AllocationDispatchQueueDaemon --> AllocationDispatchQueueService : tick
+' --- Facade.cost_estimate_for_group: jobs -> planning ---
+AllocationFacade ..> JobsTable                : fetch raw jobs by group_id
+AllocationFacade ..> AllocationPlanningService : cost_for_committed_jobs(rows)
 
-AllocationDispatchQueueService --> AllocationEnqueueHandler
-AllocationDispatchQueueService --> AllocationDispatchHandler
-AllocationDispatchQueueService --> AllocationPendingPlanner
+' --- Facade.cost_estimate_for_dry_run: snapshot -> planning ---
+AllocationFacade ..> FleetAvailabilitySnapshotCache : get_or_build()\n[read-only, no persist]
+AllocationFacade ..> Resources                      : adapt(snapshot)
+AllocationFacade ..> AllocationPlanningService      : cost_for_dry_run(\n  tier, heaviness, resources, ...)
 
-AllocationEnqueueHandler --> AllocationDispatchQueueRepository
-AllocationDispatchHandler --> AllocationDispatchQueueRepository : dequeue_for_fleet
-AllocationDispatchHandler --> AllocationDispatcher
-AllocationDispatchHandler --> AllocationBlendUrlResolver
+' --- Daemon orchestration ---
+AllocationDispatchQueueDaemon ..> FleetAvailabilitySnapshotCache : get_or_build()\n[start of tick]
+AllocationDispatchQueueDaemon ..> FleetAvailabilitySnapshotCache : persist(mutable.to_frozen())\n[end of tick, KEEPTTL XX]
+AllocationDispatchQueueDaemon -down-> AllocationPendingTickProcessor  : process(mutable)\n[phase 2]
+AllocationDispatchQueueDaemon -down-> AllocationDispatchTickProcessor : process(fleet)\n[phase 1]
 
-AllocationPendingPlanner --> AllocationPendingQueueRepository : list_all / delete
-AllocationPendingPlanner --> AllocationPlanningService : plan
-AllocationPendingPlanner --> AllocationEnqueueHandler : enqueue planned tasks
-AllocationPendingPlanner --> AllocationSnapshotMutator : commit per pick
+' --- Pending tick: read heaviness, plan by row.type, write dispatch_queue ---
+AllocationPendingTickProcessor -down-> AllocationPendingQueueRepository  : list_all / delete
+AllocationPendingTickProcessor -down-> RGTable                            : get_resolved_heaviness(group_id)\n[FULL ~20-field dict]
+AllocationPendingTickProcessor ..> Resources                              : adapt(mutable)
+AllocationPendingTickProcessor -down-> AllocationPlanningService          : plan_initial / plan_retry\n(by row.type, with row.tier)
+AllocationPendingTickProcessor -down-> AllocationDispatchQueueRepository  : enqueue planned tasks\n(stamped estimates)
 
-AllocationDispatcher --> Fleets
+' --- Dispatch tick: dequeue, dispatch via fleet ---
+AllocationDispatchTickProcessor -down-> AllocationDispatchQueueRepository : dequeue_for_fleet
+AllocationDispatchTickProcessor -down-> Fleets                            : dispatch
+Fleets ..> JobsTable : INSERT job row\n(with stamped estimates)
 
-' Planning service -> strategies -> algorithm
-AllocationPlanningService --> EconomyAllocationStrategy
-AllocationPlanningService --> StandardAllocationStrategy
-AllocationPlanningService --> PremiumAllocationStrategy
+' --- Planning service -> strategies ---
+AllocationPlanningService -down-> Shells : allocate_initial / allocate_retry
 
-EconomyAllocationStrategy --> AllocationPlanner
-StandardAllocationStrategy --> AllocationPlanner
-PremiumAllocationStrategy --> AllocationPlanner
-EconomyAllocationStrategy ..> AllocationWeights
-StandardAllocationStrategy ..> AllocationWeights
-PremiumAllocationStrategy ..> AllocationWeights
-
-AllocationPlanner --> analyzers
-AllocationPlanner --> Helpers
-AllocationPlanner --> Validators
-
-' Persistence -- planner stamps estimates onto jobs
-AllocationDispatchHandler --> JobsTable : write incl. estimates
-AllocationPlanner ..> RGTable : reads heaviness via planner client
-
-' Daemon snapshot
-AllocationDispatchQueueDaemon ..> Snap : get_or_build / persist
-
-' Cost service (Phase 2A) -- READ ONLY from jobs + telemetry
-AllocationCostService --> ChunkCostProjector
-AllocationCostService ..> JobsTable : SELECT by group_id
-ChunkCostProjector ..> JobsTable : reads estimates + timestamps
-ChunkCostProjector ..> ProgressRepos : observed frames + chunk progress
-AllocationCostService ..> GroupCostEstimate : returns
-AllocationCostService ..> GroupCostProjection : returns
-
-' ============================================================
-' Layout hints
-' ============================================================
-note right of AllocationPendingQueueRepository
-  Universal entry queue.
-  EVERYTHING parks here:
-  initial submit, auto retry,
-  manual retry.  Daemon plans
-  rows out to dispatch_queue.
-end note
-
-note right of AllocationDispatchQueueRepository
-  Already-planned commitments.
-  Each row -> one PlannedTask
-  ready to fire at a fleet.
-  Daemon drains per tick.
-end note
-
-note left of AllocationPlanner
-  THE ALGORITHM.  Pure
-  function: heaviness +
-  resources + weights ->
-  list[PlannedTask] with
-  per-chunk estimates stamped.
-  Strategies are 1-line wrappers
-  that pick the weights preset.
-end note
-
-note bottom of AllocationCostService
-  Phase 2A read-side.  No
-  writes.  Aggregates the
-  estimate columns the planner
-  already stamped, plus live
-  telemetry for running chunks.
-end note
+' --- Planner consumes BOTH heaviness AND availability ---
+Resources ..> AllocationPlanner : consumed by\nplan_initial / plan_retry
 
 @enduml

@@ -1,19 +1,21 @@
-"""AllocationDispatchHandler -- read side of the dispatch queue.
+"""AllocationDispatchTickProcessor -- one phase of the daemon's tick.
 
-One responsibility: the cap-gated pop+dispatch loop the daemon calls
-once per fleet per tick.  Per-iteration work:
+Called by ``AllocationDispatchQueueDaemon._tick`` once per enabled
+fleet.  Drains the ``dispatch_queue`` for that fleet up to its cap
+and fires the fleet strategy on each popped item.
+
+Per-iteration work:
 
   1. Check fleet cap (live count from JobRepository via callable).
   2. Pop the oldest queued item for this fleet.
   3. Skip the row if the group went terminal between enqueue and now.
   4. Reuse the pre-generated job_id, claim the in-progress ledger,
      resolve the blend URL, build the ``DispatchContext``, fire the
-     fleet strategy.
+     fleet strategy via ``AllocationDispatcher``.
 
-This handler does NOT mutate the snapshot.  Resource commitment
-already happened upstream in ``AllocationPendingPlanner._try_promote``
-when the row was first written to dispatch_queue.  Mutating again
-here would double-count.
+Does NOT mutate the snapshot.  Resource commitment already happened
+upstream in ``AllocationPendingTickProcessor`` when the row was
+written to dispatch_queue.  Mutating again here would double-count.
 
 Strict fleet-name lookup: an unknown fleet here is a wiring bug, not
 a runtime condition -- raises rather than silently no-op'ing.
@@ -33,10 +35,10 @@ from serverV2.allocation.allocation_dispatch_queue_repository import (
     AllocationQueueItem,
 )
 from serverV2.allocation.allocation_dispatcher import AllocationDispatcher
-from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_engine_resolver import (
+from serverV2.allocation.allocation_engine_resolver import (
     AllocationEngineResolver,
 )
-from serverV2.allocation.services.allocation_dispatch_queue_service.allocation_queue_item_codec import (
+from serverV2.allocation.allocation_queue_item_codec import (
     AllocationQueueItemCodec,
 )
 from serverV2.core.models import DispatchContext, DispatchResult
@@ -45,7 +47,7 @@ from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRe
 log = logging.getLogger(__name__)
 
 
-class AllocationDispatchHandler:
+class AllocationDispatchTickProcessor:
 
     def __init__(
         self,
@@ -70,19 +72,14 @@ class AllocationDispatchHandler:
         self._codec = codec
         self._engine_resolver = engine_resolver
 
-    def has_any_for_fleets(self, fleets: list[str]) -> bool:
-        """Cheap existence check used by the daemon's pre-tick guard.
-        Returns True iff at least one row is queued for any of the
-        given fleets.  Lets the daemon skip the snapshot fetch + the
-        end-of-tick persist when there's nothing to dispatch.
-        """
-        return self._queue_repo.has_any_for_fleets(fleets)
-
-    def dispatch_pending_for_fleet(self, fleet: str) -> int:
+    def process(self, fleet: str) -> int:
+        """Drain ``dispatch_queue`` for one fleet until cap or empty.
+        Returns the number of items actually dispatched."""
         if fleet not in self._fleet_caps:
             raise KeyError(
-                f"AllocationDispatchHandler: no cap configured for fleet={fleet!r}. "
-                f"Known fleets: {sorted(self._fleet_caps.keys())}"
+                f"AllocationDispatchTickProcessor: no cap configured for "
+                f"fleet={fleet!r}.  Known fleets: "
+                f"{sorted(self._fleet_caps.keys())}"
             )
         cap = self._fleet_caps[fleet]
         dispatched = 0
@@ -92,7 +89,7 @@ class AllocationDispatchHandler:
             if current >= cap:
                 if popped_count > 0:
                     log.info(
-                        "[RETRY_DEBUG] dispatch_pending_for_fleet(%s): cap reached (%d/%d) after popping %d",
+                        "[RETRY_DEBUG] dispatch_tick(%s): cap reached (%d/%d) after popping %d",
                         fleet, current, cap, popped_count,
                     )
                 break
@@ -100,13 +97,13 @@ class AllocationDispatchHandler:
             if item is None:
                 if popped_count > 0:
                     log.info(
-                        "[RETRY_DEBUG] dispatch_pending_for_fleet(%s): queue empty after %d items",
+                        "[RETRY_DEBUG] dispatch_tick(%s): queue empty after %d items",
                         fleet, popped_count,
                     )
                 break
             popped_count += 1
             log.info(
-                "[RETRY_DEBUG] dispatch_pending_for_fleet(%s): popped queue item job_id=%s "
+                "[RETRY_DEBUG] dispatch_tick(%s): popped queue item job_id=%s "
                 "group=%s chunk=%s attempt=%d",
                 fleet, item.job_id, item.group_id, item.chunk_index, item.attempt,
             )
@@ -119,14 +116,14 @@ class AllocationDispatchHandler:
                 grp_status = self._get_group_status(item.group_id)
                 if grp_status is None:
                     log.info(
-                        "dispatch_pending_for_fleet(%s): dropping queued chunk %s — "
+                        "dispatch_tick(%s): dropping queued chunk %s -- "
                         "group %s no longer exists (job_id=%s)",
                         fleet, item.chunk_index, item.group_id, item.job_id,
                     )
                     continue
                 if grp_status not in ("pending", "running"):
                     log.info(
-                        "dispatch_pending_for_fleet(%s): dropping queued chunk %s — "
+                        "dispatch_tick(%s): dropping queued chunk %s -- "
                         "group %s is %s (job_id=%s)",
                         fleet, item.chunk_index, item.group_id, grp_status, item.job_id,
                     )
@@ -135,21 +132,28 @@ class AllocationDispatchHandler:
             if result is not None:
                 dispatched += 1
                 log.info(
-                    "[RETRY_DEBUG] dispatch_pending_for_fleet(%s): dispatched job_id=%s status=%s",
+                    "[RETRY_DEBUG] dispatch_tick(%s): dispatched job_id=%s status=%s",
                     fleet, item.job_id, result.status,
                 )
             else:
                 log.warning(
-                    "[RETRY_DEBUG] dispatch_pending_for_fleet(%s): _dispatch_one returned None "
+                    "[RETRY_DEBUG] dispatch_tick(%s): _dispatch_one returned None "
                     "for job_id=%s",
                     fleet, item.job_id,
                 )
         if dispatched:
             log.info(
-                "dispatch_pending_for_fleet(%s): dispatched %d queued chunk(s)",
+                "dispatch_tick(%s): dispatched %d queued chunk(s)",
                 fleet, dispatched,
             )
         return dispatched
+
+    def has_any_for_fleets(self, fleets: list[str]) -> bool:
+        """Idle-tick guard: returns True iff at least one row is queued
+        for any of the given fleets.  Lets the daemon skip the
+        snapshot fetch + end-of-tick persist when there's nothing to
+        dispatch."""
+        return self._queue_repo.has_any_for_fleets(fleets)
 
     # ------------------------------------------------------------------
     # internals
@@ -162,7 +166,7 @@ class AllocationDispatchHandler:
         group_id = item.group_id
         if not group_id:
             log.warning(
-                "Queue item missing group_id (chunk %s) — dropping",
+                "Queue item missing group_id (chunk %s) -- dropping",
                 item.chunk_index,
             )
             return None

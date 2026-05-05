@@ -48,6 +48,7 @@ from serverV2.fleets.vast.monitor import VastMonitorManager
 from serverV2.fleets.vast.client import VastClient
 from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.infrastructure import storage
+from serverV2.infrastructure.auth.firebase_app import init_firebase
 from serverV2.infrastructure.redis_client import RedisClient
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
@@ -82,23 +83,33 @@ from serverV2.orchestrator.lifecycle_job_termination import (
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.orchestrator.repositories import PendingAllocationRepository
 from serverV2.allocation import AllocationDispatchQueueDaemon, AllocationFacade
-from serverV2.allocation.services.allocation_cost_service import (
-    AllocationCostService,
-)
 from serverV2.allocation.allocation_blend_url_resolver import (
     AllocationBlendUrlResolver,
 )
 from serverV2.allocation.allocation_dispatch_queue_repository import (
     AllocationDispatchQueueRepository as DispatchQueueRepository,
 )
+from serverV2.allocation.allocation_dispatch_tick_processor import (
+    AllocationDispatchTickProcessor,
+)
 from serverV2.allocation.allocation_dispatcher import AllocationDispatcher
+from serverV2.allocation.allocation_engine_resolver import (
+    AllocationEngineResolver,
+)
 from serverV2.allocation.allocation_pending_queue_repository import (
     AllocationPendingQueueRepository,
 )
-from serverV2.allocation.services.allocation_dispatch_queue_service import (
-    AllocationDispatchQueueService,
+from serverV2.allocation.allocation_pending_tick_processor import (
+    AllocationPendingTickProcessor,
+)
+from serverV2.allocation.allocation_queue_item_codec import (
+    AllocationQueueItemCodec,
+)
+from serverV2.allocation.allocation_snapshot_mutator import (
+    AllocationSnapshotMutator,
 )
 from serverV2.allocation.services.allocation_planning_service import (
+    AllocationCostAggregator,
     AllocationPlanningService,
 )
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_strategy_selector import (
@@ -158,7 +169,6 @@ class Container:
         fleet_availability_snapshot_cache: FleetAvailabilitySnapshotCache,
         pre_render_estimator: PreRenderEstimator,
         scene_resolver: SceneResolver,
-        allocation_cost_service: AllocationCostService,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -186,9 +196,6 @@ class Container:
         # state; safe to share.
         self.pre_render_estimator = pre_render_estimator
         self.scene_resolver = scene_resolver
-        # Phase 2A -- read-side aggregator over the per-chunk estimate
-        # columns the planner stamps at dispatch time.
-        self.allocation_cost_service = allocation_cost_service
 
 
 def build(
@@ -199,6 +206,12 @@ def build(
 
     cfg = config or AppConfig.from_env()
     redis = redis_client or RedisClient()
+
+    # Initialize Firebase Admin SDK once at boot.  Auth-protected
+    # endpoints depend on this; lazy per-request init was racing across
+    # uvicorn worker threads (firebase_admin.initialize_app is single-shot
+    # per app name, so two concurrent first-requests collided).
+    init_firebase()
 
     # Per-instance ID used as the value of every monitor lock this
     # process holds.  Generated once per process: surviving across
@@ -219,6 +232,11 @@ def build(
         community_price_per_hour=cfg.community_price_per_hour,
     )
     group_repo = RenderGroupRepository()
+    # Pre-submit / submit boundary helper.  RenderGroupService.confirm_upload
+    # uses this to merge analyzer snapshot + user overrides into the
+    # canonical resolved scene blob persisted on the row; the allocation
+    # pending tick reads it back to give the planner full heaviness.
+    scene_resolver = SceneResolver()
     asset_repo = UserInputFileRepository()
     heartbeat_repo = HeartbeatRepository(redis)
     machine_heartbeat_repo = MachineHeartbeatRepository(redis)
@@ -385,6 +403,7 @@ def build(
     allocation_dispatcher = AllocationDispatcher(registry)
     allocation_blend_resolver = AllocationBlendUrlResolver(cfg)
     allocation_strategy_selector = AllocationStrategySelector()
+    allocation_cost_aggregator = AllocationCostAggregator()
     allocation_planning_service = AllocationPlanningService(
         strategies={
             "economy": economy_strategy,
@@ -392,6 +411,7 @@ def build(
             "premium": premium_strategy,
         },
         selector=allocation_strategy_selector,
+        cost_aggregator=allocation_cost_aggregator,
     )
     _allocation_fleet_caps: dict[str, int] = {
         "modal_serverless": cfg.modal.max_parallel,
@@ -405,36 +425,60 @@ def build(
         status = grp.get("status")
         return str(status) if status else None
 
-    allocation_dispatch_queue_service = AllocationDispatchQueueService(
+    # Shared helpers used by both tick processors.
+    allocation_codec = AllocationQueueItemCodec()
+    allocation_engine_resolver = AllocationEngineResolver()
+    allocation_snapshot_mutator = AllocationSnapshotMutator()
+
+    # Tick-phase processors -- owned by the daemon, no public surface.
+    dispatch_tick_processor = AllocationDispatchTickProcessor(
         queue_repo=queue_repo,
-        pending_repo=pending_queue_repo,
         in_progress_repo=in_progress_repo,
         active_count_by_fleet=job_repo.count_active_by_fleet,
         dispatcher=allocation_dispatcher,
         blend_url_resolver=allocation_blend_resolver,
         fleet_caps=_allocation_fleet_caps,
         get_group_status=_get_group_status,
+        codec=allocation_codec,
+        engine_resolver=allocation_engine_resolver,
+    )
+    pending_tick_processor = AllocationPendingTickProcessor(
+        pending_repo=pending_queue_repo,
+        dispatch_repo=queue_repo,
+        in_progress_repo=in_progress_repo,
+        render_group_repository=group_repo,
         planning_service=allocation_planning_service,
+        codec=allocation_codec,
+        snapshot_mutator=allocation_snapshot_mutator,
     )
-    allocation_facade = AllocationFacade(
-        planning=allocation_planning_service,
-        dispatch_queue=allocation_dispatch_queue_service,
-    )
+
     fleet_availability_snapshot_cache = FleetAvailabilitySnapshotCache(
         builder_factory=fleet_availability_factory,
         redis_client=redis,
     )
+
+    # Facade holds repos directly -- queues are dumb storage, no
+    # service wrapper sits between them and the facade.  Cost paths
+    # use ``job_repo`` (live group) and ``snapshot_cache`` (dry-run);
+    # both are read-only on those paths.
+    allocation_facade = AllocationFacade(
+        planning=allocation_planning_service,
+        pending_repo=pending_queue_repo,
+        dispatch_repo=queue_repo,
+        job_repository=job_repo,
+        snapshot_cache=fleet_availability_snapshot_cache,
+    )
     allocation_dispatch_queue_daemon = AllocationDispatchQueueDaemon(
-        dispatch_queue=allocation_dispatch_queue_service,
+        dispatch_repo=queue_repo,
+        pending_repo=pending_queue_repo,
+        dispatch_tick_processor=dispatch_tick_processor,
+        pending_tick_processor=pending_tick_processor,
         snapshot_cache=fleet_availability_snapshot_cache,
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
         enabled_fleets=list(_allocation_fleet_caps.keys()),
     )
-    allocation_client = AllocationClient(
-        facade=allocation_facade,
-        snapshot_cache=fleet_availability_snapshot_cache,
-    )
+    allocation_client = AllocationClient(facade=allocation_facade)
 
     # -- anti-affinity: facade/service/repository for retry exclusion
     # resolution.  Resolves the union of (fleet, gpu_type) and
@@ -579,11 +623,6 @@ def build(
         presigner=lambda key, name: storage.generate_presigned_url(key, download_name=name),
     )
 
-    # Pre-submit / submit boundary helper.  RenderGroupService.confirm_upload
-    # uses this to merge analyzer snapshot + user overrides into the
-    # canonical resolved scene blob persisted on the row.
-    scene_resolver = SceneResolver()
-
     render_group_service = RenderGroupService(
         group_repo=group_repo,
         job_repo=job_repo,
@@ -632,11 +671,6 @@ def build(
         scene_resolver=scene_resolver,
     )
 
-    # Phase 2A -- read-side aggregator over the per-chunk estimate
-    # columns ``AllocationPlanner`` stamps at dispatch time.  Pure read,
-    # no writes, one repo dependency.
-    allocation_cost_service = AllocationCostService(job_repo=job_repo)
-
     return Container(
         config=cfg,
         orchestrator=orchestrator,
@@ -659,5 +693,4 @@ def build(
         fleet_availability_snapshot_cache=fleet_availability_snapshot_cache,
         pre_render_estimator=pre_render_estimator,
         scene_resolver=scene_resolver,
-        allocation_cost_service=allocation_cost_service,
     )

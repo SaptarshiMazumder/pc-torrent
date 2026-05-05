@@ -45,7 +45,7 @@ from serverV2.orchestrator.lifecycle_job_retry.retry_pipeline_builder import (
 #   3. compute_remaining_frames()     -> ctx.remaining
 #   4. abort_if_no_remaining()        -> if remaining is None: silent abort
 #   5. enforce_max_retries()          -> ctx.next_attempt; abort if > cap
-#   6. load_dispatch_context()        -> ctx.file_size_bytes, engine, tier
+#   6. load_dispatch_context()        -> ctx.engine, ctx.tier
 #   7. build_retry_chunk_request()    -> ctx.chunk_request (with exclusions)
 #   8. park_retry_to_pending()        -> writes pending_allocation_queue row,
 #                                        sets ctx.parked = True
@@ -84,7 +84,7 @@ AUTO_RETRY_PIPELINE = (
 #   4. compute_remaining_frames()             -> ctx.remaining
 #   5. manual_retry_raise_if_no_remaining()   -> raise no_remaining_frames
 #   6. manual_retry_set_attempt_zero()        -> ctx.next_attempt = 0
-#   7. load_dispatch_context()                -> file_size_bytes, engine, tier
+#   7. load_dispatch_context()                -> engine, tier
 #   8. build_retry_chunk_request()            -> ctx.chunk_request
 #   9. manual_retry_flip_group_pending()      -> if grp terminal:
 #                                                  group_repo.update_status('pending')

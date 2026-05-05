@@ -35,7 +35,6 @@ class EconomyAllocationStrategy:
         resources: AvailableResources,
         engine: str | None = None,
         heaviness: dict | None = None,
-        tier_budget_usd: float | None = None, # accepted for protocol compat
     ) -> list[PlannedTask]:
         return self._planner.plan_initial(
             frame_start=frame_start,
@@ -52,9 +51,12 @@ class EconomyAllocationStrategy:
         self,
         chunk_request: AllocationChunkRequest,
         resources: AvailableResources,
+        *,
+        heaviness: dict | None = None,
     ) -> PlannedTask | None:
         return self._planner.plan_retry(
             chunk_request=chunk_request,
             resources=resources,
             weights=self.WEIGHTS,
+            heaviness=heaviness,
         )

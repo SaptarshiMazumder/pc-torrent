@@ -124,43 +124,6 @@ class JobRepository:
             for r in rows if r.get("machine_type") and r.get("gpu_type")
         }
 
-    def get_cost_aggregate_for_group(self, group_id: str) -> dict[str, Any]:
-        """SUM/MAX/COUNT over the per-chunk estimate columns for a group.
-
-        Returns a dict with:
-          * ``chunks``             COUNT(*)
-          * ``total_cost_usd``     SUM(estimated_cost_usd)
-          * ``total_seconds``      SUM(estimated_seconds)
-          * ``wall_time_seconds``  MAX(estimated_seconds)
-
-        Empty group / NULLs collapse to zeros so callers don't need to
-        defend.  Read by ``AllocationCostService.static_estimate_for_group``.
-        """
-        row = query_one(
-            """
-            SELECT COUNT(*)                              AS chunks,
-                   COALESCE(SUM(estimated_cost_usd), 0)  AS total_cost_usd,
-                   COALESCE(SUM(estimated_seconds), 0)   AS total_seconds,
-                   COALESCE(MAX(estimated_seconds), 0)   AS wall_time_seconds
-              FROM jobs
-             WHERE group_id = %s
-            """,
-            (group_id,),
-        )
-        if row is None:
-            return {
-                "chunks": 0,
-                "total_cost_usd": 0.0,
-                "total_seconds": 0.0,
-                "wall_time_seconds": 0.0,
-            }
-        return {
-            "chunks": int(row.get("chunks") or 0),
-            "total_cost_usd": float(row.get("total_cost_usd") or 0.0),
-            "total_seconds": float(row.get("total_seconds") or 0.0),
-            "wall_time_seconds": float(row.get("wall_time_seconds") or 0.0),
-        }
-
     # ---- status mutations ----
 
     def update_status(self, job_id: str, status: str, *, error: str | None = None) -> None:

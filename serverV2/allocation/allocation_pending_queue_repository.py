@@ -47,7 +47,6 @@ class AllocationPendingItem:
     total_frames: int
     chunk_index: int | None = None
     attempt: int | None = None
-    file_size_bytes: int | None = None
     engine: str | None = None
     tier: str | None = None
     excluded_machine_ids: tuple[str, ...] = field(default_factory=tuple)
@@ -73,14 +72,14 @@ class AllocationPendingQueueRepository:
             """INSERT INTO pending_allocation_queue
                (type, group_id, chunk_index, attempt,
                 frame_start, frame_end, frame_step, total_frames,
-                file_size_bytes, engine, tier,
+                engine, tier,
                 excluded_machine_ids, excluded_serverless_capabilities,
                 render_overrides_json, max_retries, priority,
                 machine_ids, input_filename,
                 created_at)
                VALUES (%s, %s, %s, %s,
                        %s, %s, %s, %s,
-                       %s, %s, %s,
+                       %s, %s,
                        %s::jsonb, %s::jsonb,
                        %s, %s, %s,
                        %s::jsonb, %s,
@@ -88,7 +87,7 @@ class AllocationPendingQueueRepository:
             (
                 item.type, item.group_id, item.chunk_index, item.attempt,
                 item.frame_start, item.frame_end, item.frame_step, item.total_frames,
-                item.file_size_bytes, item.engine, item.tier,
+                item.engine, item.tier,
                 json.dumps(list(item.excluded_machine_ids)),
                 json.dumps([list(p) for p in item.excluded_serverless_capabilities]),
                 item.render_overrides_json, item.max_retries, item.priority,
@@ -159,7 +158,6 @@ def _row_to_item(row: dict) -> AllocationPendingItem:
         frame_end=row["frame_end"],
         frame_step=row["frame_step"],
         total_frames=row["total_frames"],
-        file_size_bytes=row.get("file_size_bytes"),
         engine=row.get("engine"),
         tier=row.get("tier"),
         excluded_machine_ids=tuple(row.get("excluded_machine_ids") or []),

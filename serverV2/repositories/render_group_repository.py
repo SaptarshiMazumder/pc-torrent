@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +17,34 @@ class RenderGroupRepository:
 
     def get_by_id(self, group_id: str) -> dict[str, Any] | None:
         return query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
+
+    def get_resolved_heaviness(self, group_id: str) -> dict[str, Any]:
+        """Return the heaviness sub-dict from the merged scene blob the
+        RenderGroupService persisted at confirm-upload time.  This is
+        the canonical scene-context the allocation planner reads for
+        cost / time / VRAM math; both initial and retry pending rows
+        load it via this method.
+
+        Returns ``{}`` when the group is unknown or the row's
+        ``resolved_scene_json`` is empty/malformed.  An empty dict is
+        a degraded but safe input for the planner (defaults applied)."""
+        row = query_one(
+            "SELECT resolved_scene_json FROM render_groups WHERE id = %s",
+            (group_id,),
+        )
+        if row is None:
+            return {}
+        raw = row.get("resolved_scene_json")
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        heaviness = parsed.get("heaviness")
+        return heaviness if isinstance(heaviness, dict) else {}
 
     def update_status(self, group_id: str, status: str) -> None:
         if status in ("done", "failed", "cancelled"):

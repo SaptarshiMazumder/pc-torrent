@@ -27,15 +27,13 @@ import logging
 from typing import Any
 
 from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
-from serverV2.allocation.allocation_strategies.analyzers.allocation_cost_analyzer import (
-    AllocationMixSlot,
-    estimate_cost_for_mix,
+from serverV2.allocation.services.allocation_planning_service import (
+    GroupCostEstimate,
 )
 from serverV2.callbacks.group_status_aggregator import compute_group_status
 from serverV2.core.models import (
     DispatchContext,
     DispatchResult,
-    PlannedTask,
     RenderJob,
 )
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
@@ -115,47 +113,36 @@ class RenderLifecycle:
         self._render_canceler = render_canceler
 
     # ------------------------------------------------------------------
-    # Planning — split frames across fleet targets (no dispatch)
+    # Cost intelligence — pass-through to the allocation module.
+    # The pre-render preview and the live-group cost endpoint both flow
+    # through here so monitors / routers / services never import the
+    # allocation client directly.
     # ------------------------------------------------------------------
 
-    def plan(
+    def cost_estimate_for_group(self, group_id: str) -> GroupCostEstimate:
+        return self._allocation_client.cost_estimate_for_group(group_id)
+
+    def cost_estimate_for_dry_run(
         self,
         *,
+        tier: str | None,
         frame_start: int,
         frame_end: int,
         frame_step: int,
         total_frames: int,
-        machine_ids: list[str] | None = None,
-        heaviness: dict | None = None,
         engine: str | None = None,
-        tier: str | None = None,
-    ) -> list[PlannedTask]:
-        # ``heaviness=None`` is fine — equivalent to a defaulted dict with
-        # file_size=0.  Strategy choice is allocation's job; lifecycle
-        # just forwards the user's tier and the scene context.
-        resolved_tier = tiers.normalize(tier)
-        tier_budget = self._tier_budget(resolved_tier, heaviness, total_frames)
-        pinned = bool(machine_ids)
-
-        tasks = self._allocation_client.plan_initial(
-            tier=resolved_tier,
+        heaviness: dict | None = None,
+    ) -> GroupCostEstimate:
+        return self._allocation_client.cost_estimate_for_dry_run(
+            tier=tier,
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
             total_frames=total_frames,
             engine=engine,
             heaviness=heaviness,
-            tier_budget_usd=tier_budget,
-            machine_ids=machine_ids,
         )
-        log.info(
-            "plan: tier=%s pinned=%s engine=%s "
-            "total_frames=%d file_size_bytes=%s tier_budget=%s -> tasks=%d",
-            resolved_tier, pinned, engine, total_frames,
-            int((heaviness or {}).get("file_size_bytes", 0) or 0),
-            tier_budget, len(tasks),
-        )
-        return tasks
+
 
     def _fire_modal_terminal_hook_if_modal(
         self, raw: dict[str, Any], job_id: str,
@@ -173,27 +160,6 @@ class RenderLifecycle:
         self._modal_active_jobs_hooks.on_terminal(
             job_id=job_id, gpu_type=gpu_type,
         )
-
-    def _tier_budget(
-        self, tier: str, heaviness: dict | None, total_frames: int,
-    ) -> float | None:
-        """Per-tier soft budget cap, in USD.
-
-        Derived from "what would a single A6000 cost to render this
-        scene" — scales with scene weight automatically.  None disables
-        the cap (Economy doesn't need one; Premium would also be None).
-        """
-        if tier != tiers.STANDARD or heaviness is None or total_frames <= 0:
-            return None
-        # A6000 reference: speed=1.30, price=$0.55/hr (matches config.json).
-        # Standard's cap = 1.0x A6000-equivalent cost.  With FastRender's
-        # internal BUDGET_CAP_MULTIPLIER=1.5, total headroom is 1.5x.
-        slot = AllocationMixSlot(render_speed=1.30, price_per_hour=0.55, frames_assigned=total_frames)
-        try:
-            est = estimate_cost_for_mix(heaviness, [slot])
-        except Exception:
-            return None
-        return est.cost_mid_usd if est.cost_mid_usd > 0 else None
 
     # ------------------------------------------------------------------
     # Story 1: user submitted a render

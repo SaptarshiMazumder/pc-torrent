@@ -39,9 +39,26 @@ from serverV2.core.value_objects import parse_analysis_heaviness
 # Tunables — all factors are 1.0 for the baseline scene.
 # ---------------------------------------------------------------------------
 
-# Baseline scene: CYCLES, 1024 samples, 1080p, ~baseline geometry, simple
-# shaders, no heavy features, render_speed=1.0.
-BASELINE_SEC = 30.0
+# Per-engine baselines.  Same baseline scene shape (1080p, baseline
+# samples for the engine, simple shaders, no heavy features) but
+# wildly different render times -- EEVEE's rasterization + TAA is
+# 10x cheaper than Cycles' path tracing for the same wall output.
+# A single ``BASELINE_SEC`` constant collapsed both engines onto the
+# Cycles cost curve and was overestimating EEVEE renders by ~10x.
+_BASELINE_SEC_BY_ENGINE: dict[str, float] = {
+    "BLENDER_EEVEE":      3.0,    # 64 TAA samples @ 1080p baseline
+    "BLENDER_EEVEE_NEXT": 3.0,
+    "CYCLES":             30.0,   # 1024 path samples @ 1080p baseline
+}
+# Fallback for unknown engines (older snapshots, future engines).
+# Cycles-conservative: better to overestimate than under.
+_DEFAULT_BASELINE_SEC = 30.0
+
+# Back-compat alias.  External callers historically read BASELINE_SEC
+# expecting the Cycles baseline (it was the only one).  Keep the name
+# pointing at Cycles so the smoke tests / cost analyzer / consumers
+# don't break.
+BASELINE_SEC = _BASELINE_SEC_BY_ENGINE["CYCLES"]
 
 # Reference values for "1.0x factor"
 BASELINE_PIXELS = 1920 * 1080            # 1080p
@@ -53,12 +70,25 @@ BASELINE_TEX_BYTES = 256 * 1024 * 1024   # 256 MB of textures (estimated VRAM co
 CYCLES_BASELINE_SAMPLES = 1024
 EEVEE_BASELINE_SAMPLES = 64
 
-# Heavy-feature multipliers (each compounds independently)
+# Heavy-feature multipliers (each compounds independently).
+# Cycles values (path-tracing penalty).
 SUBDIVISION_FACTOR = 1.3
 DISPLACEMENT_FACTOR = 1.3
 PARTICLES_FACTOR = 1.5
 SUBSURFACE_FACTOR = 1.4
 VOLUMETRICS_FACTOR = 2.0
+
+# EEVEE-damped variants: rasterization shrugs at extra geometry far
+# more than path tracing does.  Subdivision/displacement add draw-call
+# cost only; particles in EEVEE are typically billboard quads.
+# Subsurface and volumetrics still compound (screen-space SSS /
+# volumetric passes), but less than Cycles' path-traced equivalents.
+_EEVEE_ENGINES = frozenset({"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"})
+_EEVEE_SUBDIVISION_FACTOR  = 1.15
+_EEVEE_DISPLACEMENT_FACTOR = 1.15
+_EEVEE_PARTICLES_FACTOR    = 1.25
+_EEVEE_SUBSURFACE_FACTOR   = 1.20
+_EEVEE_VOLUMETRICS_FACTOR  = 1.50
 
 # Geometry-nodes — base penalty + complexity-scaled, capped
 GEOMETRY_NODES_BASE = 1.2
@@ -149,7 +179,12 @@ def _texture_factor(tex_bytes: int) -> float:
     return min(TEX_PRESSURE_CAP, 1.0 + TEX_PRESSURE_RAMP_RATE * (ratio - 1.0))
 
 
-def _shader_factor(node_count: int, uses_sss: bool, uses_volumetrics: bool) -> float:
+def _shader_factor(
+    node_count: int, uses_sss: bool, uses_volumetrics: bool, engine: str = "",
+) -> float:
+    is_eevee = engine in _EEVEE_ENGINES
+    sss_factor = _EEVEE_SUBSURFACE_FACTOR if is_eevee else SUBSURFACE_FACTOR
+    vol_factor = _EEVEE_VOLUMETRICS_FACTOR if is_eevee else VOLUMETRICS_FACTOR
     f = 1.0
     if node_count > SHADER_NODE_BASE_THRESHOLD:
         excess = min(
@@ -158,9 +193,9 @@ def _shader_factor(node_count: int, uses_sss: bool, uses_volumetrics: bool) -> f
         )
         f *= 1.0 + excess * SHADER_NODE_RAMP
     if uses_sss:
-        f *= SUBSURFACE_FACTOR
+        f *= sss_factor
     if uses_volumetrics:
-        f *= VOLUMETRICS_FACTOR
+        f *= vol_factor
     return f
 
 
@@ -170,14 +205,19 @@ def _feature_factor(
     uses_particles: bool,
     uses_geometry_nodes: bool,
     gn_complexity: int,
+    engine: str = "",
 ) -> float:
+    is_eevee = engine in _EEVEE_ENGINES
+    sub_factor  = _EEVEE_SUBDIVISION_FACTOR  if is_eevee else SUBDIVISION_FACTOR
+    disp_factor = _EEVEE_DISPLACEMENT_FACTOR if is_eevee else DISPLACEMENT_FACTOR
+    part_factor = _EEVEE_PARTICLES_FACTOR    if is_eevee else PARTICLES_FACTOR
     f = 1.0
     if uses_subdivision:
-        f *= SUBDIVISION_FACTOR
+        f *= sub_factor
     if uses_displacement:
-        f *= DISPLACEMENT_FACTOR
+        f *= disp_factor
     if uses_particles:
-        f *= PARTICLES_FACTOR
+        f *= part_factor
     if uses_geometry_nodes:
         gn_extra = min(GEOMETRY_NODES_CAP, gn_complexity * GEOMETRY_NODES_PER_NODE)
         f *= GEOMETRY_NODES_BASE + gn_extra
@@ -205,6 +245,7 @@ def estimate_seconds_per_frame(
     not a wall-time prediction — see module docstring.
     """
     engine = str(heaviness.get("render_engine") or "")
+    baseline_sec = _BASELINE_SEC_BY_ENGINE.get(engine, _DEFAULT_BASELINE_SEC)
 
     multiplier = (
         _sample_factor(heaviness.get("samples", 0), engine)
@@ -215,6 +256,7 @@ def estimate_seconds_per_frame(
             heaviness.get("shader_node_count_total", 0),
             bool(heaviness.get("uses_subsurface_scattering", False)),
             bool(heaviness.get("uses_volumetrics", False)),
+            engine,
         )
         * _feature_factor(
             bool(heaviness.get("uses_subdivision", False)),
@@ -222,10 +264,11 @@ def estimate_seconds_per_frame(
             bool(heaviness.get("uses_particles", False)),
             bool(heaviness.get("uses_geometry_nodes", False)),
             int(heaviness.get("geometry_nodes_complexity", 0)),
+            engine,
         )
     )
 
-    return BASELINE_SEC * multiplier / max(MIN_RENDER_SPEED, render_speed)
+    return baseline_sec * multiplier / max(MIN_RENDER_SPEED, render_speed)
 
 
 def estimate_seconds_per_frame_from_snapshot(
@@ -328,13 +371,41 @@ def _smoke() -> None:
         f"4x samples should ~4x time, got {spf_samples}"
     print(f"4x CYCLES samples                         @ speed=1.0  ->{spf_samples:.1f}s/frame")
 
-    # ------- EEVEE 64 TAA = baseline -------
+    # ------- EEVEE 64 TAA = EEVEE baseline (NOT Cycles baseline) -------
+    # EEVEE rasterization + TAA is ~10x cheaper than Cycles path tracing.
+    # Per-engine BASELINE_SEC enforces that gap.
+    eevee_baseline_sec = _BASELINE_SEC_BY_ENGINE["BLENDER_EEVEE"]
     eevee = dict(baseline)
     eevee["render_engine"] = "BLENDER_EEVEE"
     eevee["samples"] = EEVEE_BASELINE_SAMPLES   # 64
     eevee_spf = estimate_seconds_per_frame(eevee, 1.0)
-    assert abs(eevee_spf - BASELINE_SEC) < 0.5, f"EEVEE 64 TAA != baseline: {eevee_spf}"
+    assert abs(eevee_spf - eevee_baseline_sec) < 0.5, \
+        f"EEVEE 64 TAA != EEVEE baseline {eevee_baseline_sec}: {eevee_spf}"
     print(f"EEVEE 64 TAA samples                      @ speed=1.0  ->{eevee_spf:.1f}s/frame")
+
+    # ------- EEVEE damping: heavy features penalize less than Cycles -------
+    eevee_heavy = dict(baseline)
+    eevee_heavy["render_engine"] = "BLENDER_EEVEE"
+    eevee_heavy["samples"] = EEVEE_BASELINE_SAMPLES
+    eevee_heavy["uses_subdivision"] = True
+    eevee_heavy["uses_displacement"] = True
+    eevee_heavy["uses_particles"] = True
+    eevee_heavy_spf = estimate_seconds_per_frame(eevee_heavy, 1.0)
+    cycles_heavy = dict(baseline)
+    cycles_heavy["render_engine"] = "CYCLES"
+    cycles_heavy["uses_subdivision"] = True
+    cycles_heavy["uses_displacement"] = True
+    cycles_heavy["uses_particles"] = True
+    cycles_heavy_spf = estimate_seconds_per_frame(cycles_heavy, 1.0)
+    # Cycles: 1.3 x 1.3 x 1.5 = 2.535;  EEVEE: 1.15 x 1.15 x 1.25 = ~1.65
+    eevee_feature_mult  = eevee_heavy_spf / eevee_baseline_sec
+    cycles_feature_mult = cycles_heavy_spf / BASELINE_SEC
+    assert 1.5 < eevee_feature_mult < 1.8, \
+        f"EEVEE feature compounding should be ~1.65x, got {eevee_feature_mult}"
+    assert 2.4 < cycles_feature_mult < 2.7, \
+        f"Cycles feature compounding should be ~2.535x, got {cycles_feature_mult}"
+    print(f"EEVEE  + sub/disp/particles               compounded ->x{eevee_feature_mult:.2f}")
+    print(f"Cycles + sub/disp/particles               compounded ->x{cycles_feature_mult:.2f}")
 
     # ------- 4K resolution → ~4x time -------
     heavy_res = dict(baseline)

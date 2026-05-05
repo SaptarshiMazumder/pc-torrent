@@ -99,6 +99,18 @@ log_contains_device_unavailable() {
     grep -q "Requested Cycles device not available" "$log_file"
 }
 
+log_contains_optix_kernel_error() {
+    local log_file="$1"
+    grep -q "OPTIX_ERROR_" "$log_file" || \
+    grep -q "Failed to load OptiX kernel" "$log_file" || \
+    grep -q "OptiX module compilation failed" "$log_file"
+}
+
+log_should_fallback_device() {
+    local log_file="$1"
+    log_contains_device_unavailable "$log_file" || log_contains_optix_kernel_error "$log_file"
+}
+
 log_contains_fatal_render_error() {
     local log_file="$1"
     grep -q "\\[RENDER_DRIVER\\] ERROR:" "$log_file" || \
@@ -135,8 +147,8 @@ attempt_render() {
                         return 0
                     fi
                     last_exit=$?
-                    if log_contains_device_unavailable "$log_file"; then
-                        echo "Cycles device '$device' unavailable, trying next fallback."
+                    if log_should_fallback_device "$log_file"; then
+                        echo "Cycles device '$device' failed (device unavailable or OPTIX kernel error); trying next fallback."
                         : > "$log_file"
                         continue
                     fi

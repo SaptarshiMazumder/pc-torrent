@@ -128,41 +128,9 @@ else
 fi
 
 # -----------------------------------------------
-# [3/5] Sync Docker render images to R2
+# [3/4] Build & Deploy Frontend to Cloudflare Pages
 # -----------------------------------------------
-log_step "[3/5] Syncing Windows/Linux Docker render images -> Cloudflare R2"
-
-# Backward compatibility: UPLOAD_RENDER_IMAGE=1 means upload Windows image.
-if [[ "${UPLOAD_RENDER_IMAGE:-}" == "1" ]] && [[ -z "${UPLOAD_RENDER_IMAGE_WINDOWS:-}" ]]; then
-    export UPLOAD_RENDER_IMAGE_WINDOWS=1
-fi
-
-cd "$PROJECT_ROOT"
-
-if [[ "${UPLOAD_RENDER_IMAGE_WINDOWS:-}" == "1" ]] && [ -f "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" ]; then
-    IMAGE_SIZE=$(du -sh "$PROJECT_ROOT/server/docker/pcrent-render.tar.gz" | cut -f1)
-    log_info "Uploading Windows image pcrent-render.tar.gz ($IMAGE_SIZE) to R2..."
-    log_info "This may take a few minutes..."
-    python upload_docker_image.py
-    log_ok "Windows Docker render image synced to R2"
-else
-    log_info "Skipping Windows image upload (set UPLOAD_RENDER_IMAGE_WINDOWS=1)"
-fi
-
-if [[ "${UPLOAD_RENDER_IMAGE_LINUX:-}" == "1" ]] && [ -f "$PROJECT_ROOT/server/docker_linux/pcrent-render-linux.tar.gz" ]; then
-    LINUX_IMAGE_SIZE=$(du -sh "$PROJECT_ROOT/server/docker_linux/pcrent-render-linux.tar.gz" | cut -f1)
-    log_info "Uploading Linux image pcrent-render-linux.tar.gz ($LINUX_IMAGE_SIZE) to R2..."
-    log_info "This may take a few minutes..."
-    python upload_docker_image_linux.py
-    log_ok "Linux Docker render image synced to R2"
-else
-    log_info "Skipping Linux image upload (set UPLOAD_RENDER_IMAGE_LINUX=1)"
-fi
-
-# -----------------------------------------------
-# [4/5] Build & Deploy Frontend to Cloudflare Pages
-# -----------------------------------------------
-log_step "[4/5] Building & deploying frontend -> Cloudflare Pages"
+log_step "[3/4] Building & deploying frontend -> Cloudflare Pages"
 
 cd "$PROJECT_ROOT/frontend"
 echo "VITE_API_BASE_URL=$BACKEND_URL" > .env.production
@@ -184,9 +152,9 @@ npx wrangler pages deploy dist \
 log_ok "Frontend deployed to https://pcrent.pages.dev"
 
 # -----------------------------------------------
-# [5/5] Update Desktop App default URL
+# [4/4] Update Desktop App default URL
 # -----------------------------------------------
-log_step "[5/5] Updating desktop app default backend URL"
+log_step "[4/4] Updating desktop app default backend URL"
 
 cd "$PROJECT_ROOT"
 sed -i "s|useState(\"https://.*\")|useState(\"$BACKEND_URL\")|" \

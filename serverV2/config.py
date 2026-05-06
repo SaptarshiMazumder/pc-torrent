@@ -153,6 +153,22 @@ def _require_block(
     return block
 
 
+def _require_subblock(
+    parent_name: str, sub_name: str, config_json_path: str | None = None,
+) -> dict:
+    """Load a nested block ``<parent>.<sub>`` from config.json.  Used by
+    the frame-allocation loaders so the dotted path ``frame_allocation.
+    weights`` is one helper call instead of two manual lookups.
+    """
+    parent = _require_block(parent_name, config_json_path)
+    sub = parent.get(sub_name)
+    if not isinstance(sub, dict):
+        raise FleetException(
+            f"config.json missing required block: {parent_name}.{sub_name}"
+        )
+    return sub
+
+
 def _require_field_float(block: dict, block_name: str, key: str) -> float:
     if key not in block:
         raise FleetException(
@@ -486,11 +502,12 @@ class StartupBufferConfig:
 
     @classmethod
     def from_env(cls) -> StartupBufferConfig:
-        block = _require_block("startup_buffer_sec")
+        block = _require_subblock("frame_allocation", "startup_buffer_sec")
+        ctx = "frame_allocation.startup_buffer_sec"
         return cls(
-            vast=_require_field_float(block, "startup_buffer_sec", "vast"),
-            modal=_require_field_float(block, "startup_buffer_sec", "modal"),
-            community=_require_field_float(block, "startup_buffer_sec", "community"),
+            vast=_require_field_float(block, ctx, "vast"),
+            modal=_require_field_float(block, ctx, "modal"),
+            community=_require_field_float(block, ctx, "community"),
         )
 
 
@@ -537,38 +554,41 @@ class RenderTimeConfig:
 
     @classmethod
     def from_env(cls) -> RenderTimeConfig:
-        block = _require_block("render_time")
+        block = _require_subblock("frame_allocation", "render_time")
+        ctx = "frame_allocation.render_time"
 
         def _factors(key: str) -> EngineFactors:
             sub = block.get(key)
             if not isinstance(sub, dict):
-                raise FleetException(f"render_time.{key} missing or not an object")
+                raise FleetException(f"{ctx}.{key} missing or not an object")
+            sub_ctx = f"{ctx}.{key}"
             return EngineFactors(
-                subdivision=_require_field_float(sub, f"render_time.{key}", "subdivision"),
-                displacement=_require_field_float(sub, f"render_time.{key}", "displacement"),
-                particles=_require_field_float(sub, f"render_time.{key}", "particles"),
-                subsurface=_require_field_float(sub, f"render_time.{key}", "subsurface"),
-                volumetrics=_require_field_float(sub, f"render_time.{key}", "volumetrics"),
-                adaptive_sampling=_require_field_float(sub, f"render_time.{key}", "adaptive_sampling"),
+                subdivision=_require_field_float(sub, sub_ctx, "subdivision"),
+                displacement=_require_field_float(sub, sub_ctx, "displacement"),
+                particles=_require_field_float(sub, sub_ctx, "particles"),
+                subsurface=_require_field_float(sub, sub_ctx, "subsurface"),
+                volumetrics=_require_field_float(sub, sub_ctx, "volumetrics"),
+                adaptive_sampling=_require_field_float(sub, sub_ctx, "adaptive_sampling"),
             )
 
         startup_block = block.get("startup_sec")
         if not isinstance(startup_block, dict):
-            raise FleetException("render_time.startup_sec missing or not an object")
+            raise FleetException(f"{ctx}.startup_sec missing or not an object")
+        startup_ctx = f"{ctx}.startup_sec"
 
         return cls(
-            baseline_sec_cycles=_require_field_float(block, "render_time", "baseline_sec_cycles"),
-            baseline_sec_eevee=_require_field_float(block, "render_time", "baseline_sec_eevee"),
+            baseline_sec_cycles=_require_field_float(block, ctx, "baseline_sec_cycles"),
+            baseline_sec_eevee=_require_field_float(block, ctx, "baseline_sec_eevee"),
             factors_cycles=_factors("factors_cycles"),
             factors_eevee=_factors("factors_eevee"),
             startup=RenderStartupSec(
-                baseline=_require_field_float(startup_block, "render_time.startup_sec", "baseline"),
-                download_per_gb=_require_field_float(startup_block, "render_time.startup_sec", "download_per_gb"),
-                bvh_per_million_verts=_require_field_float(startup_block, "render_time.startup_sec", "bvh_per_million_verts"),
-                texture_upload_per_gb=_require_field_float(startup_block, "render_time.startup_sec", "texture_upload_per_gb"),
-                shader_compile_base=_require_field_float(startup_block, "render_time.startup_sec", "shader_compile_base"),
-                shader_compile_per_node=_require_field_float(startup_block, "render_time.startup_sec", "shader_compile_per_node"),
-                max_total=_require_field_float(startup_block, "render_time.startup_sec", "max_total"),
+                baseline=_require_field_float(startup_block, startup_ctx, "baseline"),
+                download_per_gb=_require_field_float(startup_block, startup_ctx, "download_per_gb"),
+                bvh_per_million_verts=_require_field_float(startup_block, startup_ctx, "bvh_per_million_verts"),
+                texture_upload_per_gb=_require_field_float(startup_block, startup_ctx, "texture_upload_per_gb"),
+                shader_compile_base=_require_field_float(startup_block, startup_ctx, "shader_compile_base"),
+                shader_compile_per_node=_require_field_float(startup_block, startup_ctx, "shader_compile_per_node"),
+                max_total=_require_field_float(startup_block, startup_ctx, "max_total"),
             ),
         )
 
@@ -602,11 +622,60 @@ class FailureRateConfig:
 
     @classmethod
     def from_env(cls) -> FailureRateConfig:
-        block = _require_block("failure_rate")
+        block = _require_subblock("frame_allocation", "failure_rate")
+        ctx = "frame_allocation.failure_rate"
         return cls(
-            vast=_require_field_float(block, "failure_rate", "vast"),
-            modal=_require_field_float(block, "failure_rate", "modal"),
-            community=_require_field_float(block, "failure_rate", "community"),
+            vast=_require_field_float(block, ctx, "vast"),
+            modal=_require_field_float(block, ctx, "modal"),
+            community=_require_field_float(block, ctx, "community"),
+        )
+
+
+def _load_allocation_weights() -> "AllocationWeights":
+    """Read the allocator's tunables from
+    ``frame_allocation.weights`` in config.json and construct an
+    :class:`AllocationWeights`.  Imported lazily to avoid a circular
+    import (allocation_weights imports nothing from config; config
+    imports the dataclass shape only).
+    """
+    from serverV2.allocation.allocation_strategies.allocation_weights import (
+        AllocationWeights,
+    )
+    block = _require_subblock("frame_allocation", "weights")
+    ctx = "frame_allocation.weights"
+    return AllocationWeights(
+        speed_weight=_require_field_float(block, ctx, "speed_weight"),
+        cuda_weight=_require_field_float(block, ctx, "cuda_weight"),
+        os_weight=_require_field_float(block, ctx, "os_weight"),
+        max_targets=_require_field_int(block, ctx, "max_targets"),
+        min_frames_per_chunk=_require_field_int(block, ctx, "min_frames_per_chunk"),
+        fleet_diversification_cap=_require_field_float(block, ctx, "fleet_diversification_cap"),
+        gpu_type_diversification_cap=_require_field_float(block, ctx, "gpu_type_diversification_cap"),
+        vram_safety_factor=_require_field_float(block, ctx, "vram_safety_factor"),
+        startup_amortization_ratio=_require_field_float(block, ctx, "startup_amortization_ratio"),
+    )
+
+
+@dataclass(frozen=True)
+class FrameAllocationConfig:
+    """Aggregate of every knob the frame-allocator turns: scoring
+    weights, per-fleet startup buffer, per-fleet failure-rate widening,
+    and the render-time calibration block.  All sourced from the
+    ``frame_allocation`` block in config.json so tuning happens in one
+    place.
+    """
+    weights: "AllocationWeights"
+    startup_buffer: StartupBufferConfig
+    failure_rate: FailureRateConfig
+    render_time: RenderTimeConfig
+
+    @classmethod
+    def from_env(cls) -> FrameAllocationConfig:
+        return cls(
+            weights=_load_allocation_weights(),
+            startup_buffer=StartupBufferConfig.from_env(),
+            failure_rate=FailureRateConfig.from_env(),
+            render_time=RenderTimeConfig.from_env(),
         )
 
 
@@ -615,6 +684,7 @@ class AppConfig:
     vast: VastConfig
     modal: ModalConfig
     public_backend_url: str
+    frame_allocation: FrameAllocationConfig
     min_frames_per_worker: int = 2
     # Allocator threshold: how recently a community machine must have
     # heartbeated to be eligible for new dispatches.  Tight (15s) so we
@@ -646,13 +716,6 @@ class AppConfig:
     # string disables the endpoint (returns 503 to all callers).
     orphan_secret: str = ""
     stall: StallDetectionConfig = field(default_factory=StallDetectionConfig)
-    startup_buffer: StartupBufferConfig = field(default_factory=StartupBufferConfig)
-    failure_rate: FailureRateConfig = field(default_factory=FailureRateConfig)
-    # Render-time calibration knobs (per-engine baselines, feature
-    # multipliers, startup additives).  Loaded from config.json's
-    # ``render_time`` block; ``allocation_time_analyzer`` reads via
-    # module-level configure() at boot.
-    render_time: RenderTimeConfig | None = None
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -663,13 +726,11 @@ class AppConfig:
             vast=vast,
             modal=modal,
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
+            frame_allocation=FrameAllocationConfig.from_env(),
             community_price_per_hour=_load_community_price_per_hour(),
             community_dispatch_claim_timeout_sec=_require_field_int(
                 community_block, "community", "dispatch_claim_timeout_sec",
             ),
             orphan_secret=_env_str("ORPHAN_SECRET", ""),
             stall=StallDetectionConfig.from_env(),
-            startup_buffer=StartupBufferConfig.from_env(),
-            failure_rate=FailureRateConfig.from_env(),
-            render_time=RenderTimeConfig.from_env(),
         )

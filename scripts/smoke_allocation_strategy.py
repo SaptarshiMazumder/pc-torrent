@@ -38,6 +38,9 @@ from serverV2.allocation.allocation_strategies.allocation_planner import (
 from serverV2.allocation.allocation_strategies.allocation_strategy import (
     AllocationStrategy,
 )
+from serverV2.allocation.allocation_strategies.allocation_weights import (
+    AllocationWeights,
+)
 from serverV2.allocation.allocation_strategies.analyzers import (
     allocation_time_analyzer,
 )
@@ -229,7 +232,7 @@ def _build_strategy() -> AllocationStrategy:
             AllocationEngineCompatibilityValidator(),
         ],
     )
-    return AllocationStrategy(planner)
+    return AllocationStrategy(planner, weights=AllocationWeights())
 
 
 def _summarise(tasks: list, scenario: str) -> None:

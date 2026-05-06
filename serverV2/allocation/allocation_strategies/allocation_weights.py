@@ -6,9 +6,12 @@ longer a scoring factor (it bills users at dispatch time, but doesn't
 drive *what* gets picked).  Tier semantics moved to dispatch-queue
 priority (Phase F, future) -- the allocator no longer branches on tier.
 
-One bundle, one set of knobs.  Constants are tunable; values were chosen
-empirically and live here rather than in config.json because they belong
-to the algorithm, not the deployment.
+This file is the value-object shape only.  Production values are loaded
+from config.json's ``frame_allocation.weights`` block and injected at
+boot via :class:`FrameAllocationConfig` -- see ``serverV2.config``.
+The dataclass field defaults below are kept so unit tests / smoke
+scripts can construct an ``AllocationWeights()`` without going through
+the config loader.
 """
 
 from __future__ import annotations
@@ -52,10 +55,11 @@ class AllocationWeights:
     gpu_type_diversification_cap: float = 0.40
 
     # --- VRAM feasibility filter --------------------------------------
-    # Multiplier on estimated_required_vram.  Tighter (1.10) lets cheap
-    # small-VRAM cards in at OOM risk; looser (1.30) only admits cards
-    # with comfortable headroom.
-    vram_safety_factor: float = 1.20
+    # Multiplier on estimated_required_vram.  Looser (1.10) admits cards
+    # at the borderline -- relies on the retry pipeline to recover from
+    # the rare OOM.  Tighter (1.30) only admits cards with comfortable
+    # headroom.
+    vram_safety_factor: float = 1.10
 
     # --- Knapsack fan-out (the K-decision rule) -----------------------
     # Per-chunk render time must be at least this fraction of the
@@ -70,7 +74,3 @@ class AllocationWeights:
     # equalises wall-time across chunks so the slowest GPU doesn't
     # bottleneck the render.
     distribute_by: str = "time_balanced"
-
-
-# Singleton.  Importing modules use this directly; no presets.
-DEFAULT = AllocationWeights()

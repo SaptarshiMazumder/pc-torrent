@@ -426,6 +426,10 @@ export async function getRenderGroupOutputs(baseUrl, groupId) {
   return apiFetch(baseUrl, `/render-groups/${groupId}/outputs`);
 }
 
+export async function getRenderGroupPendingQueue(baseUrl, groupId, { signal } = {}) {
+  return apiFetch(baseUrl, `/render-groups/${groupId}/pending-queue`, { signal });
+}
+
 export async function cancelRenderGroup(baseUrl, groupId) {
   return apiFetch(baseUrl, `/render-groups/${groupId}/cancel`, { method: "POST" });
 }

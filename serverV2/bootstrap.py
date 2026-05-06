@@ -93,6 +93,9 @@ from serverV2.allocation.allocation_engine_resolver import (
 from serverV2.allocation.allocation_pending_queue_repository import (
     AllocationPendingQueueRepository,
 )
+from serverV2.allocation.pending_queue_redis_mirror import (
+    PendingQueueRedisMirror,
+)
 from serverV2.allocation.allocation_pending_tick_processor import (
     AllocationPendingTickProcessor,
 )
@@ -135,6 +138,28 @@ from serverV2.services.upload.coordinator import UploadCoordinator
 
 
 
+def _warm_pending_queue_redis_mirror(
+    repo: AllocationPendingQueueRepository,
+    mirror: PendingQueueRedisMirror,
+) -> None:
+    """One-shot at startup: read the entire pending_allocation_queue,
+    bucket by group_id, and seed the Redis mirror so the first
+    detail-page poll after boot doesn't pay a cold cache penalty.
+
+    All mirror writes are async — this function returns the moment the
+    submissions are queued; actual HSETs run on the mirror's executor.
+    """
+    from collections import defaultdict
+    items = repo.list_all()
+    if not items:
+        return
+    by_group: dict[str, list] = defaultdict(list)
+    for item in items:
+        by_group[item.group_id].append(item)
+    for group_id, group_items in by_group.items():
+        mirror.set_for_group(group_id, group_items)
+
+
 class Container:
     """Holds all wired-up components.  Created once at boot."""
 
@@ -157,6 +182,7 @@ class Container:
         asset_service: AssetService,
         status_aggregator: InstanceStatusAggregator,
         allocation_facade: AllocationFacade,
+        allocation_client: AllocationClient,
         allocation_dispatch_queue_daemon: AllocationDispatchQueueDaemon,
         fleet_availability_snapshot_cache: FleetAvailabilitySnapshotCache,
         pre_render_estimator: PreRenderEstimator,
@@ -181,6 +207,7 @@ class Container:
         # Phase A: new allocation module — constructed but inert.
         # Phase B starts the daemon and reroutes callers.
         self.allocation_facade = allocation_facade
+        self.allocation_client = allocation_client
         self.allocation_dispatch_queue_daemon = allocation_dispatch_queue_daemon
         self.fleet_availability_snapshot_cache = fleet_availability_snapshot_cache
         # Pre-submit RPC layer — stateless cost / wall-time estimator
@@ -390,7 +417,11 @@ def build(
 
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
-    pending_queue_repo = AllocationPendingQueueRepository()
+    # Per-group Redis cache for the pending_allocation_queue.  Writes are
+    # mirrored on a background executor so PG writes never block on Redis
+    # I/O; reads serve the detail-page poller's per-group fetch.
+    pending_queue_mirror = PendingQueueRedisMirror(redis_client=redis)
+    pending_queue_repo = AllocationPendingQueueRepository(mirror=pending_queue_mirror)
 
     # -- fleet availability: per-step builders + factory.  The cache
     # holds the snapshot; the daemon and orchestrator both go through
@@ -496,6 +527,12 @@ def build(
         enabled_fleets=list(_allocation_fleet_caps.keys()),
     )
     allocation_client = AllocationClient(facade=allocation_facade)
+
+    # Warm the per-group Redis cache from any pending rows already in
+    # Postgres (e.g. survivors of a previous deploy).  Submits to the
+    # mirror's executor — this call returns immediately; the actual
+    # HSETs happen in the background.
+    _warm_pending_queue_redis_mirror(pending_queue_repo, pending_queue_mirror)
 
     # -- anti-affinity: facade/service/repository for retry exclusion
     # resolution.  Resolves the union of (fleet, gpu_type) and
@@ -707,6 +744,7 @@ def build(
         asset_service=asset_service,
         status_aggregator=status_aggregator,
         allocation_facade=allocation_facade,
+        allocation_client=allocation_client,
         allocation_dispatch_queue_daemon=allocation_dispatch_queue_daemon,
         fleet_availability_snapshot_cache=fleet_availability_snapshot_cache,
         pre_render_estimator=pre_render_estimator,

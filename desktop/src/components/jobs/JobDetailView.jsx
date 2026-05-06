@@ -146,7 +146,13 @@ function RenderGroupDetail({
         {/* Chunks — primary view */}
         <FailedChunksPanel tasks={tasksList} backendUrl={backendUrl} groupId={id} onRefresh={onRefresh} />
         <CompletedChunksPanel tasks={tasksList} />
-        <PendingChunksPanel groupId={id} tasks={tasksList} />
+        <PendingChunksPanel
+          backendUrl={backendUrl}
+          groupId={id}
+          tasks={tasksList}
+          totalFrames={job.total_frames}
+          groupStatus={job.status}
+        />
 
         {/* Live (active/pending) instances — finished rows live in the
             sidebar drawer to keep the main column focused on what's

@@ -1,0 +1,262 @@
+@startuml phase2_pending_queue_redis_mirror
+title Phase 2 — Per-group Redis-mirrored pending allocation queue
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+legend top right
+  | <#fef3c7> | EXISTING (unchanged) |
+  | <#fde68a> | EXISTING (signature changes) |
+  | <#bbf7d0> | NEW |
+  | <#fecaca> | DB schema (no column changes; index only) |
+endlegend
+
+' ===========================================================
+' DB schema
+' ===========================================================
+package "Postgres" <<Database>> #fecaca {
+  class "pending_allocation_queue\n<<table — unchanged columns>>" as PgTable {
+    id : SERIAL PK
+    type : text
+    group_id : text  <<existing — used as Redis key>>
+    chunk_index, attempt
+    frame_start, frame_end, frame_step, total_frames
+    engine, tier
+    excluded_machine_ids JSONB
+    excluded_serverless_capabilities JSONB
+    render_overrides_json
+    max_retries, priority
+    machine_ids JSONB, input_filename
+    created_at, last_attempted_at
+    --
+    INDEX (group_id)  <<verify exists; add if missing>>
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/allocation
+' ===========================================================
+package "serverV2/allocation" <<Frame>> #e0f2fe {
+
+  package "(existing — minor add)" <<Rectangle>> #fde68a {
+    class AllocationFacade {
+      + park_initial(group_id, ...)
+      + park_retry(rj, ...)
+      + drain_for_group(group_id)
+      + list_pending_for_group(group_id) : list<Item>   <<NEW>>
+        ' delegates to PgRepo.list_for_group(group_id)
+      --
+      Module entrypoint. AllocationClient (orchestrator)
+      MUST go through this facade — not the repo.
+    }
+    class AllocationPendingTickProcessor {
+      + tick()
+    }
+    class "AllocationPendingItem\n<<dataclass — unchanged>>" as Item {
+      + id : int?
+      + type, group_id
+      + chunk_index, attempt, ...
+      + last_attempted_at
+    }
+  }
+
+  package "(existing — signature changes)" <<Rectangle>> #fde68a {
+    class "AllocationPendingQueueRepository\n(Postgres + composes mirror)" as PgRepo {
+      .. writes — pg sync, mirror async ..
+      + enqueue(item)              ' INSERT RETURNING id; submit mirror.add(item)
+      + update_last_attempted_at(row_id)  ' UPDATE; submit mirror.update_last_attempted_at(group_id,...)
+      + delete(row_id)             ' DELETE RETURNING group_id; submit mirror.remove(group_id, id)
+      + delete_for_group(group_id) ' DELETE; submit mirror.clear_for_group(group_id)
+      .. reads ..
+      + list_all() : list<Item>     ' Postgres only — daemon needs global state
+      + has_any() : bool            ' Postgres only — daemon idle-tick guard
+      + list_for_group(group_id : str) : list<Item>  <<NEW>>
+        ' try mirror.get_for_group(group_id)
+        ' miss → SQL: WHERE group_id = ?  → mirror.set_for_group(...)
+        ' return items
+      --
+      - mirror : PendingQueueRedisMirror   <<composition>>
+    }
+  }
+
+  package "pending_queue_mirror (new)" <<Rectangle>> #bbf7d0 {
+    class PendingQueueRedisMirror {
+      .. ASYNC writes — fire-and-forget on background executor ..
+      .. SYNC reads — caller awaits cache result ..
+      + add(item)                              <<async>>
+      + update_last_attempted_at(group_id, row_id, ts)  <<async>>
+      + remove(group_id, row_id)               <<async>>
+      + clear_for_group(group_id)              <<async — DEL key>>
+      + set_for_group(group_id, items)         <<async — used on rehydrate / warmup>>
+      + get_for_group(group_id) : list<Item> | None   <<sync>>
+      --
+      Key: pending_queue:group:{group_id}  (HASH)
+      Field: SQL row id (str)
+      Value: JSON of AllocationPendingItem
+      No TTL on hash.
+      Writes submitted to a small ThreadPoolExecutor
+      so PG callers never block on Redis I/O.
+      All ops fail-safe (Redis down → log + drop).
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/orchestrator
+' ===========================================================
+package "serverV2/orchestrator" <<Frame>> #e0f2fe {
+
+  package "(existing — minor add)" <<Rectangle>> #fde68a {
+    class AllocationClient {
+      + plan_initial(...)
+      + plan_retry(...)
+      + cancel_group(...)
+      + list_pending_for_group(group_id) : list<Item>   <<NEW>>
+        ' delegates to AllocationFacade.list_pending_for_group
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/api/routers
+' ===========================================================
+package "serverV2/api/routers" <<Frame>> #e0f2fe {
+
+  package "(existing — minor add)" <<Rectangle>> #fde68a {
+    class "render_groups.py\n<<router>>" as RenderGroupsRouter {
+      GET /render-groups
+      GET /render-groups/{id}
+      DELETE /render-groups/{id}
+      POST /render-groups/cancel-all
+      --
+      GET /render-groups/{id}/pending-queue   <<NEW>>
+        ' items = allocation_client.list_pending_for_group(id)
+        ' return {"items": [item_to_dict(i) for i in items]}
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/infrastructure
+' ===========================================================
+package "serverV2/infrastructure" <<Frame>> #e0f2fe {
+
+  package "(existing)" <<Rectangle>> #fef3c7 {
+    class RedisClient
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/bootstrap (warmup wiring)
+' ===========================================================
+package "serverV2/bootstrap.py" <<Frame>> #e0f2fe {
+
+  package "(existing — minor add)" <<Rectangle>> #fde68a {
+    class "bootstrap()" as Bootstrap {
+      ... existing wiring ...
+      --
+      one-shot warmup at startup:    <<NEW>>
+        rows = pg_repo.list_all()
+        group rows by group_id
+        for gid, items: mirror.set_for_group(gid, items)
+        (still async; warmup completes in background)
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: desktop frontend (Phase 4)
+' ===========================================================
+package "desktop frontend" <<Frame>> #f5e8ff {
+
+  package "src/hooks (new)" <<Rectangle>> #bbf7d0 {
+    class "usePendingQueue\n<<hook>>" as PendingHook {
+      + items, refresh()
+      --
+      poll cadence: every 10s
+      gated by frontend math —
+      polls only when chunks are MISSING
+      (not done / running / failed / cancelled
+       and not in retry-manual cache)
+      --
+      miss-counter: after N consecutive polls
+      where the pending list is EMPTY but
+      math still expects items → STOP polling.
+      Default N = 3 (≈30s of nothing).
+      --
+      Reset on: any chunk actually appears,
+      group goes terminal, or user clicks Refresh.
+    }
+  }
+
+  package "src/components/jobs (new)" <<Rectangle>> #bbf7d0 {
+    class PendingChunksPanel {
+      renders items filtered to current group_id
+      "No items pending" — math says none
+      "Stopped polling (chunk likely lost)" — after 3 misses
+      Manual Refresh always works
+    }
+  }
+}
+
+' ===========================================================
+' Write path (allocation internal)
+' ===========================================================
+AllocationFacade --> PgRepo : enqueue / delete_for_group
+AllocationPendingTickProcessor --> PgRepo : update_last_attempted_at / delete
+
+PgRepo --> PgTable : SQL (sync — source of truth)
+PgRepo ..> PendingQueueRedisMirror : submit(...) on background pool
+
+PendingQueueRedisMirror --> RedisClient : HSET / HGETALL / HDEL / DEL
+
+' ===========================================================
+' Read path — strict layering, no cross-module repo access
+' ===========================================================
+RenderGroupsRouter --> AllocationClient : list_pending_for_group(id)
+AllocationClient --> AllocationFacade : list_pending_for_group(id)
+AllocationFacade --> PgRepo : list_for_group(id)
+PgRepo ..> PendingQueueRedisMirror : HGETALL pending_queue:group:{id}
+PgRepo ..> PgTable : fallback (SELECT WHERE group_id = ?)
+
+' ===========================================================
+' Bootstrap
+' ===========================================================
+Bootstrap --> PgRepo : list_all
+Bootstrap --> PendingQueueRedisMirror : set_for_group (warmup)
+
+' ===========================================================
+' Frontend
+' ===========================================================
+PendingHook --> RenderGroupsRouter : GET /render-groups/{id}/pending-queue (gated)
+PendingChunksPanel --> PendingHook
+
+' ===========================================================
+' Notes
+' ===========================================================
+note top of PgRepo
+  No new DB writes anywhere.
+  Mirror calls are appended to existing SQL writes
+  via composition + a background executor — so the
+  PG caller's latency is unaffected. Redis hiccups
+  do not extend request time and cannot timeout the caller.
+end note
+
+note right of PendingQueueRedisMirror
+  Only new class.
+  Keying by group_id matches the URL shape:
+  the detail page already knows its group_id,
+  one HGETALL serves the request, no aggregation.
+end note
+
+note bottom of PgRepo
+  list_for_group() is the only Redis reader.
+  Cache miss path: single SQL fallback for that
+  one group_id → rehydrate cache.
+  Postgres remains source of truth on every flow.
+end note
+
+@enduml

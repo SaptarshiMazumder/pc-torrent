@@ -74,7 +74,7 @@ const ICON = {
 // "stall.loading_*".  Keep these in sync when the backend changes.
 // The watchdog computes:
 //   allowed = clamp(estimated_startup_seconds * multiplier, min, max)
-const LOADING_STALL_MULTIPLIER = 3.0;
+const LOADING_STALL_MULTIPLIER = 1.5;
 const LOADING_STALL_MIN_SEC = 60;
 const LOADING_STALL_MAX_SEC = 1800;
 

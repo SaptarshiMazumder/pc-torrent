@@ -16,6 +16,9 @@ from __future__ import annotations
 import logging
 
 from serverV2.allocation import AllocationFacade
+from serverV2.allocation.allocation_pending_queue_repository import (
+    AllocationPendingItem,
+)
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
@@ -78,6 +81,13 @@ class AllocationClient:
 
     def drain_for_group(self, group_id: str) -> int:
         return self._facade.drain_for_group(group_id)
+
+    # ------------------------------------------------------------------
+    # reads -- pending queue (per-group detail-page poller)
+    # ------------------------------------------------------------------
+
+    def list_pending_for_group(self, group_id: str) -> list[AllocationPendingItem]:
+        return self._facade.list_pending_for_group(group_id)
 
     # ------------------------------------------------------------------
     # reads -- cost intelligence

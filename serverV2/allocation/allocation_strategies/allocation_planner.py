@@ -251,22 +251,36 @@ class AllocationPlanner:
         if not eligible:
             return None
 
-        # Score each eligible against this exact chunk's frame count
+        # Score each eligible target.  Same scoring + selection pipeline
+        # as plan_initial -- using the shared selector means rules like
+        # "community-first" live in exactly one place
+        # (_select_with_diversification) and apply consistently to both
+        # initial planning and retry dispatch.
         chunk_frames = chunk_request.total_frames
-        best = max(
-            eligible,
-            key=lambda t: score_target(
-                render_speed=t.render_speed,
-                heaviness=heaviness,
-                estimated_chunk_frames=chunk_frames,
-                weights=weights,
-                cuda_version=_target_cuda(t),
-                host_os=_target_host_os(t),
-                engine=chunk_request.engine,
-                fleet=_target_fleet(t),
-                fleet_buffer_sec=self._buffer_for_target(t),
-            ),
-        )
+        scored = [
+            _ScoredTarget(
+                target=t,
+                score=score_target(
+                    render_speed=t.render_speed,
+                    heaviness=heaviness,
+                    estimated_chunk_frames=chunk_frames,
+                    weights=weights,
+                    cuda_version=_target_cuda(t),
+                    host_os=_target_host_os(t),
+                    engine=chunk_request.engine,
+                    fleet=_target_fleet(t),
+                    fleet_buffer_sec=self._buffer_for_target(t),
+                ),
+                fleet_key=_fleet_key(t),
+                gpu_type_key=_gpu_type_key(t),
+            )
+            for t in eligible
+        ]
+        scored.sort(key=lambda s: -s.score)
+        selected = self._select_with_diversification(scored, 1, weights)
+        if not selected:
+            return None
+        best = selected[0].target
         return self._target_to_task(
             target=best,
             heaviness=heaviness,
@@ -356,43 +370,70 @@ class AllocationPlanner:
         max_picks: int,
         weights: AllocationWeights,
     ) -> list[_ScoredTarget]:
-        """Two-axis diversification:
+        """Community-first selection with diversification on the
+        serverless remainder.
 
-          * fleet_cap  -- no single fleet (community / vast / modal) may
+        Community machines are user-owned hardware that's already paid
+        for and idle.  Whenever any community machine is eligible, ALL
+        eligible community machines are taken first (in score order
+        among themselves) before any serverless capability is picked.
+        The diversification cap below does NOT apply to community --
+        the cap was meant to stop a single serverless fleet/GPU class
+        from monopolising picks; community machines are individually
+        owned with no monopoly concern.
+
+        Diversification on the remaining (serverless) slots:
+
+          * fleet_cap  -- no single serverless fleet (vast / modal) may
                           hold more than ``fleet_diversification_cap``
-                          fraction of picks
+                          fraction of the serverless slots
           * gpu_cap    -- no single ``(fleet, gpu_type)`` may hold more
                           than ``gpu_type_diversification_cap`` fraction
-                          (community machines are unique by id, so the
-                          per-gpu-type cap is a no-op for them)
+                          of the serverless slots
 
         Targets that bust either cap go to the rejected pool and are
-        backfilled in score order if the soft caps left us under
-        ``max_picks``.  Both caps are floors-of-1 so a tiny render that
-        fits in one target still allocates.
+        backfilled in score order if the soft caps left us under the
+        remaining slot count.  Both caps are floors-of-1 so a tiny
+        render that fits in one target still allocates.
+
+        Used by both ``plan_initial`` (K = ideal_count) and
+        ``plan_retry`` (K = 1) so the rule lives in exactly one place.
         """
-        fleet_cap = max(1, int(max_picks * weights.fleet_diversification_cap))
-        gpu_cap = max(1, int(max_picks * weights.gpu_type_diversification_cap))
+        # Pass 1: take every community machine, in score order, up to
+        # max_picks.  Community is exempt from the diversification cap.
+        community_taken: set[str] = set()
+        community_picks: list[_ScoredTarget] = []
+        serverless_scored: list[_ScoredTarget] = []
+        for s in scored:
+            t = s.target
+            if isinstance(t, CommunityMachine):
+                if t.id in community_taken:
+                    continue
+                if len(community_picks) < max_picks:
+                    community_picks.append(s)
+                    community_taken.add(t.id)
+            else:
+                serverless_scored.append(s)
+
+        remaining = max_picks - len(community_picks)
+        if remaining <= 0:
+            return community_picks
+
+        # Pass 2: existing diversification logic on the serverless slice.
+        fleet_cap = max(1, int(remaining * weights.fleet_diversification_cap))
+        gpu_cap = max(1, int(remaining * weights.gpu_type_diversification_cap))
 
         selected: list[_ScoredTarget] = []
         rejected: list[_ScoredTarget] = []
         fleet_counts: dict[str, int] = defaultdict(int)
         gpu_counts: dict[str, int] = defaultdict(int)
-        community_taken: set[str] = set()
 
-        for s in scored:
-            if len(selected) >= max_picks:
+        for s in serverless_scored:
+            if len(selected) >= remaining:
                 break
-            t = s.target
-            # Community machines are unique by id -- can't take twice.
-            if isinstance(t, CommunityMachine):
-                if t.id in community_taken:
-                    continue
             if fleet_counts[s.fleet_key] >= fleet_cap:
                 rejected.append(s)
                 continue
-            # Per-gpu-type cap applies to serverless only -- community
-            # has empty gpu_type_key and falls through naturally.
             if s.gpu_type_key and gpu_counts[s.gpu_type_key] >= gpu_cap:
                 rejected.append(s)
                 continue
@@ -400,23 +441,16 @@ class AllocationPlanner:
             fleet_counts[s.fleet_key] += 1
             if s.gpu_type_key:
                 gpu_counts[s.gpu_type_key] += 1
-            if isinstance(t, CommunityMachine):
-                community_taken.add(t.id)
 
         # Backfill from the rejected pool, score-order preserved.
         # Backfill ignores both caps -- the picker already preferred
         # diversified picks; if we're still short, take what's left.
         for s in rejected:
-            if len(selected) >= max_picks:
+            if len(selected) >= remaining:
                 break
-            t = s.target
-            if isinstance(t, CommunityMachine) and t.id in community_taken:
-                continue
             selected.append(s)
-            if isinstance(t, CommunityMachine):
-                community_taken.add(t.id)
 
-        return selected
+        return community_picks + selected
 
     # ------------------------------------------------------------------
     # frame distribution -- time-balanced (inverse-proportional to spf)

@@ -41,9 +41,6 @@ from serverV2.allocation.allocation_strategies.allocation_strategy import (
 from serverV2.allocation.allocation_strategies.analyzers import (
     allocation_time_analyzer,
 )
-from serverV2.allocation.allocation_strategies.validators.allocation_eevee_linux_only_validator import (
-    AllocationEeveeLinuxOnlyValidator,
-)
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
 )
@@ -230,7 +227,6 @@ def _build_strategy() -> AllocationStrategy:
         startup_buffer=StartupBufferConfig(),  # vast=180, modal=120, community=0
         validators=[
             AllocationEngineCompatibilityValidator(),
-            AllocationEeveeLinuxOnlyValidator(),
         ],
     )
     return AllocationStrategy(planner)
@@ -338,42 +334,6 @@ def scenario_6_cuda_discrimination() -> None:
         f"expected cuda=13.0 to win, got cuda={first.cuda_version}"
 
 
-def scenario_7_eevee_os_discrimination() -> None:
-    """EEVEE render + two L40S offers identical except Linux vs Windows.
-    The hard validator (AllocationEeveeLinuxOnlyValidator) removes the
-    Windows offer from the eligible pool entirely -- Windows must
-    NEVER appear in the picks, regardless of how many slots K wants.
-    """
-    strategy = _build_strategy()
-    pool = AvailableResources(
-        community_machines=[],
-        serverless_capabilities=[
-            _vast_offer(gpu="L40S", speed=1.75, vram=48, dph=0.55,
-                        cuda="13.0", host_os="Linux 24.04", offer_id=8001),
-            _vast_offer(gpu="L40S", speed=1.75, vram=48, dph=0.50,
-                        cuda="13.0", host_os="Windows Server 2022", offer_id=8002),
-        ],
-        serverless_in_flight={_VAST: 0},
-    )
-    tasks = strategy.allocate_initial(
-        frame_start=1, frame_end=20, frame_step=1, total_frames=20,
-        resources=pool, engine="BLENDER_EEVEE", heaviness=_eevee_scene(),
-    )
-    _summarise(tasks, "7. EEVEE OS discrimination (Linux vs Windows L40S)")
-    # Hard validator: zero Windows offers in the picks.
-    windows_picks = [
-        t for t in tasks if "windows" in (t.host_os or "").lower()
-    ]
-    assert not windows_picks, (
-        f"expected no Windows picks on EEVEE; got "
-        f"{[t.offer_id for t in windows_picks]}"
-    )
-    # Sanity: the Linux offer should be picked at least once.
-    assert any("linux" in (t.host_os or "").lower() for t in tasks), (
-        f"expected at least one Linux pick on EEVEE, got 0"
-    )
-
-
 def scenario_8_diversification_cap() -> None:
     """Eight RTX 4090 offers with great scores + a few of other classes.
     With gpu_type_diversification_cap=0.40 and K large enough, the
@@ -410,6 +370,62 @@ def scenario_8_diversification_cap() -> None:
           f"(soft cap was {cap}, backfill may exceed)")
 
 
+def scenario_9_community_first() -> None:
+    """Three community machines + four high-scoring Vast offers.  With
+    K large enough to fit all community + some serverless, the planner
+    must pick ALL community first (regardless of how high the serverless
+    options score) and only then fill remaining slots from serverless.
+    The fleet-diversification cap is exempt for community.
+    """
+    strategy = _build_strategy()
+    community = [
+        _community_machine(mid="comm-A", speed=0.8, vram=24),
+        _community_machine(mid="comm-B", speed=1.0, vram=24),
+        _community_machine(mid="comm-C", speed=1.2, vram=24),
+    ]
+    # Mix of high-scoring serverless options that would otherwise
+    # outscore the community machines on speed alone.
+    serverless: list[FleetCapability] = [
+        _vast_offer(gpu="H100 SXM", speed=2.5, vram=80, dph=1.50,
+                    cuda="13.0", offer_id=9101),
+        _vast_offer(gpu="H100 NVL", speed=2.45, vram=94, dph=1.40,
+                    cuda="13.0", offer_id=9102),
+        _vast_offer(gpu="RTX 4090", speed=1.45, vram=24, dph=0.18,
+                    cuda="13.0", offer_id=9103),
+        _vast_offer(gpu="L40S", speed=1.75, vram=48, dph=0.55,
+                    cuda="13.0", offer_id=9104),
+    ]
+    pool = AvailableResources(
+        community_machines=community,
+        serverless_capabilities=serverless,
+        serverless_in_flight={_VAST: 0, _MODAL: 0, "community": 0},
+    )
+    tasks = strategy.allocate_initial(
+        frame_start=1, frame_end=80, frame_step=1, total_frames=80,
+        resources=pool, engine="CYCLES", heaviness=_medium_scene(),
+    )
+    _summarise(tasks, "9. Community-first preference (3 community + 4 vast)")
+    community_picks = [t for t in tasks if t.fleet == "community"]
+    if len(tasks) >= len(community):
+        assert len(community_picks) == len(community), (
+            f"expected all {len(community)} community machines picked; "
+            f"got {len(community_picks)}"
+        )
+    # Community must precede every serverless pick in the returned list.
+    first_serverless_idx = next(
+        (i for i, t in enumerate(tasks) if t.fleet != "community"),
+        len(tasks),
+    )
+    last_community_idx = max(
+        (i for i, t in enumerate(tasks) if t.fleet == "community"),
+        default=-1,
+    )
+    assert last_community_idx < first_serverless_idx, (
+        f"community must precede serverless; "
+        f"last_community={last_community_idx} first_serverless={first_serverless_idx}"
+    )
+
+
 # ---------------------------------------------------------------------
 
 def main() -> int:
@@ -420,8 +436,8 @@ def main() -> int:
         scenario_4_medium,
         scenario_5_big,
         scenario_6_cuda_discrimination,
-        scenario_7_eevee_os_discrimination,
         scenario_8_diversification_cap,
+        scenario_9_community_first,
     ]
     failed = 0
     for fn in scenarios:

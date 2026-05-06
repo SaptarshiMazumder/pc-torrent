@@ -56,9 +56,6 @@ from serverV2.allocation.allocation_strategies.allocation_planner import (
 from serverV2.allocation.allocation_strategies.allocation_strategy import (
     AllocationStrategy,
 )
-from serverV2.allocation.allocation_strategies.validators.allocation_eevee_linux_only_validator import (
-    AllocationEeveeLinuxOnlyValidator,
-)
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
 )
@@ -378,10 +375,9 @@ def build(
         allocation_time_analyzer.configure(cfg.render_time)
 
     # Single planner does the work.  Owns target validators (engine
-    # compatibility, EEVEE-Linux-only on Vast; future: tier / price caps).
+    # compatibility today; future: tier / price caps).
     target_validators = [
         AllocationEngineCompatibilityValidator(),
-        AllocationEeveeLinuxOnlyValidator(),
     ]
     allocation_planner = AllocationPlanner(
         registry,

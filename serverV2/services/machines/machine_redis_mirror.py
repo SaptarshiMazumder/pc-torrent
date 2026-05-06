@@ -1,11 +1,12 @@
-"""MachineHeartbeatRepository — Redis-side machine state.
+"""MachineRedisMirror — Redis-side state for community machines.
 
-Two parallel concerns, both cached in Redis:
+Two parallel concerns, both backed by Redis:
 
 1. **Liveness** -- which agents are currently pinging.
    Single sorted set ``machines:alive`` keyed by machine_id, scored by
    unix timestamp of the last heartbeat.  One Redis read returns all
-   alive ids regardless of pool size; no N+1 EXISTS calls.
+   alive ids regardless of pool size; no N+1 EXISTS calls.  Redis is
+   the **source of truth** here -- no PG counterpart.
 
      Heartbeat write     : ZADD machines:alive <unix_ts> <machine_id>
      Read alive cohort   : ZRANGEBYSCORE machines:alive (now - stale) +inf
@@ -17,23 +18,25 @@ Two parallel concerns, both cached in Redis:
    (``idle`` / ``available`` / ``processing``).  Postgres remains the
    source of truth on disk; Redis is the fast read path used by the
    allocator and the heartbeat-driven self-heal in
-   ``JobService.next_for_machine``.  Every Postgres status update goes
-   through ``MachineStateWriter``, which mirrors here.
+   ``JobService.next_for_machine``.  Status writes are submitted to a
+   small ThreadPoolExecutor so the PG caller (``MachineRepository``)
+   never blocks on Redis I/O.
 
-     Status write     : HSET machines:status <id> <status>
-     Status read      : HGET machines:status <id>
-     All ids by status: HGETALL machines:status (filter in Python)
+     Status write     : HSET machines:status <id> <status>   (async)
+     Status read      : HGET machines:status <id>            (sync)
+     All ids by status: HGETALL machines:status (filter)     (sync)
 
-This class replaces the previous Postgres ``machines.last_seen_at``
-write-on-every-heartbeat pattern, which was hitting Neon
-connection-killed-mid-request errors and surfacing as 500s on dependent
-endpoints.
+Renamed from ``MachineHeartbeatRepository`` -- the old name understated
+the surface (status mirror was already living here).  Same Redis keys
+and same wire format; only the class name and the write timing for the
+status mirror have changed.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import redis
 
@@ -50,10 +53,22 @@ _STATUS_KEY = "machines:status"
 _SET_TTL_SEC = 24 * 60 * 60
 
 
-class MachineHeartbeatRepository:
+class MachineRedisMirror:
 
-    def __init__(self, redis_client: RedisClient) -> None:
+    def __init__(
+        self,
+        redis_client: RedisClient,
+        executor: ThreadPoolExecutor | None = None,
+    ) -> None:
         self._redis_client = redis_client
+        self._executor = executor or ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="machine-redis-mirror",
+        )
+
+    # ------------------------------------------------------------------
+    # liveness — Redis is source of truth, sync ops
+    # ------------------------------------------------------------------
 
     def record(self, machine_id: str) -> None:
         """Stamp this machine's heartbeat with the current unix timestamp."""
@@ -67,7 +82,7 @@ class MachineHeartbeatRepository:
             pipe.execute()
         except redis.RedisError as exc:
             log.warning(
-                "MachineHeartbeat record failed for %s: %s", machine_id, exc,
+                "MachineRedisMirror record failed for %s: %s", machine_id, exc,
             )
 
     def alive_ids(self, stale_seconds: float) -> set[str] | None:
@@ -82,7 +97,7 @@ class MachineHeartbeatRepository:
         try:
             members = client.zrangebyscore(_SET_KEY, cutoff, "+inf")
         except redis.RedisError as exc:
-            log.warning("MachineHeartbeat alive_ids failed: %s", exc)
+            log.warning("MachineRedisMirror alive_ids failed: %s", exc)
             return None
         return {m.decode() if isinstance(m, bytes) else m for m in members}
 
@@ -108,30 +123,20 @@ class MachineHeartbeatRepository:
         try:
             return int(client.zremrangebyscore(_SET_KEY, 0, cutoff))
         except redis.RedisError as exc:
-            log.warning("MachineHeartbeat prune_stale failed: %s", exc)
+            log.warning("MachineRedisMirror prune_stale failed: %s", exc)
             return 0
 
     # ------------------------------------------------------------------
-    # status cache (mirror of machines.status)
+    # status cache (mirror of machines.status) — async writes, sync reads
     # ------------------------------------------------------------------
 
     def set_status(self, machine_id: str, status: str) -> None:
-        """Mirror the machines.status field into Redis.  Best-effort:
-        Redis down is logged and ignored -- Postgres still has the truth
-        and the next read falls back to PG."""
-        client = self._redis_client.client()
-        if client is None:
-            return
-        try:
-            pipe = client.pipeline(transaction=False)
-            pipe.hset(_STATUS_KEY, machine_id, status)
-            pipe.expire(_STATUS_KEY, _SET_TTL_SEC)
-            pipe.execute()
-        except redis.RedisError as exc:
-            log.warning(
-                "MachineHeartbeat set_status failed for %s -> %s: %s",
-                machine_id, status, exc,
-            )
+        """Submit an HSET to the executor -- caller returns immediately."""
+        self._executor.submit(self._set_status_sync, machine_id, status)
+
+    def clear_status(self, machine_id: str) -> None:
+        """Submit an HDEL to the executor -- caller returns immediately."""
+        self._executor.submit(self._clear_status_sync, machine_id)
 
     def get_status(self, machine_id: str) -> str | None:
         """Read the cached status.  Returns None on cache miss OR Redis
@@ -142,7 +147,7 @@ class MachineHeartbeatRepository:
         try:
             value = client.hget(_STATUS_KEY, machine_id)
         except redis.RedisError as exc:
-            log.warning("MachineHeartbeat get_status failed for %s: %s", machine_id, exc)
+            log.warning("MachineRedisMirror get_status failed for %s: %s", machine_id, exc)
             return None
         if value is None:
             return None
@@ -158,7 +163,7 @@ class MachineHeartbeatRepository:
         try:
             entries = client.hgetall(_STATUS_KEY)
         except redis.RedisError as exc:
-            log.warning("MachineHeartbeat available_ids failed: %s", exc)
+            log.warning("MachineRedisMirror available_ids failed: %s", exc)
             return None
         out: set[str] = set()
         for mid, status in entries.items():
@@ -168,9 +173,26 @@ class MachineHeartbeatRepository:
                 out.add(mid_s)
         return out
 
-    def clear_status(self, machine_id: str) -> None:
-        """Drop a machine from the status cache.  Used when a machine
-        row is destroyed.  Best-effort."""
+    # ------------------------------------------------------------------
+    # internal -- run on the executor
+    # ------------------------------------------------------------------
+
+    def _set_status_sync(self, machine_id: str, status: str) -> None:
+        client = self._redis_client.client()
+        if client is None:
+            return
+        try:
+            pipe = client.pipeline(transaction=False)
+            pipe.hset(_STATUS_KEY, machine_id, status)
+            pipe.expire(_STATUS_KEY, _SET_TTL_SEC)
+            pipe.execute()
+        except redis.RedisError as exc:
+            log.warning(
+                "MachineRedisMirror set_status failed for %s -> %s: %s",
+                machine_id, status, exc,
+            )
+
+    def _clear_status_sync(self, machine_id: str) -> None:
         client = self._redis_client.client()
         if client is None:
             return

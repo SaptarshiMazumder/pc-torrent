@@ -90,6 +90,13 @@ class AllocationClient:
         return self._facade.list_pending_for_group(group_id)
 
     # ------------------------------------------------------------------
+    # reads -- fleet availability snapshot
+    # ------------------------------------------------------------------
+
+    def list_available_machines(self):
+        return self._facade.list_available_machines()
+
+    # ------------------------------------------------------------------
     # reads -- cost intelligence
     # ------------------------------------------------------------------
 

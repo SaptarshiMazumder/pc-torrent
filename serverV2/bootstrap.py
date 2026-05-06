@@ -116,11 +116,8 @@ from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.job_terminal_cache import JobTerminalCache
-from serverV2.services.machines.machine_heartbeat_repository import (
-    MachineHeartbeatRepository,
-)
+from serverV2.services.machines.machine_redis_mirror import MachineRedisMirror
 from serverV2.services.machines.machine_repository import MachineRepository
-from serverV2.services.machines.machine_state_writer import MachineStateWriter
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.progress_repository import ProgressRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
@@ -251,7 +248,12 @@ def build(
     # and JobService (reader side: ``_assert_not_terminal``).
     job_terminal_cache = JobTerminalCache(redis)
     job_repo = JobRepository(terminal_cache=job_terminal_cache)
+    # Redis-side machine state (heartbeat liveness + status mirror).
+    # Composed into MachineRepository so every PG status write fires
+    # an async Redis mirror op alongside.
+    machine_redis_mirror = MachineRedisMirror(redis)
     machine_repo = MachineRepository(
+        mirror=machine_redis_mirror,
         stale_seconds=cfg.machine_stale_seconds,
         community_price_per_hour=cfg.community_price_per_hour,
     )
@@ -263,13 +265,6 @@ def build(
     scene_resolver = SceneResolver()
     asset_repo = UserInputFileRepository()
     heartbeat_repo = HeartbeatRepository(redis)
-    machine_heartbeat_repo = MachineHeartbeatRepository(redis)
-    # Single writer for the machines.status field -- every status
-    # mutation goes through here so PG and Redis stay in lockstep.
-    machine_state_writer = MachineStateWriter(
-        machine_repo=machine_repo,
-        machine_heartbeat_repo=machine_heartbeat_repo,
-    )
     progress_repo = ProgressRepository(redis)
     worker_start_repo = WorkerStartRepository(redis)
     in_progress_repo = InProgressChunkRepository()
@@ -385,7 +380,7 @@ def build(
     # -- community fleet --
     community_strategy = CommunityStrategy(
         job_repo=job_repo,
-        machine_state_writer=machine_state_writer,
+        machine_repo=machine_repo,
     )
     registry.register(community_strategy)
 
@@ -440,7 +435,7 @@ def build(
         ),
         community=CommunityAvailabilityBuilder(
             machine_repo=machine_repo,
-            machine_heartbeat_repo=machine_heartbeat_repo,
+            machine_redis_mirror=machine_redis_mirror,
             stale_seconds=cfg.machine_stale_seconds,
         ),
         in_progress_serverless_fleet=InProgressServerlessFleetBuilder(
@@ -572,7 +567,7 @@ def build(
         job_repo=job_repo,
         group_repo=group_repo,
         in_progress_repo=in_progress_repo,
-        state_writer=machine_state_writer,
+        machine_repo=machine_repo,
         fleet_registry=registry,
         retry_executor=retry_executor,
         reconcile_group=_reconcile_group,
@@ -596,7 +591,6 @@ def build(
         job_repo=job_repo,
         group_repo=group_repo,
         machine_repo=machine_repo,
-        machine_state_writer=machine_state_writer,
         in_progress_repo=in_progress_repo,
         telemetry_repo=telemetry_repo,
         output_frame_repo=output_frame_repo,
@@ -636,7 +630,7 @@ def build(
         group_repo=group_repo,
         machine_repo=machine_repo,
         heartbeat_repo=heartbeat_repo,
-        machine_heartbeat_repo=machine_heartbeat_repo,
+        machine_redis_mirror=machine_redis_mirror,
         output_frame_repo=output_frame_repo,
         progress_repo=progress_repo,
         on_failure=_on_failure,
@@ -694,8 +688,7 @@ def build(
         job_repo=job_repo,
         machine_repo=machine_repo,
         heartbeat_repo=heartbeat_repo,
-        machine_heartbeat_repo=machine_heartbeat_repo,
-        machine_state_writer=machine_state_writer,
+        machine_redis_mirror=machine_redis_mirror,
         progress_repo=progress_repo,
         worker_start_repo=worker_start_repo,
         outputs_resolver=outputs_resolver,
@@ -709,8 +702,8 @@ def build(
 
     machine_service = MachineService(
         orchestrator=orchestrator,
-        machine_heartbeat_repo=machine_heartbeat_repo,
-        state_writer=machine_state_writer,
+        machine_repo=machine_repo,
+        mirror=machine_redis_mirror,
         vast_config=cfg.vast,
         modal_config=cfg.modal,
     )

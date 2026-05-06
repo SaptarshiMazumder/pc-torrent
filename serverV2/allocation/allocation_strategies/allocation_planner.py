@@ -72,7 +72,7 @@ from serverV2.allocation.allocation_strategies.validators.allocation_target_vali
 from serverV2.allocation.allocation_strategies.validators.allocation_validation_context import (
     AllocationValidationContext,
 )
-from serverV2.config import StartupBufferConfig
+from serverV2.config import StartupBufferConfig, VramFleetBoostConfig
 from serverV2.core.models import (
     AvailableResources,
     CommunityMachine,
@@ -99,9 +99,11 @@ class AllocationPlanner:
         registry: FleetRegistry,
         startup_buffer: StartupBufferConfig | None = None,
         validators: list[AllocationTargetValidator] | None = None,
+        vram_fleet_boost: VramFleetBoostConfig | None = None,
     ) -> None:
         self._registry = registry
         self._startup_buffer = startup_buffer or StartupBufferConfig()
+        self._vram_boost = vram_fleet_boost or VramFleetBoostConfig()
         self._validators: tuple[AllocationTargetValidator, ...] = tuple(validators or ())
 
     # ------------------------------------------------------------------
@@ -320,8 +322,9 @@ class AllocationPlanner:
         context: AllocationValidationContext,
     ) -> list:
         out: list = []
+        community_boost = self._vram_boost.for_fleet("community")
         for m in resources.community_machines:
-            if m.vram_gb < vram_floor:
+            if m.vram_gb * community_boost < vram_floor:
                 continue
             if not self._passes_validators(m, context):
                 continue
@@ -330,7 +333,7 @@ class AllocationPlanner:
         for cap in resources.serverless_capabilities:
             if not self._registry.is_enabled(cap.fleet):
                 continue
-            if cap.vram_gb < vram_floor:
+            if cap.vram_gb * self._vram_boost.for_fleet(cap.fleet) < vram_floor:
                 continue
             if not self._passes_validators(cap, context):
                 continue

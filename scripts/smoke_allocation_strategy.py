@@ -47,7 +47,7 @@ from serverV2.allocation.allocation_strategies.analyzers import (
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
 )
-from serverV2.config import RenderTimeConfig, StartupBufferConfig
+from serverV2.config import RenderTimeConfig, StartupBufferConfig, VramFleetBoostConfig
 from serverV2.core.models import (
     AvailableResources,
     CommunityMachine,
@@ -224,13 +224,16 @@ def _eevee_scene() -> dict:
 # Strategy harness
 # ---------------------------------------------------------------------
 
-def _build_strategy() -> AllocationStrategy:
+def _build_strategy(
+    *, vram_fleet_boost: VramFleetBoostConfig | None = None,
+) -> AllocationStrategy:
     planner = AllocationPlanner(
         registry=_AllEnabledRegistry(),
         startup_buffer=StartupBufferConfig(),  # vast=180, modal=120, community=0
         validators=[
             AllocationEngineCompatibilityValidator(),
         ],
+        vram_fleet_boost=vram_fleet_boost,
     )
     return AllocationStrategy(planner, weights=AllocationWeights())
 
@@ -429,6 +432,62 @@ def scenario_9_community_first() -> None:
     )
 
 
+def scenario_10_community_vram_boost() -> None:
+    """A borderline community machine (small VRAM) is filtered out by
+    the default VRAM gate but admitted when ``vram_fleet_boost.community``
+    > 1.0.  Demonstrates the per-fleet boost knob: same machine, same
+    scene, different policy.
+    """
+    # Scene that needs ~10-12 GB after the safety factor.
+    heaviness = parse_analysis_heaviness(None, file_size_bytes=400 * 1024 * 1024)
+    heaviness["render_engine"] = "CYCLES"
+    heaviness["samples"] = 512
+    heaviness["vertex_count_total"] = 5_000_000
+    heaviness["effective_pixels"] = 1920 * 1080
+    heaviness["texture_total_bytes"] = 5 * 1024 * 1024 * 1024  # 5 GB tex
+
+    machine = _community_machine(mid="comm-borderline", speed=1.0, vram=8)
+    pool = AvailableResources(
+        community_machines=[machine],
+        serverless_capabilities=[
+            _vast_offer(gpu="RTX 4090", speed=1.45, vram=24, dph=0.18,
+                        cuda="13.0", offer_id=10001),
+        ],
+        serverless_in_flight={_VAST: 0, _MODAL: 0, "community": 0},
+    )
+
+    # Run 1: no boost (defaults all 1.0) -> 8 GB community is filtered.
+    plain_strategy = _build_strategy(vram_fleet_boost=VramFleetBoostConfig())
+    tasks_plain = plain_strategy.allocate_initial(
+        frame_start=1, frame_end=20, frame_step=1, total_frames=20,
+        resources=pool, engine="CYCLES", heaviness=heaviness,
+    )
+    plain_community = [t for t in tasks_plain if t.fleet == "community"]
+    assert not plain_community, (
+        f"expected 8GB community machine to be filtered without boost; "
+        f"got {len(plain_community)} community pick(s)"
+    )
+
+    # Run 2: boost community to 1.5 -> 8 GB acts as 12 GB, machine admitted.
+    boosted_strategy = _build_strategy(
+        vram_fleet_boost=VramFleetBoostConfig(community=1.5),
+    )
+    tasks_boosted = boosted_strategy.allocate_initial(
+        frame_start=1, frame_end=20, frame_step=1, total_frames=20,
+        resources=pool, engine="CYCLES", heaviness=heaviness,
+    )
+    boosted_community = [t for t in tasks_boosted if t.fleet == "community"]
+    assert boosted_community, (
+        f"expected 8GB community machine to be admitted with 1.5x boost; "
+        f"got 0 community picks (all={len(tasks_boosted)})"
+    )
+
+    _summarise(
+        tasks_boosted,
+        "10. Community VRAM boost (8GB machine, boost=1.5, heavy scene)",
+    )
+
+
 # ---------------------------------------------------------------------
 
 def main() -> int:
@@ -441,6 +500,7 @@ def main() -> int:
         scenario_6_cuda_discrimination,
         scenario_8_diversification_cap,
         scenario_9_community_first,
+        scenario_10_community_vram_boost,
     ]
     failed = 0
     for fn in scenarios:

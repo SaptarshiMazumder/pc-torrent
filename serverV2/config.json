@@ -42,15 +42,20 @@
   },
   "frame_allocation": {
     "weights": {
-      "speed_weight": 0.70,
-      "cuda_weight": 0.20,
-      "os_weight": 0.10,
+      "speed_weight": 0.7,
+      "cuda_weight": 0.2,
+      "os_weight": 0.1,
       "max_targets": 60,
-      "min_frames_per_chunk": 4,
+      "min_frames_per_chunk": 8,
       "fleet_diversification_cap": 0.85,
-      "gpu_type_diversification_cap": 0.40,
-      "vram_safety_factor": 1.10,
+      "gpu_type_diversification_cap": 0.25,
+      "vram_safety_factor": 1.1,
       "startup_amortization_ratio": 0.5
+    },
+    "vram_fleet_boost": {
+      "vast": 1.0,
+      "modal": 1.0,
+      "community": 1.5
     },
     "startup_buffer_sec": {
       "vast": 300,

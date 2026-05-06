@@ -477,6 +477,46 @@ class StallDetectionConfig:
 
 
 @dataclass(frozen=True)
+class VramFleetBoostConfig:
+    """Per-fleet multiplier on a target's effective VRAM during the
+    eligibility check.  The planner's check is::
+
+        target.vram_gb * fleet_boost >= required_vram * vram_safety_factor
+
+    Vast / Modal default to 1.0 (treat the GPU's real VRAM at face value)
+    because spinning up paid compute to hit an OOM costs real money.
+    Community defaults > 1.0 (treat the user's own hardware as if it had
+    more VRAM than the estimator's pessimistic floor) -- the trade-off
+    is a rare OOM that the retry pipeline reassigns to a bigger card,
+    in exchange for hitting the user's idle hardware much more often.
+    """
+    vast: float = 1.0
+    modal: float = 1.0
+    community: float = 1.0
+
+    def for_fleet(self, fleet: str | None) -> float:
+        if not fleet:
+            return 1.0
+        if fleet == "vast_serverless":
+            return self.vast
+        if fleet == "modal_serverless":
+            return self.modal
+        if fleet == "community":
+            return self.community
+        return 1.0
+
+    @classmethod
+    def from_env(cls) -> VramFleetBoostConfig:
+        block = _require_subblock("frame_allocation", "vram_fleet_boost")
+        ctx = "frame_allocation.vram_fleet_boost"
+        return cls(
+            vast=_require_field_float(block, ctx, "vast"),
+            modal=_require_field_float(block, ctx, "modal"),
+            community=_require_field_float(block, ctx, "community"),
+        )
+
+
+@dataclass(frozen=True)
 class StartupBufferConfig:
     """Per-fleet startup-time additive in seconds.  Modelled in the
     allocation time analyzer so short chunks don't make Vast look
@@ -660,11 +700,12 @@ def _load_allocation_weights() -> "AllocationWeights":
 class FrameAllocationConfig:
     """Aggregate of every knob the frame-allocator turns: scoring
     weights, per-fleet startup buffer, per-fleet failure-rate widening,
-    and the render-time calibration block.  All sourced from the
-    ``frame_allocation`` block in config.json so tuning happens in one
-    place.
+    per-fleet VRAM boost, and the render-time calibration block.  All
+    sourced from the ``frame_allocation`` block in config.json so
+    tuning happens in one place.
     """
     weights: "AllocationWeights"
+    vram_fleet_boost: VramFleetBoostConfig
     startup_buffer: StartupBufferConfig
     failure_rate: FailureRateConfig
     render_time: RenderTimeConfig
@@ -673,6 +714,7 @@ class FrameAllocationConfig:
     def from_env(cls) -> FrameAllocationConfig:
         return cls(
             weights=_load_allocation_weights(),
+            vram_fleet_boost=VramFleetBoostConfig.from_env(),
             startup_buffer=StartupBufferConfig.from_env(),
             failure_rate=FailureRateConfig.from_env(),
             render_time=RenderTimeConfig.from_env(),

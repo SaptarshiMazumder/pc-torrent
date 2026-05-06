@@ -16,6 +16,7 @@ import {
 import {
   getTerminalDetailFromCache,
   setTerminalDetailInCache,
+  clearTerminalDetailFromCache,
 } from "../utils/terminalDetailCache";
 import JobGrid from "../components/jobs/JobGrid";
 import JobDetailView from "../components/jobs/JobDetailView";
@@ -24,7 +25,7 @@ import { useDownloads } from "../contexts/DownloadContext";
 
 const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
 
-export default function MyJobsPage({ jobs, loading, loadingMore, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onNavigate }) {
+export default function MyJobsPage({ jobs, loading, loadingMore, removeJob, backendUrl, markRenderGroupCancelled, updateGroup, onRefresh, onNavigate }) {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [cancelingAll, setCancelingAll] = useState(false);
@@ -220,6 +221,34 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
     setSelectedJobId(null);
   }, []);
 
+  // Detail-page Refresh: fetch ONLY the selected group via
+  // /render-groups/{id}.  No paginated list re-fetch — that would be
+  // wasted work since the user only cares about the open detail.
+  // Terminal groups also get their persistent localStorage cache busted
+  // so a group flipping terminal -> pending -> terminal (e.g. via
+  // manual retry) doesn't keep serving the original frozen DTO.
+  const [refreshingDetail, setRefreshingDetail] = useState(false);
+  const handleRefreshFromDetail = useCallback(async () => {
+    if (!selectedJobId || !backendUrl) return;
+    setRefreshingDetail(true);
+    clearTerminalDetailFromCache(selectedJobId);
+    setTerminalDetailJob(null);
+    try {
+      const data = await getRenderGroup(backendUrl, selectedJobId);
+      if (!data) return;
+      if (TERMINAL_STATUSES.has(data.status)) {
+        setTerminalDetailInCache(selectedJobId, data);
+        setTerminalDetailJob(data);
+      } else {
+        updateGroup?.(selectedJobId, data);
+      }
+    } catch {
+      // network error — leave UI as-is, user can retry
+    } finally {
+      setRefreshingDetail(false);
+    }
+  }, [selectedJobId, backendUrl, updateGroup]);
+
   // Build handlers for selected job
   const getHandlers = (job) => {
     const id = jobKey(job);
@@ -359,8 +388,9 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
             galleryOpen={!!openFrameGalleries[selectedJobId]}
             galleryState={frameGalleries[selectedJobId]}
             openingFrameKey={openingFrameKey}
+            refreshing={refreshingDetail}
             onBack={handleBack}
-            onRefresh={onRefresh}
+            onRefresh={handleRefreshFromDetail}
             {...getHandlers(jobForDetail)}
           />
         );

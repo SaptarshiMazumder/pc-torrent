@@ -3219,6 +3219,263 @@ body {
   flex: 1;
 }
 
+/* Render-group detail: drawer is a fixed overlay pinned to the right of
+   the viewport.  Main content takes full width; drawer overlays content
+   underneath when expanded. */
+.jd-body-split {
+  position: relative;
+}
+
+.jd-main {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Right-edge rail that holds the stacked fixed drawers (instances + scene).
+   Each drawer right-aligns inside the rail and sizes itself; the rail
+   constrains overall vertical extent. */
+.jd-drawers-rail {
+  position: fixed;
+  top: 80px;
+  right: 16px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+  max-height: calc(100vh - 100px);
+  pointer-events: none;
+}
+
+.jd-drawers-rail > * { pointer-events: auto; }
+
+.jd-drawer {
+  background: rgba(18, 16, 30, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(180, 175, 220, 0.14);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: -4px 6px 18px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.jd-drawer-open { width: 380px; }
+
+/* Collapsed state — circular floating button with the drawer's icon. */
+.jd-drawer-collapsed {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border-color: rgba(232, 114, 74, 0.3);
+  background: linear-gradient(135deg, rgba(232, 114, 74, 0.18), rgba(18, 16, 30, 0.92));
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+
+.jd-drawer-collapsed:hover {
+  transform: translateY(-2px);
+  border-color: rgba(232, 114, 74, 0.6);
+  box-shadow: -4px 8px 22px rgba(232, 114, 74, 0.25), -4px 6px 18px rgba(0, 0, 0, 0.4);
+}
+
+.jd-drawer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+
+.jd-drawer-toggle:hover { color: var(--accent); }
+
+.jd-drawer-toggle-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.jd-drawer-toggle-label { flex: 1; text-align: left; }
+
+.jd-drawer-toggle-chevron { opacity: 0.55; transition: opacity 0.15s; }
+.jd-drawer-toggle:hover .jd-drawer-toggle-chevron { opacity: 1; }
+
+.jd-drawer-collapsed .jd-drawer-toggle {
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  gap: 0;
+  color: var(--accent);
+}
+
+.jd-drawer-collapsed .jd-drawer-toggle-icon {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  line-height: 0;
+  transform: translate(-1px, -1px);
+}
+
+.jd-drawer-collapsed .jd-drawer-toggle-icon svg {
+  display: block;
+  filter: drop-shadow(0 0 6px rgba(232, 114, 74, 0.4));
+}
+
+.jd-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 12px 12px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Completed chunks compact grid */
+.cc-show-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(34, 197, 94, 0.04);
+  border: 1px dashed rgba(34, 197, 94, 0.2);
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.cc-show-more:hover {
+  color: #eeedf5;
+  background: rgba(34, 197, 94, 0.08);
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+.cc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.cc-cell {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(34, 197, 94, 0.05);
+  border: 1px solid rgba(34, 197, 94, 0.15);
+  transition: background 0.15s;
+}
+
+.cc-cell:hover { background: rgba(34, 197, 94, 0.08); }
+
+.cc-cell-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cc-cell-tick { flex-shrink: 0; }
+
+.cc-cell-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #eeedf5;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.cc-cell-machine {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: auto;
+  min-width: 0;
+}
+
+/* Failed chunks compact grid (mirrors .cc-grid in red). */
+.fc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.fc-cell {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.05);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  transition: background 0.15s;
+}
+
+.fc-cell:hover { background: rgba(239, 68, 68, 0.08); }
+
+.fc-cell-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fc-cell-icon { flex-shrink: 0; }
+
+.fc-cell-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #eeedf5;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.fc-cell-retry {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: linear-gradient(135deg, #ef4444, #f97316);
+  color: #fff;
+  transition: opacity 0.15s, transform 0.1s;
+}
+
+.fc-cell-retry:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.fc-cell-retry:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .jd-drawer { right: 8px; }
+  .jd-drawer-open { width: calc(100vw - 16px); max-width: 380px; }
+}
+
 .jd-top-grid {
   display: grid;
   grid-template-columns: auto 1fr;

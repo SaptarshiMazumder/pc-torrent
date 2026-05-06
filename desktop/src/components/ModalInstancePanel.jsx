@@ -61,7 +61,7 @@ const modalProvider = {
   },
 };
 
-export default function ModalInstancePanel({ tasks, backendUrl, onRefresh }) {
+export default function ModalInstancePanel({ tasks, backendUrl, onRefresh, mode }) {
   const provider = useMemo(() => modalProvider, []);
-  return <InstancePanel tasks={tasks} backendUrl={backendUrl} provider={provider} onRefresh={onRefresh} />;
+  return <InstancePanel tasks={tasks} backendUrl={backendUrl} provider={provider} onRefresh={onRefresh} mode={mode} />;
 }

@@ -59,7 +59,7 @@ export function AuthProvider({ children }) {
         if (u) {
           // Ensure Firestore profile exists for this user
           const backendUrl = localStorage.getItem("pcrent_backend_url") ||
-            "https://pcrent-server-930713698987.asia-northeast1.run.app";
+            "https://pcrent-server-v2-930713698987.asia-northeast1.run.app";
           try {
             const token = await u.getIdToken();
             await fetch(`${backendUrl}/me`, {

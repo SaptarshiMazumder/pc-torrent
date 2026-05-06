@@ -286,7 +286,7 @@ function FinishedRow({ data }) {
  * @param {(backendUrl) => Promise<Array>} provider.fetchInstances
  * @param {(task, live) => CardData} provider.extractCardData
  */
-export default function InstancePanel({ tasks, backendUrl, provider, onRefresh }) {
+export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, mode = "both" }) {
   const [liveMap, setLiveMap] = useState({});
 
   const filteredTasks = (tasks || []).filter(
@@ -296,8 +296,12 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh }
   const finishedTasks = filteredTasks.filter((t) => ["done", "failed", "cancelled"].includes(t.status));
   const activeIdsKey = activeTasks.map((t) => t.job_id).join(",");
 
+  const showActive = mode !== "finished";
+  const showFinished = mode !== "active";
+  const shouldPoll = showActive && !!activeIdsKey;
+
   useEffect(() => {
-    if (!backendUrl || !activeIdsKey) return;
+    if (!backendUrl || !shouldPoll) return;
     const jobIdSet = new Set(activeTasks.map((t) => t.job_id));
     let cancelled = false;
     async function poll() {
@@ -314,9 +318,10 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh }
     const id = setInterval(poll, 5_000);
     return () => { cancelled = true; clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, activeIdsKey]);
+  }, [backendUrl, activeIdsKey, shouldPoll]);
 
-  if (filteredTasks.length === 0) return null;
+  const visibleCount = (showActive ? activeTasks.length : 0) + (showFinished ? finishedTasks.length : 0);
+  if (visibleCount === 0) return null;
 
   const doneCount = finishedTasks.filter((t) => t.status === "done").length;
   const failedCount = finishedTasks.filter((t) => t.status === "failed").length;
@@ -327,16 +332,16 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh }
         <div className="inst-panel-title-row">
           <div className="inst-panel-icon">{provider.icon}</div>
           <span className="inst-panel-title">{provider.title}</span>
-          <span className="inst-panel-count">{filteredTasks.length}</span>
+          <span className="inst-panel-count">{visibleCount}</span>
         </div>
         <div className="inst-panel-chips">
-          {activeTasks.length > 0 && <span className="inst-chip inst-chip--active"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{activeTasks.length} active</span>}
-          {doneCount > 0 && <span className="inst-chip inst-chip--done"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{doneCount} done</span>}
-          {failedCount > 0 && <span className="inst-chip inst-chip--failed"><span className="inst-chip-dot" style={{ background: "#f87171" }} />{failedCount} failed</span>}
+          {showActive && activeTasks.length > 0 && <span className="inst-chip inst-chip--active"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{activeTasks.length} active</span>}
+          {showFinished && doneCount > 0 && <span className="inst-chip inst-chip--done"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{doneCount} done</span>}
+          {showFinished && failedCount > 0 && <span className="inst-chip inst-chip--failed"><span className="inst-chip-dot" style={{ background: "#f87171" }} />{failedCount} failed</span>}
         </div>
       </div>
 
-      {activeTasks.length > 0 && (
+      {showActive && activeTasks.length > 0 && (
         <div className="inst-active-list">
           {activeTasks.map((task) => (
             <ActiveCard
@@ -350,9 +355,9 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh }
         </div>
       )}
 
-      {finishedTasks.length > 0 && (
+      {showFinished && finishedTasks.length > 0 && (
         <div className="inst-fin-list">
-          {activeTasks.length > 0 && <div className="inst-fin-divider">Completed</div>}
+          {showActive && activeTasks.length > 0 && <div className="inst-fin-divider">Completed</div>}
           {finishedTasks.map((task) => (
             <FinishedRow key={task.job_id} data={provider.extractCardData(task, null)} />
           ))}

@@ -12,7 +12,12 @@
       "Bash(Select-Object Name)",
       "Bash(awk '/09:42:30/,/09:43:30/')",
       "Bash(gcloud logging *)",
-      "Bash(awk '{ if\\($1==1\\) one++; else if\\($1<=3\\) low++; else high++ } END { print \"Single 410:\", one; print \"2-3 410s:\", low; print \"4+ 410s \\(worker not stopping\\):\", high }')"
+      "Bash(awk '{ if\\($1==1\\) one++; else if\\($1<=3\\) low++; else high++ } END { print \"Single 410:\", one; print \"2-3 410s:\", low; print \"4+ 410s \\(worker not stopping\\):\", high }')",
+      "Bash(awk '{print $1}')",
+      "Bash(awk '$1 > \"2026-05-06T12:57:00Z\"' /tmp/group.log)",
+      "Bash(awk '$1 > \"2026-05-06T12:57:00Z\" && $1 < \"2026-05-06T13:10:00Z\"' /tmp/allocs.log)",
+      "Bash(gcloud monitoring *)",
+      "Bash(awk '{print $1, substr\\($2,1,16\\)}')"
     ],
     "additionalDirectories": [
       "\\tmp"

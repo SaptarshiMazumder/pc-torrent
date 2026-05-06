@@ -55,7 +55,7 @@
     "vram_fleet_boost": {
       "vast": 1.0,
       "modal": 1.0,
-      "community": 1.5
+      "community": 500
     },
     "startup_buffer_sec": {
       "vast": 300,

@@ -382,6 +382,7 @@ def build(
         registry,
         startup_buffer=cfg.frame_allocation.startup_buffer,
         validators=target_validators,
+        vram_fleet_boost=cfg.frame_allocation.vram_fleet_boost,
     )
     allocation_strategy = AllocationStrategy(
         allocation_planner, weights=cfg.frame_allocation.weights,

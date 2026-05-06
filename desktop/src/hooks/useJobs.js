@@ -190,6 +190,19 @@ export function useJobs(backendUrl) {
     );
   }, []);
 
+  // Patch a single group's row from outside the hook.  Used by the
+  // detail-page refresh button so it can fetch one group via
+  // /render-groups/{id} and update just that row, instead of paying for
+  // a full paginated list re-fetch.
+  const updateGroup = useCallback((groupId, data) => {
+    if (!groupId || !data) return;
+    const updated = normalizeRenderGroup(data);
+    if (!updated) return;
+    setJobs((prev) =>
+      prev.map((job) => (job.group_id === groupId ? { ...job, ...updated } : job))
+    );
+  }, []);
+
   // Poll active groups
   useEffect(() => {
     let polling = false;
@@ -241,6 +254,7 @@ export function useJobs(backendUrl) {
     addRenderGroup,
     removeJob,
     markRenderGroupCancelled,
+    updateGroup,
     refresh,
   };
 }

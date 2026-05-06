@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   STATUS_LABELS,
   isTerminalStatus,
@@ -11,6 +12,27 @@ import CommunityInstancePanel from "./CommunityInstancePanel";
 import FrameGalleryPanel from "./FrameGalleryPanel";
 import HeavinessPanel from "./HeavinessPanel";
 import FailedChunksPanel from "./FailedChunksPanel";
+import CompletedChunksPanel from "./CompletedChunksPanel";
+import PendingChunksPanel from "./PendingChunksPanel";
+
+const INSTANCES_DRAWER_KEY = "pcrent:jd_drawer_open:v1";
+const SCENE_DRAWER_KEY = "pcrent:jd_scene_drawer_open:v1";
+
+function readDrawerState(key) {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeDrawerState(key, open) {
+  try {
+    localStorage.setItem(key, open ? "1" : "0");
+  } catch {
+    // storage unavailable — drawer state simply won't persist
+  }
+}
 
 function BigGauge({ pct, color, label }) {
   const size = 96;
@@ -76,97 +98,174 @@ function RenderGroupDetail({
   const gaugeColor = job.status === "done" ? "#22c55e" : job.status === "failed" ? "#ef4444" : job.status === "cancelled" ? "#6b7280" : "#e8724a";
   const canViewFrames = availableOutputCount > 0;
 
+  const [instancesOpen, setInstancesOpen] = useState(() => readDrawerState(INSTANCES_DRAWER_KEY));
+  const [sceneOpen, setSceneOpen] = useState(() => readDrawerState(SCENE_DRAWER_KEY));
+  useEffect(() => { writeDrawerState(INSTANCES_DRAWER_KEY, instancesOpen); }, [instancesOpen]);
+  useEffect(() => { writeDrawerState(SCENE_DRAWER_KEY, sceneOpen); }, [sceneOpen]);
+
+  const tasksList = job.tasks || [];
+
   return (
-    <div className="jd-body">
-      {/* Top grid: gauge + stats + progress */}
-      <div className="jd-top-grid">
-        <div className="jd-card jd-card-gauge">
-          <BigGauge pct={overallPct} color={gaugeColor} label="COMPLETE" />
-          <div className="jd-gauge-stats">
-            <StatTile
-              icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>}
-              label="Frames" value={total != null ? `${rendered} / ${total}` : `${rendered}`}
-            />
-            <StatTile
-              icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 14h.01M10 14h.01" /></svg>}
-              label="Machines" value={`${tasksDone} / ${taskCount} done`}
-            />
-            <StatTile
-              icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>}
-              label="Output Files" value={availableOutputCount}
-            />
+    <div className="jd-body jd-body-split">
+      <div className="jd-main">
+        {/* Top grid: gauge + stats + progress */}
+        <div className="jd-top-grid">
+          <div className="jd-card jd-card-gauge">
+            <BigGauge pct={overallPct} color={gaugeColor} label="COMPLETE" />
+            <div className="jd-gauge-stats">
+              <StatTile
+                icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>}
+                label="Frames" value={total != null ? `${rendered} / ${total}` : `${rendered}`}
+              />
+              <StatTile
+                icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 14h.01M10 14h.01" /></svg>}
+                label="Machines" value={`${tasksDone} / ${taskCount} done`}
+              />
+              <StatTile
+                icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>}
+                label="Output Files" value={availableOutputCount}
+              />
+            </div>
           </div>
-        </div>
 
-        {taskCount > 0 && (
-          <div className="jd-card jd-card-progress">
-            <div className="jd-card-label">Render Progress</div>
-            <SegmentedProgressBar tasks={job.tasks} totalFrames={job.total_frames} />
-          </div>
-        )}
-      </div>
-
-      {/* Errors & download status */}
-      {job.status === "failed" && job.error && <div className="inst-error">{job.error}</div>}
-      {downloadState?.status === "done" && (
-        <div className="rentee-job-success">Downloaded to <code>{downloadState.path}</code>{downloadState?.summary ? ` (${downloadState.summary})` : ""}</div>
-      )}
-      {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
-
-      {/* Stuck chunks the user can manually re-dispatch */}
-      <FailedChunksPanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
-
-      {/* GPU Instances */}
-      <VastInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
-      <ModalInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
-      <CommunityInstancePanel tasks={job.tasks || []} backendUrl={backendUrl} onRefresh={onRefresh} />
-
-      {/* Scene heaviness — backend resolves snapshot+overrides at submit
-          time and surfaces ``heaviness`` directly on the status DTO. */}
-      <HeavinessPanel
-        heaviness={job.heaviness ?? null}
-        overrides={job.resolved_render_settings?.render ?? null}
-        loading={!job.heaviness}
-      />
-
-      {/* Frames — collapsible, below GPU instances */}
-      {canViewFrames && (
-        <div className="jd-frames-section">
-          <button type="button" className="jd-frames-toggle" onClick={onToggleGallery}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
-            <span>Rendered Frames</span>
-            <span className="jd-frames-count">{availableOutputCount}</span>
-            <svg className={`jd-frames-chevron${galleryOpen ? " open" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6" /></svg>
-          </button>
-          {galleryOpen && (
-            <FrameGalleryPanel
-              id={id}
-              files={galleryState?.files || []}
-              loading={!!galleryState?.loading}
-              error={galleryState?.error || ""}
-              openingFrameKey={openingFrameKey}
-              onOpenFrame={onOpenFrame}
-              onRefresh={onRefreshFrames}
-              backendUrl={backendUrl}
-            />
+          {taskCount > 0 && (
+            <div className="jd-card jd-card-progress">
+              <div className="jd-card-label">Render Progress</div>
+              <SegmentedProgressBar tasks={job.tasks} totalFrames={job.total_frames} />
+            </div>
           )}
         </div>
-      )}
 
-      {/* Actions */}
-      <div className="jd-actions">
-        {canCancel && (
-          <button className="btn btn-danger" onClick={onCancel} disabled={canceling}>
-            {canceling ? "Stopping..." : "Stop Render"}
-          </button>
+        {/* Errors & download status */}
+        {job.status === "failed" && job.error && <div className="inst-error">{job.error}</div>}
+        {downloadState?.status === "done" && (
+          <div className="rentee-job-success">Downloaded to <code>{downloadState.path}</code>{downloadState?.summary ? ` (${downloadState.summary})` : ""}</div>
         )}
-        {canDownloadAvailable && (
-          <button className="btn btn-primary" onClick={onDownload} disabled={isDownloading}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
-            {isDownloading ? (downloadState?.progress || "Downloading...") : job.status === "done" ? "Download All" : "Download Available"}
-          </button>
+        {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
+
+        {/* Chunks — primary view */}
+        <FailedChunksPanel tasks={tasksList} backendUrl={backendUrl} groupId={id} onRefresh={onRefresh} />
+        <CompletedChunksPanel tasks={tasksList} />
+        <PendingChunksPanel groupId={id} tasks={tasksList} />
+
+        {/* Live (active/pending) instances — finished rows live in the
+            sidebar drawer to keep the main column focused on what's
+            currently running. */}
+        <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
+        <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
+        <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
+
+        {/* Frames — collapsible */}
+        {canViewFrames && (
+          <div className="jd-frames-section">
+            <button type="button" className="jd-frames-toggle" onClick={onToggleGallery}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
+              <span>Rendered Frames</span>
+              <span className="jd-frames-count">{availableOutputCount}</span>
+              <svg className={`jd-frames-chevron${galleryOpen ? " open" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6" /></svg>
+            </button>
+            {galleryOpen && (
+              <FrameGalleryPanel
+                id={id}
+                files={galleryState?.files || []}
+                loading={!!galleryState?.loading}
+                error={galleryState?.error || ""}
+                openingFrameKey={openingFrameKey}
+                onOpenFrame={onOpenFrame}
+                onRefresh={onRefreshFrames}
+                backendUrl={backendUrl}
+              />
+            )}
+          </div>
         )}
-        <button className="btn btn-secondary" onClick={onRemove}>Remove</button>
+
+        {/* Actions */}
+        <div className="jd-actions">
+          {canCancel && (
+            <button className="btn btn-danger" onClick={onCancel} disabled={canceling}>
+              {canceling ? "Stopping..." : "Stop Render"}
+            </button>
+          )}
+          {canDownloadAvailable && (
+            <button className="btn btn-primary" onClick={onDownload} disabled={isDownloading}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
+              {isDownloading ? (downloadState?.progress || "Downloading...") : job.status === "done" ? "Download All" : "Download Available"}
+            </button>
+          )}
+          <button className="btn btn-secondary" onClick={onRemove}>Remove</button>
+        </div>
+      </div>
+
+      <div className="jd-drawers-rail">
+        <aside className={`jd-drawer ${instancesOpen ? "jd-drawer-open" : "jd-drawer-collapsed"}`}>
+          <button
+            type="button"
+            className="jd-drawer-toggle"
+            onClick={() => setInstancesOpen((v) => !v)}
+            title={instancesOpen ? "Hide instances" : "Show instances"}
+          >
+            <span className="jd-drawer-toggle-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+                <rect x="9" y="9" width="6" height="6" />
+                <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+              </svg>
+            </span>
+            {instancesOpen && <span className="jd-drawer-toggle-label">Instances</span>}
+            {instancesOpen && (
+              <svg
+                className="jd-drawer-toggle-chevron"
+                width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2.5"
+              >
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+            )}
+          </button>
+          {instancesOpen && (
+            <div className="jd-drawer-body">
+              <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+              <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+              <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+            </div>
+          )}
+        </aside>
+
+        <aside className={`jd-drawer ${sceneOpen ? "jd-drawer-open" : "jd-drawer-collapsed"}`}>
+          <button
+            type="button"
+            className="jd-drawer-toggle"
+            onClick={() => setSceneOpen((v) => !v)}
+            title={sceneOpen ? "Hide scene details" : "Show scene details"}
+          >
+            <span className="jd-drawer-toggle-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                <line x1="12" y1="22.08" x2="12" y2="12" />
+              </svg>
+            </span>
+            {sceneOpen && <span className="jd-drawer-toggle-label">Scene</span>}
+            {sceneOpen && (
+              <svg
+                className="jd-drawer-toggle-chevron"
+                width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2.5"
+              >
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+            )}
+          </button>
+          {sceneOpen && (
+            <div className="jd-drawer-body">
+              <HeavinessPanel
+                heaviness={job.heaviness ?? null}
+                overrides={job.resolved_render_settings?.render ?? null}
+                loading={!job.heaviness}
+              />
+            </div>
+          )}
+        </aside>
       </div>
     </div>
   );
@@ -251,7 +350,7 @@ function SingleJobDetail({
 
 export default function JobDetailView({
   job, backendUrl, authToken, downloadState, downloadingId, canceling,
-  galleryOpen, galleryState, openingFrameKey,
+  galleryOpen, galleryState, openingFrameKey, refreshing,
   onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
   onRefresh, onRefreshFrames,
 }) {
@@ -264,10 +363,20 @@ export default function JobDetailView({
   return (
     <div className="job-detail">
       <div className="job-detail-header">
-        <div className="jd-header-top">
+        <div className="jd-header-top" style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <button type="button" className="job-detail-back" onClick={onBack}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M19 12H5M12 5l-7 7 7 7" /></svg>
             All Jobs
+          </button>
+          <button
+            type="button"
+            className="job-detail-back"
+            onClick={onRefresh}
+            disabled={!!refreshing}
+            style={{ opacity: refreshing ? 0.5 : 1 }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
+            {refreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
 

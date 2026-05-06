@@ -22,7 +22,7 @@ export default function App() {
   );
   const [page, setPage] = useState(() => DEFAULT_PAGES[localStorage.getItem("pcrent_mode") || "rentee"] || "create");
   const [backendUrl, setBackendUrl] = useState(
-    "https://pcrent-server-930713698987.asia-northeast1.run.app"
+    "https://pcrent-server-v2-930713698987.asia-northeast1.run.app"
   );
 
   const agent = useAgent(user && mode === "renter" ? backendUrl : null);
@@ -96,6 +96,7 @@ export default function App() {
             removeJob={jobsHook.removeJob}
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
+            updateGroup={jobsHook.updateGroup}
             onRefresh={jobsHook.refresh}
             onNavigate={setPage}
           />

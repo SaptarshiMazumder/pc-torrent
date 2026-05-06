@@ -616,113 +616,6 @@ body {
   color: var(--text-primary);
 }
 
-/* ---- Segmented (Torrent-Style) Progress Bar ---- */
-.segmented-progress-wrap {
-  margin-top: 8px;
-}
-
-.segmented-progress-track {
-  display: flex;
-  width: 100%;
-  height: 22px;
-  border-radius: 12px;
-  overflow: hidden;
-  background: rgba(12, 14, 28, 0.7);
-  border: 1px solid rgba(180, 175, 220, 0.1);
-  gap: 2px;
-  padding: 3px;
-}
-
-.segmented-progress-segment {
-  position: relative;
-  height: 100%;
-  overflow: hidden;
-  min-width: 4px;
-  background: rgba(180, 175, 220, 0.06);
-  flex-shrink: 0;
-  border-radius: 8px;
-}
-
-.segmented-progress-segment:first-child {
-  border-radius: 8px;
-}
-
-.segmented-progress-segment:last-child {
-  border-radius: 8px;
-  flex-grow: 1;
-}
-
-.segmented-progress-fill {
-  height: 100%;
-  border-radius: 8px;
-  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-  position: relative;
-}
-
-.segmented-progress-fill::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255,255,255,0.18) 0%, transparent 60%);
-}
-
-.segment-failed .segmented-progress-fill {
-  width: 100% !important;
-}
-
-.segmented-progress-labels {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  margin-top: 10px;
-}
-
-.segmented-label-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-muted);
-  padding: 4px 10px 4px 6px;
-  background: rgba(180, 175, 220, 0.05);
-  border-radius: 8px;
-  border: 1px solid rgba(180, 175, 220, 0.06);
-}
-
-.segmented-label-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  box-shadow: 0 0 6px currentColor;
-}
-
-.segmented-label-gpu {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.segmented-label-frames {
-  opacity: 0.5;
-  font-family: "Cascadia Code", "Fira Code", monospace;
-  font-size: 10px;
-}
-
-.segmented-label-pct {
-  font-weight: 700;
-  color: var(--accent);
-  font-family: "Cascadia Code", "Fira Code", monospace;
-}
-
-.segmented-label-pct.pct-done {
-  color: #22c55e;
-}
-
-.segmented-label-pct.pct-failed {
-  color: #ef4444;
-}
-
 /* ---- Machine Card Selection ---- */
 .machine-card {
   cursor: pointer;
@@ -3226,12 +3119,6 @@ body {
   position: relative;
 }
 
-.jd-main {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
 /* Right-edge rail.  Dock pill is the LAST flex child so it sits at the
    rightmost edge; an open panel renders before it and naturally flows to
    the dock's left.  The rail's right edge is fixed at right:16px and its
@@ -3591,11 +3478,178 @@ body {
   color: var(--text-muted);
 }
 
-/* -- Progress card -- */
-.jd-card-progress {
+/* -- Two-column detail grid (left summary | right activity) --
+   padding-right reserves a runway for the fixed-positioned dock pill on
+   the viewport's right edge (dock = 16 right offset + 56 width + 16 buffer)
+   so right-column cards never slide under it. */
+.jd-detail-grid {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 32px;
+  padding-right: 88px;
+  flex: 1;
+  min-height: 0;
+}
+
+.jd-left-col,
+.jd-right-col {
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .jd-detail-grid { grid-template-columns: 1fr; }
+}
+
+/* -- Headline metric (replaces big circular gauge) --
+   Layout: big % on the left, frame count + progress bar stacked on the right. */
+.jd-headline {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.jd-headline-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.jd-headline-value {
+  font-size: 48px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.jd-headline-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+
+.jd-headline-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.jd-headline-frames {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.jd-headline-frames-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.jd-headline-frames-value {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.jd-headline-bar {
+  height: 8px;
+  background: rgba(180, 175, 220, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.jd-headline-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+/* -- 2x2 stat tile grid -- */
+.jd-stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.jd-stat-tile-card {
+  display: flex;
+  align-items: center;
+  padding: 12px 14px;
+  background: linear-gradient(165deg, rgba(24, 28, 52, 0.45) 0%, rgba(16, 18, 36, 0.55) 100%);
+  border: 1px solid rgba(180, 175, 220, 0.1);
+  border-radius: 12px;
+  min-width: 0;
+}
+
+.jd-stat-tile-card .jd-stat-tile { width: 100%; min-width: 0; }
+.jd-stat-tile-card .jd-stat-text { min-width: 0; }
+.jd-stat-tile-card .jd-stat-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* -- Latest rendered preview card -- */
+.jd-preview-card {
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(165deg, rgba(24, 28, 52, 0.45) 0%, rgba(16, 18, 36, 0.55) 100%);
+  border: 1px solid rgba(180, 175, 220, 0.1);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.jd-preview-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  background: rgba(12, 14, 28, 0.5);
+  display: block;
+  overflow: hidden;
+}
+
+.jd-preview-loader {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.jd-preview-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid rgba(180, 175, 220, 0.08);
+}
+
+.jd-preview-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.jd-preview-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  flex-shrink: 0;
 }
 
 /* -- Collapsible frames section -- */

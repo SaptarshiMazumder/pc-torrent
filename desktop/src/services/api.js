@@ -290,8 +290,8 @@ export async function getFirebaseToken() {
   return auth.currentUser?.getIdToken() ?? null;
 }
 
-export async function getMachines(baseUrl) {
-  return apiFetch(baseUrl, "/machines");
+export async function getAvailableMachines(baseUrl) {
+  return apiFetch(baseUrl, "/machines/available");
 }
 
 export async function listInputFiles(baseUrl) {

@@ -37,6 +37,7 @@ class MonitorLockModalSweepStrategy:
             """
             SELECT j.id, j.modal_function_call_id, j.machine_id, j.group_id,
                    j.render_overrides_json, j.input_filename,
+                   j.estimated_startup_seconds,
                    rg.input_filename AS rg_input_filename
             FROM jobs j
             LEFT JOIN render_groups rg ON rg.id = j.group_id

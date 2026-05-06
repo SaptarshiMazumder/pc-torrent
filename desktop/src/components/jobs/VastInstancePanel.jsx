@@ -15,7 +15,7 @@ function gpuShortName(name) {
 }
 
 const vastProvider = {
-  title: "GPU Instances",
+  title: "Vast Instances",
   icon: VAST_ICON,
 
   filterTask(task) {

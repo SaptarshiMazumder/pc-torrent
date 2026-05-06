@@ -19,6 +19,7 @@ from serverV2.api.schemas.upload import (
     MultipartPartUrlsPayload,
 )
 from serverV2.allocation.allocation_facade import AllocationFacade
+from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.services.render_groups.service import RenderGroupService, RenderGroupServiceError
 from serverV2.services.upload.coordinator import UploadCoordinator
 from serverV2.services.upload.validators import UploadValidationError
@@ -28,17 +29,20 @@ router = APIRouter(tags=["render_groups"])
 _svc: RenderGroupService | None = None
 _upload: UploadCoordinator | None = None
 _facade: AllocationFacade | None = None
+_allocation_client: AllocationClient | None = None
 
 
 def init(
     service: RenderGroupService,
     upload_coordinator: UploadCoordinator,
     allocation_facade: AllocationFacade,
+    allocation_client: AllocationClient,
 ) -> None:
-    global _svc, _upload, _facade
+    global _svc, _upload, _facade, _allocation_client
     _svc = service
     _upload = upload_coordinator
     _facade = allocation_facade
+    _allocation_client = allocation_client
 
 
 def _get() -> RenderGroupService:
@@ -57,6 +61,12 @@ def _get_facade() -> AllocationFacade:
     if _facade is None:
         raise HTTPException(500, "AllocationFacade not initialized")
     return _facade
+
+
+def _get_allocation_client() -> AllocationClient:
+    if _allocation_client is None:
+        raise HTTPException(500, "AllocationClient not initialized")
+    return _allocation_client
 
 
 @router.get("/render-groups")
@@ -209,6 +219,39 @@ def download_zip(group_id: str):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="group-{group_id[:8]}-output.zip"'},
     )
+
+
+# ---------- pending allocation queue (per-group) ----------
+
+@router.get("/render-groups/{group_id}/pending-queue")
+def get_pending_queue(group_id: str):
+    """Pending allocation rows for one group.  Detail-page polls this
+    while frontend math says chunks are missing.  Backed by the Redis
+    mirror; falls through to Postgres on a cold cache."""
+    items = _get_allocation_client().list_pending_for_group(group_id)
+    return {
+        "items": [
+            {
+                "id": i.id,
+                "type": i.type,
+                "group_id": i.group_id,
+                "chunk_index": i.chunk_index,
+                "attempt": i.attempt,
+                "frame_start": i.frame_start,
+                "frame_end": i.frame_end,
+                "frame_step": i.frame_step,
+                "total_frames": i.total_frames,
+                "engine": i.engine,
+                "tier": i.tier,
+                "max_retries": i.max_retries,
+                "priority": i.priority,
+                "input_filename": i.input_filename,
+                "created_at": i.created_at,
+                "last_attempted_at": i.last_attempted_at,
+            }
+            for i in items
+        ],
+    }
 
 
 # ---------- cost ----------

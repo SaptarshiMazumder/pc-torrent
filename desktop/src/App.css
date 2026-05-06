@@ -3471,6 +3471,79 @@ body {
   cursor: not-allowed;
 }
 
+/* Pending chunks compact grid (mirrors .cc-grid in indigo). */
+.pq-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.pq-cell {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(165, 180, 252, 0.05);
+  border: 1px solid rgba(165, 180, 252, 0.18);
+  transition: background 0.15s;
+}
+
+.pq-cell:hover { background: rgba(165, 180, 252, 0.08); }
+
+.pq-cell-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pq-cell-icon { flex-shrink: 0; }
+
+.pq-cell-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #eeedf5;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.pq-cell-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.pq-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 3px 8px;
+  background: none;
+  border: 1px solid rgba(180, 175, 220, 0.18);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.pq-refresh:hover:not(:disabled) {
+  color: #eeedf5;
+  background: rgba(180, 175, 220, 0.06);
+  border-color: rgba(180, 175, 220, 0.4);
+}
+
+.pq-refresh:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 @media (max-width: 900px) {
   .jd-drawer { right: 8px; }
   .jd-drawer-open { width: calc(100vw - 16px); max-width: 380px; }

@@ -12,6 +12,11 @@ deleted; on still-no-target it stays here with its
 Two row types via the ``type`` column (constants below):
   * ``TYPE_INITIAL_GROUP``  — whole-group initial plan re-attempt
   * ``TYPE_RETRY_CHUNK``    — single-chunk retry re-attempt
+
+Composes ``PendingQueueRedisMirror`` so every successful write is
+mirrored to Redis on a background executor.  Postgres remains source
+of truth; Redis just accelerates the per-group read used by the
+detail-page poller.
 """
 
 from __future__ import annotations
@@ -20,8 +25,14 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from serverV2.infrastructure.db import execute, execute_returning, query_all
+
+if TYPE_CHECKING:
+    from serverV2.allocation.pending_queue_redis_mirror import (
+        PendingQueueRedisMirror,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -63,12 +74,16 @@ class AllocationPendingItem:
 
 class AllocationPendingQueueRepository:
 
+    def __init__(self, mirror: "PendingQueueRedisMirror | None" = None) -> None:
+        self._mirror = mirror
+
     # ------------------------------------------------------------------
     # writes
     # ------------------------------------------------------------------
 
     def enqueue(self, item: AllocationPendingItem) -> None:
-        execute(
+        item.created_at = _now_iso()
+        row = execute_returning(
             """INSERT INTO pending_allocation_queue
                (type, group_id, chunk_index, attempt,
                 frame_start, frame_end, frame_step, total_frames,
@@ -83,7 +98,8 @@ class AllocationPendingQueueRepository:
                        %s::jsonb, %s::jsonb,
                        %s, %s, %s,
                        %s::jsonb, %s,
-                       %s)""",
+                       %s)
+               RETURNING id""",
             (
                 item.type, item.group_id, item.chunk_index, item.attempt,
                 item.frame_start, item.frame_end, item.frame_step, item.total_frames,
@@ -92,21 +108,30 @@ class AllocationPendingQueueRepository:
                 json.dumps([list(p) for p in item.excluded_serverless_capabilities]),
                 item.render_overrides_json, item.max_retries, item.priority,
                 json.dumps(list(item.machine_ids)), item.input_filename,
-                _now_iso(),
+                item.created_at,
             ),
         )
+        item.id = int(row["id"])
+        if self._mirror is not None:
+            self._mirror.add(item)
 
     def update_last_attempted_at(self, row_id: int) -> None:
-        execute(
-            "UPDATE pending_allocation_queue SET last_attempted_at = %s WHERE id = %s",
-            (_now_iso(), row_id),
+        ts = _now_iso()
+        row = execute_returning(
+            "UPDATE pending_allocation_queue SET last_attempted_at = %s "
+            "WHERE id = %s RETURNING group_id",
+            (ts, row_id),
         )
+        if row and self._mirror is not None:
+            self._mirror.update_last_attempted_at(row["group_id"], row_id, ts)
 
     def delete(self, row_id: int) -> None:
-        execute(
-            "DELETE FROM pending_allocation_queue WHERE id = %s",
+        row = execute_returning(
+            "DELETE FROM pending_allocation_queue WHERE id = %s RETURNING group_id",
             (row_id,),
         )
+        if row and self._mirror is not None:
+            self._mirror.remove(row["group_id"], row_id)
 
     def delete_for_group(self, group_id: str) -> int:
         """Drop every pending row for ``group_id``.  Called by the cancel
@@ -117,6 +142,8 @@ class AllocationPendingQueueRepository:
             "DELETE FROM pending_allocation_queue WHERE group_id = %s RETURNING id",
             (group_id,),
         )
+        if self._mirror is not None:
+            self._mirror.clear_for_group(group_id)
         return len(rows)
 
     # ------------------------------------------------------------------
@@ -141,6 +168,26 @@ class AllocationPendingQueueRepository:
             "SELECT 1 AS x FROM pending_allocation_queue LIMIT 1",
         )
         return row is not None
+
+    def list_for_group(self, group_id: str) -> list[AllocationPendingItem]:
+        """Per-group read used by the detail-page poller.  Tries Redis
+        first; falls back to Postgres on a cold cache and rehydrates the
+        cache for next time.
+        """
+        if self._mirror is not None:
+            cached = self._mirror.get_for_group(group_id)
+            if cached is not None:
+                return cached
+        rows = query_all(
+            """SELECT * FROM pending_allocation_queue
+               WHERE group_id = %s
+               ORDER BY priority DESC, created_at ASC""",
+            (group_id,),
+        )
+        items = [_row_to_item(r) for r in rows]
+        if self._mirror is not None:
+            self._mirror.set_for_group(group_id, items)
+        return items
 
 
 # ----------------------------------------------------------------------

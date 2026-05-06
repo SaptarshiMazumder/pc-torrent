@@ -166,6 +166,15 @@ class AllocationFacade:
         return dispatched + pending
 
     # ------------------------------------------------------------------
+    # reads -- pending queue (per-group detail-page poller)
+    # ------------------------------------------------------------------
+
+    def list_pending_for_group(self, group_id: str) -> list[AllocationPendingItem]:
+        """Pending allocation rows for one group.  Reads through the
+        repo's Redis-backed cache; falls through to Postgres on miss."""
+        return self._pending_repo.list_for_group(group_id)
+
+    # ------------------------------------------------------------------
     # reads -- cost intelligence
     # ------------------------------------------------------------------
 

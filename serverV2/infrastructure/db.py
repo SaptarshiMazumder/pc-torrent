@@ -337,6 +337,12 @@ def init_db() -> None:
                     "ALTER TABLE pending_allocation_queue "
                     "DROP COLUMN IF EXISTS file_size_bytes"
                 )
+                # Per-group lookup is the hot path for the detail-page
+                # poller's Redis-fallback query.
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS pending_allocation_queue_group_id "
+                    "ON pending_allocation_queue (group_id)"
+                )
 
                 # Pre-submit / submit boundary refactor — render_groups now
                 # carries a single ``resolved_scene_json`` column that is

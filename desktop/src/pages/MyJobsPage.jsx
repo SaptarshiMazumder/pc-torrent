@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   cancelRenderGroup,
@@ -24,7 +24,7 @@ import { useDownloads } from "../contexts/DownloadContext";
 
 const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
 
-export default function MyJobsPage({ jobs, loading, hasMore, loadingMore, onLoadMore, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onNavigate }) {
+export default function MyJobsPage({ jobs, loading, loadingMore, removeJob, backendUrl, markRenderGroupCancelled, onRefresh, onNavigate }) {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [cancelingAll, setCancelingAll] = useState(false);
@@ -38,24 +38,6 @@ export default function MyJobsPage({ jobs, loading, hasMore, loadingMore, onLoad
   // and cache it in localStorage forever (terminal data never changes).
   const [terminalDetailJob, setTerminalDetailJob] = useState(null);
   const { downloads, startDownload } = useDownloads();
-  const sentinelRef = useRef(null);
-
-  // Auto-fetch the next page when the sentinel is in view.  Re-attach
-  // on every ``jobs.length`` change so we re-check intersection after
-  // each successful load -- IntersectionObserver only fires when the
-  // intersection state *changes*, so a sentinel that was already visible
-  // and stays visible (because the page is taller than the loaded slice)
-  // would never re-fire without re-attachment.  ``rootMargin: 200px``
-  // fires slightly before the user hits the literal bottom.
-  useEffect(() => {
-    const node = sentinelRef.current;
-    if (!node || !hasMore) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (entries[0]?.isIntersecting) onLoadMore();
-    }, { rootMargin: "200px" });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [hasMore, jobs.length, onLoadMore]);
 
   // If selected job gets removed, go back to grid
   useEffect(() => {
@@ -313,10 +295,8 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
         />
       )}
 
-      {!selectedJob && hasMore && (
-        <div ref={sentinelRef} className="myjobs-load-more">
-          {loadingMore ? "Loading more..." : ""}
-        </div>
+      {!selectedJob && loadingMore && (
+        <div className="myjobs-load-more">Loading more...</div>
       )}
 
       {showTerminalSpinner && (

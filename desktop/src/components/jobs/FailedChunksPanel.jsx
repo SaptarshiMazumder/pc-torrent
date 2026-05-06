@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { retryJobChunk } from "../../services/api";
+import { getRetriedJobIds, markJobRetried } from "../../utils/retriedJobsCache";
 
 function rangeLabel(task) {
   // Prefer the verified-upload-based remaining range — that's what will
@@ -11,7 +12,7 @@ function rangeLabel(task) {
   return start === end ? `Frame ${start}` : `Frames ${start}-${end}`;
 }
 
-function FailedChunkRow({ task, backendUrl, onRefresh }) {
+function FailedChunkRow({ task, backendUrl, onRetried, onRefresh }) {
   const [retrying, setRetrying] = useState(false);
   const [showError, setShowError] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -22,12 +23,13 @@ function FailedChunkRow({ task, backendUrl, onRefresh }) {
     setActionError("");
     try {
       await retryJobChunk(backendUrl, task.job_id);
-      // Server flipped the group from 'failed' back to 'running' inside
-      // retry_chunk_manually -> reconcile_group_status.  Force a refetch
-      // so the local cached status updates from 'failed' to 'running' --
-      // otherwise useJobs's polling filter (which excludes terminal
-      // groups) never refreshes this view and the new dispatched
-      // instance never appears.
+      // Confirmed success: persist the retried job_id so the row stays
+      // hidden across reloads, then notify the panel to drop the row
+      // immediately (without waiting for the polling cycle).  Still
+      // call onRefresh so the new dispatch surfaces faster than the
+      // 3s poll interval.
+      markJobRetried(task.job_id);
+      onRetried(task.job_id, task.chunk_index);
       if (onRefresh) onRefresh();
     } catch (e) {
       setRetrying(false);
@@ -81,8 +83,33 @@ function FailedChunkRow({ task, backendUrl, onRefresh }) {
 }
 
 export default function FailedChunksPanel({ tasks, backendUrl, onRefresh }) {
-  const retryable = (tasks || []).filter((t) => t.is_retryable === true);
-  if (retryable.length === 0) return null;
+  // Persisted set of job_ids the user already retried.  Read once on
+  // mount; mutated locally on each successful retry so the affected row
+  // re-renders out of the visible list.
+  const [retriedIds, setRetriedIds] = useState(() => getRetriedJobIds());
+  const [confirmation, setConfirmation] = useState("");
+  const confirmTimerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+  }, []);
+
+  function handleRetried(jobId, chunkIndex) {
+    setRetriedIds((prev) => {
+      const next = new Set(prev);
+      next.add(jobId);
+      return next;
+    });
+    const label = chunkIndex != null ? `Chunk ${chunkIndex + 1}` : "Chunk";
+    setConfirmation(`${label} retried — new instance will appear shortly.`);
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    confirmTimerRef.current = setTimeout(() => setConfirmation(""), 3000);
+  }
+
+  const retryable = (tasks || []).filter(
+    (t) => t.is_retryable === true && !retriedIds.has(t.job_id),
+  );
+  if (retryable.length === 0 && !confirmation) return null;
 
   return (
     <div className="inst-panel">
@@ -95,21 +122,39 @@ export default function FailedChunksPanel({ tasks, backendUrl, onRefresh }) {
             </svg>
           </div>
           <span className="inst-panel-title">Failed Chunks</span>
-          <span className="inst-panel-count">{retryable.length}</span>
+          {retryable.length > 0 && (
+            <span className="inst-panel-count">{retryable.length}</span>
+          )}
         </div>
-        <div className="inst-panel-chips">
-          <span className="inst-chip inst-chip--failed">
-            <span className="inst-chip-dot" style={{ background: "#f87171" }} />
-            needs retry
-          </span>
-        </div>
+        {retryable.length > 0 && (
+          <div className="inst-panel-chips">
+            <span className="inst-chip inst-chip--failed">
+              <span className="inst-chip-dot" style={{ background: "#f87171" }} />
+              needs retry
+            </span>
+          </div>
+        )}
       </div>
 
-      <div className="inst-fin-list">
-        {retryable.map((task) => (
-          <FailedChunkRow key={task.job_id} task={task} backendUrl={backendUrl} onRefresh={onRefresh} />
-        ))}
-      </div>
+      {confirmation && (
+        <div className="rentee-job-success" style={{ margin: "8px 0" }}>
+          {confirmation}
+        </div>
+      )}
+
+      {retryable.length > 0 && (
+        <div className="inst-fin-list">
+          {retryable.map((task) => (
+            <FailedChunkRow
+              key={task.job_id}
+              task={task}
+              backendUrl={backendUrl}
+              onRetried={handleRetried}
+              onRefresh={onRefresh}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -77,4 +77,5 @@ class MonitorLockModalSweepStrategy:
             blend_url=blend_url,
             render_overrides_json=overrides_json,
             group_id=group_id,
+            estimated_startup_sec=float(row["estimated_startup_seconds"]),
         )

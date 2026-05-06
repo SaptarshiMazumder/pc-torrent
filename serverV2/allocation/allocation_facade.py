@@ -175,6 +175,18 @@ class AllocationFacade:
         return self._pending_repo.list_for_group(group_id)
 
     # ------------------------------------------------------------------
+    # reads -- fleet availability (UI mirror of the planner's view)
+    # ------------------------------------------------------------------
+
+    def list_available_machines(self) -> FleetAvailabilitySnapshot:
+        """The exact snapshot the dispatch daemon will read on its next
+        tick: community PCs + Vast offers + Modal capacities, with the
+        in-flight counts.  Up to 60s stale, but identically stale for
+        UI and planner -- they share the Redis cache key, so they
+        cannot disagree about what's eligible right now."""
+        return self._snapshot_cache.get_or_build()
+
+    # ------------------------------------------------------------------
     # reads -- cost intelligence
     # ------------------------------------------------------------------
 

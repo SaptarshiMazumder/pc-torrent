@@ -45,9 +45,7 @@ from serverV2.fleets.shared.pre_render_stall_detector import (
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.monitor_lock import MonitorLockRepository
-from serverV2.services.machines.machine_heartbeat_repository import (
-    MachineHeartbeatRepository,
-)
+from serverV2.services.machines.machine_redis_mirror import MachineRedisMirror
 from serverV2.services.machines.machine_repository import MachineRepository
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.progress_repository import ProgressRepository
@@ -65,7 +63,7 @@ class CommunityMonitor:
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
         heartbeat_repo: HeartbeatRepository,
-        machine_heartbeat_repo: MachineHeartbeatRepository,
+        machine_redis_mirror: MachineRedisMirror,
         output_frame_repo: OutputFrameRepository,
         progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
@@ -80,7 +78,7 @@ class CommunityMonitor:
         self._group_repo = group_repo
         self._machine_repo = machine_repo
         self._heartbeat_repo = heartbeat_repo
-        self._machine_hb = machine_heartbeat_repo
+        self._mirror = machine_redis_mirror
         self._output_frames = output_frame_repo
         # Same JobCounts shape Modal and Vast monitors construct -- single
         # source of truth for "is this job complete?" semantics so all
@@ -157,7 +155,7 @@ class CommunityMonitor:
         # liveness signal in _check_machine_offline AND for the
         # demote-ghosts pass at the bottom -- no reason to query it
         # twice per tick.
-        machine_alive_ids = self._machine_hb.alive_ids(self._demote_sec)
+        machine_alive_ids = self._mirror.alive_ids(self._demote_sec)
 
         for group in self._group_repo.get_active_groups():
             try:
@@ -190,7 +188,7 @@ class CommunityMonitor:
                 demoted = self._machine_repo.demote_ghosts(machine_alive_ids)
                 if demoted:
                     log.info("Demoted %d ghost machine(s) to idle", demoted)
-                self._machine_hb.prune_stale(self._demote_sec)
+                self._mirror.prune_stale(self._demote_sec)
             except Exception:
                 log.exception("Ghost demote / prune failed")
 

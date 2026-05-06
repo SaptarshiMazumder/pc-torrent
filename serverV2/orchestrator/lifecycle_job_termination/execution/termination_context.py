@@ -26,7 +26,7 @@ from serverV2.orchestrator.anti_affinity import AntiAffinityExclusions
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
-from serverV2.services.machines.machine_state_writer import MachineStateWriter
+from serverV2.services.machines.machine_repository import MachineRepository
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.lifecycle_job_retry import RetryExecutor
@@ -42,7 +42,7 @@ class LifecycleDeps:
     job_repo: JobRepository
     group_repo: RenderGroupRepository
     in_progress_repo: InProgressChunkRepository
-    state_writer: MachineStateWriter
+    machine_repo: MachineRepository
     fleet_registry: FleetRegistry
     retry_executor: "RetryExecutor"
     # Callable into RenderLifecycle.reconcile_group_status -- kept as a

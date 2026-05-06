@@ -272,8 +272,8 @@ class JobRepository:
         """Claim the oldest pending job for this machine and flip it to
         'running'.  Does NOT touch the machines row -- the caller
         (``JobService.next_for_machine``) routes the
-        machines.status='processing' write through ``MachineStateWriter``
-        so PG and Redis stay in sync.
+        machines.status='processing' write through ``MachineRepository
+        .update_status`` so PG (sync) and Redis mirror (async) stay in sync.
         """
         from serverV2.infrastructure.db import execute_returning
         return execute_returning(

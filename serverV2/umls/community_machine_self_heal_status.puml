@@ -1,0 +1,329 @@
+@startuml community_machine_self_heal_status
+title Machine state refactor — single repo + async Redis mirror, drop StateWriter
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+legend top right
+  | <#fef3c7> | EXISTING (unchanged) |
+  | <#fde68a> | EXISTING (signature / behavior changes) |
+  | <#bbf7d0> | NEW (or new behavior on existing class) |
+  | <#bfdbfe> | RENAMED / TRANSFERRED FROM ELSEWHERE |
+  | <#fecaca> | DELETED |
+endlegend
+
+' ===========================================================
+' DELETED — was the dual-store coordinator
+' ===========================================================
+package "serverV2/services/machines (deleted)" <<Frame>> #fecaca {
+  class "MachineStateWriter\n<<DELETED>>" as DeletedWriter {
+    set_status(machine_id, status)   ' was: PG write + Redis mirror
+    --
+    Responsibilities folded into
+    MachineRepository.update_status,
+    which now composes the mirror itself.
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/services/machines  (the consolidated repo)
+' ===========================================================
+package "serverV2/services/machines" <<Frame>> #e0f2fe {
+
+  package "(existing — composes mirror, writes mirror async)" <<Rectangle>> #fde68a {
+    class "MachineRepository\n(Postgres + composes mirror)" as MachineRepo {
+      .. reads (existing — unchanged) ..
+      + get_available_community()
+      + get_community_by_ids(ids)
+      + get_by_id(id)
+      + get_raw_by_ids(ids)
+      + get_status(id)
+      + get_failover_candidates(exclude_id)
+      .. writes — pg sync, mirror async ..
+      + update_status(id, status)        <<existing: now mirrors>>
+      + set_processing(id)               <<existing: now mirrors>>
+      + set_available(id)                <<existing: now mirrors>>
+      + demote_ghosts(alive_ids)         <<existing: now mirrors per row>>
+      .. dependencies ..
+      - mirror : MachineRedisMirror      <<NEW composition>>
+      --
+      Every PG write that mutates the
+      ``status`` column queues an async
+      mirror.set_status (or clear_status
+      on demote_ghosts).  PG remains
+      source of truth.
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/services/machines/machine_redis_mirror.py
+' ===========================================================
+package "serverV2/services/machines (renamed file/class)" <<Frame>> #e0f2fe {
+
+  package "machine_redis_mirror.py — renamed from machine_heartbeat_repository.py" <<Rectangle>> #bfdbfe {
+    class "MachineRedisMirror\n(was MachineHeartbeatRepository)" as Mirror {
+      .. liveness — Redis-authoritative (transferred, no PG counterpart) ..
+      + record(id)                       <<sync — heartbeat ZADD>>
+      + clear(id)                        <<sync — clean disconnect>>
+      + alive_ids(stale_seconds)         <<sync read — ZRANGEBYSCORE>>
+      + prune_stale(stale_seconds)       <<sync — periodic monitor sweep>>
+
+      .. status mirror — was on MachineHeartbeatRepository, now ASYNC ..
+      + set_status(id, status)           <<NEW: async via executor>>
+      + clear_status(id)                 <<NEW: async via executor>>
+      + get_status(id) : str | None      <<sync read — HGET>>
+      + available_ids() : set[str]|None  <<sync read — HGETALL filter>>
+
+      .. infrastructure (NEW) ..
+      - _executor : ThreadPoolExecutor   <<NEW — same pattern as PendingQueueRedisMirror>>
+      --
+      Single Redis-side store for
+      machine state.  Liveness is
+      authoritative here; status is a
+      cache mirror of PG.  Writes that
+      mirror PG are async (fire-and-forget
+      on the executor) so PG callers
+      never block on Redis I/O.
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/services/machines (existing service surface)
+' ===========================================================
+package "serverV2/services/machines (service)" <<Frame>> #e0f2fe {
+
+  package "(existing — minor add)" <<Rectangle>> #fde68a {
+    class MachineService {
+      + list_available()
+      + set_available(machine_id)
+      + ensure_available(machine_id)     <<NEW>>
+        ' Self-heal called by JobService
+        ' on every work-claim poll:
+        '   1. mirror.get_status(id)
+        '   2. if != 'available':
+        '        machine_repo.update_status(id, 'available')
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/services/jobs
+' ===========================================================
+package "serverV2/services/jobs" <<Frame>> #e0f2fe {
+
+  package "(existing — minor add)" <<Rectangle>> #fde68a {
+    class JobService {
+      + next_for_machine(machine_id)
+      --
+      Order:
+      1. mirror.record(machine_id)         (existing — heartbeat refresh)
+      2. machine_service.ensure_available  <<NEW call site>>
+      3. job_repo.claim_next_for_machine   (existing)
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/api/routers
+' ===========================================================
+package "serverV2/api/routers" <<Frame>> #e0f2fe {
+
+  package "(existing)" <<Rectangle>> #fef3c7 {
+    class "jobs.py\n<<router>>" as JobsRouter {
+      GET /jobs/next-for-machine/{id}
+    }
+  }
+
+  package "(existing — new endpoint + new init param)" <<Rectangle>> #fde68a {
+    class "machines.py\n<<router>>" as MachinesRouter {
+      .. existing ..
+      POST /machines/register
+      PUT /machines/{id}/available
+      PUT /machines/{id}/idle
+      GET /machines           ' old PG-only path; killable separately
+      .. NEW ..
+      GET /machines/available   <<NEW>>
+        ' calls allocation_client.list_available_machines()
+      --
+      init(service, allocation_client)   <<allocation_client = NEW init param>>
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/orchestrator
+' ===========================================================
+package "serverV2/orchestrator" <<Frame>> #e0f2fe {
+
+  package "(existing — new method)" <<Rectangle>> #fde68a {
+    class AllocationClient {
+      ... existing methods ...
+      + list_available_machines()   <<NEW — pass-through>>
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/allocation
+' ===========================================================
+package "serverV2/allocation" <<Frame>> #e0f2fe {
+
+  package "(existing — new method)" <<Rectangle>> #fde68a {
+    class AllocationFacade {
+      ... existing methods ...
+      + list_available_machines() : FleetAvailabilitySnapshot   <<NEW>>
+        ' return self._snapshot_cache.get_or_build()
+        ' --
+        ' Returns the FULL snapshot:
+        '   community_available + vast_available
+        '   + modal_available + serverless_in_flight
+        ' Same Redis key (60s TTL) the dispatch
+        ' daemon reads on its next tick.
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/fleets/fleet_availability
+' ===========================================================
+package "serverV2/fleets/fleet_availability" <<Frame>> #e0f2fe {
+
+  package "(existing — single source of truth)" <<Rectangle>> #fef3c7 {
+    class FleetAvailabilitySnapshotCache {
+      + get_or_build() : FleetAvailabilitySnapshot
+      --
+      Cached snapshot built by
+      CommunityAvailabilityBuilder
+      (status='available' ∩ alive_within_stale).
+      Same instance the allocator's
+      strategies see on the next tick.
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: community_worker (agent)
+' ===========================================================
+package "community_worker/agent" <<Frame>> #e0f2fe {
+
+  package "(existing)" <<Rectangle>> #fef3c7 {
+    class "agent.py" as Agent {
+      poll loop, every 5s
+      GET /jobs/next-for-machine/{id}
+    }
+  }
+}
+
+' ===========================================================
+' DESKTOP UI (Tauri renderer) — caller of the new endpoint
+' ===========================================================
+package "desktop frontend" <<Frame>> #f5e8ff {
+
+  package "(new caller)" <<Rectangle>> #bbf7d0 {
+    class "Available Machines page" as DesktopUI {
+      GET /machines/available
+      --
+      Replaces the legacy /machines call.
+      Sees exactly what the allocator
+      would see on the next dispatch tick.
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/infrastructure
+' ===========================================================
+package "serverV2/infrastructure" <<Frame>> #e0f2fe {
+
+  package "(existing)" <<Rectangle>> #fef3c7 {
+    class RedisClient
+    class "Postgres\nmachines table" as PgMachines {
+      id, status, machine_type,
+      gpu_vram_gb, last_seen_at, ...
+    }
+  }
+}
+
+' ===========================================================
+' Per-poll write/read sequence (the self-heal flow)
+' ===========================================================
+Agent --> JobsRouter : GET /jobs/next-for-machine/{id} (every 5s)
+JobsRouter --> JobService : next_for_machine(machine_id)
+
+JobService --> Mirror : record(machine_id)
+Mirror ..> RedisClient : ZADD machines:alive
+
+JobService --> MachineService : ensure_available(machine_id)
+MachineService --> Mirror : get_status(machine_id)
+Mirror ..> RedisClient : HGET machines:status {id}
+
+MachineService ..> MachineRepo : update_status(id, 'available')\n[only when status != 'available']
+MachineRepo --> PgMachines : UPDATE machines SET status='available'
+MachineRepo ..> Mirror : set_status(id, 'available')   <<async via executor>>
+Mirror ..> RedisClient : HSET machines:status {id} 'available'
+
+JobService --> JobsRouter : (continues to claim_next_for_machine)
+
+' ===========================================================
+' Available-machines read sequence (NEW — UI -> allocator's view)
+' ===========================================================
+DesktopUI --> MachinesRouter : GET /machines/available
+MachinesRouter --> AllocationClient : list_available_machines()
+AllocationClient --> AllocationFacade : list_available_machines()
+AllocationFacade --> FleetAvailabilitySnapshotCache : get_or_build()
+FleetAvailabilitySnapshotCache ..> Mirror : (allocator path uses\nMachineRedisMirror inside\nCommunityAvailabilityBuilder)
+
+note right of FleetAvailabilitySnapshotCache
+  This is the single source of truth.
+  The allocator's strategies and the
+  /machines/available endpoint both read
+  THIS object — by definition they cannot
+  disagree on which PCs are available
+  for the next dispatch.
+end note
+
+' ===========================================================
+' Other write surfaces — same pattern (PG sync, mirror async)
+' ===========================================================
+note as N1
+  Every other status-write call site
+  (set_processing, demote_ghosts,
+  community-monitor flips) goes through
+  MachineRepository now.  No call site
+  ever talks to Mirror.set_status/clear_status
+  directly except via the repo.
+end note
+N1 .. MachineRepo
+
+' ===========================================================
+' Notes
+' ===========================================================
+note top of MachineRepo
+  Was: SQL-only repo + separate StateWriter
+  for dual-store coordination.
+  Now: composes the mirror; every PG status
+  write fires an async mirror op alongside.
+  Cleaner call graph, one fewer class.
+end note
+
+note right of Mirror
+  Renamed (heartbeat → redis_mirror) because
+  the class owns BOTH:
+  - liveness (Redis-authoritative, no PG twin)
+  - status mirror (PG twin, now async)
+  "Heartbeat" was understating the surface.
+end note
+
+note bottom of DeletedWriter
+  set_status was the only public method.
+  Folds into MachineRepository.update_status.
+  Every import of MachineStateWriter is
+  retargeted to MachineRepository.
+end note
+
+@enduml

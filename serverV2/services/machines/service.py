@@ -8,10 +8,8 @@ from uuid import uuid4
 
 from serverV2.core.value_objects import now_iso
 from serverV2.infrastructure.db import execute, query_one, query_all
-from serverV2.services.machines.machine_heartbeat_repository import (
-    MachineHeartbeatRepository,
-)
-from serverV2.services.machines.machine_state_writer import MachineStateWriter
+from serverV2.services.machines.machine_redis_mirror import MachineRedisMirror
+from serverV2.services.machines.machine_repository import MachineRepository
 
 if TYPE_CHECKING:
     from serverV2.orchestrator.orchestrator import RenderOrchestrator
@@ -32,14 +30,14 @@ class MachineService:
         self,
         *,
         orchestrator: "RenderOrchestrator",
-        machine_heartbeat_repo: MachineHeartbeatRepository,
-        state_writer: MachineStateWriter,
+        machine_repo: MachineRepository,
+        mirror: MachineRedisMirror,
         vast_config=None,
         modal_config=None,
     ) -> None:
         self._orchestrator = orchestrator
-        self._machine_hb = machine_heartbeat_repo
-        self._state_writer = state_writer
+        self._machine_repo = machine_repo
+        self._mirror = mirror
         self._vast_cfg = vast_config
         self._modal_cfg = modal_config
 
@@ -109,7 +107,7 @@ class MachineService:
         # Mirror the freshly-written 'idle' status into Redis so the
         # allocator's read path and the heartbeat self-heal don't see
         # a missing entry on first sight.
-        self._machine_hb.set_status(machine_id, "idle")
+        self._mirror.set_status(machine_id, "idle")
         return {"machine_id": machine_id}
 
     def set_available(self, machine_id: str) -> dict[str, bool]:
@@ -123,14 +121,12 @@ class MachineService:
         # standard failure path so retries fire — same flow Vast/Modal
         # use when their per-job monitor sees a container disappear.
         self._orchestrator.handle_community_machine_idle(machine_id)
-        # Write-through PG + Redis so demote_ghosts can never see a
-        # status='available' machine without a corresponding entry in
-        # the Redis status cache.
-        self._state_writer.set_status(machine_id, "available")
+        # PG sync + Redis async (mirror).
+        self._machine_repo.update_status(machine_id, "available")
         # Also seed the Redis machines:alive sorted set so the agent
         # is considered live from this instant -- the next poll's
         # ZADD just refreshes the same entry.
-        self._machine_hb.record(machine_id)
+        self._mirror.record(machine_id)
         return {"success": True}
 
     def set_idle(self, machine_id: str) -> dict[str, bool]:
@@ -139,17 +135,31 @@ class MachineService:
             raise MachineServiceError(404, "Machine not found")
         # Drop the agent from the alive set in Redis -- the allocator's
         # liveness intersect should immediately stop returning this PC.
-        self._machine_hb.clear(machine_id)
-        self._state_writer.set_status(machine_id, "idle")
+        self._mirror.clear(machine_id)
+        self._machine_repo.update_status(machine_id, "idle")
         return {"success": True}
 
-    def list_all(self) -> list[dict[str, Any]]:
-        return query_all("SELECT * FROM machines ORDER BY registered_at DESC")
+    def ensure_available(self, machine_id: str) -> None:
+        """Self-heal entry called from ``JobService.next_for_machine`` on
+        every work-claim poll.  An agent reaches that endpoint only when
+        idle, so its status should be 'available' -- if Redis says
+        otherwise, we flip it (PG + Redis) and let the next allocator
+        tick pick the agent up.
 
-    def list_available(self, machine_repo) -> list[dict[str, Any]]:
+        Cheap on the happy path: one HGET, no writes when the cached
+        status is already 'available'.  Fail-safe on Redis miss/down:
+        ``mirror.get_status`` returns None, so we treat that as "drift"
+        and reassert via PG -- the resulting Redis write reseeds the
+        cache.
+        """
+        if self._mirror.get_status(machine_id) == "available":
+            return
+        self._machine_repo.update_status(machine_id, "available")
+
+    def list_available(self) -> list[dict[str, Any]]:
         # Community-only after Phase 1 of the allocator redesign — Modal
         # and Vast capacities live in config.json, not the machines table.
-        machines = machine_repo.get_available_community()
+        machines = self._machine_repo.get_available_community()
         return [
             {
                 "id": m.id,

@@ -27,9 +27,7 @@ slightly stale, acceptable per the existing picker's docstring).
 from __future__ import annotations
 
 from serverV2.core.models import CommunityMachine
-from serverV2.services.machines.machine_heartbeat_repository import (
-    MachineHeartbeatRepository,
-)
+from serverV2.services.machines.machine_redis_mirror import MachineRedisMirror
 from serverV2.services.machines.machine_repository import MachineRepository
 
 
@@ -39,16 +37,16 @@ class CommunityAvailabilityBuilder:
         self,
         *,
         machine_repo: MachineRepository,
-        machine_heartbeat_repo: MachineHeartbeatRepository,
+        machine_redis_mirror: MachineRedisMirror,
         stale_seconds: int,
     ) -> None:
         self._machines = machine_repo
-        self._heartbeat = machine_heartbeat_repo
+        self._mirror = machine_redis_mirror
         self._stale_seconds = stale_seconds
 
     def build(self) -> tuple[CommunityMachine, ...]:
         # Step 1 -- status=available cohort, Redis-first with PG fallback.
-        available_ids = self._heartbeat.available_ids()
+        available_ids = self._mirror.available_ids()
         if available_ids is not None:
             community = self._machines.get_community_by_ids(available_ids)
         else:
@@ -56,7 +54,7 @@ class CommunityAvailabilityBuilder:
         # Step 2 -- intersect with the alive set (Redis-only; if Redis
         # is down we keep the broader status=available list for this
         # tick rather than mass-failing every dispatch).
-        alive_ids = self._heartbeat.alive_ids(self._stale_seconds)
+        alive_ids = self._mirror.alive_ids(self._stale_seconds)
         if alive_ids is not None:
             community = [m for m in community if m.id in alive_ids]
         return tuple(community)

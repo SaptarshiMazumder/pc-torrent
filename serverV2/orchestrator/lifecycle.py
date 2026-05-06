@@ -55,7 +55,6 @@ from serverV2.orchestrator.lifecycle_job_termination import (
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.services.machines.machine_repository import MachineRepository
-from serverV2.services.machines.machine_state_writer import MachineStateWriter
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
@@ -84,7 +83,6 @@ class RenderLifecycle:
         job_repo: JobRepository,
         group_repo: RenderGroupRepository,
         machine_repo: MachineRepository,
-        machine_state_writer: MachineStateWriter,
         in_progress_repo: InProgressChunkRepository,
         telemetry_repo: TelemetryRepository,
         output_frame_repo: OutputFrameRepository,
@@ -100,7 +98,6 @@ class RenderLifecycle:
         self._job_repo = job_repo
         self._group_repo = group_repo
         self._machine_repo = machine_repo
-        self._state_writer = machine_state_writer
         self._in_progress = in_progress_repo
         self._telemetry = telemetry_repo
         self._output_frames = output_frame_repo
@@ -395,7 +392,7 @@ class RenderLifecycle:
         # machines row, so this is a community-only side effect.
         machine_id = raw.get("machine_id")
         if fleet == "windows" and machine_id:
-            self._state_writer.set_status(machine_id, "available")
+            self._machine_repo.update_status(machine_id, "available")
 
         try:
             self._record_telemetry(job_id, group_id, raw)

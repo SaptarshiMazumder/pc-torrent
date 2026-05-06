@@ -21,7 +21,7 @@ from serverV2.core.models import (
     PlannedTask,
 )
 from serverV2.repositories.job_repository import JobRepository
-from serverV2.services.machines.machine_state_writer import MachineStateWriter
+from serverV2.services.machines.machine_repository import MachineRepository
 
 
 _FLEET = "community"
@@ -33,10 +33,10 @@ class CommunityStrategy:
         self,
         *,
         job_repo: JobRepository,
-        machine_state_writer: MachineStateWriter,
+        machine_repo: MachineRepository,
     ) -> None:
         self._job_repo = job_repo
-        self._machine_state_writer = machine_state_writer
+        self._machine_repo = machine_repo
 
     @property
     def fleet(self) -> str:
@@ -81,7 +81,7 @@ class CommunityStrategy:
         # ticks read 'machines:status' from Redis and exclude this machine
         # immediately, instead of seeing it as 'available' for the
         # 5-15s gap until the agent's next poll.
-        self._machine_state_writer.set_status(task.machine_id, "processing")
+        self._machine_repo.update_status(task.machine_id, "processing")
         return DispatchResult(
             job_id=job_id,
             machine_id=task.machine_id,

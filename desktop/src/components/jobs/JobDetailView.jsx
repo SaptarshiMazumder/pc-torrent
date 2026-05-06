@@ -12,24 +12,24 @@ import CommunityInstancePanel from "./CommunityInstancePanel";
 import FrameGalleryPanel from "./FrameGalleryPanel";
 import HeavinessPanel from "./HeavinessPanel";
 import FailedChunksPanel from "./FailedChunksPanel";
-import CompletedChunksPanel from "./CompletedChunksPanel";
 import PendingChunksPanel from "./PendingChunksPanel";
 import { usePendingQueue } from "../../hooks/usePendingQueue";
 
-const INSTANCES_DRAWER_KEY = "pcrent:jd_drawer_open:v1";
-const SCENE_DRAWER_KEY = "pcrent:jd_scene_drawer_open:v1";
+const ACTIVE_DRAWER_KEY = "pcrent:jd_active_drawer:v1";
 
-function readDrawerState(key) {
+function readActiveDrawer() {
   try {
-    return localStorage.getItem(key) === "1";
+    const v = localStorage.getItem(ACTIVE_DRAWER_KEY);
+    return v === "instances" || v === "scene" ? v : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function writeDrawerState(key, open) {
+function writeActiveDrawer(value) {
   try {
-    localStorage.setItem(key, open ? "1" : "0");
+    if (value) localStorage.setItem(ACTIVE_DRAWER_KEY, value);
+    else localStorage.removeItem(ACTIVE_DRAWER_KEY);
   } catch {
     // storage unavailable — drawer state simply won't persist
   }
@@ -99,10 +99,11 @@ function RenderGroupDetail({
   const gaugeColor = job.status === "done" ? "#22c55e" : job.status === "failed" ? "#ef4444" : job.status === "cancelled" ? "#6b7280" : "#e8724a";
   const canViewFrames = availableOutputCount > 0;
 
-  const [instancesOpen, setInstancesOpen] = useState(() => readDrawerState(INSTANCES_DRAWER_KEY));
-  const [sceneOpen, setSceneOpen] = useState(() => readDrawerState(SCENE_DRAWER_KEY));
-  useEffect(() => { writeDrawerState(INSTANCES_DRAWER_KEY, instancesOpen); }, [instancesOpen]);
-  useEffect(() => { writeDrawerState(SCENE_DRAWER_KEY, sceneOpen); }, [sceneOpen]);
+  const [activeDrawer, setActiveDrawer] = useState(readActiveDrawer);
+  const instancesOpen = activeDrawer === "instances";
+  const sceneOpen = activeDrawer === "scene";
+  useEffect(() => { writeActiveDrawer(activeDrawer); }, [activeDrawer]);
+  const toggleDrawer = (which) => setActiveDrawer((cur) => (cur === which ? null : which));
 
   const tasksList = job.tasks || [];
 
@@ -162,7 +163,6 @@ function RenderGroupDetail({
           onRefresh={onRefresh}
           onPendingQueueRefresh={pendingQueue.refresh}
         />
-        <CompletedChunksPanel tasks={tasksList} />
         <PendingChunksPanel pendingQueue={pendingQueue} />
 
         {/* Live (active/pending) instances — finished rows live in the
@@ -214,75 +214,81 @@ function RenderGroupDetail({
       </div>
 
       <div className="jd-drawers-rail">
-        <aside className={`jd-drawer ${instancesOpen ? "jd-drawer-open" : "jd-drawer-collapsed"}`}>
-          <button
-            type="button"
-            className="jd-drawer-toggle"
-            onClick={() => setInstancesOpen((v) => !v)}
-            title={instancesOpen ? "Hide instances" : "Show instances"}
-          >
-            <span className="jd-drawer-toggle-icon">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="4" y="4" width="16" height="16" rx="2" />
-                <rect x="9" y="9" width="6" height="6" />
-                <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
-              </svg>
-            </span>
-            {instancesOpen && <span className="jd-drawer-toggle-label">Instances</span>}
-            {instancesOpen && (
-              <svg
-                className="jd-drawer-toggle-chevron"
-                width="14" height="14" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" strokeWidth="2.5"
+        {instancesOpen && (
+          <aside className="jd-drawer-panel">
+            <div className="jd-drawer-panel-header">
+              <span className="jd-drawer-panel-title">Instances</span>
+              <button
+                type="button"
+                className="jd-drawer-panel-close"
+                onClick={() => setActiveDrawer(null)}
+                title="Hide instances"
               >
-                <path d="M9 18l6-6-6-6" />
-              </svg>
-            )}
-          </button>
-          {instancesOpen && (
-            <div className="jd-drawer-body">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="jd-drawer-panel-body">
               <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
               <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
               <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
             </div>
-          )}
-        </aside>
-
-        <aside className={`jd-drawer ${sceneOpen ? "jd-drawer-open" : "jd-drawer-collapsed"}`}>
-          <button
-            type="button"
-            className="jd-drawer-toggle"
-            onClick={() => setSceneOpen((v) => !v)}
-            title={sceneOpen ? "Hide scene details" : "Show scene details"}
-          >
-            <span className="jd-drawer-toggle-icon">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-                <line x1="12" y1="22.08" x2="12" y2="12" />
-              </svg>
-            </span>
-            {sceneOpen && <span className="jd-drawer-toggle-label">Scene</span>}
-            {sceneOpen && (
-              <svg
-                className="jd-drawer-toggle-chevron"
-                width="14" height="14" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" strokeWidth="2.5"
+          </aside>
+        )}
+        {sceneOpen && (
+          <aside className="jd-drawer-panel">
+            <div className="jd-drawer-panel-header">
+              <span className="jd-drawer-panel-title">Scene</span>
+              <button
+                type="button"
+                className="jd-drawer-panel-close"
+                onClick={() => setActiveDrawer(null)}
+                title="Hide scene details"
               >
-                <path d="M9 18l6-6-6-6" />
-              </svg>
-            )}
-          </button>
-          {sceneOpen && (
-            <div className="jd-drawer-body">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="jd-drawer-panel-body">
               <HeavinessPanel
                 heaviness={job.heaviness ?? null}
                 overrides={job.resolved_render_settings?.render ?? null}
                 loading={!job.heaviness}
               />
             </div>
-          )}
-        </aside>
+          </aside>
+        )}
+
+        <nav className="jd-dock" aria-label="Drawers">
+          <button
+            type="button"
+            className={`jd-dock-btn${instancesOpen ? " jd-dock-btn-active" : ""}`}
+            onClick={() => toggleDrawer("instances")}
+            title={instancesOpen ? "Hide instances" : "Show instances"}
+            aria-pressed={instancesOpen}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="4" y="4" width="16" height="16" rx="2" />
+              <rect x="9" y="9" width="6" height="6" />
+              <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={`jd-dock-btn${sceneOpen ? " jd-dock-btn-active" : ""}`}
+            onClick={() => toggleDrawer("scene")}
+            title={sceneOpen ? "Hide scene details" : "Show scene details"}
+            aria-pressed={sceneOpen}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+              <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+              <line x1="12" y1="22.08" x2="12" y2="12" />
+            </svg>
+          </button>
+        </nav>
       </div>
     </div>
   );

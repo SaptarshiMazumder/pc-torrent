@@ -67,7 +67,35 @@ const ICON = {
   range: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 8l4 4-4 4M7 16l-4-4 4-4M14 4l-4 16" /></svg>,
   uptime: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>,
   cost: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" /></svg>,
+  stall: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>,
 };
+
+// Loading-stall watchdog params -- mirror of serverV2/config.json
+// "stall.loading_*".  Keep these in sync when the backend changes.
+// The watchdog computes:
+//   allowed = clamp(estimated_startup_seconds * multiplier, min, max)
+const LOADING_STALL_MULTIPLIER = 3.0;
+const LOADING_STALL_MIN_SEC = 60;
+const LOADING_STALL_MAX_SEC = 1800;
+
+function fmtSec(s) {
+  if (!Number.isFinite(s) || s < 0) return null;
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  const r = Math.round(s % 60);
+  return r > 0 ? `${m}m ${r}s` : `${m}m`;
+}
+
+export function loadingStallChipParts(estimatedStartupSeconds) {
+  if (estimatedStartupSeconds == null) return null;
+  const est = Number(estimatedStartupSeconds);
+  if (!Number.isFinite(est)) return null;
+  const allowed = Math.max(
+    LOADING_STALL_MIN_SEC,
+    Math.min(LOADING_STALL_MAX_SEC, est * LOADING_STALL_MULTIPLIER),
+  );
+  return { allowed: fmtSec(allowed), est: fmtSec(est) };
+}
 
 /**
  * Provider strategy must return an object from extractCardData(task, live):
@@ -158,6 +186,11 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
           {data.rangeLabel && <StatChip icon={ICON.range}>{data.rangeLabel}</StatChip>}
           {data.elapsedSec != null && <StatChip icon={ICON.uptime}>{fmtElapsed(data.elapsedSec)}</StatChip>}
           {data.cost != null && <StatChip icon={ICON.cost}>{data.cost}</StatChip>}
+          {data.loadingStall && (
+            <StatChip icon={ICON.stall}>
+              stall {data.loadingStall.allowed} <span style={{ opacity: 0.55 }}>(est {data.loadingStall.est})</span>
+            </StatChip>
+          )}
         </div>
         <div className="inst-mini-bar">
           <div className="inst-mini-fill" style={{ width: `${fillPct}%`, background: dot }} />
@@ -227,6 +260,11 @@ function FinishedRow({ data }) {
         )}
         <span className="inst-fin-stat">{data.rendered}{data.total != null ? ` / ${data.total}` : ""} frames</span>
         {data.rangeLabel && <span className="inst-fin-stat inst-fin-range">{data.rangeLabel}</span>}
+        {data.loadingStall && (
+          <span className="inst-fin-stat" title="Loading-stall budget at dispatch time">
+            stall {data.loadingStall.allowed} (est {data.loadingStall.est})
+          </span>
+        )}
         {data.error && (
           <button className="inst-fin-err-toggle" onClick={() => setShowError((v) => !v)}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>

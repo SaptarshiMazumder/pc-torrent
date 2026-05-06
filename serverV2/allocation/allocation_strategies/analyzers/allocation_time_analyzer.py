@@ -100,19 +100,26 @@ EEVEE_BASELINE_SAMPLES = 64
 
 _EEVEE_ENGINES = frozenset({"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"})
 
-# Geometry-nodes — base penalty + complexity-scaled, capped
-GEOMETRY_NODES_BASE = 1.2
-GEOMETRY_NODES_CAP = 0.8                  # +0.8 max from complexity
-GEOMETRY_NODES_PER_NODE = 0.8 / 200.0     # complexity 200 → at the cap
+# Geometry-nodes — base penalty + complexity-scaled, capped.
+# Real-world GN often pays its cost at BVH build (one-time per chunk) and
+# barely impacts per-frame render, so the multiplier here stays mild.
+GEOMETRY_NODES_BASE = 1.1
+GEOMETRY_NODES_CAP = 0.3                  # +0.3 max from complexity
+GEOMETRY_NODES_PER_NODE = 0.3 / 200.0     # complexity 200 → at the cap
 
-# Shader complexity — flat below threshold, ramps to +100% at the upper threshold
+# Shader complexity — flat below threshold, ramps to +40% at the upper
+# threshold.  Most shader nodes in a 542-node scene are dormant per
+# shading path; the prior +100% ramp over-penalized node count.
 SHADER_NODE_BASE_THRESHOLD = 100
 SHADER_NODE_CAP_THRESHOLD = 600
-SHADER_NODE_RAMP = 1.0 / (SHADER_NODE_CAP_THRESHOLD - SHADER_NODE_BASE_THRESHOLD)
+SHADER_NODE_RAMP = 0.4 / (SHADER_NODE_CAP_THRESHOLD - SHADER_NODE_BASE_THRESHOLD)
 
-# Texture VRAM-pressure proxy — mild penalty above baseline tex bytes
-TEX_PRESSURE_RAMP_RATE = 0.3
-TEX_PRESSURE_CAP = 2.0
+# Texture VRAM-pressure proxy — mild penalty above baseline tex bytes.
+# 1-2 GB of textures fits comfortably on every GPU class we ship; the
+# pressure penalty only matters when we'd spill, which we essentially
+# never do.  Cap and ramp tuned accordingly.
+TEX_PRESSURE_RAMP_RATE = 0.15
+TEX_PRESSURE_CAP = 1.3
 
 # Floors — guard against pathological inputs producing absurd estimates
 MIN_PIXEL_FACTOR = 0.25
@@ -477,13 +484,13 @@ def _smoke() -> None:
     assert 1.25 * BASELINE_SEC < spf_subdiv < 1.35 * BASELINE_SEC
     print(f"+ subdivision modifier                    @ speed=1.0  ->{spf_subdiv:.1f}s/frame")
 
-    # ------- Geometry nodes (high complexity) — base 1.2 + capped extra -------
+    # ------- Geometry nodes (high complexity) — base 1.1 + capped extra -------
     heavy_gnodes = dict(baseline)
     heavy_gnodes["uses_geometry_nodes"] = True
     heavy_gnodes["geometry_nodes_complexity"] = 200    # at the cap
     spf_gn = estimate_seconds_per_frame(heavy_gnodes, 1.0)
-    assert 1.95 * BASELINE_SEC < spf_gn < 2.05 * BASELINE_SEC, \
-        f"GN at cap should ~2x (1.2 + 0.8), got {spf_gn}"
+    assert 1.35 * BASELINE_SEC < spf_gn < 1.45 * BASELINE_SEC, \
+        f"GN at cap should ~1.4x (1.1 + 0.3), got {spf_gn}"
     print(f"+ geometry nodes (complexity 200, capped) @ speed=1.0  ->{spf_gn:.1f}s/frame")
 
     # ------- Combined heavy scene — multiplicative -------

@@ -51,6 +51,9 @@ async function apiFetch(baseUrl, path, options = {}, _retry = false) {
   try {
     response = await fetch(`${normalizedBase}${path}`, { ...options, headers });
   } catch (error) {
+    // Preserve AbortError so callers can distinguish "I cancelled this"
+    // from a genuine network failure.
+    if (error?.name === "AbortError") throw error;
     const detail = error?.message || String(error);
     throw new Error(`Network error reaching ${normalizedBase}${path}: ${detail}`);
   }
@@ -309,9 +312,9 @@ export async function deleteInputFile(baseUrl, assetId) {
   });
 }
 
-export async function listRenderGroups(baseUrl, { limit = 5, offset = 0 } = {}) {
+export async function listRenderGroups(baseUrl, { limit = 5, offset = 0, signal } = {}) {
   const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
-  return apiFetch(baseUrl, `/render-groups?${qs.toString()}`);
+  return apiFetch(baseUrl, `/render-groups?${qs.toString()}`, { signal });
 }
 
 export async function createDistributedRenderGroup(

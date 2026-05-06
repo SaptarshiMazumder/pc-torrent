@@ -92,9 +92,7 @@ export default function App() {
           <MyJobsPage
             jobs={jobsHook.jobs}
             loading={jobsHook.loading}
-            hasMore={jobsHook.hasMore}
             loadingMore={jobsHook.loadingMore}
-            onLoadMore={jobsHook.loadMore}
             removeJob={jobsHook.removeJob}
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}

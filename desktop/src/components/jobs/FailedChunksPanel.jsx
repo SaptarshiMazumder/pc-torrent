@@ -10,7 +10,7 @@ function rangeLabel(task) {
   return start === end ? `${start}` : `${start}-${end}`;
 }
 
-function FailedChunkCell({ task, backendUrl, groupId, onRetried, onRefresh }) {
+function FailedChunkCell({ task, backendUrl, groupId, onRetried, onRefresh, onPendingQueueRefresh }) {
   const [retrying, setRetrying] = useState(false);
   const [actionError, setActionError] = useState("");
   const color = "#ef4444";
@@ -29,6 +29,11 @@ function FailedChunkCell({ task, backendUrl, groupId, onRetried, onRefresh }) {
       // refetches.
       if (groupId) clearTerminalDetailFromCache(groupId);
       onRetried(task.job_id, task.chunk_index);
+      // Manual retry parks a new row on pending_allocation_queue — fire
+      // a one-shot pending-queue refresh now so the user sees the new
+      // entry immediately, instead of waiting up to 10s for the next
+      // gated poll.
+      if (onPendingQueueRefresh) onPendingQueueRefresh();
       if (onRefresh) onRefresh();
     } catch (e) {
       setRetrying(false);
@@ -66,7 +71,7 @@ function FailedChunkCell({ task, backendUrl, groupId, onRetried, onRefresh }) {
   );
 }
 
-export default function FailedChunksPanel({ tasks, backendUrl, groupId, onRefresh }) {
+export default function FailedChunksPanel({ tasks, backendUrl, groupId, onRefresh, onPendingQueueRefresh }) {
   const [retriedIds, setRetriedIds] = useState(() => getRetriedJobIds());
   const [confirmation, setConfirmation] = useState("");
   const confirmTimerRef = useRef(null);
@@ -125,6 +130,7 @@ export default function FailedChunksPanel({ tasks, backendUrl, groupId, onRefres
               groupId={groupId}
               onRetried={handleRetried}
               onRefresh={onRefresh}
+              onPendingQueueRefresh={onPendingQueueRefresh}
             />
           ))}
         </div>

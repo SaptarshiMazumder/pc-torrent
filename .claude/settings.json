@@ -7,7 +7,9 @@
       "Bash(modal app *)",
       "Bash(npx --no-install esbuild --bundle src/pages/CreateRenderPage.jsx --outfile=NUL --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:*)",
       "Bash(gcloud auth *)",
-      "PowerShell(head -20)"
+      "PowerShell(head -20)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\sapma\\\\OneDrive\\\\Desktop\\\\Projects\\\\PC_Rent\\\\pc-torrent\" -Directory)",
+      "Bash(Select-Object Name)"
     ]
   }
 }

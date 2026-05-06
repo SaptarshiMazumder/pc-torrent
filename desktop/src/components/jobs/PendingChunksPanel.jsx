@@ -1,5 +1,3 @@
-import { usePendingQueue } from "../../hooks/usePendingQueue";
-
 function rangeLabel(item) {
   const start = item.frame_start;
   const end = item.frame_end;
@@ -31,10 +29,8 @@ function PendingChunkCell({ item }) {
   );
 }
 
-export default function PendingChunksPanel({ backendUrl, groupId, tasks, totalFrames, groupStatus }) {
-  const { items, loading, stopped, expectsPending, refresh } = usePendingQueue(
-    backendUrl, groupId, { tasks, totalFrames, groupStatus },
-  );
+export default function PendingChunksPanel({ pendingQueue }) {
+  const { items, loading, stopped, expectsPending, refresh } = pendingQueue;
 
   let body;
   if (items.length > 0) {

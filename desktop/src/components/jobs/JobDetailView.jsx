@@ -14,6 +14,7 @@ import HeavinessPanel from "./HeavinessPanel";
 import FailedChunksPanel from "./FailedChunksPanel";
 import CompletedChunksPanel from "./CompletedChunksPanel";
 import PendingChunksPanel from "./PendingChunksPanel";
+import { usePendingQueue } from "../../hooks/usePendingQueue";
 
 const INSTANCES_DRAWER_KEY = "pcrent:jd_drawer_open:v1";
 const SCENE_DRAWER_KEY = "pcrent:jd_scene_drawer_open:v1";
@@ -105,6 +106,16 @@ function RenderGroupDetail({
 
   const tasksList = job.tasks || [];
 
+  // Pending-queue hook lives at this level so both the failed-chunks
+  // panel (which fires a one-shot refresh on retry success) and the
+  // pending panel (which renders the items + manual refresh) share
+  // the same state.  10s gated polling continues as before.
+  const pendingQueue = usePendingQueue(backendUrl, id, {
+    tasks: tasksList,
+    totalFrames: job.total_frames,
+    groupStatus: job.status,
+  });
+
   return (
     <div className="jd-body jd-body-split">
       <div className="jd-main">
@@ -144,15 +155,15 @@ function RenderGroupDetail({
         {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
 
         {/* Chunks — primary view */}
-        <FailedChunksPanel tasks={tasksList} backendUrl={backendUrl} groupId={id} onRefresh={onRefresh} />
-        <CompletedChunksPanel tasks={tasksList} />
-        <PendingChunksPanel
+        <FailedChunksPanel
+          tasks={tasksList}
           backendUrl={backendUrl}
           groupId={id}
-          tasks={tasksList}
-          totalFrames={job.total_frames}
-          groupStatus={job.status}
+          onRefresh={onRefresh}
+          onPendingQueueRefresh={pendingQueue.refresh}
         />
+        <CompletedChunksPanel tasks={tasksList} />
+        <PendingChunksPanel pendingQueue={pendingQueue} />
 
         {/* Live (active/pending) instances — finished rows live in the
             sidebar drawer to keep the main column focused on what's

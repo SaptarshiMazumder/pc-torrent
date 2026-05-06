@@ -6,6 +6,10 @@ priority (Phase F, future).  This class is now a thin wrapper around
 ``AllocationPlanner`` -- exists for API compatibility with the
 planning service surface and to keep dependency injection one-step
 explicit.
+
+Weights come in via constructor (loaded from
+``frame_allocation.weights`` in config.json by the bootstrap), so the
+deployment can retune without a code change.
 """
 
 from __future__ import annotations
@@ -16,16 +20,19 @@ from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chu
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
-from serverV2.allocation.allocation_strategies.allocation_weights import DEFAULT
+from serverV2.allocation.allocation_strategies.allocation_weights import (
+    AllocationWeights,
+)
 from serverV2.core.models import AvailableResources, PlannedTask
 
 
 class AllocationStrategy:
 
-    WEIGHTS = DEFAULT
-
-    def __init__(self, planner: AllocationPlanner) -> None:
+    def __init__(
+        self, planner: AllocationPlanner, *, weights: AllocationWeights,
+    ) -> None:
         self._planner = planner
+        self._weights = weights
 
     def allocate_initial(
         self,
@@ -44,7 +51,7 @@ class AllocationStrategy:
             frame_step=frame_step,
             total_frames=total_frames,
             resources=resources,
-            weights=self.WEIGHTS,
+            weights=self._weights,
             engine=engine,
             heaviness=heaviness,
         )
@@ -59,6 +66,6 @@ class AllocationStrategy:
         return self._planner.plan_retry(
             chunk_request=chunk_request,
             resources=resources,
-            weights=self.WEIGHTS,
+            weights=self._weights,
             heaviness=heaviness,
         )

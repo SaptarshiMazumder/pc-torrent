@@ -368,11 +368,10 @@ def build(
     # analyzer module.  Must happen before the planner runs so the
     # first dry-run estimate uses production calibration rather than
     # the module's hand-tuned defaults.
-    if cfg.render_time is not None:
-        from serverV2.allocation.allocation_strategies.analyzers import (
-            allocation_time_analyzer,
-        )
-        allocation_time_analyzer.configure(cfg.render_time)
+    from serverV2.allocation.allocation_strategies.analyzers import (
+        allocation_time_analyzer,
+    )
+    allocation_time_analyzer.configure(cfg.frame_allocation.render_time)
 
     # Single planner does the work.  Owns target validators (engine
     # compatibility today; future: tier / price caps).
@@ -381,10 +380,12 @@ def build(
     ]
     allocation_planner = AllocationPlanner(
         registry,
-        startup_buffer=cfg.startup_buffer,
+        startup_buffer=cfg.frame_allocation.startup_buffer,
         validators=target_validators,
     )
-    allocation_strategy = AllocationStrategy(allocation_planner)
+    allocation_strategy = AllocationStrategy(
+        allocation_planner, weights=cfg.frame_allocation.weights,
+    )
 
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
@@ -426,7 +427,7 @@ def build(
     allocation_planning_service = AllocationPlanningService(
         strategy=allocation_strategy,
         cost_aggregator=allocation_cost_aggregator,
-        failure_rate=cfg.failure_rate,
+        failure_rate=cfg.frame_allocation.failure_rate,
     )
     _allocation_fleet_caps: dict[str, int] = {
         "modal_serverless": cfg.modal.max_parallel,

@@ -5,7 +5,8 @@
       "Bash(modal function-call *)",
       "Bash(modal -h)",
       "Bash(modal app *)",
-      "Bash(npx --no-install esbuild --bundle src/pages/CreateRenderPage.jsx --outfile=NUL --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:*)"
+      "Bash(npx --no-install esbuild --bundle src/pages/CreateRenderPage.jsx --outfile=NUL --loader:.jsx=jsx --jsx=automatic --external:react --external:react-dom --external:*)",
+      "Bash(gcloud auth *)"
     ]
   }
 }

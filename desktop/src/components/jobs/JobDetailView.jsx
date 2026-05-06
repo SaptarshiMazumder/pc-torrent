@@ -176,19 +176,19 @@ function RenderGroupDetail({
             </div>
           </div>
 
-          <div className="jd-preview-card">
-            <div className="jd-preview-thumb">
-              {latestOutputFile ? (
+          {latestOutputFile ? (
+            <div className="jd-preview-card">
+              <div className="jd-preview-thumb">
                 <JobThumbnail job={job} authToken={authToken} backendUrl={backendUrl} />
-              ) : (
-                <img src={loaderGif} alt="Rendering..." className="jd-preview-loader" />
-              )}
+              </div>
+              <div className="jd-preview-meta">
+                <span className="jd-preview-name">{latestOutputFile}</span>
+                <span className="jd-preview-tag">Latest Rendered Frame</span>
+              </div>
             </div>
-            <div className="jd-preview-meta">
-              <span className="jd-preview-name">{latestOutputFile || "No frame yet"}</span>
-              <span className="jd-preview-tag">Latest Rendered Frame</span>
-            </div>
-          </div>
+          ) : (
+            <img src={loaderGif} alt="Rendering..." className="jd-preview-loader-bare" />
+          )}
 
           <div className="jd-actions">
             {canCancel && (

@@ -18,13 +18,11 @@ Two parallel concerns, both backed by Redis:
    (``idle`` / ``available`` / ``processing``).  Postgres remains the
    source of truth on disk; Redis is the fast read path used by the
    allocator and the heartbeat-driven self-heal in
-   ``JobService.next_for_machine``.  Status writes are submitted to a
-   small ThreadPoolExecutor so the PG caller (``MachineRepository``)
-   never blocks on Redis I/O.
+   ``JobService.next_for_machine``.
 
-     Status write     : HSET machines:status <id> <status>   (async)
-     Status read      : HGET machines:status <id>            (sync)
-     All ids by status: HGETALL machines:status (filter)     (sync)
+     Status write     : HSET machines:status <id> <status>
+     Status read      : HGET machines:status <id>
+     All ids by status: HGETALL machines:status (filter)
 
 Renamed from ``MachineHeartbeatRepository`` -- the old name understated
 the surface (status mirror was already living here).  Same Redis keys
@@ -36,7 +34,6 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import redis
 
@@ -55,16 +52,8 @@ _SET_TTL_SEC = 24 * 60 * 60
 
 class MachineRedisMirror:
 
-    def __init__(
-        self,
-        redis_client: RedisClient,
-        executor: ThreadPoolExecutor | None = None,
-    ) -> None:
+    def __init__(self, redis_client: RedisClient) -> None:
         self._redis_client = redis_client
-        self._executor = executor or ThreadPoolExecutor(
-            max_workers=2,
-            thread_name_prefix="machine-redis-mirror",
-        )
 
     # ------------------------------------------------------------------
     # liveness — Redis is source of truth, sync ops
@@ -127,16 +116,32 @@ class MachineRedisMirror:
             return 0
 
     # ------------------------------------------------------------------
-    # status cache (mirror of machines.status) — async writes, sync reads
+    # status cache (mirror of machines.status)
     # ------------------------------------------------------------------
 
     def set_status(self, machine_id: str, status: str) -> None:
-        """Submit an HSET to the executor -- caller returns immediately."""
-        self._executor.submit(self._set_status_sync, machine_id, status)
+        client = self._redis_client.client()
+        if client is None:
+            return
+        try:
+            pipe = client.pipeline(transaction=False)
+            pipe.hset(_STATUS_KEY, machine_id, status)
+            pipe.expire(_STATUS_KEY, _SET_TTL_SEC)
+            pipe.execute()
+        except redis.RedisError as exc:
+            log.warning(
+                "MachineRedisMirror set_status failed for %s -> %s: %s",
+                machine_id, status, exc,
+            )
 
     def clear_status(self, machine_id: str) -> None:
-        """Submit an HDEL to the executor -- caller returns immediately."""
-        self._executor.submit(self._clear_status_sync, machine_id)
+        client = self._redis_client.client()
+        if client is None:
+            return
+        try:
+            client.hdel(_STATUS_KEY, machine_id)
+        except redis.RedisError:
+            pass
 
     def get_status(self, machine_id: str) -> str | None:
         """Read the cached status.  Returns None on cache miss OR Redis
@@ -173,30 +178,3 @@ class MachineRedisMirror:
                 out.add(mid_s)
         return out
 
-    # ------------------------------------------------------------------
-    # internal -- run on the executor
-    # ------------------------------------------------------------------
-
-    def _set_status_sync(self, machine_id: str, status: str) -> None:
-        client = self._redis_client.client()
-        if client is None:
-            return
-        try:
-            pipe = client.pipeline(transaction=False)
-            pipe.hset(_STATUS_KEY, machine_id, status)
-            pipe.expire(_STATUS_KEY, _SET_TTL_SEC)
-            pipe.execute()
-        except redis.RedisError as exc:
-            log.warning(
-                "MachineRedisMirror set_status failed for %s -> %s: %s",
-                machine_id, status, exc,
-            )
-
-    def _clear_status_sync(self, machine_id: str) -> None:
-        client = self._redis_client.client()
-        if client is None:
-            return
-        try:
-            client.hdel(_STATUS_KEY, machine_id)
-        except redis.RedisError:
-            pass

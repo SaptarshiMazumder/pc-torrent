@@ -80,7 +80,7 @@ class BackendClient:
         try:
             resp = requests.put(
                 f"{self._backend_url}/jobs/{self._job_id}/worker-start",
-                timeout=10,
+                timeout=30,
             )
         except Exception as exc:
             log.warning(
@@ -108,7 +108,7 @@ class BackendClient:
             requests.put(
                 f"{self._backend_url}/jobs/{self._job_id}/status",
                 json={"status": "running"},
-                timeout=15,
+                timeout=30,
             )
         except Exception as exc:
             log.warning(f"Failed to mark job running: {exc}")
@@ -192,7 +192,7 @@ class BackendClient:
             requests.put(
                 f"{self._backend_url}/jobs/{self._job_id}/progress",
                 json={"rendered_frames": rendered_frames, "total_frames": total_frames},
-                timeout=15,
+                timeout=30,
             )
         except Exception as exc:
             log.warning(f"Failed to push progress: {exc}")
@@ -205,7 +205,7 @@ class BackendClient:
             requests.put(
                 f"{self._backend_url}/jobs/{self._job_id}/heartbeat",
                 json={"phase": phase},
-                timeout=10,
+                timeout=30,
             )
         except Exception as exc:
             log.warning(f"Heartbeat failed for job {self._job_id}: {exc}")
@@ -222,7 +222,7 @@ class BackendClient:
         try:
             resp = requests.get(
                 f"{self._backend_url}/jobs/{self._job_id}/cancel-status",
-                timeout=10,
+                timeout=30,
             )
             resp.raise_for_status()
             return bool(resp.json().get("cancelled"))

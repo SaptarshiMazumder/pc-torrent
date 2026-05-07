@@ -142,9 +142,6 @@ def _warm_pending_queue_redis_mirror(
     """One-shot at startup: read the entire pending_allocation_queue,
     bucket by group_id, and seed the Redis mirror so the first
     detail-page poll after boot doesn't pay a cold cache penalty.
-
-    All mirror writes are async — this function returns the moment the
-    submissions are queued; actual HSETs run on the mirror's executor.
     """
     from collections import defaultdict
     items = repo.list_all()
@@ -255,8 +252,8 @@ def build(
     job_terminal_cache = JobTerminalCache(redis)
     job_repo = JobRepository(terminal_cache=job_terminal_cache)
     # Redis-side machine state (heartbeat liveness + status mirror).
-    # Composed into MachineRepository so every PG status write fires
-    # an async Redis mirror op alongside.
+    # Composed into MachineRepository so every PG status write also
+    # writes to the Redis mirror synchronously.
     machine_redis_mirror = MachineRedisMirror(redis)
     machine_repo = MachineRepository(
         mirror=machine_redis_mirror,
@@ -414,9 +411,9 @@ def build(
 
     # -- dispatch queue (DB-backed) --
     queue_repo = DispatchQueueRepository()
-    # Per-group Redis cache for the pending_allocation_queue.  Writes are
-    # mirrored on a background executor so PG writes never block on Redis
-    # I/O; reads serve the detail-page poller's per-group fetch.
+    # Per-group Redis cache for the pending_allocation_queue.  Writes
+    # mirror synchronously alongside the PG write; reads serve the
+    # detail-page poller's per-group fetch.
     pending_queue_mirror = PendingQueueRedisMirror(redis_client=redis)
     pending_queue_repo = AllocationPendingQueueRepository(mirror=pending_queue_mirror)
 
@@ -527,9 +524,7 @@ def build(
     allocation_client = AllocationClient(facade=allocation_facade)
 
     # Warm the per-group Redis cache from any pending rows already in
-    # Postgres (e.g. survivors of a previous deploy).  Submits to the
-    # mirror's executor — this call returns immediately; the actual
-    # HSETs happen in the background.
+    # Postgres (e.g. survivors of a previous deploy).
     _warm_pending_queue_redis_mirror(pending_queue_repo, pending_queue_mirror)
 
     # -- anti-affinity: facade/service/repository for retry exclusion

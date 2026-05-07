@@ -91,7 +91,7 @@ class HeartbeatSender:
 
     def _push(self) -> None:
         try:
-            resp = requests.put(self._url, json=self._payload(), timeout=15)
+            resp = requests.put(self._url, json=self._payload(), timeout=30)
             if resp.status_code == 410:
                 # Job terminal -- orchestrator no longer wants this work.
                 # Signal and stop heartbeating; main loop reads the event

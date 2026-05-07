@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from serverV2.api.dependencies import get_current_user
@@ -73,19 +73,13 @@ def _terminal_response(exc: JobTerminalError) -> JSONResponse:
 def update_status(
     job_id: str,
     payload: UpdateJobStatusPayload,
-    background_tasks: BackgroundTasks,
 ):
     try:
         result = _get().update_status(job_id, payload.status, payload.error)
         if payload.output_files:
             _get().register_outputs(job_id, payload.output_files)
-        # Worker self-reported done (community path) -- run the success
-        # chain as a BackgroundTask, mirroring register_outputs.  The
-        # synchronous DB write inside update_status was enough to close
-        # the reclaim race; this task does the heavy follow-up
-        # (telemetry, group reconcile, drain).
         if result.get("needs_completion"):
-            background_tasks.add_task(_get().notify_completion, job_id)
+            _get().notify_completion(job_id)
         return result
     except JobTerminalError as e:
         # Workers MUST be allowed to update terminal status -- but the
@@ -125,36 +119,28 @@ def heartbeat(job_id: str, payload: JobHeartbeatPayload | None = None):
         raise HTTPException(e.status, e.message)
 
 
-@router.post("/jobs/{job_id}/agent-failure", status_code=202)
-def agent_failure(job_id: str, body: dict, background: BackgroundTasks):
+@router.post("/jobs/{job_id}/agent-failure")
+def agent_failure(job_id: str, body: dict):
     """Community-agent monitor-equivalent path.  The agent is its own
     monitor — when its local render fails, it tells the orchestrator
     here so the standard retry / drain / reconcile flow fires.
-
-    Returns 202 immediately; the orchestration chain (release_if_owner,
-    retry dispatch, group reconcile, drain) runs in a background task
-    so the agent's HTTP client doesn't block on it.  Mirrors the same
-    BackgroundTasks pattern that ``register_outputs`` uses.
     """
     error = str(body.get("error") or "Agent reported failure")
-    background.add_task(
-        _get_callback_router().route,
+    _get_callback_router().route(
         job_id=job_id, outcome=CallbackOutcome.FAILURE, error=error,
     )
     return {"job_id": job_id, "accepted": True}
 
 
-@router.post("/jobs/{job_id}/cancel", status_code=202)
-def cancel_one_job(job_id: str, background: BackgroundTasks):
+@router.post("/jobs/{job_id}/cancel")
+def cancel_one_job(job_id: str):
     """Per-instance Cancel button (B2).  Tears down ONE job (the
     chunk the user clicked Cancel on) without touching the rest of
-    the render group.  Returns 202 immediately; the cancel chain
-    (mark cancelled, stop monitor, release ledger, RPC the provider)
-    runs in a background task -- the provider call can take seconds.
+    the render group.  Cancel chain (mark cancelled, stop monitor,
+    release ledger, RPC the provider) runs synchronously — the
+    provider call can take up to ~30s.
     """
-    background.add_task(
-        _get_orchestrator().cancel_one_job, job_id,
-    )
+    _get_orchestrator().cancel_one_job(job_id)
     return {"job_id": job_id, "accepted": True}
 
 
@@ -249,14 +235,13 @@ def download_zip(job_id: str):
 
 
 @router.post("/jobs/{job_id}/register-outputs")
-def register_outputs(
-    job_id: str, body: dict, background_tasks: BackgroundTasks,
-):
-    """Worker tells us a file is in R2.  We record it and return 200 fast.
-    The success-notifier chain (telemetry, group reconcile, drain queue,
-    possibly a new dispatch) runs as a BackgroundTask AFTER the response
-    is flushed, so the worker's catch-up POST doesn't block on heavy
-    server-side side-effects and time out client-side."""
+def register_outputs(job_id: str, body: dict):
+    """Worker tells us a file is in R2.  We record it and (on
+    completion) run the success-notifier chain (telemetry, group
+    reconcile, drain queue, possibly a new dispatch) inline.  Worker
+    waits for the full chain to finish — its HTTP client tolerates
+    up to 30s.
+    """
     filenames = body.get("filenames", [])
     if not filenames:
         raise HTTPException(400, "No filenames provided")
@@ -265,7 +250,7 @@ def register_outputs(
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
     if result.get("completion_reached"):
-        background_tasks.add_task(_get().notify_completion, job_id)
+        _get().notify_completion(job_id)
     return result
 
 

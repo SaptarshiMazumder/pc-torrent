@@ -121,7 +121,7 @@ class VastInstanceManager:
             resp = httpx.delete(
                 f"{self._cfg.api_base}/instances/{instance_id}/",
                 headers=_auth_headers(self._cfg),
-                timeout=15,
+                timeout=30,
             )
             if resp.status_code not in (200, 204, 404):
                 resp.raise_for_status()

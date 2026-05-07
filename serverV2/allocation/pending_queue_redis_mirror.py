@@ -22,21 +22,17 @@ naturally re-triggers a PG fallback the next read.
 
 Concurrency
 -----------
-All writes are submitted to a small ThreadPoolExecutor and return
-immediately.  The Postgres caller (AllocationPendingQueueRepository)
-never blocks on Redis I/O — Redis hiccups can't extend or time out the
-caller.  Reads stay synchronous because the cached result is needed to
-serve the response.
-
-All operations are fail-safe: if Redis is unreachable, writes silently
-drop and reads return None (signaling cache miss → fall back to PG).
+All operations run synchronously on the caller's thread.  PG hop is
+~5 ms (Singapore) and Redis hop is similar, so the per-write cost is
+negligible.  All operations are fail-safe: if Redis is unreachable,
+writes silently drop and reads return None (signaling cache miss →
+fall back to PG).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from typing import Any
 
@@ -96,82 +92,25 @@ def _item_from_json(raw: str) -> AllocationPendingItem:
 
 class PendingQueueRedisMirror:
 
-    def __init__(
-        self,
-        redis_client: RedisClient,
-        executor: ThreadPoolExecutor | None = None,
-    ) -> None:
+    def __init__(self, redis_client: RedisClient) -> None:
         self._redis = redis_client
-        self._executor = executor or ThreadPoolExecutor(
-            max_workers=2,
-            thread_name_prefix="pending-queue-mirror",
-        )
 
     # ------------------------------------------------------------------
-    # writes -- fire-and-forget
+    # writes
     # ------------------------------------------------------------------
 
     def add(self, item: AllocationPendingItem) -> None:
-        self._executor.submit(self._add_sync, item)
-
-    def update_last_attempted_at(
-        self, group_id: str, row_id: int, last_attempted_at: str,
-    ) -> None:
-        self._executor.submit(
-            self._update_last_attempted_at_sync,
-            group_id, row_id, last_attempted_at,
-        )
-
-    def remove(self, group_id: str, row_id: int) -> None:
-        self._executor.submit(self._remove_sync, group_id, row_id)
-
-    def clear_for_group(self, group_id: str) -> None:
-        self._executor.submit(self._clear_for_group_sync, group_id)
-
-    def set_for_group(
-        self, group_id: str, items: list[AllocationPendingItem],
-    ) -> None:
-        self._executor.submit(self._set_for_group_sync, group_id, items)
-
-    # ------------------------------------------------------------------
-    # reads -- synchronous
-    # ------------------------------------------------------------------
-
-    def get_for_group(self, group_id: str) -> list[AllocationPendingItem] | None:
-        """Return cached items, an empty list if the group is known to
-        have zero rows, or ``None`` if the cache is cold for this group.
-        """
-        client = self._redis.client()
-        if client is None:
-            return None
-        try:
-            raw = client.hgetall(_key(group_id))
-        except Exception as exc:
-            log.warning("Redis HGETALL failed for %s: %s", group_id, exc)
-            return None
-        if not raw:
-            return None
-        if _EMPTY_SENTINEL in raw:
-            return []
-        return [_item_from_json(v) for v in raw.values()]
-
-    # ------------------------------------------------------------------
-    # internal -- run on the executor
-    # ------------------------------------------------------------------
-
-    def _add_sync(self, item: AllocationPendingItem) -> None:
         client = self._redis.client()
         if client is None or item.id is None:
             return
         try:
             key = _key(item.group_id)
-            # Drop empty sentinel before writing a real row.
             client.hdel(key, _EMPTY_SENTINEL)
             client.hset(key, str(item.id), _item_to_json(item))
         except Exception as exc:
             log.warning("Redis mirror add failed for row %s: %s", item.id, exc)
 
-    def _update_last_attempted_at_sync(
+    def update_last_attempted_at(
         self, group_id: str, row_id: int, last_attempted_at: str,
     ) -> None:
         client = self._redis.client()
@@ -191,7 +130,7 @@ class PendingQueueRedisMirror:
                 row_id, exc,
             )
 
-    def _remove_sync(self, group_id: str, row_id: int) -> None:
+    def remove(self, group_id: str, row_id: int) -> None:
         client = self._redis.client()
         if client is None:
             return
@@ -202,7 +141,7 @@ class PendingQueueRedisMirror:
                 "Redis mirror remove failed for row %s: %s", row_id, exc,
             )
 
-    def _clear_for_group_sync(self, group_id: str) -> None:
+    def clear_for_group(self, group_id: str) -> None:
         client = self._redis.client()
         if client is None:
             return
@@ -214,7 +153,7 @@ class PendingQueueRedisMirror:
                 group_id, exc,
             )
 
-    def _set_for_group_sync(
+    def set_for_group(
         self, group_id: str, items: list[AllocationPendingItem],
     ) -> None:
         client = self._redis.client()
@@ -239,3 +178,25 @@ class PendingQueueRedisMirror:
                 "Redis mirror set_for_group failed for %s: %s",
                 group_id, exc,
             )
+
+    # ------------------------------------------------------------------
+    # reads
+    # ------------------------------------------------------------------
+
+    def get_for_group(self, group_id: str) -> list[AllocationPendingItem] | None:
+        """Return cached items, an empty list if the group is known to
+        have zero rows, or ``None`` if the cache is cold for this group.
+        """
+        client = self._redis.client()
+        if client is None:
+            return None
+        try:
+            raw = client.hgetall(_key(group_id))
+        except Exception as exc:
+            log.warning("Redis HGETALL failed for %s: %s", group_id, exc)
+            return None
+        if not raw:
+            return None
+        if _EMPTY_SENTINEL in raw:
+            return []
+        return [_item_from_json(v) for v in raw.values()]

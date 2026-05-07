@@ -62,6 +62,13 @@ def get_conn():
     pool = _get_pool()
     conn = _checkout_healthy_conn(pool)
     try:
+        # Neon's transaction-mode pooler doesn't honor per-database /
+        # per-role search_path defaults, so set it explicitly at the
+        # start of every checkout.  Same transaction as the caller's
+        # query → same backend → search_path is in effect when the
+        # query runs.
+        with conn.cursor() as cur:
+            cur.execute("SET search_path = public")
         yield conn
         conn.commit()
     except Exception:

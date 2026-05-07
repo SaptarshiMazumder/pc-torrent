@@ -18,7 +18,17 @@
       "Bash(awk '$1 > \"2026-05-06T12:57:00Z\" && $1 < \"2026-05-06T13:10:00Z\"' /tmp/allocs.log)",
       "Bash(gcloud monitoring *)",
       "Bash(awk '{print $1, substr\\($2,1,16\\)}')",
-      "Bash(npm --prefix c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop run build)"
+      "Bash(npm --prefix c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop run build)",
+      "Bash(psql \"postgresql://neondb_owner:npg_W4czdLm1MTUv@ep-mute-smoke-aow9soyi-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require\" -c \"ALTER DATABASE neondb SET search_path = public; ALTER ROLE neondb_owner SET search_path = public;\")",
+      "Bash(psql \"postgresql://neondb_owner:npg_W4czdLm1MTUv@ep-mute-smoke-aow9soyi-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require\" -c \"SHOW search_path; SELECT count\\(*\\) AS jobs_count FROM jobs;\")",
+      "Bash(psql \"postgresql://neondb_owner:npg_W4czdLm1MTUv@ep-mute-smoke-aow9soyi-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require\" -c \"SHOW search_path;\" -t)",
+      "Bash(psql \"postgresql://neondb_owner:npg_W4czdLm1MTUv@ep-mute-smoke-aow9soyi.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require\" -c \"SHOW search_path; SELECT count\\(*\\) FROM jobs;\")",
+      "Bash(curl -s -m 10 \"https://pcrent-server-v2-930713698987.asia-northeast1.run.app/render-groups/6c08ff48-05b\")",
+      "Bash(gcloud builds *)",
+      "Bash(gsutil ls *)",
+      "Bash(curl -s --max-time 10 -o /dev/null -w 'status=%{http_code} time=%{time_total}s\\\\n' https://pcrent-server-v2-930713698987.asia-northeast1.run.app/)",
+      "Bash(gcloud container *)",
+      "Bash(PGPASSWORD='npg_W4czdLm1MTUv' psql -h ep-mute-smoke-aow9soyi-pooler.c-2.ap-southeast-1.aws.neon.tech -U neondb_owner -d neondb --set=sslmode=require -c \"SELECT id, machine_type, status, attempt, started_at IS NULL AS started_null, completed_at IS NULL AS completed_null, price_per_hour_at_dispatch FROM jobs WHERE group_id = '2c3b8069-b6a2-4211-a7e2-5912c712dd96' ORDER BY chunk_index, attempt;\")"
     ],
     "additionalDirectories": [
       "\\tmp"

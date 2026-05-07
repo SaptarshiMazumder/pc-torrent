@@ -108,7 +108,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --memory 2Gi \
     --min-instances 1 \
     --no-cpu-throttling \
-    --concurrency=300 \
+    --concurrency=80 \
     --cpu=2 \
     --env-vars-file "$ENV_YAML" \
     --quiet

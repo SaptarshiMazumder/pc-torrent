@@ -98,6 +98,7 @@ def on_startup() -> None:
 
 def _wire_routers(c: Container) -> None:
     from serverV2.api.routers import (
+        admin_config,
         assets,
         debug,
         docker,
@@ -117,6 +118,7 @@ def _wire_routers(c: Container) -> None:
     assets.init(c.asset_service)
     debug.init(aggregator=c.status_aggregator)
     internal.init(c.callback_router, c.config.orphan_secret)
+    admin_config.init(c.allocation_client)
 
     app.include_router(health.router)
     app.include_router(machines.router)
@@ -128,5 +130,6 @@ def _wire_routers(c: Container) -> None:
     app.include_router(logs.router)
     app.include_router(debug.router)
     app.include_router(internal.router)
+    app.include_router(admin_config.router)
 
 

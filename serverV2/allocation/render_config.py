@@ -1,0 +1,409 @@
+"""RenderConfig — typed mirror of ``serverV2/config.json``.
+
+Storage shape and dataclass shape are identical: ``dataclasses.asdict``
+of a ``RenderConfig`` equals the JSON blob in Firestore (and the bundled
+``config.json``), and ``RenderConfig.from_dict`` parses that blob back.
+This is the object the allocation planner reads fresh from the
+``AllocationConfigRepository`` at the start of each plan call, and the
+object the admin endpoint round-trips through Firestore.
+
+Reuses existing leaf dataclasses where their field names already match
+the JSON inner keys (``AllocationWeights``, ``VramFleetBoostConfig``,
+``StartupBufferConfig``, ``FailureRateConfig``, ``EngineFactors``,
+``RenderStartupSec``).  New ``*Section`` dataclasses are defined here
+for the parent containers where the existing AppConfig-side dataclass
+field names diverged from JSON keys.
+
+This is intentionally a separate hierarchy from ``AppConfig``.
+``AppConfig`` continues to drive the legacy boot-time wiring (stall
+watchdog, monitors, registry, etc.) from the bundled file.  ``Render
+Config`` drives the planner from Firestore.  Both eat the same JSON
+content; the typing differs because their use cases differ.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from serverV2.allocation.allocation_strategies.allocation_weights import (
+    AllocationWeights,
+)
+from serverV2.config import (
+    EngineFactors,
+    FailureRateConfig,
+    RenderStartupSec,
+    StartupBufferConfig,
+    VramFleetBoostConfig,
+)
+from serverV2.fleets.fleet_exception import FleetException
+
+
+# ---------------------------------------------------------------------------
+# Top-level section dataclasses (one per top-level key in config.json).
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ModalSection:
+    max_parallel: int
+    per_gpu_max_parallel: int
+    dispatch_timeout_sec: int
+    in_queue_timeout_sec: int
+    endpoint_url_prefix: str
+    provisioning_enabled: bool
+
+
+@dataclass(frozen=True)
+class VastSection:
+    max_parallel: int
+    disk_gb: int
+    secure_cloud_only: bool
+    poll_interval_sec: float
+    startup_timeout_sec: float
+    heartbeat_timeout_sec: float
+    heartbeat_grace_sec: float
+    provisioning_enabled: bool
+
+
+@dataclass(frozen=True)
+class OrchestratorSection:
+    max_retries: int
+
+
+@dataclass(frozen=True)
+class CommunitySection:
+    price_per_hour: float
+    dispatch_claim_timeout_sec: int
+
+
+@dataclass(frozen=True)
+class MonitorSection:
+    in_progress_stale_sec: int
+
+
+@dataclass(frozen=True)
+class StallSection:
+    """Mirror of the ``stall`` block in config.json.  Field names match
+    the JSON keys verbatim so ``asdict`` round-trips."""
+    cpu_threshold_pct: float
+    cpu_window_sec: float
+    rss_noise_bytes: int
+    download_bytes_stall_sec: float
+    download_secs_per_gb: float
+    download_phase_min_sec: float
+    download_phase_max_sec: float
+    loading_multiplier: float
+    loading_phase_min_sec: float
+    loading_phase_max_sec: float
+    hard_max_chunk_sec: float
+
+
+@dataclass(frozen=True)
+class RenderTimeSection:
+    """Mirror of ``frame_allocation.render_time``.  ``startup_sec``
+    field name matches the JSON key (the legacy ``RenderTimeConfig``
+    uses ``startup`` -- different shape, separate type)."""
+    baseline_sec_cycles: float
+    baseline_sec_eevee: float
+    factors_cycles: EngineFactors
+    factors_eevee: EngineFactors
+    startup_sec: RenderStartupSec
+
+
+@dataclass(frozen=True)
+class FrameAllocationSection:
+    """Mirror of ``frame_allocation``.  Note ``startup_buffer_sec``
+    field name (the legacy ``FrameAllocationConfig`` uses
+    ``startup_buffer`` -- different name, separate type)."""
+    weights: AllocationWeights
+    vram_fleet_boost: VramFleetBoostConfig
+    startup_buffer_sec: StartupBufferConfig
+    failure_rate: FailureRateConfig
+    render_time: RenderTimeSection
+
+
+@dataclass(frozen=True)
+class VastInstanceEntry:
+    gpu_name: str
+    label: str
+    vram_gb: float
+    cpu_cores: int
+    ram_gb: float
+    render_speed: float
+
+
+@dataclass(frozen=True)
+class ModalInstanceEntry:
+    gpu_type: str
+    label: str
+    vram_gb: float
+    cpu_cores: int
+    ram_gb: float
+    render_speed: float
+    price_per_hour: float
+
+
+# ---------------------------------------------------------------------------
+# Top-level RenderConfig
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RenderConfig:
+    modal: ModalSection
+    vast: VastSection
+    orchestrator: OrchestratorSection
+    community: CommunitySection
+    monitor: MonitorSection
+    stall: StallSection
+    frame_allocation: FrameAllocationSection
+    vast_instances: tuple[VastInstanceEntry, ...]
+    modal_instances: tuple[ModalInstanceEntry, ...]
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RenderConfig":
+        return cls(
+            modal=_modal(_block(d, "modal")),
+            vast=_vast(_block(d, "vast")),
+            orchestrator=_orchestrator(_block(d, "orchestrator")),
+            community=_community(_block(d, "community")),
+            monitor=_monitor(_block(d, "monitor")),
+            stall=_stall(_block(d, "stall")),
+            frame_allocation=_frame_allocation(_block(d, "frame_allocation")),
+            vast_instances=tuple(
+                _vast_instance(e, i)
+                for i, e in enumerate(_list(d, "vast_instances"))
+            ),
+            modal_instances=tuple(
+                _modal_instance(e, i)
+                for i, e in enumerate(_list(d, "modal_instances"))
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Parsing helpers — fail loud on missing or wrongly-typed fields.
+# ---------------------------------------------------------------------------
+
+def _block(d: dict, name: str) -> dict:
+    block = d.get(name)
+    if not isinstance(block, dict):
+        raise FleetException(f"config missing required block: {name!r}")
+    return block
+
+
+def _list(d: dict, name: str) -> list:
+    items = d.get(name)
+    if not isinstance(items, list):
+        raise FleetException(f"config missing required array: {name!r}")
+    return items
+
+
+def _str(block: dict, ctx: str, key: str) -> str:
+    if key not in block:
+        raise FleetException(f"{ctx} missing required key: {key}")
+    return str(block[key])
+
+
+def _bool(block: dict, ctx: str, key: str) -> bool:
+    if key not in block:
+        raise FleetException(f"{ctx} missing required key: {key}")
+    return bool(block[key])
+
+
+def _int(block: dict, ctx: str, key: str) -> int:
+    if key not in block:
+        raise FleetException(f"{ctx} missing required key: {key}")
+    try:
+        return int(block[key])
+    except (TypeError, ValueError) as exc:
+        raise FleetException(f"{ctx}.{key} not a valid int: {block[key]!r}") from exc
+
+
+def _float(block: dict, ctx: str, key: str) -> float:
+    if key not in block:
+        raise FleetException(f"{ctx} missing required key: {key}")
+    try:
+        return float(block[key])
+    except (TypeError, ValueError) as exc:
+        raise FleetException(f"{ctx}.{key} not a valid number: {block[key]!r}") from exc
+
+
+def _modal(b: dict) -> ModalSection:
+    ctx = "modal"
+    return ModalSection(
+        max_parallel=_int(b, ctx, "max_parallel"),
+        per_gpu_max_parallel=_int(b, ctx, "per_gpu_max_parallel"),
+        dispatch_timeout_sec=_int(b, ctx, "dispatch_timeout_sec"),
+        in_queue_timeout_sec=_int(b, ctx, "in_queue_timeout_sec"),
+        endpoint_url_prefix=_str(b, ctx, "endpoint_url_prefix"),
+        provisioning_enabled=_bool(b, ctx, "provisioning_enabled"),
+    )
+
+
+def _vast(b: dict) -> VastSection:
+    ctx = "vast"
+    return VastSection(
+        max_parallel=_int(b, ctx, "max_parallel"),
+        disk_gb=_int(b, ctx, "disk_gb"),
+        secure_cloud_only=_bool(b, ctx, "secure_cloud_only"),
+        poll_interval_sec=_float(b, ctx, "poll_interval_sec"),
+        startup_timeout_sec=_float(b, ctx, "startup_timeout_sec"),
+        heartbeat_timeout_sec=_float(b, ctx, "heartbeat_timeout_sec"),
+        heartbeat_grace_sec=_float(b, ctx, "heartbeat_grace_sec"),
+        provisioning_enabled=_bool(b, ctx, "provisioning_enabled"),
+    )
+
+
+def _orchestrator(b: dict) -> OrchestratorSection:
+    return OrchestratorSection(max_retries=_int(b, "orchestrator", "max_retries"))
+
+
+def _community(b: dict) -> CommunitySection:
+    ctx = "community"
+    return CommunitySection(
+        price_per_hour=_float(b, ctx, "price_per_hour"),
+        dispatch_claim_timeout_sec=_int(b, ctx, "dispatch_claim_timeout_sec"),
+    )
+
+
+def _monitor(b: dict) -> MonitorSection:
+    return MonitorSection(in_progress_stale_sec=_int(b, "monitor", "in_progress_stale_sec"))
+
+
+def _stall(b: dict) -> StallSection:
+    ctx = "stall"
+    return StallSection(
+        cpu_threshold_pct=_float(b, ctx, "cpu_threshold_pct"),
+        cpu_window_sec=_float(b, ctx, "cpu_window_sec"),
+        rss_noise_bytes=_int(b, ctx, "rss_noise_bytes"),
+        download_bytes_stall_sec=_float(b, ctx, "download_bytes_stall_sec"),
+        download_secs_per_gb=_float(b, ctx, "download_secs_per_gb"),
+        download_phase_min_sec=_float(b, ctx, "download_phase_min_sec"),
+        download_phase_max_sec=_float(b, ctx, "download_phase_max_sec"),
+        loading_multiplier=_float(b, ctx, "loading_multiplier"),
+        loading_phase_min_sec=_float(b, ctx, "loading_phase_min_sec"),
+        loading_phase_max_sec=_float(b, ctx, "loading_phase_max_sec"),
+        hard_max_chunk_sec=_float(b, ctx, "hard_max_chunk_sec"),
+    )
+
+
+def _per_fleet_block(b: dict, ctx: str) -> dict[str, float]:
+    return {
+        "vast": _float(b, ctx, "vast"),
+        "modal": _float(b, ctx, "modal"),
+        "community": _float(b, ctx, "community"),
+    }
+
+
+def _weights(b: dict) -> AllocationWeights:
+    ctx = "frame_allocation.weights"
+    return AllocationWeights(
+        speed_weight=_float(b, ctx, "speed_weight"),
+        cuda_weight=_float(b, ctx, "cuda_weight"),
+        os_weight=_float(b, ctx, "os_weight"),
+        max_targets=_int(b, ctx, "max_targets"),
+        min_frames_per_chunk=_int(b, ctx, "min_frames_per_chunk"),
+        fleet_diversification_cap=_float(b, ctx, "fleet_diversification_cap"),
+        gpu_type_diversification_cap=_float(b, ctx, "gpu_type_diversification_cap"),
+        vram_safety_factor=_float(b, ctx, "vram_safety_factor"),
+        startup_amortization_ratio=_float(b, ctx, "startup_amortization_ratio"),
+    )
+
+
+def _engine_factors(b: dict, ctx: str) -> EngineFactors:
+    return EngineFactors(
+        subdivision=_float(b, ctx, "subdivision"),
+        displacement=_float(b, ctx, "displacement"),
+        particles=_float(b, ctx, "particles"),
+        subsurface=_float(b, ctx, "subsurface"),
+        volumetrics=_float(b, ctx, "volumetrics"),
+        adaptive_sampling=_float(b, ctx, "adaptive_sampling"),
+    )
+
+
+def _startup_sec(b: dict) -> RenderStartupSec:
+    ctx = "frame_allocation.render_time.startup_sec"
+    return RenderStartupSec(
+        baseline=_float(b, ctx, "baseline"),
+        download_per_gb=_float(b, ctx, "download_per_gb"),
+        bvh_per_million_verts=_float(b, ctx, "bvh_per_million_verts"),
+        texture_upload_per_gb=_float(b, ctx, "texture_upload_per_gb"),
+        shader_compile_base=_float(b, ctx, "shader_compile_base"),
+        shader_compile_per_node=_float(b, ctx, "shader_compile_per_node"),
+        max_total=_float(b, ctx, "max_total"),
+    )
+
+
+def _render_time(b: dict) -> RenderTimeSection:
+    ctx = "frame_allocation.render_time"
+    factors_cycles_block = b.get("factors_cycles")
+    factors_eevee_block = b.get("factors_eevee")
+    startup_sec_block = b.get("startup_sec")
+    if not isinstance(factors_cycles_block, dict):
+        raise FleetException(f"{ctx}.factors_cycles missing or not an object")
+    if not isinstance(factors_eevee_block, dict):
+        raise FleetException(f"{ctx}.factors_eevee missing or not an object")
+    if not isinstance(startup_sec_block, dict):
+        raise FleetException(f"{ctx}.startup_sec missing or not an object")
+    return RenderTimeSection(
+        baseline_sec_cycles=_float(b, ctx, "baseline_sec_cycles"),
+        baseline_sec_eevee=_float(b, ctx, "baseline_sec_eevee"),
+        factors_cycles=_engine_factors(factors_cycles_block, f"{ctx}.factors_cycles"),
+        factors_eevee=_engine_factors(factors_eevee_block, f"{ctx}.factors_eevee"),
+        startup_sec=_startup_sec(startup_sec_block),
+    )
+
+
+def _frame_allocation(b: dict) -> FrameAllocationSection:
+    weights_block = b.get("weights")
+    vram_fleet_boost_block = b.get("vram_fleet_boost")
+    startup_buffer_sec_block = b.get("startup_buffer_sec")
+    failure_rate_block = b.get("failure_rate")
+    render_time_block = b.get("render_time")
+    for name, blk in [
+        ("weights", weights_block),
+        ("vram_fleet_boost", vram_fleet_boost_block),
+        ("startup_buffer_sec", startup_buffer_sec_block),
+        ("failure_rate", failure_rate_block),
+        ("render_time", render_time_block),
+    ]:
+        if not isinstance(blk, dict):
+            raise FleetException(f"frame_allocation.{name} missing or not an object")
+    vfb = _per_fleet_block(vram_fleet_boost_block, "frame_allocation.vram_fleet_boost")
+    sbs = _per_fleet_block(startup_buffer_sec_block, "frame_allocation.startup_buffer_sec")
+    fr = _per_fleet_block(failure_rate_block, "frame_allocation.failure_rate")
+    return FrameAllocationSection(
+        weights=_weights(weights_block),
+        vram_fleet_boost=VramFleetBoostConfig(**vfb),
+        startup_buffer_sec=StartupBufferConfig(**sbs),
+        failure_rate=FailureRateConfig(**fr),
+        render_time=_render_time(render_time_block),
+    )
+
+
+def _vast_instance(e: dict, i: int) -> VastInstanceEntry:
+    ctx = f"vast_instances[{i}]"
+    if not isinstance(e, dict):
+        raise FleetException(f"{ctx} not an object")
+    return VastInstanceEntry(
+        gpu_name=_str(e, ctx, "gpu_name"),
+        label=_str(e, ctx, "label"),
+        vram_gb=_float(e, ctx, "vram_gb"),
+        cpu_cores=_int(e, ctx, "cpu_cores"),
+        ram_gb=_float(e, ctx, "ram_gb"),
+        render_speed=_float(e, ctx, "render_speed"),
+    )
+
+
+def _modal_instance(e: dict, i: int) -> ModalInstanceEntry:
+    ctx = f"modal_instances[{i}]"
+    if not isinstance(e, dict):
+        raise FleetException(f"{ctx} not an object")
+    return ModalInstanceEntry(
+        gpu_type=_str(e, ctx, "gpu_type"),
+        label=_str(e, ctx, "label"),
+        vram_gb=_float(e, ctx, "vram_gb"),
+        cpu_cores=_int(e, ctx, "cpu_cores"),
+        ram_gb=_float(e, ctx, "ram_gb"),
+        render_speed=_float(e, ctx, "render_speed"),
+        price_per_hour=_float(e, ctx, "price_per_hour"),
+    )

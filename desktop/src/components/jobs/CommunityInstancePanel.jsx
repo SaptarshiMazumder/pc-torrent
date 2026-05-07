@@ -44,7 +44,9 @@ const communityProvider = {
       total,
       rangeLabel,
       elapsedSec: null,
-      cost: null,
+      cost: task.estimated_cost_usd != null
+        ? `~$${Number(task.estimated_cost_usd).toFixed(2)} est.`
+        : null,
       error: task.status === "failed" ? (task.error || "") : "",
       stallRule: task.stall_rule || null,
       loadingStall: loadingStallChipParts(task.estimated_startup_seconds),

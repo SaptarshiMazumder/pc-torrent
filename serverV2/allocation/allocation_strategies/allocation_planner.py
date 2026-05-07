@@ -97,13 +97,14 @@ class AllocationPlanner:
     def __init__(
         self,
         registry: FleetRegistry,
-        startup_buffer: StartupBufferConfig | None = None,
         validators: list[AllocationTargetValidator] | None = None,
-        vram_fleet_boost: VramFleetBoostConfig | None = None,
     ) -> None:
+        # Phase 2b: planner is pure-functional in its config inputs --
+        # callers pass weights / startup_buffer_sec / vram_fleet_boost
+        # at each plan call.  AllocationPlanningService is the single
+        # config reader and feeds those slices in.  No repo on the
+        # planner.
         self._registry = registry
-        self._startup_buffer = startup_buffer or StartupBufferConfig()
-        self._vram_boost = vram_fleet_boost or VramFleetBoostConfig()
         self._validators: tuple[AllocationTargetValidator, ...] = tuple(validators or ())
 
     # ------------------------------------------------------------------
@@ -119,20 +120,27 @@ class AllocationPlanner:
         total_frames: int,
         resources: AvailableResources,
         weights: AllocationWeights,
+        startup_buffer_sec: StartupBufferConfig,
+        vram_fleet_boost: VramFleetBoostConfig,
         engine: str | None = None,
         heaviness: dict | None = None,
     ) -> list[PlannedTask]:
         if total_frames <= 0:
             return []
 
+        # Phase 2b: config slices arrive via params from the planning
+        # service (the single config reader).  Pure-functional inputs.
+        startup_buffer = startup_buffer_sec
+        vram_boost = vram_fleet_boost
+
         heaviness = heaviness or {}
         context = AllocationValidationContext(engine=engine)
 
         # Step 1: validators + VRAM feasibility filter
-        eligible = self._eligible_targets(resources, heaviness, weights, context)
+        eligible = self._eligible_targets(resources, heaviness, weights, vram_boost, context)
         if not eligible:
             # Drop the VRAM floor entirely -- still better to try than refuse
-            eligible = self._eligible_targets_no_vram(resources, context)
+            eligible = self._eligible_targets_no_vram(resources, vram_boost, context)
         if not eligible:
             return []
 
@@ -151,9 +159,9 @@ class AllocationPlanner:
         median_spf = max(0.001, median(spfs)) if spfs else 1.0
         worst_startup = (
             estimate_startup_seconds(heaviness)
-            + max(self._startup_buffer.vast,
-                  self._startup_buffer.modal,
-                  self._startup_buffer.community)
+            + max(startup_buffer.vast,
+                  startup_buffer.modal,
+                  startup_buffer.community)
         )
         ratio = max(0.05, weights.startup_amortization_ratio)
         total_render_sec = total_frames * median_spf
@@ -184,7 +192,7 @@ class AllocationPlanner:
                     host_os=_target_host_os(t),
                     engine=engine,
                     fleet=_target_fleet(t),
-                    fleet_buffer_sec=self._buffer_for_target(t),
+                    fleet_buffer_sec=_buffer_for_target(startup_buffer, t),
                 ),
                 fleet_key=_fleet_key(t),
                 gpu_type_key=_gpu_type_key(t),
@@ -211,6 +219,7 @@ class AllocationPlanner:
         # Step 6: build PlannedTasks with estimate fields stamped
         return [
             self._target_to_task(
+                startup_buffer=startup_buffer,
                 target=share.target,
                 heaviness=heaviness,
                 frame_start=share.frame_start,
@@ -231,15 +240,22 @@ class AllocationPlanner:
         self,
         chunk_request: AllocationChunkRequest,
         resources: AvailableResources,
+        *,
         weights: AllocationWeights,
+        startup_buffer_sec: StartupBufferConfig,
+        vram_fleet_boost: VramFleetBoostConfig,
         heaviness: dict | None = None,
     ) -> PlannedTask | None:
+        # Phase 2b: pure-functional in config inputs.
+        startup_buffer = startup_buffer_sec
+        vram_boost = vram_fleet_boost
+
         heaviness = heaviness or {}
         context = AllocationValidationContext(engine=chunk_request.engine)
 
-        eligible = self._eligible_targets(resources, heaviness, weights, context)
+        eligible = self._eligible_targets(resources, heaviness, weights, vram_boost, context)
         if not eligible:
-            eligible = self._eligible_targets_no_vram(resources, context)
+            eligible = self._eligible_targets_no_vram(resources, vram_boost, context)
 
         excluded_caps = set(chunk_request.excluded_serverless_capabilities)
         excluded_ids = set(chunk_request.excluded_machine_ids)
@@ -271,7 +287,7 @@ class AllocationPlanner:
                     host_os=_target_host_os(t),
                     engine=chunk_request.engine,
                     fleet=_target_fleet(t),
-                    fleet_buffer_sec=self._buffer_for_target(t),
+                    fleet_buffer_sec=_buffer_for_target(startup_buffer, t),
                 ),
                 fleet_key=_fleet_key(t),
                 gpu_type_key=_gpu_type_key(t),
@@ -284,6 +300,7 @@ class AllocationPlanner:
             return None
         best = selected[0].target
         return self._target_to_task(
+            startup_buffer=startup_buffer,
             target=best,
             heaviness=heaviness,
             frame_start=chunk_request.frame_start,
@@ -303,26 +320,29 @@ class AllocationPlanner:
         resources: AvailableResources,
         heaviness: dict,
         weights: AllocationWeights,
+        vram_boost: VramFleetBoostConfig,
         context: AllocationValidationContext,
     ) -> list:
         required_vram = estimate_required_vram_gb(heaviness) * weights.vram_safety_factor
-        return self._collect_eligibles(resources, required_vram, context)
+        return self._collect_eligibles(resources, vram_boost, required_vram, context)
 
     def _eligible_targets_no_vram(
         self,
         resources: AvailableResources,
+        vram_boost: VramFleetBoostConfig,
         context: AllocationValidationContext,
     ) -> list:
-        return self._collect_eligibles(resources, 0.0, context)
+        return self._collect_eligibles(resources, vram_boost, 0.0, context)
 
     def _collect_eligibles(
         self,
         resources: AvailableResources,
+        vram_boost: VramFleetBoostConfig,
         vram_floor: float,
         context: AllocationValidationContext,
     ) -> list:
         out: list = []
-        community_boost = self._vram_boost.for_fleet("community")
+        community_boost = vram_boost.for_fleet("community")
         for m in resources.community_machines:
             if m.vram_gb * community_boost < vram_floor:
                 continue
@@ -333,7 +353,7 @@ class AllocationPlanner:
         for cap in resources.serverless_capabilities:
             if not self._registry.is_enabled(cap.fleet):
                 continue
-            if cap.vram_gb * self._vram_boost.for_fleet(cap.fleet) < vram_floor:
+            if cap.vram_gb * vram_boost.for_fleet(cap.fleet) < vram_floor:
                 continue
             if not self._passes_validators(cap, context):
                 continue
@@ -533,6 +553,7 @@ class AllocationPlanner:
     def _target_to_task(
         self,
         *,
+        startup_buffer: StartupBufferConfig,
         target,
         heaviness: dict,
         frame_start: int,
@@ -542,7 +563,7 @@ class AllocationPlanner:
         chunk_index: int | None,
         attempt: int,
     ) -> PlannedTask:
-        fleet_buffer = self._buffer_for_target(target)
+        fleet_buffer = _buffer_for_target(startup_buffer, target)
         spf = estimate_seconds_per_frame(heaviness, target.render_speed)
         startup = estimate_startup_seconds(heaviness) + fleet_buffer
         seconds = chunk_seconds_for(
@@ -655,12 +676,9 @@ def _target_host_os(target) -> str | None:
     return None
 
 
-# Bound method on the planner instance: forwards to the StartupBufferConfig.
-def _buffer_for_target(self: "AllocationPlanner", target) -> float:
-    return self._startup_buffer.for_fleet(_target_fleet(target))
-
-
-# Attach as a method on AllocationPlanner so the per-target call sites
-# above can use ``self._buffer_for_target(t)`` without an unbound free
-# function.  Keeps the resolution clean in one place.
-AllocationPlanner._buffer_for_target = _buffer_for_target
+# Module-level helper: per-target fleet buffer lookup.  Phase 2 dropped
+# the bound-method form because the planner no longer holds a frozen
+# StartupBufferConfig -- callers pull the fresh instance from cfg at the
+# top of each plan call and pass it through.
+def _buffer_for_target(startup_buffer: StartupBufferConfig, target) -> float:
+    return startup_buffer.for_fleet(_target_fleet(target))

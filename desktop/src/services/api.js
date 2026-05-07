@@ -294,6 +294,18 @@ export async function getAvailableMachines(baseUrl) {
   return apiFetch(baseUrl, "/machines/available");
 }
 
+export async function getAdminConfig(baseUrl) {
+  return apiFetch(baseUrl, "/admin/config");
+}
+
+export async function putAdminConfig(baseUrl, configDict) {
+  return apiFetch(baseUrl, "/admin/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config: configDict }),
+  });
+}
+
 export async function listInputFiles(baseUrl) {
   return apiFetch(baseUrl, "/me/input-files");
 }

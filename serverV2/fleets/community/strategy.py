@@ -34,9 +34,14 @@ class CommunityStrategy:
         *,
         job_repo: JobRepository,
         machine_repo: MachineRepository,
+        price_per_hour: float,
     ) -> None:
         self._job_repo = job_repo
         self._machine_repo = machine_repo
+        # Snapshot at dispatch time for telemetry / actual-cost rollup.
+        # Symmetric with how Modal/Vast strategies stamp the row's
+        # ``price_per_hour_at_dispatch`` from their per-fleet config.
+        self._price_per_hour = price_per_hour
 
     @property
     def fleet(self) -> str:
@@ -70,7 +75,7 @@ class CommunityStrategy:
             priority=context.priority,
             chunk_index=task.chunk_index,
             attempt=task.attempt,
-            price_per_hour_at_dispatch=None,   # telemetry skipped for community in v1
+            price_per_hour_at_dispatch=self._price_per_hour,
             estimated_seconds=task.estimated_seconds,
             estimated_cost_usd=task.estimated_cost_usd,
             estimated_seconds_per_frame=task.estimated_seconds_per_frame,

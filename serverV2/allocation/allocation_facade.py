@@ -39,6 +39,9 @@ Constructed once at boot; stateless beyond the injected references.
 
 from __future__ import annotations
 
+from serverV2.allocation.allocation_config_repository import (
+    AllocationConfigRepository,
+)
 from serverV2.allocation.allocation_dispatch_queue_repository import (
     AllocationDispatchQueueRepository,
 )
@@ -48,6 +51,7 @@ from serverV2.allocation.allocation_pending_queue_repository import (
     TYPE_INITIAL_GROUP,
     TYPE_RETRY_CHUNK,
 )
+from serverV2.allocation.render_config import RenderConfig
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
@@ -78,12 +82,14 @@ class AllocationFacade:
         dispatch_repo: AllocationDispatchQueueRepository,
         job_repository: JobRepository,
         snapshot_cache: FleetAvailabilitySnapshotCache,
+        config_repo: AllocationConfigRepository,
     ) -> None:
         self._planning = planning
         self._pending_repo = pending_repo
         self._dispatch_repo = dispatch_repo
         self._job_repo = job_repository
         self._snapshot_cache = snapshot_cache
+        self._config_repo = config_repo
 
     # ------------------------------------------------------------------
     # writes -- parking lot
@@ -173,6 +179,22 @@ class AllocationFacade:
         """Pending allocation rows for one group.  Reads through the
         repo's Redis-backed cache; falls through to Postgres on miss."""
         return self._pending_repo.list_for_group(group_id)
+
+    # ------------------------------------------------------------------
+    # admin -- config edit surface (Phase 3)
+    # ------------------------------------------------------------------
+
+    def admin_get_config(self) -> dict:
+        """Return the raw config dict from Firestore for the admin UI
+        to render its editor.  Same shape as the bundled config.json."""
+        return self._config_repo.admin_get()
+
+    def admin_put_config(self, d: dict) -> None:
+        """Validate the incoming config dict via ``RenderConfig.from_dict``
+        (raises on missing/invalid keys), then write to Firestore.  Bad
+        shape -> raises before any write hits storage."""
+        RenderConfig.from_dict(d)  # validation; result intentionally discarded
+        self._config_repo.admin_put(d)
 
     # ------------------------------------------------------------------
     # reads -- fleet availability (UI mirror of the planner's view)

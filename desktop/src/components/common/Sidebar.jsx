@@ -156,6 +156,7 @@ const RENTEE_PAGES = [
   { id: "myjobs", label: "My Jobs", Icon: NavIconJobs },
   { id: "downloads", label: "Downloads", Icon: NavIconDownloads },
   { id: "available", label: "Available Machines", Icon: NavIconMachines },
+  { id: "configuration", label: "Configuration", Icon: NavIconMachines },
   { id: "logs", label: "Logs", Icon: NavIconLogs },
 ];
 

@@ -427,6 +427,14 @@ class RenderGroupService:
         latest_output = latest[0] if latest else None
         latest_output_job_id = latest[1] if latest else None
 
+        # Group-level actual-cost rollup -- sum of per-task actuals.
+        # Tasks pre-start contribute None (treated as 0), so the rollup
+        # converges to the real total as chunks complete.  Cheap reduce
+        # over the in-memory ``tasks`` list; no extra SQL.
+        total_actual_cost_usd = sum(
+            (t.get("actual_cost_usd") or 0.0) for t in tasks
+        )
+
         return {
             "group_id": group["id"],
             "status": overall_status,
@@ -447,6 +455,7 @@ class RenderGroupService:
             "available_output_files_count": min(total_frames, unique_rendered),
             "latest_output_file": latest_output,
             "latest_output_job_id": latest_output_job_id,
+            "total_actual_cost_usd": total_actual_cost_usd,
             "tasks_count": len(tasks),
             "tasks": tasks,
         }

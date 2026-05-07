@@ -35,8 +35,6 @@ const vastProvider = {
     const rendered = task.rendered_frames ?? 0;
     const total = task.total_frames;
     const rangeLabel = task.frame_start != null && task.frame_end != null ? `${task.frame_start}–${task.frame_end}` : null;
-    const dph = live?.dph_total;
-
     return {
       gpuLabel,
       displayStatus,
@@ -44,7 +42,9 @@ const vastProvider = {
       total,
       rangeLabel,
       elapsedSec: live?.elapsed_sec ?? null,
-      cost: dph != null ? `$${Number(dph).toFixed(3)}/hr` : null,
+      cost: task.estimated_cost_usd != null
+        ? `~$${Number(task.estimated_cost_usd).toFixed(2)} est.`
+        : null,
       error: live?.error || (task.status === "failed" ? task.error : "") || "",
       stallRule: task.stall_rule || null,
       loadingStall: loadingStallChipParts(task.estimated_startup_seconds),

@@ -17,7 +17,8 @@
       "Bash(awk '$1 > \"2026-05-06T12:57:00Z\"' /tmp/group.log)",
       "Bash(awk '$1 > \"2026-05-06T12:57:00Z\" && $1 < \"2026-05-06T13:10:00Z\"' /tmp/allocs.log)",
       "Bash(gcloud monitoring *)",
-      "Bash(awk '{print $1, substr\\($2,1,16\\)}')"
+      "Bash(awk '{print $1, substr\\($2,1,16\\)}')",
+      "Bash(npm --prefix c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop run build)"
     ],
     "additionalDirectories": [
       "\\tmp"

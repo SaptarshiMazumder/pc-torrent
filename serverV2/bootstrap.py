@@ -53,9 +53,6 @@ from serverV2.infrastructure.redis_client import RedisClient
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
-from serverV2.allocation.allocation_strategies.allocation_strategy import (
-    AllocationStrategy,
-)
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
 )
@@ -89,6 +86,9 @@ from serverV2.allocation.allocation_dispatch_tick_processor import (
 from serverV2.allocation.allocation_dispatcher import AllocationDispatcher
 from serverV2.allocation.allocation_engine_resolver import (
     AllocationEngineResolver,
+)
+from serverV2.allocation.allocation_config_repository import (
+    AllocationConfigRepository,
 )
 from serverV2.allocation.allocation_pending_queue_repository import (
     AllocationPendingQueueRepository,
@@ -220,7 +220,13 @@ def build(
 ) -> Container:
     """Compose the full object graph.  Pure wiring, no side effects."""
 
+    # Boot-time AppConfig: bundled config.json drives the legacy path
+    # (stall watchdog, monitors, registry, etc.).  Allocation paths
+    # (planner / planning service) read fresh from Firestore via
+    # ``allocation_config_repo`` -- a separate flow returning the new
+    # ``RenderConfig`` object.
     cfg = config or AppConfig.from_env()
+    allocation_config_repo = AllocationConfigRepository()
     redis = redis_client or RedisClient()
 
     # Initialize Firebase Admin SDK once at boot.  Auth-protected
@@ -381,6 +387,7 @@ def build(
     community_strategy = CommunityStrategy(
         job_repo=job_repo,
         machine_repo=machine_repo,
+        price_per_hour=cfg.community_price_per_hour,
     )
     registry.register(community_strategy)
 
@@ -402,12 +409,7 @@ def build(
     ]
     allocation_planner = AllocationPlanner(
         registry,
-        startup_buffer=cfg.frame_allocation.startup_buffer,
         validators=target_validators,
-        vram_fleet_boost=cfg.frame_allocation.vram_fleet_boost,
-    )
-    allocation_strategy = AllocationStrategy(
-        allocation_planner, weights=cfg.frame_allocation.weights,
     )
 
     # -- dispatch queue (DB-backed) --
@@ -452,9 +454,9 @@ def build(
     allocation_blend_resolver = AllocationBlendUrlResolver(cfg)
     allocation_cost_aggregator = AllocationCostAggregator()
     allocation_planning_service = AllocationPlanningService(
-        strategy=allocation_strategy,
+        planner=allocation_planner,
         cost_aggregator=allocation_cost_aggregator,
-        failure_rate=cfg.frame_allocation.failure_rate,
+        config_repo=allocation_config_repo,
     )
     _allocation_fleet_caps: dict[str, int] = {
         "modal_serverless": cfg.modal.max_parallel,
@@ -510,6 +512,7 @@ def build(
         dispatch_repo=queue_repo,
         job_repository=job_repo,
         snapshot_cache=fleet_availability_snapshot_cache,
+        config_repo=allocation_config_repo,
     )
     allocation_dispatch_queue_daemon = AllocationDispatchQueueDaemon(
         dispatch_repo=queue_repo,

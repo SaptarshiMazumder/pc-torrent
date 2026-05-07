@@ -97,6 +97,16 @@ class AllocationClient:
         return self._facade.list_available_machines()
 
     # ------------------------------------------------------------------
+    # admin -- config edit surface (Phase 3)
+    # ------------------------------------------------------------------
+
+    def admin_get_config(self) -> dict:
+        return self._facade.admin_get_config()
+
+    def admin_put_config(self, d: dict) -> None:
+        self._facade.admin_put_config(d)
+
+    # ------------------------------------------------------------------
     # reads -- cost intelligence
     # ------------------------------------------------------------------
 

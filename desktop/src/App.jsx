@@ -7,6 +7,7 @@ import CreateRenderPage from "./pages/CreateRenderPage";
 import MyJobsPage from "./pages/MyJobsPage";
 import DownloadsPage from "./pages/DownloadsPage";
 import AvailableMachinesPage from "./pages/AvailableMachinesPage";
+import ConfigurationPage from "./pages/ConfigurationPage";
 import LoginPage from "./components/common/LoginPage";
 import { useAgent } from "./hooks/useAgent";
 import { useJobs } from "./hooks/useJobs";
@@ -109,6 +110,9 @@ export default function App() {
         )}
 
         {/* Shared pages */}
+        {page === "configuration" && (
+          <ConfigurationPage backendUrl={backendUrl} />
+        )}
         {page === "settings" && (
           <SettingsPage
             backendUrl={backendUrl}

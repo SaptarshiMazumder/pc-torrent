@@ -1,0 +1,383 @@
+@startuml cloud_config_provider
+title Cloud config — Phases 1 + 2 + 2b (DONE), Phase 3 (admin UI, planned)
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+legend top right
+  | <#fef3c7> | EXISTING (unchanged) |
+  | <#bbf7d0> | DONE — new class/file |
+  | <#bfdbfe> | DONE — modified |
+  | <#e9d5ff> | PHASE 3 (planned — admin UI) |
+  | <#fecaca> | Storage |
+endlegend
+
+' ===========================================================
+' Storage
+' ===========================================================
+package "Firestore" <<Database>> #fecaca {
+  class "config/global\n<<doc>>" as FsDoc {
+    json : <stringified JSON>
+    --
+    Single doc.  Whole config blob in
+    one field.  Backend always reads
+    fresh, never caches.
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/allocation
+' ===========================================================
+package "serverV2/allocation" <<Frame>> #e0f2fe {
+
+  package "(Phase 1 — DONE: new classes)" <<Rectangle>> #bbf7d0 {
+    class "AllocationConfigRepository\n(allocation_config_repository.py)" as Repo {
+      + get() : RenderConfig
+        ' fetch Firestore doc, JSON.loads,
+        ' RenderConfig.from_dict, return.
+      .. PHASE 3 (planned) ..
+      + admin_get() : dict
+      + admin_put(d : dict)
+      --
+      Firestore reads on EVERY get().
+      No cache, no TTL.  Fails LOUD on
+      Firestore down, doc missing, or
+      bad shape.
+    }
+
+    class "RenderConfig\n(render_config.py)" as RenderCfg {
+      .. typed mirror of config.json ..
+      + modal : ModalSection
+      + vast : VastSection
+      + orchestrator : OrchestratorSection
+      + community : CommunitySection
+      + monitor : MonitorSection
+      + stall : StallSection
+      + frame_allocation : FrameAllocationSection
+      + vast_instances : tuple[VastInstanceEntry]
+      + modal_instances : tuple[ModalInstanceEntry]
+      --
+      + from_dict(d : dict) : RenderConfig
+      + dataclasses.asdict(cfg) round-trips
+        identically back to JSON shape.
+      --
+      Field names match config.json keys
+      verbatim (e.g. startup_buffer_sec,
+      cpu_threshold_pct, render_time
+      .startup_sec).  Reuses leaf
+      dataclasses (AllocationWeights,
+      VramFleetBoostConfig,
+      StartupBufferConfig,
+      FailureRateConfig, EngineFactors,
+      RenderStartupSec) where field
+      names already line up.
+    }
+  }
+
+  package "(Phases 2 + 2b — DONE: planning layer cleanup)" <<Rectangle>> #bfdbfe {
+    class AllocationPlanner {
+      .. pure-functional in config inputs ..
+      Constructor: takes ONLY
+        FleetRegistry + validators.
+        No config_repo on planner.
+      + plan_initial(*, weights,
+                     startup_buffer_sec,
+                     vram_fleet_boost,
+                     ...frame_range/resources...)
+      + plan_retry(chunk_request, resources,
+                   *, weights,
+                   startup_buffer_sec,
+                   vram_fleet_boost, ...)
+      --
+      Caller (PlanningService) hands in
+      the config slices it pulled from
+      its own fresh cfg.get().  Same
+      args -> same tasks; trivially
+      testable in isolation.
+    }
+    class AllocationPlanningService {
+      .. single config reader for the planning surface ..
+      Constructor: takes
+        AllocationPlanner +
+        AllocationCostAggregator +
+        AllocationConfigRepository.
+      + plan_initial(...)
+        ' cfg = self._config_repo.get()  <<single read>>
+        ' planner.plan_initial(
+        '     weights=cfg.frame_allocation.weights,
+        '     startup_buffer_sec=cfg.frame_allocation.startup_buffer_sec,
+        '     vram_fleet_boost=cfg.frame_allocation.vram_fleet_boost,
+        '     ...)
+      + plan_retry(...)
+        ' same single-read pattern.
+      + cost_for_dry_run(...)
+        ' ONE cfg.get() shared between planning
+        ' and cost aggregation:
+        '   tasks = planner.plan_initial(... cfg slices ...)
+        '   items = aggregator.from_planned_tasks(
+        '              tasks,
+        '              failure_rate=cfg.frame_allocation.failure_rate)
+      + cost_for_committed_jobs(rows)
+      --
+      One Firestore read per call.
+      Public API unchanged for upstream
+      callers (AllocationPendingTickProcessor,
+      AllocationFacade); the internal
+      strategy hop and the duplicate
+      cfg.get() are both gone.
+    }
+  }
+
+  package "(existing — unchanged)" <<Rectangle>> #fef3c7 {
+    class AllocationDispatchQueueDaemon {
+      tick(): plan via planning_service.
+    }
+  }
+
+  package "(facade — existing + phase 3 additions)" <<Rectangle>> #e9d5ff {
+    class AllocationFacade {
+      .. existing (unchanged) ..
+      + cost_estimate_for_dry_run(...)
+        ' delegates to planning_service.
+      .. NEW (phase 3) ..
+      + admin_get_config() : dict
+      + admin_put_config(d : dict)
+        ' validates via RenderConfig.from_dict(d)
+        ' before delegating to repo.admin_put.
+        ' bad shape -> raises before any write.
+    }
+  }
+
+  package "(deleted in Phase 2b)" <<Rectangle>> #fef3c7 {
+    class "AllocationStrategy\n<<DELETED>>" as DeletedStrategy {
+      Was a single-tier thin wrapper
+      between PlanningService and the
+      Planner.  File removed; PlanningService
+      now talks to the Planner directly.
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/config (LEGACY, untouched by this work)
+' ===========================================================
+package "serverV2/config (legacy boot path)" <<Frame>> #e0f2fe {
+  package "(existing — unchanged)" <<Rectangle>> #fef3c7 {
+    class AppConfig {
+      Reads bundled config.json at boot
+      via AppConfig.from_env().
+      Drives stall watchdog, monitors,
+      registry, etc.  Untouched by this
+      workstream -- legacy typing for
+      non-allocation consumers.
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/bootstrap.py
+' ===========================================================
+package "serverV2/bootstrap.py" <<Frame>> #e0f2fe {
+  package "(Phases 1 + 2b — DONE)" <<Rectangle>> #bfdbfe {
+    class "build()" as Bootstrap {
+      Boot wiring:
+        cfg = AppConfig.from_env()
+            ' legacy boot, drives non-allocation
+        config_repo = AllocationConfigRepository()
+            ' new, drives allocation flow
+        planner = AllocationPlanner(
+            registry, validators=...)
+            ' Phase 2b: no config_repo on planner
+        planning_service = AllocationPlanningService(
+            planner=planner,
+            cost_aggregator=...,
+            config_repo=config_repo)
+            ' Phase 2b: takes planner directly,
+            ' no AllocationStrategy hop
+        ... wire frozen-at-boot consumers
+            (stall watchdog, monitors,
+             registry) with cfg ...
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: scripts (seed)
+' ===========================================================
+package "scripts" <<Frame>> #e0f2fe {
+  package "(Phase 1 — DONE)" <<Rectangle>> #bbf7d0 {
+    class "seed_config_to_firestore.py" as SeedScript {
+      One-shot:
+        - read bundled serverV2/config.json
+        - validate via RenderConfig.from_dict
+        - write to Firestore config/global
+    }
+  }
+
+  package "(Phase 2b — DONE: smoke updated)" <<Rectangle>> #bfdbfe {
+    class "smoke_allocation_strategy.py" as Smoke {
+      _build_strategy -> _build_planning_service
+      strategy.allocate_initial -> service.plan_initial
+      strategy.allocate_retry -> service.plan_retry
+      Constructs a stub repo, real planner,
+      AllocationPlanningService.  9 / 9
+      scenarios pass.
+    }
+  }
+}
+
+' ===========================================================
+' PHASE 3 — admin endpoints + form UI
+' ===========================================================
+package "serverV2/orchestrator (phase 3)" <<Frame>> #e0f2fe {
+  package "(phase 3 — admin pass-throughs)" <<Rectangle>> #e9d5ff {
+    class AllocationClient {
+      ... existing methods ...
+      .. NEW (phase 3) ..
+      + admin_get_config() : dict
+      + admin_put_config(d : dict)
+      --
+      Pure pass-through to AllocationFacade.
+      ``admin_`` prefix marks the dict-shaped
+      surface as deliberately distinct from
+      the planning-side typed reads.
+    }
+  }
+}
+
+package "serverV2/api/routers (phase 3)" <<Frame>> #e0f2fe {
+  package "(phase 3 — new router)" <<Rectangle>> #e9d5ff {
+    class "admin_config.py\n<<router>>" as AdminRouter {
+      GET  /admin/config
+        ' d = client.admin_get_config()
+        ' return {"config": d}
+      PUT  /admin/config
+        ' client.admin_put_config(body.config)
+      --
+      No auth (will gate admin-only later).
+      No write validation rules beyond
+      RenderConfig.from_dict implicit shape
+      check at the facade.
+    }
+  }
+}
+
+package "desktop frontend (phase 3)" <<Frame>> #e0f2fe {
+  package "(phase 3 — Configuration page)" <<Rectangle>> #e9d5ff {
+    class "ConfigurationPage.jsx" as ConfigPage {
+      Standalone top-level page in nav.
+      Two-column layout:
+        - LEFT: form sections (cards,
+          collapsible).  Sliders for
+          ratios, NumberFields for ints,
+          ToggleSwitch for bools.
+        - RIGHT (sticky): last-saved
+          timestamp, dirty indicator,
+          Reload + Save buttons,
+          parse-error display.
+      Sections:
+        Frame Allocation (weights,
+          vram_fleet_boost, startup_buffer_sec,
+          failure_rate, render_time
+          [cycles factors / eevee factors
+           / startup_sec sub-cards]),
+        Stall Watchdog,
+        Monitor, Modal, Vast,
+        Community, Orchestrator.
+      vast_instances / modal_instances:
+        NOT rendered (round-trip through
+        state untouched on PUT).
+      Single Save button writes the
+      entire config dict.  PUT bad shape
+      -> 400 -> inline error display.
+    }
+    class "Reusable form components" as FormComps {
+      <SectionCard>
+      <NumberField>
+      <RatioSlider>
+      <ToggleSwitch>
+      <TextField>
+    }
+    class "api.js (additions)" as ApiAdd {
+      + getAdminConfig(baseUrl)
+      + putAdminConfig(baseUrl, configDict)
+    }
+  }
+}
+
+' ===========================================================
+' Storage relationships
+' ===========================================================
+Repo --> FsDoc : read (per get) / write (admin_put, phase 3)
+Repo --> RenderCfg : builds via RenderConfig.from_dict
+SeedScript --> FsDoc : write (one-shot)
+SeedScript --> RenderCfg : validate before write
+
+' ===========================================================
+' Phases 1 + 2b — boot-time wiring
+' ===========================================================
+Bootstrap --> AppConfig : from_env() (legacy boot)
+Bootstrap --> Repo : construct (drives planning service)
+Bootstrap --> AllocationPlanner : registry + validators only
+Bootstrap --> AllocationPlanningService : planner + repo + aggregator
+
+' ===========================================================
+' Phase 2 + 2b — planning service is the single config reader
+' ===========================================================
+AllocationDispatchQueueDaemon --> AllocationPlanningService : plan_initial / plan_retry per tick
+AllocationPlanningService ..> Repo : get() ONCE per public call
+AllocationPlanningService ..> AllocationPlanner : plan_initial(weights, buffer, boost, ...)
+AllocationFacade --> AllocationPlanningService : cost_estimate_for_dry_run
+
+' ===========================================================
+' Phase 3 — admin endpoint flow (strict layering)
+' ===========================================================
+ConfigPage --> FormComps : composes
+ConfigPage --> ApiAdd : uses
+ApiAdd --> AdminRouter : HTTP GET / PUT
+AdminRouter --> AllocationClient : admin_get_config / admin_put_config
+AllocationClient --> AllocationFacade : same names
+AllocationFacade --> Repo : admin_get / admin_put
+
+' ===========================================================
+' Notes
+' ===========================================================
+note bottom of RenderCfg
+  Independent of AppConfig.  Two typed
+  views of the same config.json content:
+    AppConfig — legacy boot, bundled file.
+    RenderConfig — fresh per plan, Firestore.
+  Both will eventually unify when the
+  legacy consumers also move to the
+  per-call read pattern.
+end note
+
+note right of AllocationPlanningService
+  Single config reader for the planning
+  surface.  Dispatch tick AND the UI's
+  cost-estimate dry-run both land here,
+  so they always see the same snapshot.
+  Planner is now pure-functional in its
+  config inputs -- no double reads.
+end note
+
+note bottom of AdminRouter
+  Strict layering — desktop NEVER hits
+  Firestore directly.  Always:
+  desktop -> router -> client -> facade
+  -> repo -> Firestore.
+end note
+
+note bottom of ConfigPage
+  Out of scope for phase 3:
+  - Auth (will gate admin-only later).
+  - Write-time schema validation beyond
+    RenderConfig.from_dict at the facade.
+  - vast_instances / modal_instances
+    editor (deploy-time only).
+end note
+
+@enduml

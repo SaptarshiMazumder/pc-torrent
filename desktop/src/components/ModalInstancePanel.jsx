@@ -50,7 +50,9 @@ const modalProvider = {
       total,
       rangeLabel,
       elapsedSec: live?.elapsed_sec ?? null,
-      cost: null,
+      cost: task.estimated_cost_usd != null
+        ? `~$${Number(task.estimated_cost_usd).toFixed(2)} est.`
+        : null,
       error: live?.error || (task.status === "failed" ? task.error : "") || "",
       stallRule: task.stall_rule || null,
       loadingStall: loadingStallChipParts(task.estimated_startup_seconds),

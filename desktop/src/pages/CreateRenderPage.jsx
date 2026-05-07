@@ -27,6 +27,7 @@ import {
   setCachedAnalysis,
 } from "../utils/blendAnalysis";
 import HeavinessPanel from "../components/jobs/HeavinessPanel";
+import { useError } from "../contexts/ErrorContext";
 
 // ─── Flow stages ────────────────────────────────────────────
 // IDLE          → user picks a file / saved input
@@ -160,6 +161,7 @@ function reducer(state, action) {
 // ─── Component ──────────────────────────────────────────────
 
 export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
+  const { showError } = useError();
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const {
     stage, file, savedInputId, savedInputAsset,
@@ -349,12 +351,17 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         setCostEstimate(data?.estimate || null);
         setCostEstimateLoading(false);
       })
-      .catch(() => {
+      .catch((err) => {
         if (seq !== costEstimateCallSeq.current) return;
         setCostEstimate(null);
         setCostEstimateLoading(false);
+        showError({
+          title: "Couldn't compute cost estimate",
+          message: err?.message || "Backend cost-estimate call failed.",
+          detail: err?.body || null,
+        });
       });
-  }, [stage, analysis, frameRange, renderOverridesForServer, backendUrl, file, savedInputAsset]);
+  }, [stage, analysis, frameRange, renderOverridesForServer, backendUrl, file, savedInputAsset, showError]);
 
   useEffect(() => {
     refreshCostEstimate();

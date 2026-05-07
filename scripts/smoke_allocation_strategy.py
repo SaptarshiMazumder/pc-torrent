@@ -35,19 +35,17 @@ if _REPO_ROOT not in sys.path:
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
-from serverV2.allocation.allocation_strategies.allocation_strategy import (
-    AllocationStrategy,
-)
-from serverV2.allocation.allocation_strategies.allocation_weights import (
-    AllocationWeights,
-)
 from serverV2.allocation.allocation_strategies.analyzers import (
     allocation_time_analyzer,
 )
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
 )
-from serverV2.config import RenderTimeConfig, StartupBufferConfig, VramFleetBoostConfig
+from serverV2.allocation.services.allocation_planning_service import (
+    AllocationCostAggregator,
+    AllocationPlanningService,
+)
+from serverV2.config import RenderTimeConfig, VramFleetBoostConfig
 from serverV2.core.models import (
     AvailableResources,
     CommunityMachine,
@@ -224,18 +222,47 @@ def _eevee_scene() -> dict:
 # Strategy harness
 # ---------------------------------------------------------------------
 
-def _build_strategy(
+class _StubConfigRepo:
+    """Smoke-test stand-in for AllocationConfigRepository.  Skips
+    Firestore -- the planner only needs a ``.get()`` returning
+    RenderConfig."""
+
+    def __init__(self, cfg) -> None:
+        self._cfg = cfg
+
+    def get(self):
+        return self._cfg
+
+
+def _build_planning_service(
     *, vram_fleet_boost: VramFleetBoostConfig | None = None,
-) -> AllocationStrategy:
+) -> AllocationPlanningService:
+    import dataclasses
+    import json
+    from serverV2.allocation.render_config import RenderConfig
+    cfg_path = os.path.join(_REPO_ROOT, "serverV2", "config.json")
+    with open(cfg_path) as f:
+        base = RenderConfig.from_dict(json.load(f))
+    if vram_fleet_boost is not None:
+        cfg = dataclasses.replace(
+            base,
+            frame_allocation=dataclasses.replace(
+                base.frame_allocation, vram_fleet_boost=vram_fleet_boost,
+            ),
+        )
+    else:
+        cfg = base
     planner = AllocationPlanner(
         registry=_AllEnabledRegistry(),
-        startup_buffer=StartupBufferConfig(),  # vast=180, modal=120, community=0
         validators=[
             AllocationEngineCompatibilityValidator(),
         ],
-        vram_fleet_boost=vram_fleet_boost,
     )
-    return AllocationStrategy(planner, weights=AllocationWeights())
+    return AllocationPlanningService(
+        planner=planner,
+        cost_aggregator=AllocationCostAggregator(),
+        config_repo=_StubConfigRepo(cfg),
+    )
 
 
 def _summarise(tasks: list, scenario: str) -> None:
@@ -259,8 +286,8 @@ def _summarise(tasks: list, scenario: str) -> None:
 # ---------------------------------------------------------------------
 
 def scenario_1_tiny() -> None:
-    strategy = _build_strategy()
-    tasks = strategy.allocate_initial(
+    service = _build_planning_service()
+    tasks = service.plan_initial(
         frame_start=1, frame_end=5, frame_step=1, total_frames=5,
         resources=_diverse_pool(), engine="CYCLES", heaviness=_light_scene(),
     )
@@ -269,8 +296,8 @@ def scenario_1_tiny() -> None:
 
 
 def scenario_2_short_light() -> None:
-    strategy = _build_strategy()
-    tasks = strategy.allocate_initial(
+    service = _build_planning_service()
+    tasks = service.plan_initial(
         frame_start=1, frame_end=50, frame_step=1, total_frames=50,
         resources=_diverse_pool(), engine="CYCLES", heaviness=_light_scene(),
     )
@@ -282,8 +309,8 @@ def scenario_2_short_light() -> None:
 
 
 def scenario_3_short_heavy() -> None:
-    strategy = _build_strategy()
-    tasks = strategy.allocate_initial(
+    service = _build_planning_service()
+    tasks = service.plan_initial(
         frame_start=1, frame_end=50, frame_step=1, total_frames=50,
         resources=_diverse_pool(), engine="CYCLES", heaviness=_heavy_scene(),
     )
@@ -293,8 +320,8 @@ def scenario_3_short_heavy() -> None:
 
 
 def scenario_4_medium() -> None:
-    strategy = _build_strategy()
-    tasks = strategy.allocate_initial(
+    service = _build_planning_service()
+    tasks = service.plan_initial(
         frame_start=1, frame_end=200, frame_step=1, total_frames=200,
         resources=_diverse_pool(), engine="CYCLES", heaviness=_medium_scene(),
     )
@@ -303,8 +330,8 @@ def scenario_4_medium() -> None:
 
 
 def scenario_5_big() -> None:
-    strategy = _build_strategy()
-    tasks = strategy.allocate_initial(
+    service = _build_planning_service()
+    tasks = service.plan_initial(
         frame_start=1, frame_end=1000, frame_step=1, total_frames=1000,
         resources=_diverse_pool(), engine="CYCLES", heaviness=_medium_scene(),
     )
@@ -319,7 +346,7 @@ def scenario_6_cuda_discrimination() -> None:
     With speed equal and price (cost not in scoring) ignored, the
     cuda_factor should make the 13.0 offer rank higher.
     """
-    strategy = _build_strategy()
+    service = _build_planning_service()
     pool = AvailableResources(
         community_machines=[],
         serverless_capabilities=[
@@ -328,7 +355,7 @@ def scenario_6_cuda_discrimination() -> None:
         ],
         serverless_in_flight={_VAST: 0},
     )
-    tasks = strategy.allocate_initial(
+    tasks = service.plan_initial(
         frame_start=1, frame_end=20, frame_step=1, total_frames=20,
         resources=pool, engine="CYCLES", heaviness=_light_scene(),
     )
@@ -345,7 +372,7 @@ def scenario_8_diversification_cap() -> None:
     With gpu_type_diversification_cap=0.40 and K large enough, the
     planner should NOT pick all 8 RTX 4090 offers.
     """
-    strategy = _build_strategy()
+    service = _build_planning_service()
     serverless: list[FleetCapability] = [
         _vast_offer(gpu="RTX 4090", speed=1.45, vram=24, dph=0.18,
                     cuda="13.0", offer_id=7000+i)
@@ -360,7 +387,7 @@ def scenario_8_diversification_cap() -> None:
         serverless_capabilities=serverless,
         serverless_in_flight={_VAST: 0},
     )
-    tasks = strategy.allocate_initial(
+    tasks = service.plan_initial(
         frame_start=1, frame_end=200, frame_step=1, total_frames=200,
         resources=pool, engine="CYCLES", heaviness=_medium_scene(),
     )
@@ -383,7 +410,7 @@ def scenario_9_community_first() -> None:
     options score) and only then fill remaining slots from serverless.
     The fleet-diversification cap is exempt for community.
     """
-    strategy = _build_strategy()
+    service = _build_planning_service()
     community = [
         _community_machine(mid="comm-A", speed=0.8, vram=24),
         _community_machine(mid="comm-B", speed=1.0, vram=24),
@@ -406,7 +433,7 @@ def scenario_9_community_first() -> None:
         serverless_capabilities=serverless,
         serverless_in_flight={_VAST: 0, _MODAL: 0, "community": 0},
     )
-    tasks = strategy.allocate_initial(
+    tasks = service.plan_initial(
         frame_start=1, frame_end=80, frame_step=1, total_frames=80,
         resources=pool, engine="CYCLES", heaviness=_medium_scene(),
     )
@@ -457,8 +484,8 @@ def scenario_10_community_vram_boost() -> None:
     )
 
     # Run 1: no boost (defaults all 1.0) -> 8 GB community is filtered.
-    plain_strategy = _build_strategy(vram_fleet_boost=VramFleetBoostConfig())
-    tasks_plain = plain_strategy.allocate_initial(
+    plain_service = _build_planning_service(vram_fleet_boost=VramFleetBoostConfig())
+    tasks_plain = plain_service.plan_initial(
         frame_start=1, frame_end=20, frame_step=1, total_frames=20,
         resources=pool, engine="CYCLES", heaviness=heaviness,
     )
@@ -469,10 +496,10 @@ def scenario_10_community_vram_boost() -> None:
     )
 
     # Run 2: boost community to 1.5 -> 8 GB acts as 12 GB, machine admitted.
-    boosted_strategy = _build_strategy(
+    boosted_service = _build_planning_service(
         vram_fleet_boost=VramFleetBoostConfig(community=1.5),
     )
-    tasks_boosted = boosted_strategy.allocate_initial(
+    tasks_boosted = boosted_service.plan_initial(
         frame_start=1, frame_end=20, frame_step=1, total_frames=20,
         resources=pool, engine="CYCLES", heaviness=heaviness,
     )

@@ -9,6 +9,7 @@ from the ``output_frames`` table directly via the repo.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from serverV2.core.value_objects import (
@@ -16,6 +17,11 @@ from serverV2.core.value_objects import (
     output_frame_sort_key,
 )
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
+
+# Statuses for which "actual cost so far" is meaningful even though
+# ``completed_at`` is still NULL.  For these we substitute ``now``
+# as the end timestamp so the UI can show a live-ticking value.
+_INFLIGHT_STATUSES = frozenset({"running", "uploading"})
 
 # Stall-rule extractor for the per-task DTO.  When a job fails because
 # a PreRenderStallDetector rule fired, the failure handler writes the
@@ -88,6 +94,21 @@ class RenderGroupSerializer:
 
         latest = max(output_files, key=output_frame_sort_key) if output_files else None
 
+        # Actual-cost telemetry — derived from the three already-stamped
+        # columns ``started_at``, ``completed_at``, ``price_per_hour_at_dispatch``.
+        # Computed here (not in SQL) so a running task gets ``end = now``
+        # and the UI can show a live-ticking value without a DB recompute.
+        started_at_raw = job.get("started_at")
+        completed_at_raw = job.get("completed_at")
+        price_per_hour_raw = job.get("price_per_hour_at_dispatch")
+        actual_seconds, actual_cost_usd = _actual_cost(
+            started_at=started_at_raw,
+            completed_at=completed_at_raw,
+            price_per_hour=price_per_hour_raw,
+            status=job.get("status", ""),
+        )
+        price_per_hour = _maybe_float(price_per_hour_raw)
+
         return {
             "job_id": job["id"],
             "machine_id": job["machine_id"],
@@ -121,6 +142,14 @@ class RenderGroupSerializer:
             "estimated_cost_usd": _maybe_float(job.get("estimated_cost_usd")),
             "estimated_seconds_per_frame": _maybe_float(job.get("estimated_seconds_per_frame")),
             "estimated_startup_seconds": _maybe_float(job.get("estimated_startup_seconds")),
+            # Actual-cost telemetry.  Raw timestamps + rate flow through so
+            # the desktop client can tick in-flight values locally without
+            # a server poll, using the same formula as ``_actual_cost``.
+            "started_at": _iso(started_at_raw),
+            "completed_at": _iso(completed_at_raw),
+            "price_per_hour_at_dispatch": price_per_hour,
+            "actual_seconds": actual_seconds,
+            "actual_cost_usd": actual_cost_usd,
         }
 
 
@@ -135,6 +164,76 @@ def _maybe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _iso(value: Any) -> str | None:
+    """Return an ISO-8601 string for an already-string or datetime-typed
+    timestamp; ``None`` if the input is missing.  The DB driver may give
+    us either form depending on cursor configuration; normalise once at
+    the serializer boundary so the wire payload is predictable."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _to_datetime(value: Any) -> datetime | None:
+    """Parse a row's TIMESTAMPTZ value into a tz-aware ``datetime``.
+    Accepts both ``datetime`` (psycopg2 default for tz-aware columns)
+    and ISO strings (some pooled drivers / serialisations).  Returns
+    ``None`` on missing or unparseable input -- the caller treats that
+    as "no actual cost computable yet"."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _actual_cost(
+    *,
+    started_at: Any,
+    completed_at: Any,
+    price_per_hour: Any,
+    status: str,
+) -> tuple[float | None, float | None]:
+    """Compute (actual_seconds, actual_cost_usd) for a job row.
+
+    Rules:
+      * ``started_at`` missing -> both None (worker hasn't run yet).
+      * ``completed_at`` present -> use it as the end (terminal job).
+      * status in {running, uploading} and no ``completed_at`` -> use ``now``
+        so the UI can render a live value; the next real callback will
+        replace this with the canonical ``completed_at - started_at``.
+      * ``price_per_hour`` missing -> seconds may be returned but cost is None
+        (e.g. legacy community rows pre-fix that have ``started_at``
+        but no rate).
+    """
+    started = _to_datetime(started_at)
+    if started is None:
+        return None, None
+
+    end = _to_datetime(completed_at)
+    if end is None and status in _INFLIGHT_STATUSES:
+        end = datetime.now(timezone.utc)
+    if end is None:
+        return None, None
+
+    seconds = (end - started).total_seconds()
+    if seconds < 0:
+        # Clock skew between rows / appservers — better to show 0 than
+        # a negative duration.  Small race windows.
+        seconds = 0.0
+
+    rate = _maybe_float(price_per_hour)
+    if rate is None:
+        return seconds, None
+
+    return seconds, seconds * rate / 3600.0
 
 
 def _extract_stall_rule(error: str | None) -> str | None:

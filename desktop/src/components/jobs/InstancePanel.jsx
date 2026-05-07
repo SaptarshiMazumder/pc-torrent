@@ -1,5 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { cancelJob } from "../../services/api";
+import { useLiveCostTick, liveActualCost } from "../../hooks/useLiveCostTick";
+
+function formatActualCost(task, now) {
+  // Terminal tasks: trust the canonical ``actual_cost_usd`` from the
+  // server.  Running tasks: compute live from started_at + price so the
+  // chip ticks every second.  Returns ``null`` if neither is computable
+  // (worker hasn't started or pre-Phase-5 row missing rate).
+  if (task?.status === "running" || task?.status === "uploading") {
+    const live = liveActualCost(task, now);
+    return live != null ? `$${live.toFixed(2)} live` : null;
+  }
+  if (typeof task?.actual_cost_usd === "number") {
+    return `$${task.actual_cost_usd.toFixed(2)} actual`;
+  }
+  return null;
+}
 
 const MERGED_STATUS_COLORS = {
   created: "#888", provisioning: "#f5a623", loading: "#f5a623",
@@ -186,6 +202,7 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
           {data.rangeLabel && <StatChip icon={ICON.range}>{data.rangeLabel}</StatChip>}
           {data.elapsedSec != null && <StatChip icon={ICON.uptime}>{fmtElapsed(data.elapsedSec)}</StatChip>}
           {data.cost != null && <StatChip icon={ICON.cost}>{data.cost}</StatChip>}
+          {data.actualCost != null && <StatChip icon={ICON.cost}>{data.actualCost}</StatChip>}
           {data.loadingStall && (
             <StatChip icon={ICON.stall}>
               stall {data.loadingStall.allowed} <span style={{ opacity: 0.55 }}>(est {data.loadingStall.est})</span>
@@ -260,6 +277,9 @@ function FinishedRow({ data }) {
         )}
         <span className="inst-fin-stat">{data.rendered}{data.total != null ? ` / ${data.total}` : ""} frames</span>
         {data.rangeLabel && <span className="inst-fin-stat inst-fin-range">{data.rangeLabel}</span>}
+        {data.actualCost != null && (
+          <span className="inst-fin-stat" title="Actual cost (price_per_hour × elapsed)">{data.actualCost}</span>
+        )}
         {data.loadingStall && (
           <span className="inst-fin-stat" title="Loading-stall budget at dispatch time">
             stall {data.loadingStall.allowed} (est {data.loadingStall.est})
@@ -288,6 +308,11 @@ function FinishedRow({ data }) {
  */
 export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, mode = "both" }) {
   const [liveMap, setLiveMap] = useState({});
+  // 1Hz signal — drives the inline ``liveActualCost`` recomputation on
+  // running tasks between server polls.  Subscribers don't read this
+  // value; they just depend on the re-render.
+  useLiveCostTick();
+  const now = new Date();
 
   const filteredTasks = (tasks || []).filter(
     (t) => provider.filterTask(t) && ["pending", "running", "done", "failed", "cancelled"].includes(t.status)
@@ -343,24 +368,30 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, 
 
       {showActive && activeTasks.length > 0 && (
         <div className="inst-active-list">
-          {activeTasks.map((task) => (
-            <ActiveCard
-              key={task.job_id}
-              data={provider.extractCardData(task, liveMap[task.job_id] || null)}
-              jobId={task.job_id}
-              backendUrl={backendUrl}
-              onCancel={onRefresh}
-            />
-          ))}
+          {activeTasks.map((task) => {
+            const data = provider.extractCardData(task, liveMap[task.job_id] || null);
+            data.actualCost = formatActualCost(task, now);
+            return (
+              <ActiveCard
+                key={task.job_id}
+                data={data}
+                jobId={task.job_id}
+                backendUrl={backendUrl}
+                onCancel={onRefresh}
+              />
+            );
+          })}
         </div>
       )}
 
       {showFinished && finishedTasks.length > 0 && (
         <div className="inst-fin-list">
           {showActive && activeTasks.length > 0 && <div className="inst-fin-divider">Completed</div>}
-          {finishedTasks.map((task) => (
-            <FinishedRow key={task.job_id} data={provider.extractCardData(task, null)} />
-          ))}
+          {finishedTasks.map((task) => {
+            const data = provider.extractCardData(task, null);
+            data.actualCost = formatActualCost(task, now);
+            return <FinishedRow key={task.job_id} data={data} />;
+          })}
         </div>
       )}
     </div>

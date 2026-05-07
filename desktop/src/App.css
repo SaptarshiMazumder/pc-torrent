@@ -3268,29 +3268,14 @@ body {
   position: relative;
 }
 
-/* Right-edge rail.  Dock pill is the LAST flex child so it sits at the
-   rightmost edge; an open panel renders before it and naturally flows to
-   the dock's left.  The rail's right edge is fixed at right:16px and its
-   width grows leftward with content, so the dock never shifts when a
-   panel opens. */
-.jd-drawers-rail {
+/* Dock — vertically centered pill on the right edge.  Slides leftward
+   when a drawer is open so it sits flush against the drawer's left edge. */
+.jd-dock {
   position: fixed;
   top: 50%;
   right: 16px;
   transform: translateY(-50%);
   z-index: 50;
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 12px;
-  max-height: calc(100vh - 32px);
-  pointer-events: none;
-}
-
-.jd-drawers-rail > * { pointer-events: auto; }
-
-/* Dock — single rounded pill housing both toggle buttons. */
-.jd-dock {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3305,8 +3290,10 @@ body {
   box-shadow:
     0 8px 24px rgba(0, 0, 0, 0.35),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  flex-shrink: 0;
+  transition: right 0.22s ease-out;
 }
+
+.jd-dock-shifted { right: 396px; }
 
 .jd-dock-btn {
   width: 40px;
@@ -3347,22 +3334,31 @@ body {
   color: #fff;
 }
 
-/* Open drawer panel — sits to the left of the dock as its own card.  Only
-   one panel can be open at a time, so the rail directly contains a single
-   panel sibling rather than a wrapping group. */
+/* Open drawer panel — full-height edge-anchored drawer.  Slides in from
+   the right of the viewport; flush right edge (no border-radius), only the
+   left edge is bordered/shadowed since that's the seam with the page. */
 .jd-drawer-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
   width: 380px;
-  max-height: calc(100vh - 100px);
-  background: rgba(18, 16, 30, 0.92);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(180, 175, 220, 0.14);
-  border-radius: 14px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 40;
+  background: rgba(18, 16, 30, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-left: 1px solid rgba(180, 175, 220, 0.14);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.45);
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  animation: jd-drawer-slide-in 0.22s ease-out;
+}
+
+@keyframes jd-drawer-slide-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
 }
 
 .jd-drawer-panel-header {
@@ -3406,6 +3402,108 @@ body {
   padding: 12px;
   overflow-y: auto;
   min-height: 0;
+}
+
+/* Cost drawer panel — summary row + per-task list. */
+.jd-cost-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: rgba(180, 175, 220, 0.04);
+  border: 1px solid rgba(180, 175, 220, 0.08);
+  border-radius: 10px;
+}
+
+.jd-cost-summary-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.jd-cost-summary-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.jd-cost-summary-value {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.jd-cost-summary-pending {
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.jd-cost-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.jd-cost-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: rgba(180, 175, 220, 0.03);
+  border: 1px solid rgba(180, 175, 220, 0.06);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.jd-cost-item-est {
+  color: var(--text-muted) !important;
+  font-weight: 600 !important;
+}
+
+.jd-cost-item-range {
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.jd-cost-item-machine {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.jd-cost-item-value {
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.jd-cost-empty {
+  padding: 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  background: rgba(180, 175, 220, 0.03);
+  border: 1px dashed rgba(180, 175, 220, 0.1);
+  border-radius: 10px;
 }
 
 /* Failed chunks compact grid. */
@@ -3539,8 +3637,9 @@ body {
 }
 
 @media (max-width: 900px) {
-  .jd-drawers-rail { right: 8px; }
-  .jd-drawer-panel { width: calc(100vw - 96px); max-width: 380px; }
+  .jd-dock { right: 8px; }
+  .jd-drawer-panel { width: min(380px, 90vw); }
+  .jd-dock-shifted { right: calc(min(380px, 90vw) + 12px); }
 }
 
 .jd-top-grid {
@@ -3727,6 +3826,29 @@ body {
   height: 100%;
   border-radius: 4px;
   transition: width 0.5s ease;
+}
+
+.jd-headline-cost {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.jd-headline-cost-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.jd-headline-cost-value {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
 }
 
 /* -- 2x2 stat tile grid -- */
@@ -4833,4 +4955,338 @@ body {
 .hp-empty {
   padding: 14px 20px;
   font-size: 12px;
+}
+
+/* ---- Configuration page ---- */
+.cfg-layout {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 20px;
+  align-items: start;
+}
+
+.cfg-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.cfg-side {
+  position: sticky;
+  top: 12px;
+}
+
+.cfg-side-card {
+  background: rgba(20, 18, 32, 0.55);
+  border: 1px solid rgba(180, 175, 220, 0.14);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cfg-side-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.cfg-side-label { color: var(--text-muted); }
+.cfg-side-value { font-weight: 700; color: #eeedf5; }
+.cfg-side-value.dirty { color: #f59e0b; }
+
+.cfg-side-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.cfg-side-actions .btn { flex: 1; justify-content: center; }
+
+.cfg-side-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.cfg-card {
+  background: rgba(18, 16, 30, 0.45);
+  border: 1px solid rgba(180, 175, 220, 0.12);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.cfg-card-header {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: none;
+  border: none;
+  color: #eeedf5;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.cfg-card-header:hover { background: rgba(180, 175, 220, 0.04); }
+
+.cfg-card-title-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.cfg-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.cfg-card-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.cfg-card-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+  transform: rotate(-90deg);
+}
+.cfg-card-chevron.open { transform: rotate(0); }
+
+.cfg-card-body {
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-top: 1px solid rgba(180, 175, 220, 0.08);
+}
+
+/* Nested cards inside a parent body */
+.cfg-card-body .cfg-card {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.cfg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px 16px;
+}
+
+.cfg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cfg-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cfg-field-input {
+  width: 100%;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(180, 175, 220, 0.18);
+  border-radius: 6px;
+  color: #eeedf5;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-family: inherit;
+}
+
+.cfg-field-input:focus {
+  outline: none;
+  border-color: rgba(232, 114, 74, 0.5);
+}
+
+.cfg-field-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Slider */
+.cfg-field-slider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.cfg-field-slider-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: #eeedf5;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfg-field-range {
+  width: 100%;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(180, 175, 220, 0.15);
+  border-radius: 2px;
+  outline: none;
+}
+
+.cfg-field-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(232, 114, 74, 0.5);
+}
+
+.cfg-field-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(232, 114, 74, 0.5);
+}
+
+/* Toggle */
+.cfg-field-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.cfg-field-toggle .cfg-field-label {
+  flex: 1;
+}
+
+.cfg-toggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: rgba(180, 175, 220, 0.15);
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.cfg-toggle.on { background: var(--accent); }
+
+.cfg-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  transition: left 0.15s;
+}
+
+.cfg-toggle.on .cfg-toggle-thumb { left: 18px; }
+
+@media (max-width: 900px) {
+  .cfg-layout { grid-template-columns: 1fr; }
+  .cfg-side { position: static; }
+}
+
+/* ---- Error dialog (global) ---- */
+.error-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.error-dialog {
+  width: 100%;
+  max-width: 480px;
+  background: rgba(20, 18, 32, 0.98);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+
+.error-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  background: rgba(239, 68, 68, 0.12);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.25);
+  color: #ef4444;
+}
+
+.error-dialog-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff5f5;
+}
+
+.error-dialog-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.error-dialog-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #eeedf5;
+}
+
+.error-dialog-detail {
+  margin: 0;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(180, 175, 220, 0.1);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.error-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid rgba(180, 175, 220, 0.08);
+  background: rgba(0, 0, 0, 0.18);
 }

@@ -8,6 +8,7 @@ import {
 } from "../../utils/jobUtils";
 import JobThumbnail from "./JobThumbnail";
 import loaderGif from "../../assets/animations/glowing-fish-loader.gif";
+import { useLiveCostTick, liveActualCost } from "../../hooks/useLiveCostTick";
 import VastInstancePanel from "./VastInstancePanel";
 import ModalInstancePanel from "../ModalInstancePanel";
 import CommunityInstancePanel from "./CommunityInstancePanel";
@@ -19,10 +20,16 @@ import { usePendingQueue } from "../../hooks/usePendingQueue";
 
 const ACTIVE_DRAWER_KEY = "pcrent:jd_active_drawer:v1";
 
+const DRAWER_TITLES = {
+  instances: "Instances",
+  scene: "Scene",
+  costs: "Costs",
+};
+
 function readActiveDrawer() {
   try {
     const v = localStorage.getItem(ACTIVE_DRAWER_KEY);
-    return v === "instances" || v === "scene" ? v : null;
+    return v === "instances" || v === "scene" || v === "costs" ? v : null;
   } catch {
     return null;
   }
@@ -104,6 +111,7 @@ function RenderGroupDetail({
   const [activeDrawer, setActiveDrawer] = useState(readActiveDrawer);
   const instancesOpen = activeDrawer === "instances";
   const sceneOpen = activeDrawer === "scene";
+  const costsOpen = activeDrawer === "costs";
   useEffect(() => { writeActiveDrawer(activeDrawer); }, [activeDrawer]);
   const toggleDrawer = (which) => setActiveDrawer((cur) => (cur === which ? null : which));
 
@@ -121,6 +129,36 @@ function RenderGroupDetail({
 
   const latestOutputFile =
     job.latest_output_file || getLatestTaskWithOutput(job.tasks)?.latest_output_file || null;
+
+  // Sum of per-task projected costs.  Tasks pre-AllocationPlanner have null
+  // estimates -- treated as 0 so we don't poison the rollup.  When everything
+  // is null/0 we hide the row entirely (no point showing "$0.00 est.").
+  const totalEstimatedCost = tasksList.reduce(
+    (sum, t) => sum + (typeof t.estimated_cost_usd === "number" ? t.estimated_cost_usd : 0),
+    0,
+  );
+
+  // 1Hz tick so the actual-cost rollup recomputes for in-flight tasks
+  // between polls.  liveActualCost mirrors the server's serializer formula
+  // exactly so the live value lines up with the canonical one the next
+  // poll will deliver.
+  useLiveCostTick();
+  const now = new Date();
+  const totalActualCost = tasksList.reduce((sum, t) => {
+    if (t.status === "running" || t.status === "uploading") {
+      const live = liveActualCost(t, now);
+      return sum + (live ?? 0);
+    }
+    return sum + (typeof t.actual_cost_usd === "number" ? t.actual_cost_usd : 0);
+  }, 0);
+  // Server already provides ``total_actual_cost_usd`` on the group payload
+  // for terminal groups (where ``now`` doesn't matter).  Prefer the live
+  // sum so running tasks tick smoothly; fall back to the server value
+  // when the live sum is 0 but the server snapshot has data (covers
+  // pre-tick first render).
+  const groupActualCost = totalActualCost > 0
+    ? totalActualCost
+    : (typeof job.total_actual_cost_usd === "number" ? job.total_actual_cost_usd : 0);
 
   return (
     <div className="jd-body jd-body-split">
@@ -146,6 +184,12 @@ function RenderGroupDetail({
                   style={{ width: `${overallPct ?? 0}%`, background: gaugeColor }}
                 />
               </div>
+              {totalEstimatedCost > 0 && (
+                <div className="jd-headline-cost">
+                  <span className="jd-headline-cost-label">Estimated cost</span>
+                  <span className="jd-headline-cost-value">~${totalEstimatedCost.toFixed(2)}</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -251,83 +295,133 @@ function RenderGroupDetail({
         </div>
       </div>
 
-      <div className="jd-drawers-rail">
-        {instancesOpen && (
-          <aside className="jd-drawer-panel">
-            <div className="jd-drawer-panel-header">
-              <span className="jd-drawer-panel-title">Instances</span>
-              <button
-                type="button"
-                className="jd-drawer-panel-close"
-                onClick={() => setActiveDrawer(null)}
-                title="Hide instances"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                  <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="jd-drawer-panel-body">
-              <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
-              <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
-              <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
-            </div>
-          </aside>
-        )}
-        {sceneOpen && (
-          <aside className="jd-drawer-panel">
-            <div className="jd-drawer-panel-header">
-              <span className="jd-drawer-panel-title">Scene</span>
-              <button
-                type="button"
-                className="jd-drawer-panel-close"
-                onClick={() => setActiveDrawer(null)}
-                title="Hide scene details"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                  <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="jd-drawer-panel-body">
+      {activeDrawer && (
+        <aside className="jd-drawer-panel">
+          <div className="jd-drawer-panel-header">
+            <span className="jd-drawer-panel-title">{DRAWER_TITLES[activeDrawer]}</span>
+            <button
+              type="button"
+              className="jd-drawer-panel-close"
+              onClick={() => setActiveDrawer(null)}
+              title={`Hide ${DRAWER_TITLES[activeDrawer].toLowerCase()}`}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div className="jd-drawer-panel-body">
+            {instancesOpen && (
+              <>
+                <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+                <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+                <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+              </>
+            )}
+            {sceneOpen && (
               <HeavinessPanel
                 heaviness={job.heaviness ?? null}
                 overrides={job.resolved_render_settings?.render ?? null}
                 loading={!job.heaviness}
               />
-            </div>
-          </aside>
-        )}
+            )}
+            {costsOpen && (
+              <>
+                <div className="jd-cost-summary">
+                  <div className="jd-cost-summary-row">
+                    <span className="jd-cost-summary-label">Estimated</span>
+                    <span className="jd-cost-summary-value">
+                      {totalEstimatedCost > 0 ? `~$${totalEstimatedCost.toFixed(2)}` : "—"}
+                    </span>
+                  </div>
+                  <div className="jd-cost-summary-row">
+                    <span className="jd-cost-summary-label">Actual</span>
+                    <span className="jd-cost-summary-value">
+                      {groupActualCost > 0 ? `$${groupActualCost.toFixed(2)}` : "—"}
+                    </span>
+                  </div>
+                </div>
 
-        <nav className="jd-dock" aria-label="Drawers">
-          <button
-            type="button"
-            className={`jd-dock-btn${instancesOpen ? " jd-dock-btn-active" : ""}`}
-            onClick={() => toggleDrawer("instances")}
-            title={instancesOpen ? "Hide instances" : "Show instances"}
-            aria-pressed={instancesOpen}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="4" y="4" width="16" height="16" rx="2" />
-              <rect x="9" y="9" width="6" height="6" />
-              <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={`jd-dock-btn${sceneOpen ? " jd-dock-btn-active" : ""}`}
-            onClick={() => toggleDrawer("scene")}
-            title={sceneOpen ? "Hide scene details" : "Show scene details"}
-            aria-pressed={sceneOpen}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-              <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-              <line x1="12" y1="22.08" x2="12" y2="12" />
-            </svg>
-          </button>
-        </nav>
-      </div>
+                {tasksList.length > 0 ? (
+                  <ul className="jd-cost-list">
+                    {tasksList
+                      .slice()
+                      .sort((a, b) => (a.chunk_index ?? 0) - (b.chunk_index ?? 0))
+                      .map((t) => {
+                        const range = t.frame_start != null && t.frame_end != null
+                          ? `${t.frame_start}–${t.frame_end}`
+                          : "—";
+                        const est = typeof t.estimated_cost_usd === "number"
+                          ? `~$${t.estimated_cost_usd.toFixed(2)}`
+                          : "—";
+                        const liveCost = (t.status === "running" || t.status === "uploading")
+                          ? liveActualCost(t, now)
+                          : (typeof t.actual_cost_usd === "number" ? t.actual_cost_usd : null);
+                        const actual = liveCost != null ? `$${liveCost.toFixed(2)}` : "—";
+                        return (
+                          <li key={t.job_id} className="jd-cost-item">
+                            <span className="jd-cost-item-range">{range}</span>
+                            <span className="jd-cost-item-machine" title={t.machine_gpu}>
+                              {t.machine_gpu || "Unassigned"}
+                            </span>
+                            <span className="jd-cost-item-value jd-cost-item-est">{est}</span>
+                            <span className="jd-cost-item-value">{actual}</span>
+                          </li>
+                        );
+                      })}
+                  </ul>
+                ) : (
+                  <div className="jd-cost-empty">
+                    No estimates yet — costs will appear once chunks are dispatched.
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </aside>
+      )}
+
+      <nav className={`jd-dock${activeDrawer ? " jd-dock-shifted" : ""}`} aria-label="Drawers">
+        <button
+          type="button"
+          className={`jd-dock-btn${instancesOpen ? " jd-dock-btn-active" : ""}`}
+          onClick={() => toggleDrawer("instances")}
+          title={instancesOpen ? "Hide instances" : "Show instances"}
+          aria-pressed={instancesOpen}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="4" y="4" width="16" height="16" rx="2" />
+            <rect x="9" y="9" width="6" height="6" />
+            <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={`jd-dock-btn${sceneOpen ? " jd-dock-btn-active" : ""}`}
+          onClick={() => toggleDrawer("scene")}
+          title={sceneOpen ? "Hide scene details" : "Show scene details"}
+          aria-pressed={sceneOpen}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+            <line x1="12" y1="22.08" x2="12" y2="12" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={`jd-dock-btn${costsOpen ? " jd-dock-btn-active" : ""}`}
+          onClick={() => toggleDrawer("costs")}
+          title={costsOpen ? "Hide costs" : "Show costs"}
+          aria-pressed={costsOpen}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M16 8h-6.5a2.5 2.5 0 0 0 0 5h3a2.5 2.5 0 0 1 0 5H6" />
+            <path d="M12 6v2M12 16v2" />
+          </svg>
+        </button>
+      </nav>
     </div>
   );
 }

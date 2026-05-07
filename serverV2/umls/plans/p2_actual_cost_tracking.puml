@@ -1,0 +1,264 @@
+@startuml p2_actual_cost_tracking
+title Phase P2 — Actual Cost Tracking\nReuses existing schema + write paths; serializer + community-pricing fix expose actuals end-to-end
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype ortho
+skinparam nodesep 50
+skinparam ranksep 50
+
+skinparam classBackgroundColor<<EXISTING>>  #E5E7EB
+skinparam classBackgroundColor<<CHANGED>>   #FEF3C7
+skinparam classBackgroundColor<<NEW>>       #DCFCE7
+skinparam classBackgroundColor<<DB>>        #fecaca
+
+top to bottom direction
+
+legend top right
+  | <#E5E7EB> | EXISTING (used as-is) |
+  | <#FEF3C7> | EXISTING (changes here) |
+  | <#DCFCE7> | NEW |
+  | <#fecaca> | DB schema (no column changes) |
+endlegend
+
+' ============================================================
+' LAYER 1 -- inbound callers (existing)
+' ============================================================
+package "<<inbound>>" <<Cloud>> #c7d2fe {
+    class "RenderGroupsRouter\nGET /render-groups/{id}\nGET /render-groups (list)" as Router <<EXISTING>>
+}
+
+' ============================================================
+' LAYER 2 -- DISPATCH: row stamping (price_per_hour_at_dispatch)
+' ============================================================
+package "Allocation strategies\nserverV2/fleets/*/strategy" <<Frame>> #e0e7ff {
+
+    together {
+        class ModalStrategy <<EXISTING>> {
+            dispatch(task, ctx)
+            ── ALREADY STAMPS ──
+            price_per_hour_at_dispatch =
+                capability.price_per_hour
+        }
+        class VastStrategy <<EXISTING>> {
+            dispatch(task, ctx)
+            ── ALREADY STAMPS ──
+            price_per_hour_at_dispatch =
+                capability.price_per_hour
+        }
+        class CommunityStrategy <<CHANGED>> {
+            __init__(..., **price_per_hour: float**)  ' P2 NEW PARAM (symmetric naming)
+            dispatch(task, ctx)
+            ── TODAY ──
+            price_per_hour_at_dispatch = None
+            (telemetry skipped for community in v1)
+            ── P2 FIX ──
+            price_per_hour_at_dispatch = self._price_per_hour
+        }
+    }
+
+    note right of CommunityStrategy
+      **One-line behavioural fix**
+      Old rows stay NULL (acceptable -- those
+      jobs already terminal).  Going forward,
+      community jobs are uniform with Modal/Vast.
+      Side benefit: unblocks community
+      render_telemetry writes if Phase 5 ever
+      re-enables the table for community.
+    end note
+}
+
+' ============================================================
+' LAYER 3 -- BOOTSTRAP wiring (one new param threaded through)
+' ============================================================
+class "Bootstrap\nserverV2/bootstrap.py" as Bootstrap <<CHANGED>> {
+    P2 ADDS:
+      community_strategy = CommunityStrategy(
+          ...,
+          **price_per_hour=cfg.community_price_per_hour**,
+      )
+    ── strategy param is fleet-agnostic (price_per_hour);
+       config attr keeps the fleet prefix because it lives
+       alongside other fleets' configs (config.py:754) ──
+}
+
+Bootstrap   ..> CommunityStrategy : constructs (P2: passes price)
+
+' ============================================================
+' LAYER 4 -- DB COLUMNS (already exist; no schema change)
+' ============================================================
+class "jobs (table)" as JobsRow <<DB>> {
+    .. already-existing columns ..
+    started_at                  TIMESTAMPTZ NULL
+    completed_at                TIMESTAMPTZ NULL
+    price_per_hour_at_dispatch  NUMERIC(10,4) NULL
+    ── all three already migrated and
+       written by today's code paths ──
+}
+
+ModalStrategy      -[#2563eb]-> JobsRow : INSERT (today)
+VastStrategy       -[#2563eb]-> JobsRow : INSERT (today)
+CommunityStrategy  -[#f97316]-> JobsRow : INSERT (P2: price stamped)
+
+' ============================================================
+' LAYER 5 -- existing write paths that fill started_at / completed_at
+' ============================================================
+package "Existing write paths" <<Frame>> #fff8d6 {
+
+    class "JobService.update_progress\n→ JobRepository.mark_started_if_unset" as ProgressWrite <<EXISTING>> {
+        First /progress beat from worker:
+          UPDATE jobs SET started_at = NOW()
+          WHERE id = ? AND started_at IS NULL
+        ── idempotent; subsequent beats no-op ──
+    }
+    class "Terminal handlers\nmark_done / mark_failed / mark_cancelled" as TerminalWrite <<EXISTING>> {
+        UPDATE jobs SET status = ?, completed_at = NOW()
+            (and error on failed)
+        ── stamps completed_at on every terminal ──
+    }
+}
+
+ProgressWrite  -[#2563eb]-> JobsRow : UPDATE started_at (today)
+TerminalWrite  -[#2563eb]-> JobsRow : UPDATE completed_at (today)
+
+' ============================================================
+' LAYER 6 -- THE WORK: Serializer adds five fields
+' ============================================================
+package "services/render_groups" <<Frame>> #fde2e4 {
+
+    class RenderGroupSerializer <<CHANGED>> {
+        + serialize_task(job, machine, ...)
+        --
+        TODAY exposes (per-task DTO):
+          frame_start, frame_end, status,
+          rendered_frames, estimated_cost_usd, ...
+        --
+        **P2 ADDS five fields:**
+          + started_at                  -- raw, ISO string
+          + completed_at                -- raw, ISO string
+          + price_per_hour_at_dispatch  -- raw float
+          + actual_seconds              -- computed
+          + actual_cost_usd             -- computed
+        --
+        **Compute rules (in serializer, single source of truth):**
+          end = completed_at
+                  or (status running/uploading ? now : null)
+          actual_seconds =
+              (end - started_at).total_seconds()
+              if started_at and end else null
+          actual_cost_usd =
+              actual_seconds × price / 3600
+              if actual_seconds and price else null
+        --
+        Null hygiene: pre-Phase-5 jobs / community
+        jobs pre-fix → fields stay null; UI renders "—".
+    }
+
+    class RenderGroupService <<CHANGED>> {
+        + get_render_group(...)
+        --
+        TODAY returns:
+          status, total_frames, tasks[], ...
+        --
+        **P2 ADDS to group response:**
+          + total_actual_cost_usd =
+              Σ(task.actual_cost_usd ?? 0)
+        --
+        Cheap rollup; no extra SQL.
+    }
+
+    RenderGroupService --> RenderGroupSerializer : per-task serialize
+    RenderGroupService ..> JobsRow                : SELECT (existing query)
+}
+
+JobsRow -[#16a34a]-> RenderGroupSerializer : reads new columns
+Router  -[#16a34a]-> RenderGroupService    : GET /render-groups/{id}
+
+' ============================================================
+' LAYER 7 -- DESKTOP CONSUMPTION (the work on the client)
+' ============================================================
+package "<<desktop>>\ndesktop/src" <<Cloud>> #b9e3a3 {
+
+    class "InstancePanel cards\n(Vast / Modal / Community)" as Cards <<CHANGED>> {
+        extractCardData(task, live)
+        --
+        TODAY (P1):
+          cost: "~$X.XX est."
+        --
+        **P2:** add ``actualCost`` field
+          actual_cost_usd != null
+            → "$Y.YY actual"
+        --
+        Rendered as a second StatChip
+        in the existing card grid; no
+        new card layout.
+    }
+
+    class "Costs drawer panel\n(JobDetailView.jsx)" as CostsPanel <<CHANGED>> {
+        TODAY (P1):
+          Estimated:  $X.XX
+          Actual:     — soon          ← placeholder
+          per-task list (estimated only)
+        --
+        **P2:**
+          Estimated:  $X.XX
+          Actual:     $Y.YY            ← live ticking
+          per-task: range · machine · est. · actual
+    }
+
+    class "useLiveCostTick\ndesktop/src/hooks/" as Ticker <<NEW>> {
+        + useLiveCostTick()
+        --
+        Stateless ticker: setInterval(1000)
+        forces re-render so consumers' inline
+        ``(now - started_at) × price / 3600``
+        re-computes between polls.
+        --
+        Subscribers compute their own value —
+        the hook just supplies a wall-clock
+        signal.  Keeps the formula in ONE place
+        (UI) and avoids server polling.
+    }
+
+    Cards       ..> Ticker : subscribes (running tasks only)
+    CostsPanel  ..> Ticker : subscribes (running tasks only)
+}
+
+RenderGroupService -[#7c3aed]-> Cards       : tasks[*].actual_cost_usd
+RenderGroupService -[#7c3aed]-> CostsPanel  : total_actual_cost_usd + per-task DTOs
+
+' ============================================================
+' DESIGN NOTES
+' ============================================================
+note bottom of RenderGroupSerializer
+  **Why compute in the serializer (vs DB view)?**
+  • Single source of truth for the formula across
+    list / detail / future cost endpoints.
+  • Lets ``end = now`` for running tasks without
+    a SQL recompute.
+  • Already does this shape for ``progress_pct``.
+  • Pure read-side; no migration risk.
+end note
+
+note bottom of Ticker
+  **Why a hook (not server polling)?**
+  Running-task actuals are a closed-form function
+  of ``started_at`` (immutable) + ``price`` (immutable)
+  + ``now``.  Polling the server every second
+  would burn ~80 req/s during a busy group.
+  The ticker re-renders locally; the next real
+  poll already gives canonical actuals on completion.
+end note
+
+note left of Bootstrap
+  **No backend schema migration.**
+  All three columns and their write paths
+  exist today.  P2 is purely about exposing
+  them + fixing community pricing.
+
+  Net backend diff: ~25 lines across 4 files.
+end note
+
+@enduml

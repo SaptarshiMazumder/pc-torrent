@@ -63,6 +63,7 @@ class JobService:
         outputs_resolver: OutputsResolver,
         output_frame_repo: OutputFrameRepository,
         success_notifier: Callable[[str], None],
+        failure_notifier: Callable[[str, str], None],
         community_idle_notifier: Callable[[str], None],
         terminal_cache=None,
     ) -> None:
@@ -85,6 +86,14 @@ class JobService:
         # group reconcile).  No worker self-report of "done"; no monitor
         # poll race — the data is the success signal.
         self._success_notifier = success_notifier
+        # Called when a worker self-reports failure via PUT /status.
+        # Wired to CallbackRouter(FAILURE) in bootstrap so the standard
+        # retry pipeline runs (mark_terminal, release_ledger,
+        # try_retry, group reconcile).  Without this, a worker's
+        # mark_failed would write status='failed' to the DB directly
+        # and short-circuit retry entirely -- the bug that left frames
+        # 1-13 orphaned on the EGL_BAD_MATCH incident.
+        self._failure_notifier = failure_notifier
         # Called from ``next_for_machine``'s self-heal when a polling
         # agent is found with status='processing'.  Wired to
         # ``orchestrator.handle_community_machine_idle`` in bootstrap
@@ -137,18 +146,35 @@ class JobService:
             log.info("Rejecting status update %s→%s for job %s (terminal)", current, status, job_id)
             return {"job_id": job_id, "status": current, "success": False, "reason": "job already terminal"}
 
+        # Worker self-reported failure -- route through the orchestrator's
+        # failure pipeline instead of writing status='failed' to the DB
+        # directly.  The pipeline owns mark_terminal, release_ledger,
+        # retry decision, and group reconcile.  A direct DB write here
+        # would short-circuit CallbackRouter's is_job_terminal early-out
+        # on any subsequent monitor-detected failure, leaving the chunk
+        # un-retried and the in_progress_chunks row stranded.
+        if status == "failed":
+            self._failure_notifier(job_id, error or "Worker reported failure")
+            return {"job_id": job_id, "status": "failed"}
+
         self._jobs.update_status(job_id, status, error=error)
+        # Stamp ``started_at`` on the worker's first ``running`` self-report.
+        # This is the moment Modal/Vast start charging us, so it's the
+        # cost-tracking ground truth.  ``mark_started`` is IS-NULL-guarded
+        # so subsequent ``running`` updates (e.g. retries that skip back
+        # through pending) are no-ops and don't disturb the original
+        # billing-start timestamp.
+        if status == "running":
+            self._jobs.mark_started(job_id)
         # When the worker self-reports ``done`` (community path -- closes
         # the reclaim race where a sidecar restart between "last upload"
-        # and "success_notifier BackgroundTask firing" leaves the row
-        # status='running' for handle_community_machine_idle to mark
-        # failed), tell the caller to schedule the success chain as a
-        # BackgroundTask.  We deliberately do NOT call success_notifier
-        # synchronously here -- the heavy work (telemetry, group
-        # reconcile, drain) would inflate the worker's HTTP response
-        # time and risk client-side timeout.  The synchronous DB write
-        # above is enough to close the race; the rest can run async,
-        # exactly mirroring the existing register_outputs flow.
+        # and "success_notifier firing" leaves the row status='running'
+        # for handle_community_machine_idle to mark failed), tell the
+        # caller to fire the success chain (notify_completion).  Done
+        # synchronously now that the request path is no longer wrapped
+        # in BackgroundTasks -- worker timeouts are 30s, well within the
+        # ~5-30s the success chain takes (provider cancel is the slow
+        # part).  Same shape as register_outputs's completion path.
         needs_completion = status == "done"
         return {"job_id": job_id, "status": status, "needs_completion": needs_completion}
 

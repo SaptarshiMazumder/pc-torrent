@@ -694,6 +694,9 @@ def build(
         success_notifier=lambda jid: callback_router.route(
             job_id=jid, outcome=CallbackOutcome.SUCCESS,
         ),
+        failure_notifier=lambda jid, err: callback_router.route(
+            job_id=jid, outcome=CallbackOutcome.FAILURE, error=err,
+        ),
         community_idle_notifier=orchestrator.handle_community_machine_idle,
         terminal_cache=job_terminal_cache,
     )

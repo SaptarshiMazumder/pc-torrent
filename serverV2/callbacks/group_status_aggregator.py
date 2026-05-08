@@ -47,6 +47,16 @@ def compute_group_status(
             return GroupStatusResult(status="done", should_persist=current_group_status != "done")
         return GroupStatusResult(status=current_group_status, should_persist=False)
 
+    # Brand-new group, planner hasn't enqueued anything yet:
+    # zero jobs, zero pending-allocation rows, zero rendered frames.
+    # Falling through to the active-state branches below would trip
+    # the "no_active and not all_frames → failed" branch and falsely
+    # terminalize a group that's still in initial planning.  Hold the
+    # current status; the planner / daemon will create work soon and
+    # the next reconcile will see it.
+    if not job_statuses and not has_pending_allocation and total_rendered == 0:
+        return GroupStatusResult(status=current_group_status, should_persist=False)
+
     if all_done or (no_active and any_done and all_frames):
         return GroupStatusResult(status="done", should_persist=current_group_status != "done")
 

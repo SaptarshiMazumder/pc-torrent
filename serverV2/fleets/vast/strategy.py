@@ -1,9 +1,13 @@
-"""VastFleetStrategy — composes VastClient + VastMonitorManager + JobRepository.
+"""VastFleetStrategy — composes VastClient + JobRepository.
 
-Implements IFleetStrategy via composition, not inheritance.  After Phase
-1 of the allocator redesign, the strategy reads ``task.gpu_type``
-directly (the GPU name string Vast expects) — no machine_id → gpu_name
-lookup needed.
+Implements IFleetStrategy via composition, not inheritance.  Reads
+``task.gpu_type`` directly (the GPU name string Vast expects) — no
+machine_id → gpu_name lookup needed.
+
+Monitor lifecycle is owned by the singleton ``VastFleetMonitor``, not
+by this strategy.  ``dispatch`` writes the row + provider job id and
+returns; the singleton's next 30s sweep observes the row and starts
+running its decision blocks.
 """
 
 from __future__ import annotations
@@ -14,7 +18,6 @@ from typing import Any, Callable
 from serverV2.config import VastConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.vast.client import VastClient
-from serverV2.fleets.vast.monitor import VastMonitorManager
 from serverV2.repositories.job_repository import JobRepository
 
 log = logging.getLogger(__name__)
@@ -28,13 +31,11 @@ class VastFleetStrategy:
         self,
         config: VastConfig,
         client: VastClient,
-        callback_handler: VastMonitorManager,
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None],
     ) -> None:
         self._cfg = config
         self._client = client
-        self._callback = callback_handler
         self._job_repo = job_repo
         self._on_failure = on_failure
 
@@ -121,16 +122,8 @@ class VastFleetStrategy:
                 raise
             return DispatchResult(job_id=job_id, machine_id="", status="failed", error=error)
 
-        self._callback.start_monitoring(
-            job_id=job_id,
-            provider_job_id=provider_job_id,
-            machine_id="",
-            blend_url=context.blend_url,
-            render_overrides_json=context.render_overrides_json,
-            group_id=context.group_id,
-            estimated_startup_sec=task.estimated_startup_seconds,
-        )
-
+        # No per-job monitor thread spawn -- the singleton VastFleetMonitor
+        # picks up this row on its next 30s sweep.
         return DispatchResult(
             job_id=job_id,
             machine_id="",
@@ -142,7 +135,9 @@ class VastFleetStrategy:
         self._client.cancel_job(provider_job_id)
 
     def stop_monitoring(self, job_id: str) -> None:
-        self._callback.stop_monitoring(job_id)
+        # No-op: the singleton VastFleetMonitor drops per-job state on
+        # the next tick when it sees the row has gone terminal.
+        return
 
     def provider_job_id_from_job(self, job: dict[str, Any]) -> str | None:
         value = (job.get("vast_job_id") or "").strip()

@@ -66,17 +66,18 @@ def on_startup() -> None:
     # Every Cloud Run instance runs the same boot sequence.  Lock-based
     # ownership replaces the old leader election:
     #
-    #  * ``community_monitor.try_start()`` attempts the singleton
-    #    ``monitor:community`` Redis lock; the first booted instance
-    #    wins and starts the scan thread, others no-op.  If that
-    #    instance dies, its lock TTL expires (60s) and the
-    #    MonitorLockSweeper running on every other instance will
-    #    re-attempt try_start on the next tick.
+    #  * Three fleet singletons (vast / modal / community) each try to
+    #    acquire their ``monitor:<fleet>`` Redis lock at boot.  At most
+    #    one Cloud Run instance wins each lock and runs that fleet's
+    #    scan thread.  If a holder dies, its lock TTL expires (60s) and
+    #    the MonitorLockSweeper running on every other instance re-
+    #    attempts try_start on the next 30s tick.
     #
-    #  * ``monitor_lock_facade.start()`` runs on every instance and
-    #    iterates active Vast / Modal jobs every 30s, asking the
-    #    managers to start_monitoring.  Each manager try_acquires a
-    #    per-job lock; at most one wins per job.  No leader needed.
+    #  * ``monitor_lock_facade.start()`` is the sweeper itself.  It
+    #    loops every 30s and calls try_start() on each fleet singleton
+    #    (idempotent if we already own it, no-op if another instance
+    #    holds the lock).  Also runs the group-status drift audit
+    #    strategy alongside the fleet sweeps.
     #
     #  * ``allocation_dispatch_queue_daemon.start()`` runs on every
     #    instance.  Each replica's thread polls the
@@ -87,6 +88,8 @@ def on_startup() -> None:
     #    next tick after boot.
     _container.monitor_lock_facade.start()
     _container.allocation_dispatch_queue_daemon.start()
+    _container.vast_fleet_monitor.try_start()
+    _container.modal_fleet_monitor.try_start()
     if _container.community_monitor.try_start():
         log.info("ServerV2 startup complete (community-monitor owner)")
     else:

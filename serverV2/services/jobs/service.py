@@ -254,29 +254,22 @@ class JobService:
     # ---- output management ----
 
     def register_outputs(self, job_id: str, files: list[str]) -> dict[str, Any]:
-        """Pure DB work: insert into ``output_frames`` (PK on
-        (group_id, filename) silently dedupes sibling-retry duplicates),
-        return this job's full filename list and a flag telling the
-        caller whether this registration completed the chunk.  The
-        downstream side-effects (telemetry, group reconcile, drain
-        queue, possibly new dispatch HTTP calls) are NOT fired here —
-        the route schedules :meth:`notify_completion` as a background
-        task so the worker's HTTP response doesn't block on them.
-        Keeping the response under 100ms prevents the catch-up path
-        from misclassifying a slow side-effect chain as a failed
-        upload."""
+        """Pure DB write: insert into ``output_frames`` and return this
+        job's full filename list.  No completion detection here --
+        chunk completion is the singleton fleet monitor's job, observed
+        on its next tick via ``JobCounts.is_complete``.
+
+        ON CONFLICT silently dedupes frames a sibling retry already
+        uploaded.  Single round-trip from the worker's POV.
+        """
         job = self._jobs.get_raw_by_id(job_id)
         if not job:
             raise JobServiceError(404, "Job not found")
         group_id = job.get("group_id") or job_id
         self._output_frames.add_many(group_id, job_id, files)
-        merged = self._output_frames.list_for_job(job_id)
-        total = job.get("total_frames") or 0
-        completion_reached = total > 0 and len(merged) >= total
         return {
             "job_id": job_id,
-            "output_files": merged,
-            "completion_reached": completion_reached,
+            "output_files": self._output_frames.list_for_job(job_id),
         }
 
     def notify_completion(self, job_id: str) -> None:

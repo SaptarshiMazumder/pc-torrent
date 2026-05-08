@@ -22,7 +22,7 @@ from serverV2.core.models import AvailableResources
 from serverV2.fleets.community.community_monitor import CommunityMonitor
 from serverV2.fleets.community.strategy import CommunityStrategy
 from serverV2.fleets.instance_registry import InstanceRegistry
-from serverV2.fleets.modal.monitor import ModalMonitorManager
+from serverV2.fleets.modal.monitor.modal_fleet_monitor import ModalFleetMonitor
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.endpoint_validator import validate_modal_endpoints
 from serverV2.fleets.fleet_availability import (
@@ -44,7 +44,7 @@ from serverV2.fleets.shared.pre_render_stall_detector import (
 )
 from serverV2.fleets.status_aggregator import InstanceStatusAggregator
 from serverV2.fleets.status_provider import ModalStatusProvider, VastStatusProvider
-from serverV2.fleets.vast.monitor import VastMonitorManager
+from serverV2.fleets.vast.monitor.vast_fleet_monitor import VastFleetMonitor
 from serverV2.fleets.vast.client import VastClient
 from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.infrastructure import storage
@@ -163,6 +163,8 @@ class Container:
         orchestrator: RenderOrchestrator,
         callback_router: CallbackRouter,
         fleet_registry: FleetRegistry,
+        vast_fleet_monitor: VastFleetMonitor,
+        modal_fleet_monitor: ModalFleetMonitor,
         community_monitor: CommunityMonitor,
         monitor_lock_facade: MonitorLockFacade,
         job_repo: JobRepository,
@@ -186,6 +188,8 @@ class Container:
         self.orchestrator = orchestrator
         self.callback_router = callback_router
         self.fleet_registry = fleet_registry
+        self.vast_fleet_monitor = vast_fleet_monitor
+        self.modal_fleet_monitor = modal_fleet_monitor
         self.community_monitor = community_monitor
         self.monitor_lock_facade = monitor_lock_facade
         self.job_repo = job_repo
@@ -332,23 +336,12 @@ def build(
 
     # -- vast fleet --
     # No machine registrar — Vast capabilities live in config.json.
-    # Strategy reads task.gpu_type at dispatch time.
+    # Strategy reads task.gpu_type at dispatch time.  Singleton fleet
+    # monitor is constructed below; strategy doesn't reference it.
     vast_client = VastClient(cfg.vast)
-    vast_callback = VastMonitorManager(
-        config=cfg.vast, client=vast_client,
-        heartbeat_repo=heartbeat_repo,
-        progress_repo=progress_repo,
-        output_frame_repo=output_frame_repo,
-        on_failure=_on_failure,
-        on_success=_on_success,
-        stall_detector_factory=_make_pre_render_stall_detector,
-        lock_repo=monitor_lock_repo,
-        instance_id=instance_id,
-        registry=vast_instance_registry,
-    )
     vast_strategy = VastFleetStrategy(
         config=cfg.vast, client=vast_client,
-        callback_handler=vast_callback, job_repo=job_repo,
+        job_repo=job_repo,
         on_failure=_on_failure,
     )
     registry.register(vast_strategy)
@@ -356,25 +349,13 @@ def build(
     # -- modal fleet --
     # No machine registrar — Modal capabilities live in config.json.
     modal_client = ModalClient(cfg.modal)
-    modal_callback = ModalMonitorManager(
-        config=cfg.modal, client=modal_client,
-        heartbeat_repo=heartbeat_repo,
-        progress_repo=progress_repo,
-        output_frame_repo=output_frame_repo,
-        on_failure=_on_failure,
-        on_success=_on_success,
-        stall_detector_factory=_make_pre_render_stall_detector,
-        lock_repo=monitor_lock_repo,
-        instance_id=instance_id,
-        registry=modal_instance_registry,
-    )
     modal_active_jobs_tracker = ModalActiveJobsTracker(redis_client=redis)
     modal_active_jobs_hooks = ModalActiveJobsHooks(
         tracker=modal_active_jobs_tracker,
     )
     modal_strategy = ModalFleetStrategy(
         config=cfg.modal, client=modal_client,
-        callback_handler=modal_callback, job_repo=job_repo,
+        job_repo=job_repo,
         on_failure=_on_failure,
         active_jobs_hooks=modal_active_jobs_hooks,
     )
@@ -612,16 +593,45 @@ def build(
     callback_router = CallbackRouter(orchestrator, success_handler, failure_handler)
     router_ref[0] = callback_router
 
-    # Late-bind orchestrator into fleet callback handlers so the per-job
-    # monitors they spawn can use it for read facade calls.  Two-phase
-    # wiring breaks the otherwise-circular construction order
-    # (orchestrator → registry → strategies → handlers → orchestrator).
-    vast_callback.set_orchestrator(orchestrator)
-    modal_callback.set_orchestrator(orchestrator)
+    def _on_running(job_id: str) -> None:
+        orchestrator.on_job_running(job_id)
+
+    # -- vast & modal singleton fleet monitors --
+    # One thread per fleet across the entire Cloud Run service, gated by
+    # the ``monitor:vast`` / ``monitor:modal`` Redis locks.  Each tick
+    # (~30s) the singleton iterates active rows of its fleet and runs
+    # the same decision blocks the per-job monitors used to run.
+    vast_fleet_monitor = VastFleetMonitor(
+        config=cfg.vast,
+        client=vast_client,
+        group_repo=group_repo,
+        heartbeat_repo=heartbeat_repo,
+        progress_repo=progress_repo,
+        output_frame_repo=output_frame_repo,
+        on_failure=_on_failure,
+        on_success=_on_success,
+        on_running=_on_running,
+        stall_detector_factory=_make_pre_render_stall_detector,
+        lock_repo=monitor_lock_repo,
+        instance_id=instance_id,
+        registry=vast_instance_registry,
+    )
+    modal_fleet_monitor = ModalFleetMonitor(
+        config=cfg.modal,
+        client=modal_client,
+        group_repo=group_repo,
+        heartbeat_repo=heartbeat_repo,
+        progress_repo=progress_repo,
+        output_frame_repo=output_frame_repo,
+        on_failure=_on_failure,
+        on_success=_on_success,
+        stall_detector_factory=_make_pre_render_stall_detector,
+        lock_repo=monitor_lock_repo,
+        instance_id=instance_id,
+        registry=modal_instance_registry,
+    )
 
     # -- community fleet monitor (machine-offline + group-terminal reconciliation)
-    # Modal and Vast own their own health via per-job monitors inside their
-    # callback handlers; community is pull-based and needs this daemon.
     # Singleton across instances via the ``monitor:community`` Redis lock.
     community_monitor = CommunityMonitor(
         job_repo=job_repo,
@@ -640,18 +650,17 @@ def build(
     )
 
     # -- monitor lock facade --
-    # Per-instance daemon that re-claims orphaned per-job (Vast/Modal)
-    # monitors and the community singleton.  Replaces leader-only boot
-    # recovery: every instance runs this and ownership is decided by
-    # the per-key Redis lock the managers acquire on ``start_monitoring``.
-    # The facade hides the per-fleet sweep strategies + thread driver --
-    # bootstrap only sees the public surface.
+    # Per-instance sweep daemon.  Each tick (~30s) calls try_start() on
+    # every fleet singleton (vast/modal/community) so any instance whose
+    # singleton lock TTL expired gets reclaimed by another instance.
+    # Also runs the group-status drift audit -- the group-level safety
+    # net for chunks-done-but-status-stuck.
     monitor_lock_facade = MonitorLockFacade.build(
-        vast_cfg=cfg.vast,
-        modal_cfg=cfg.modal,
-        vast_manager=vast_callback,
-        modal_manager=modal_callback,
+        vast_fleet_monitor=vast_fleet_monitor,
+        modal_fleet_monitor=modal_fleet_monitor,
         community_monitor=community_monitor,
+        group_repo=group_repo,
+        lifecycle=lifecycle,
     )
 
     # -- status providers + aggregator --
@@ -725,6 +734,8 @@ def build(
         orchestrator=orchestrator,
         callback_router=callback_router,
         fleet_registry=registry,
+        vast_fleet_monitor=vast_fleet_monitor,
+        modal_fleet_monitor=modal_fleet_monitor,
         community_monitor=community_monitor,
         monitor_lock_facade=monitor_lock_facade,
         job_repo=job_repo,

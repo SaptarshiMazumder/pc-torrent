@@ -1,0 +1,219 @@
+@startuml ghost_instance_sweep_classes
+title Plan: ghost-instance sweep via backup_monitor (reports-only)\n(green = NEW entry; green-filled box = NEW class)
+
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #FAFAFA
+  BorderColor #444
+}
+skinparam package {
+  BackgroundColor #F4F4F4
+  BorderColor #888
+}
+
+!define NEW <color:#1B7A3E><b>
+!define NEW_END </b></color>
+
+' ============================================================
+' backup_monitor/  (Cloud Run Job, runs every 60s via Scheduler)
+' ============================================================
+package "backup_monitor/  <<external Cloud Run Job>>" #FFF8E1 {
+
+  class "VastApiClient\n<size:11><i>NEW FILE</i></size>" as VastApi <<NEW>> #C8E6C9 {
+    - api_key : str
+    - http_timeout_sec : int
+    + list_instances() : list[dict]
+    .. wraps ..
+    GET /instances/?owner=me
+  }
+
+  class "VastJobsRepository\n<size:11><i>NEW FILE</i></size>" as VastRepo <<NEW>> #C8E6C9 {
+    + get_by_vast_ids(db, vast_ids : list[int]) : dict[int, dict]
+    .. SQL ..
+    SELECT id, status, vast_job_id
+    FROM jobs
+    WHERE vast_job_id = ANY(%s)
+  }
+
+  class "ModalTerminalJobsRepository\n<size:11><i>NEW FILE</i></size>" as ModalRepo <<NEW>> #C8E6C9 {
+    + list_recent_terminal(db, *, since_hours, limit) : list[dict]
+    .. SQL ..
+    SELECT id, modal_function_call_id
+    FROM jobs
+    WHERE status IN ('done','failed','cancelled')
+      AND modal_function_call_id IS NOT NULL
+      AND completed_at > now() - interval
+    LIMIT %s
+  }
+
+  class "VastGhostScanner\n<size:11><i>NEW FILE</i></size>" as VastScan <<NEW>> #C8E6C9 {
+    - vast_api : VastApiClient
+    - vast_jobs_repo : VastJobsRepository
+    - reporter : GhostReporter
+    - min_instance_age_sec : float
+    - db_factory : Callable
+    + tick() : None
+    .. behavior ..
+    1. provider = vast_api.list_instances()
+    2. ids = [int(i["id"]) for i in provider]
+    3. local = vast_jobs_repo.get_by_vast_ids(db, ids)
+    4. for instance in provider:
+         row = local.get(instance.id)
+         if row exists AND row.status terminal:
+           reporter.report_vast_ghost(instance.id)
+         elif row missing AND age > min_instance_age_sec:
+           reporter.report_vast_ghost(instance.id)
+  }
+
+  class "ModalTerminalScanner\n<size:11><i>NEW FILE</i></size>" as ModalScan <<NEW>> #C8E6C9 {
+    - modal_terminal_jobs_repo : ModalTerminalJobsRepository
+    - reporter : GhostReporter
+    - window_hours : int
+    - max_rows : int
+    - db_factory : Callable
+    + tick() : None
+    .. behavior ..
+    1. rows = modal_terminal_jobs_repo
+            .list_recent_terminal(db, since_hours, limit)
+    2. for row in rows:
+         reporter.report_modal_ghost(row.modal_function_call_id)
+    .. note ..
+    No bulk-list API on Modal. This is
+    "terminal-cleanup retry" -- if our prior
+    cancel didn't reach Modal, this catches it.
+  }
+
+  class "GhostReporter\n<size:11><i>NEW FILE</i></size>" as Reporter <<NEW>> #C8E6C9 {
+    - url_base : str
+    - secret : str
+    - timeout : int
+    + report_vast_ghost(vast_id : int)
+    + report_modal_ghost(call_id : str)
+    .. wraps ..
+    POST /internal/ghost-instance/vast/{vast_id}
+    POST /internal/ghost-instance/modal/{call_id}
+    Header: X-Orphan-Secret  (reuse existing secret)
+  }
+
+  class BackupMonitorConfig {
+    + database_url, redis_url, orchestrator_url, orphan_secret
+    + http_timeout_sec
+    NEW + vast_api_key : str NEW_END
+    NEW + vast_ghost_min_age_sec : float = 120 NEW_END
+    NEW + modal_terminal_window_hours : int = 24 NEW_END
+    NEW + modal_terminal_max_rows : int = 200 NEW_END
+  }
+
+  class "main.py" as Main {
+    + main()
+    .. updated body ..
+    cfg = BackupMonitorConfig.from_env()
+    orphan_scanner.tick()        // existing
+    NEW vast_ghost_scanner.tick()    NEW_END
+    NEW modal_terminal_scanner.tick() NEW_END
+  }
+
+  class OrphanScanner <<existing, untouched>> {
+    + tick()
+  }
+}
+
+' ============================================================
+' serverV2/  (orchestrator side -- two new endpoints)
+' ============================================================
+package "serverV2/api/routers/" #E3F2FD {
+
+  class "internal.py (router module)" as InternalRouter {
+    + POST /internal/orphan/{job_id}        <<existing>>
+    NEW + POST /internal/ghost-instance/vast/{vast_id}  NEW_END
+    NEW + POST /internal/ghost-instance/modal/{call_id} NEW_END
+    .. updated init() ..
+    init(
+      callback_router,
+      orphan_secret,
+    NEW   vast_client,    NEW_END
+    NEW   modal_client,   NEW_END
+    NEW   job_repo,       NEW_END
+    )
+    .. behavior of new endpoints ..
+    1. validate X-Orphan-Secret
+    2. lookup local row by provider id
+    3. if row active (running/pending): log + skip
+       (defense vs stale backup-monitor view)
+    4. else: client.destroy(...) / cancel_job(...)
+       (idempotent; safe on already-gone)
+  }
+}
+
+package "serverV2/fleets/  <<existing>>" #FCE4EC {
+  class VastClient <<existing>> {
+    + instances.destroy(id : int)
+  }
+  class ModalClient <<existing>> {
+    + cancel_job(call_id : str)
+  }
+}
+
+package "serverV2/repositories/  <<existing>>" #F3E5F5 {
+  class JobRepository <<existing>> {
+    + get_raw_by_id(job_id) : dict | None
+    .. (no new methods on the server side --
+       defensive lookup uses get_raw_by_id) ..
+  }
+}
+
+' ============================================================
+' RELATIONSHIPS
+' ============================================================
+
+' --- backup_monitor wiring ---
+Main *-- VastScan
+Main *-- ModalScan
+Main *-- OrphanScanner
+
+VastScan --> VastApi
+VastScan --> VastRepo
+VastScan --> Reporter
+
+ModalScan --> ModalRepo
+ModalScan --> Reporter
+
+' --- HTTP boundary ---
+Reporter ..> InternalRouter : <color:#1B7A3E>POST</color>\n<color:#1B7A3E>X-Orphan-Secret</color>
+
+' --- server side resolution ---
+InternalRouter --> VastClient : destroy
+InternalRouter --> ModalClient : cancel_job
+InternalRouter --> JobRepository : defensive re-check
+
+note as PatternNote #E1F5FE
+  <b>Mirrors OrphanReporter pattern</b>
+  • backup_monitor scans + decides
+  • orchestrator destroys (single auth boundary)
+  • shared X-Orphan-Secret reused
+  • idempotent destroys + defensive re-check
+    on the server side
+end note
+
+note as ModalNote #FFF3E0
+  <b>Modal asymmetry</b>
+  Modal SDK has no bulk-list API.
+  ModalTerminalScanner inverts the strategy:
+  scan our DB for terminal rows whose
+  modal_function_call_id we still hold,
+  re-cancel via Modal SDK (server-side).
+  Bounded by window_hours + max_rows.
+end note
+
+note as ConfigNote #FFFDE7
+  <b>backup_monitor env (per existing pattern)</b>
+  <color:#1B7A3E><b>VAST_API_KEY</b></color>             (secret)
+  <color:#1B7A3E><b>VAST_GHOST_MIN_AGE_SEC</b></color>   default 120
+  <color:#1B7A3E><b>MODAL_TERMINAL_WINDOW_HOURS</b></color> default 24
+  <color:#1B7A3E><b>MODAL_TERMINAL_MAX_ROWS</b></color>  default 200
+  Tunables: env-overrideable, defaults in code.
+  Backup monitor doesn't read serverV2 config.json
+  -- it has its own deploy and env contract.
+end note
+
+@enduml

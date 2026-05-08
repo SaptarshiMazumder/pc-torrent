@@ -91,6 +91,27 @@ class JobRepository:
     def get_raw_by_id(self, job_id: str) -> dict[str, Any] | None:
         return self._raw_with_machine_type(job_id)
 
+    def get_raw_by_vast_id(self, vast_id: int) -> dict[str, Any] | None:
+        """Look up the local job that owns a given Vast.ai instance id.
+        Used by the internal ghost-instance endpoint to defensively
+        re-check status before destroying a provider-side instance."""
+        row = query_one(
+            "SELECT * FROM jobs WHERE vast_job_id = %s",
+            (str(vast_id),),
+        )
+        return self._attach_machine_type(row) if row else None
+
+    def get_raw_by_modal_function_call_id(
+        self, call_id: str,
+    ) -> dict[str, Any] | None:
+        """Same as ``get_raw_by_vast_id`` but keyed on
+        ``modal_function_call_id``."""
+        row = query_one(
+            "SELECT * FROM jobs WHERE modal_function_call_id = %s",
+            (call_id,),
+        )
+        return self._attach_machine_type(row) if row else None
+
     def get_by_group(self, group_id: str) -> list[RenderJob]:
         rows = query_all(
             "SELECT * FROM jobs WHERE group_id = %s ORDER BY frame_start ASC",

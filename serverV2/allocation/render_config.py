@@ -32,6 +32,7 @@ from serverV2.config import (
     EngineFactors,
     FailureRateConfig,
     RenderStartupSec,
+    SceneScalingConfig,
     StartupBufferConfig,
     VramFleetBoostConfig,
 )
@@ -106,6 +107,8 @@ class RenderTimeSection:
     baseline_sec_eevee: float
     factors_cycles: EngineFactors
     factors_eevee: EngineFactors
+    scene_scaling_cycles: SceneScalingConfig
+    scene_scaling_eevee: SceneScalingConfig
     startup_sec: RenderStartupSec
 
 
@@ -333,6 +336,60 @@ def _startup_sec(b: dict) -> RenderStartupSec:
     )
 
 
+_SCENE_SCALING_CYCLES_DEFAULT = SceneScalingConfig(
+    baseline_pixels=1920 * 1080,
+    pixel_curve_exponent=0.85,
+    min_pixel_factor=0.25,
+    baseline_samples=1024.0,
+    sample_curve_exponent=0.9,
+    min_sample_factor=0.0,
+)
+
+_SCENE_SCALING_EEVEE_DEFAULT = SceneScalingConfig(
+    baseline_pixels=1920 * 1080,
+    pixel_curve_exponent=0.5,
+    min_pixel_factor=0.25,
+    baseline_samples=64.0,
+    sample_curve_exponent=0.4,
+    min_sample_factor=0.5,
+)
+
+
+def _scene_scaling(b: dict, key: str, defaults: SceneScalingConfig) -> SceneScalingConfig:
+    """Backwards-compat at both granularities:
+      * docs missing the whole section -> engine-appropriate defaults;
+      * docs with a partial section (admin UI saves a half-filled form,
+        seeds from older shape) -> per-field default fallback.
+
+    The admin UI surfaces these fields lazily (they stay undefined in form
+    state until touched), so a save without every field would otherwise
+    400 the request.  Defaults match what ``allocation_time_analyzer``
+    bakes in, so missing-field behaviour is identical to "section never
+    written".
+    """
+    sub = b.get(key)
+    if not isinstance(sub, dict):
+        return defaults
+
+    def _f(k: str, d: float) -> float:
+        v = sub.get(k)
+        if v is None:
+            return d
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return d
+
+    return SceneScalingConfig(
+        baseline_pixels=_f("baseline_pixels", defaults.baseline_pixels),
+        pixel_curve_exponent=_f("pixel_curve_exponent", defaults.pixel_curve_exponent),
+        min_pixel_factor=_f("min_pixel_factor", defaults.min_pixel_factor),
+        baseline_samples=_f("baseline_samples", defaults.baseline_samples),
+        sample_curve_exponent=_f("sample_curve_exponent", defaults.sample_curve_exponent),
+        min_sample_factor=_f("min_sample_factor", defaults.min_sample_factor),
+    )
+
+
 def _render_time(b: dict) -> RenderTimeSection:
     ctx = "frame_allocation.render_time"
     factors_cycles_block = b.get("factors_cycles")
@@ -349,6 +406,8 @@ def _render_time(b: dict) -> RenderTimeSection:
         baseline_sec_eevee=_float(b, ctx, "baseline_sec_eevee"),
         factors_cycles=_engine_factors(factors_cycles_block, f"{ctx}.factors_cycles"),
         factors_eevee=_engine_factors(factors_eevee_block, f"{ctx}.factors_eevee"),
+        scene_scaling_cycles=_scene_scaling(b, "scene_scaling_cycles", _SCENE_SCALING_CYCLES_DEFAULT),
+        scene_scaling_eevee=_scene_scaling(b, "scene_scaling_eevee", _SCENE_SCALING_EEVEE_DEFAULT),
         startup_sec=_startup_sec(startup_sec_block),
     )
 

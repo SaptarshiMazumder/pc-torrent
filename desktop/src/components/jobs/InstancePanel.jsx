@@ -161,7 +161,16 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
   const canCancel = Boolean(jobId && backendUrl && onCancel);
 
   return (
-    <div ref={cardRef} className="inst-active-card" style={{ "--inst-color": dot }}>
+    <div
+      ref={cardRef}
+      className="inst-active-card"
+      style={{
+        "--inst-color": dot,
+        ...(stallTimesOpen
+          ? { borderBottomLeftRadius: 0, borderBottomRightRadius: 0, borderBottom: "none" }
+          : null),
+      }}
+    >
       <div className="inst-active-left">
         {pct != null ? <CircleProgress pct={pct} color={dot} /> : (
           <div className="inst-active-avatar" style={{ borderColor: dot }}>

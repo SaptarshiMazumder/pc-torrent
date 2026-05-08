@@ -1,8 +1,10 @@
 """MonitorLockModalSweepStrategy — claim the Modal singleton lock.
 
-Same shape as Vast and community strategies: per tick, call
-``try_start()`` on the singleton.  The lock acquire inside decides
-whether THIS Cloud Run instance now runs the Modal fleet scan.
+Per tick, call ``try_start()`` on the supervised singleton.  Same
+shape as the Vast and community sweep strategies.
+
+Constructor takes the Protocol from this module (``MonitorLockDaemon``)
+rather than the concrete fleet-monitor class.
 """
 
 from __future__ import annotations
@@ -10,12 +12,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from serverV2.fleets.modal.monitor.modal_fleet_monitor import ModalFleetMonitor
+    from serverV2.monitor_lock.monitor_lock_daemon import MonitorLockDaemon
 
 
 class MonitorLockModalSweepStrategy:
 
-    def __init__(self, *, modal_fleet_monitor: "ModalFleetMonitor") -> None:
+    def __init__(self, *, modal_fleet_monitor: "MonitorLockDaemon") -> None:
         self._fleet_monitor = modal_fleet_monitor
 
     def sweep(self) -> None:

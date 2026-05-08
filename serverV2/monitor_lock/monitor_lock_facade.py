@@ -35,9 +35,7 @@ from serverV2.monitor_lock.monitor_lock_service.monitor_lock_vast_sweep_strategy
 )
 
 if TYPE_CHECKING:
-    from serverV2.fleets.community.community_monitor import CommunityMonitor
-    from serverV2.fleets.modal.monitor.modal_fleet_monitor import ModalFleetMonitor
-    from serverV2.fleets.vast.monitor.vast_fleet_monitor import VastFleetMonitor
+    from serverV2.monitor_lock.monitor_lock_daemon import MonitorLockDaemon
     from serverV2.orchestrator.lifecycle import RenderLifecycle
     from serverV2.repositories.render_group_repository import RenderGroupRepository
 
@@ -51,15 +49,20 @@ class MonitorLockFacade:
     def build(
         cls,
         *,
-        vast_fleet_monitor: "VastFleetMonitor",
-        modal_fleet_monitor: "ModalFleetMonitor",
-        community_monitor: "CommunityMonitor",
+        vast_fleet_monitor: "MonitorLockDaemon",
+        modal_fleet_monitor: "MonitorLockDaemon",
+        community_monitor: "MonitorLockDaemon",
         group_repo: "RenderGroupRepository",
         lifecycle: "RenderLifecycle",
         interval_sec: int = 30,
     ) -> "MonitorLockFacade":
         """Compose the strategies + sweeper for this process.  The only
-        constructor bootstrap needs to know."""
+        constructor bootstrap needs to know.
+
+        The three fleet singletons are typed as ``MonitorLockDaemon``
+        rather than concrete classes -- this module owns the contract
+        for what counts as a supervised singleton.
+        """
         strategies = [
             MonitorLockVastSweepStrategy(
                 vast_fleet_monitor=vast_fleet_monitor,

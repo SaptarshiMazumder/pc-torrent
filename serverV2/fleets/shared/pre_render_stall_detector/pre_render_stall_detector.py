@@ -1,16 +1,16 @@
 """PreRenderStallDetector — runs the rule list in order, first match wins.
 
-Stateless across jobs.  One instance can evaluate any number of jobs by
-being handed a different ``HeartbeatWindow`` per call — the per-job
-``elapsed`` and ``window`` are the only inputs that vary.
+Stateless across jobs.  One instance can evaluate any number of jobs
+because rules read their deadlines from ``allowed_stall_times`` on the
+row (stamped at dispatch) rather than holding config values at
+construction.
 
-Construct via :class:`PreRenderStallDetectorBuilder` rather than calling
-the constructor directly so callers don't have to import the rules.
+Construct via :class:`PreRenderStallDetectorBuilder`.
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from serverV2.fleets.shared.pre_render_stall_detector.heartbeat_window import (
     HeartbeatWindow,
@@ -27,7 +27,7 @@ class IPreRenderStallDetector(Protocol):
         job_age_sec: float,
         *,
         has_rendered: bool = False,
-        estimated_startup_sec: float = 0.0,
+        allowed_stall_times: dict[str, Any] | None = None,
     ) -> StallReason | None:
         ...
 
@@ -43,14 +43,14 @@ class PreRenderStallDetector:
         job_age_sec: float,
         *,
         has_rendered: bool = False,
-        estimated_startup_sec: float = 0.0,
+        allowed_stall_times: dict[str, Any] | None = None,
     ) -> StallReason | None:
         for rule in self._rules:
             reason = rule.evaluate(
                 window,
                 job_age_sec,
                 has_rendered=has_rendered,
-                estimated_startup_sec=estimated_startup_sec,
+                allowed_stall_times=allowed_stall_times,
             )
             if reason is not None:
                 return reason

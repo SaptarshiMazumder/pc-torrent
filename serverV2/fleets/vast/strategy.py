@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from serverV2.allocation.allowed_stall_times_resolver import AllowedStallTimesResolver
 from serverV2.config import VastConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.vast.client import VastClient
@@ -33,11 +34,13 @@ class VastFleetStrategy:
         client: VastClient,
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None],
+        allowed_stall_times_resolver: AllowedStallTimesResolver,
     ) -> None:
         self._cfg = config
         self._client = client
         self._job_repo = job_repo
         self._on_failure = on_failure
+        self._stall_resolver = allowed_stall_times_resolver
 
     @property
     def fleet(self) -> str:
@@ -66,6 +69,11 @@ class VastFleetStrategy:
         # from the live Vast bundle.  Stamped onto the row for telemetry.
         price_at_dispatch = task.price_per_hour or None
 
+        allowed_stall_times = self._stall_resolver.resolve(
+            fleet=_FLEET,
+            group_id=context.group_id,
+            estimated_startup_seconds=task.estimated_startup_seconds,
+        )
         self._job_repo.create(CreateJobParams(
             job_id=job_id,
             fleet=_FLEET,
@@ -87,6 +95,7 @@ class VastFleetStrategy:
             estimated_cost_usd=task.estimated_cost_usd,
             estimated_seconds_per_frame=task.estimated_seconds_per_frame,
             estimated_startup_seconds=task.estimated_startup_seconds,
+            allowed_stall_times=allowed_stall_times,
         ))
 
         try:

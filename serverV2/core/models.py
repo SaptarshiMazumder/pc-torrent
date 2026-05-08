@@ -111,9 +111,13 @@ class RenderJob:
     render_overrides_json: str | None
     chunk_index: int | None
     priority: int
-    # Planner-stamped startup budget; CommunityMonitor's loading-stall
-    # check reads this off the row to size the per-job allowance.
+    # Planner-stamped startup budget; resolver uses this at dispatch
+    # to compute the loading-stall deadline.
     estimated_startup_seconds: float = 0.0
+    # Resolved kill-time deadlines stamped at dispatch.  Read by the
+    # fleet singletons (and CommunityMonitor) per-tick to enforce
+    # stall checks.  None for legacy rows pre-dating the column.
+    allowed_stall_times: dict[str, Any] | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RenderJob:
@@ -137,6 +141,7 @@ class RenderJob:
             chunk_index=row.get("chunk_index"),
             priority=row.get("priority") or 0,
             estimated_startup_seconds=float(row.get("estimated_startup_seconds") or 0.0),
+            allowed_stall_times=row.get("allowed_stall_times"),
         )
 
     @property
@@ -287,6 +292,13 @@ class CreateJobParams:
     estimated_cost_usd: float = 0.0
     estimated_seconds_per_frame: float = 0.0
     estimated_startup_seconds: float = 0.0
+    # Resolved kill-time deadlines for this chunk, computed at dispatch
+    # by ``AllowedStallTimesResolver``.  Written to the
+    # ``jobs.allowed_stall_times`` JSONB column and read by:
+    #   * fleet singletons each tick (stall enforcement)
+    #   * UI on instance card mount (deadline display)
+    # Single source of truth for the clamp/multiplier math.
+    allowed_stall_times: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------

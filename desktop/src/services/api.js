@@ -462,6 +462,18 @@ export async function cancelJob(baseUrl, jobId) {
   return apiFetch(baseUrl, `/jobs/${jobId}/cancel`, { method: "POST" });
 }
 
+export async function getAllowedStallTimes(baseUrl, jobId) {
+  // Returns the dispatch-time-resolved kill-time deadline dict for a job.
+  // 404 for legacy rows pre-dating the column or missing jobs; we map
+  // that to null so callers can render "not yet known" gracefully.
+  try {
+    return await apiFetch(baseUrl, `/jobs/${jobId}/allowed-stall-times`);
+  } catch (e) {
+    if (e?.status === 404) return null;
+    throw e;
+  }
+}
+
 export async function getVastInstances(baseUrl) {
   return apiFetch(baseUrl, "/vast/instances");
 }

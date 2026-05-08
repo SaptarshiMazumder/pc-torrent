@@ -227,14 +227,34 @@ class VastFleetMonitor:
         local_status: str = str(row.get("status") or "")
         elapsed = self._elapsed_since_dispatch(row)
 
+        # Resolved kill-time deadlines stamped at dispatch.  None for
+        # legacy rows pre-dating the column -- rule evaluators silently
+        # skip when their key is missing.
+        deadlines = row.get("allowed_stall_times") or {}
+        # Fallbacks to per-fleet config for pre-deploy rows.  After all
+        # in-flight jobs settle these become dead branches we can prune.
+        startup_timeout_sec = float(
+            deadlines.get("startup_timeout_sec")
+            if deadlines.get("startup_timeout_sec") is not None
+            else self._cfg.startup_timeout_sec
+        )
+        heartbeat_grace_sec = float(
+            deadlines.get("heartbeat_grace_sec")
+            if deadlines.get("heartbeat_grace_sec") is not None
+            else self._cfg.heartbeat_grace_sec
+        )
+        frame_progress_stale_sec = float(
+            deadlines.get("frame_progress_stale_sec")
+            if deadlines.get("frame_progress_stale_sec") is not None
+            else self._cfg.in_progress_stale_sec
+        )
+
         # Lazy per-job state.
         state = self._per_job.get(job_id)
         if state is None:
             state = _PerJobState(
                 liveness=LivenessCheck(
                     heartbeat_repo=self._heartbeats,
-                    stale_sec=self._cfg.in_progress_stale_sec,
-                    heartbeat_grace_sec=self._cfg.heartbeat_grace_sec,
                     defer_activation=True,
                 ),
             )
@@ -295,7 +315,7 @@ class VastFleetMonitor:
         # Block: startup timeout — container never reached running.
         if (state.became_running_at is None
                 and not self._status.is_running(actual_status)
-                and elapsed > self._cfg.startup_timeout_sec):
+                and elapsed > startup_timeout_sec):
             err = f"Vast.ai instance stuck in '{actual_status}' for {elapsed:.0f}s"
             self._destroy(int(inst["id"]))
             self._on_failure(job_id, err)
@@ -310,24 +330,24 @@ class VastFleetMonitor:
                 state.liveness.mark_active()
                 if local_status == "pending":
                     self._on_running(job_id)
-            if state.liveness.is_stale():
+            if state.liveness.is_stale(stale_sec=frame_progress_stale_sec):
                 err = (
                     f"Vast.ai job running but no new frames for "
-                    f"{self._cfg.in_progress_stale_sec / 60:.0f} min"
+                    f"{frame_progress_stale_sec / 60:.0f} min"
                 )
                 self._destroy(int(inst["id"]))
                 self._on_failure(job_id, err)
                 self._per_job.pop(job_id, None)
                 snapshot.remove()
                 return
-            if state.liveness.heartbeat_dead(job_id):
+            if state.liveness.heartbeat_dead(job_id, grace_sec=heartbeat_grace_sec):
                 err = "Worker heartbeat stopped while Vast instance shows running"
                 self._destroy(int(inst["id"]))
                 self._on_failure(job_id, err)
                 self._per_job.pop(job_id, None)
                 snapshot.remove()
                 return
-            stall = self._evaluate_stall(row, elapsed)
+            stall = self._evaluate_stall(row, elapsed, deadlines)
             if stall is not None:
                 err = f"Pre-render stall ({stall.rule}): {stall.message}"
                 log.warning("Job %s stalled: %s", job_id, err)
@@ -384,19 +404,21 @@ class VastFleetMonitor:
         return str(grp.get("status") or "")
 
     def _evaluate_stall(
-        self, row: dict[str, Any], elapsed: float,
+        self,
+        row: dict[str, Any],
+        elapsed: float,
+        deadlines: dict[str, Any],
     ) -> StallReason | None:
         samples = self._heartbeats.get_recent(row["id"], n=30)
         if not samples:
             return None
         window = HeartbeatWindow.from_raw(samples)
         has_rendered = self._counts.uploaded(row) > 0
-        startup_sec = float(row.get("estimated_startup_seconds") or 0.0)
         return self._stall_detector_factory().evaluate(
             window,
             elapsed,
             has_rendered=has_rendered,
-            estimated_startup_sec=startup_sec,
+            allowed_stall_times=deadlines or None,
         )
 
     def _on_instance_gone(self, row: dict[str, Any]) -> None:

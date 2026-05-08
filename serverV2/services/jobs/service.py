@@ -172,6 +172,14 @@ class JobService:
         # firing on_success via ``JobCounts.is_complete`` on its tick.
         return {"job_id": job_id, "status": status}
 
+    def get_allowed_stall_times(self, job_id: str) -> dict[str, Any] | None:
+        """Return the resolved kill-time deadline dict written at
+        dispatch.  None if the job doesn't exist OR pre-dates the
+        column (legacy rows).  UI handles None by hiding the overlay
+        chip.
+        """
+        return self._jobs.get_allowed_stall_times(job_id)
+
     def update_progress(self, job_id: str, rendered_frames: int, total_frames: int) -> dict[str, Any]:
         self._progress.record(job_id, rendered_frames, total_frames)
         return {"job_id": job_id, "rendered_frames": rendered_frames, "total_frames": total_frames}

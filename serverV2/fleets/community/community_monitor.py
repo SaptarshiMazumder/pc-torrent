@@ -324,16 +324,15 @@ class CommunityMonitor:
         job_age = _seconds_since_iso(job.submitted_at)
         if job_age is None:
             return
-        # ``has_rendered`` and ``estimated_startup_sec`` feed LoadingStallRule.
-        # Community monitor scans all jobs in one thread, so we read both
-        # per-job rather than holding state on the monitor.  ``uploaded``
-        # only needs the row's id.
+        # Each rule reads its own deadline from job.allowed_stall_times
+        # (stamped at dispatch).  Legacy rows with None silently skip
+        # all rule evaluations.
         has_rendered = self._counts.uploaded({"id": job.job_id}) > 0
         reason = self._stall_detector.evaluate(
             window,
             job_age,
             has_rendered=has_rendered,
-            estimated_startup_sec=float(job.estimated_startup_seconds or 0.0),
+            allowed_stall_times=job.allowed_stall_times,
         )
         if reason is None:
             return

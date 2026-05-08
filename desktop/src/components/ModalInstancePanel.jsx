@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { getModalInstances } from "../lib/api";
-import InstancePanel, { loadingStallChipParts } from "./jobs/InstancePanel";
+import InstancePanel from "./jobs/InstancePanel";
 
 const MODAL_ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round">
@@ -55,7 +55,6 @@ const modalProvider = {
         : null,
       error: live?.error || (task.status === "failed" ? task.error : "") || "",
       stallRule: task.stall_rule || null,
-      loadingStall: loadingStallChipParts(task.estimated_startup_seconds),
       statusMsg: live?.monitor_action || "",
       logs: live?.logs || "",
       history: Array.isArray(live?.status_history) ? live.status_history : [],

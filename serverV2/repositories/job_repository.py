@@ -34,6 +34,12 @@ class JobRepository:
     # ---- create ----
 
     def create(self, params: CreateJobParams) -> str:
+        import json as _json
+        allowed_stall_json = (
+            _json.dumps(params.allowed_stall_times)
+            if params.allowed_stall_times is not None
+            else None
+        )
         execute(
             """
             INSERT INTO jobs (
@@ -45,9 +51,10 @@ class JobRepository:
                 chunk_index, submitted_at,
                 price_per_hour_at_dispatch,
                 estimated_seconds, estimated_cost_usd,
-                estimated_seconds_per_frame, estimated_startup_seconds
+                estimated_seconds_per_frame, estimated_startup_seconds,
+                allowed_stall_times
             )
-            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
             """,
             (
                 params.job_id, params.machine_id, params.fleet, params.gpu_type,
@@ -58,9 +65,22 @@ class JobRepository:
                 params.price_per_hour_at_dispatch,
                 params.estimated_seconds, params.estimated_cost_usd,
                 params.estimated_seconds_per_frame, params.estimated_startup_seconds,
+                allowed_stall_json,
             ),
         )
         return params.job_id
+
+    def get_allowed_stall_times(self, job_id: str) -> dict | None:
+        """Return the resolved kill-time deadline dict written at
+        dispatch.  None if the job doesn't exist OR pre-dates the column
+        (legacy rows).  Callers treat None as "not yet known"."""
+        row = query_one(
+            "SELECT allowed_stall_times FROM jobs WHERE id = %s",
+            (job_id,),
+        )
+        if row is None:
+            return None
+        return row.get("allowed_stall_times")
 
     # ---- reads ----
 

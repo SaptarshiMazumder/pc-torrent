@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { cancelJob } from "../../services/api";
+import { cancelJob, getAllowedStallTimes } from "../../services/api";
 import { useLiveCostTick, liveActualCost } from "../../hooks/useLiveCostTick";
+import AllowedStallTimesOverlay from "./AllowedStallTimesOverlay";
 
 function formatActualCost(task, now) {
   // Terminal tasks: trust the canonical ``actual_cost_usd`` from the
@@ -86,32 +87,12 @@ const ICON = {
   stall: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>,
 };
 
-// Loading-stall watchdog params -- mirror of serverV2/config.json
-// "stall.loading_*".  Keep these in sync when the backend changes.
-// The watchdog computes:
-//   allowed = clamp(estimated_startup_seconds * multiplier, min, max)
-const LOADING_STALL_MULTIPLIER = 1.5;
-const LOADING_STALL_MIN_SEC = 60;
-const LOADING_STALL_MAX_SEC = 1800;
-
-function fmtSec(s) {
-  if (!Number.isFinite(s) || s < 0) return null;
-  if (s < 60) return `${Math.round(s)}s`;
-  const m = Math.floor(s / 60);
-  const r = Math.round(s % 60);
-  return r > 0 ? `${m}m ${r}s` : `${m}m`;
-}
-
-export function loadingStallChipParts(estimatedStartupSeconds) {
-  if (estimatedStartupSeconds == null) return null;
-  const est = Number(estimatedStartupSeconds);
-  if (!Number.isFinite(est)) return null;
-  const allowed = Math.max(
-    LOADING_STALL_MIN_SEC,
-    Math.min(LOADING_STALL_MAX_SEC, est * LOADING_STALL_MULTIPLIER),
-  );
-  return { allowed: fmtSec(allowed), est: fmtSec(est) };
-}
+// Allowed stall-time chip math used to live here as hardcoded constants
+// mirroring serverV2/config.json "stall.loading_*".  After the
+// allowed-stall-times refactor, deadlines are stamped on the job row at
+// dispatch and exposed via GET /jobs/{id}/allowed-stall-times.  The
+// per-card overlay (AllowedStallTimesOverlay) consumes that endpoint
+// directly; no client-side clamp math.
 
 /**
  * Provider strategy must return an object from extractCardData(task, live):
@@ -124,6 +105,35 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState("");
   const logsRef = useRef(null);
+
+  // Allowed-stall-times: fetch once on mount, cache forever for this card.
+  // The deadline values are immutable per chunk-attempt, so a single
+  // fetch is sufficient -- no polling.  Server returns 404 for legacy
+  // rows that pre-date the column; the api wrapper maps that to null.
+  const [stallTimes, setStallTimes] = useState(null);
+  const [stallTimesLoading, setStallTimesLoading] = useState(true);
+  const [stallTimesOpen, setStallTimesOpen] = useState(false);
+  const clockBtnRef = useRef(null);
+  const cardRef = useRef(null);
+
+  useEffect(() => {
+    if (!backendUrl || !jobId) {
+      setStallTimesLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getAllowedStallTimes(backendUrl, jobId);
+        if (!cancelled) setStallTimes(result);
+      } catch {
+        // Network error -- treat as null; overlay shows "no data" message.
+      } finally {
+        if (!cancelled) setStallTimesLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [backendUrl, jobId]);
 
   useEffect(() => {
     if (showLogs && logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
@@ -151,7 +161,7 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
   const canCancel = Boolean(jobId && backendUrl && onCancel);
 
   return (
-    <div className="inst-active-card" style={{ "--inst-color": dot }}>
+    <div ref={cardRef} className="inst-active-card" style={{ "--inst-color": dot }}>
       <div className="inst-active-left">
         {pct != null ? <CircleProgress pct={pct} color={dot} /> : (
           <div className="inst-active-avatar" style={{ borderColor: dot }}>
@@ -163,6 +173,50 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
         <div className="inst-active-header">
           <span className="inst-active-gpu">{data.gpuLabel}</span>
           <span className="inst-active-pill" style={{ background: dot + "18", color: dot }}>{data.displayStatus}</span>
+          <span style={{ marginLeft: "auto", display: "inline-flex" }}>
+            <button
+              ref={clockBtnRef}
+              type="button"
+              onClick={() => setStallTimesOpen((v) => !v)}
+              title="Allowed stall times"
+              aria-label="Show allowed stall times"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 22,
+                height: 22,
+                padding: 0,
+                borderRadius: "50%",
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: stallTimesOpen ? "rgba(255,255,255,0.08)" : "transparent",
+                color: stallTimesOpen ? "#eaeaf1" : "#9090a0",
+                cursor: "pointer",
+                transition: "background 0.15s ease, color 0.15s ease",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; e.currentTarget.style.color = "#eaeaf1"; }}
+              onMouseLeave={(e) => {
+                if (!stallTimesOpen) {
+                  e.currentTarget.style.background = "transparent";
+                  e.currentTarget.style.color = "#9090a0";
+                }
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 6v6l4 2" />
+              </svg>
+            </button>
+            {stallTimesOpen && (
+              <AllowedStallTimesOverlay
+                anchorRef={cardRef}
+                ignoreClickRef={clockBtnRef}
+                stallTimes={stallTimes}
+                isLoading={stallTimesLoading}
+                onClose={() => setStallTimesOpen(false)}
+              />
+            )}
+          </span>
           {canCancel && (
             <button
               type="button"
@@ -172,7 +226,7 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
               title={cancelling ? "Cancelling…" : "Cancel this chunk"}
               aria-label="Cancel this chunk"
               style={{
-                marginLeft: "auto",
+                marginLeft: 6,
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -203,11 +257,6 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
           {data.elapsedSec != null && <StatChip icon={ICON.uptime}>{fmtElapsed(data.elapsedSec)}</StatChip>}
           {data.cost != null && <StatChip icon={ICON.cost}>{data.cost}</StatChip>}
           {data.actualCost != null && <StatChip icon={ICON.cost}>{data.actualCost}</StatChip>}
-          {data.loadingStall && (
-            <StatChip icon={ICON.stall}>
-              stall {data.loadingStall.allowed} <span style={{ opacity: 0.55 }}>(est {data.loadingStall.est})</span>
-            </StatChip>
-          )}
         </div>
         <div className="inst-mini-bar">
           <div className="inst-mini-fill" style={{ width: `${fillPct}%`, background: dot }} />
@@ -279,11 +328,6 @@ function FinishedRow({ data }) {
         {data.rangeLabel && <span className="inst-fin-stat inst-fin-range">{data.rangeLabel}</span>}
         {data.actualCost != null && (
           <span className="inst-fin-stat" title="Actual cost (price_per_hour × elapsed)">{data.actualCost}</span>
-        )}
-        {data.loadingStall && (
-          <span className="inst-fin-stat" title="Loading-stall budget at dispatch time">
-            stall {data.loadingStall.allowed} (est {data.loadingStall.est})
-          </span>
         )}
         {data.error && (
           <button className="inst-fin-err-toggle" onClick={() => setShowError((v) => !v)}>

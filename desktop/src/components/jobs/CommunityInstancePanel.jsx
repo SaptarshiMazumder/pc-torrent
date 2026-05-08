@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import InstancePanel, { loadingStallChipParts } from "./InstancePanel";
+import InstancePanel from "./InstancePanel";
 
 const COMMUNITY_ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -49,7 +49,6 @@ const communityProvider = {
         : null,
       error: task.status === "failed" ? (task.error || "") : "",
       stallRule: task.stall_rule || null,
-      loadingStall: loadingStallChipParts(task.estimated_startup_seconds),
       statusMsg: "",
       logs: "",
       history: [],

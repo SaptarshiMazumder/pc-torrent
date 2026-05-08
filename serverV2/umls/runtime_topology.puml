@@ -1,74 +1,85 @@
 @startuml runtime_topology
 '
-' Class diagram — orchestration, fleet, callbacks, and monitor_lock
-' layers, after the per-job → singleton fleet monitor port.
-'
-' Reflects current state on the orchestration branch.
+' Runtime topology — orchestration / callbacks / fleet / allocation / monitor.
+' Cross-module arrows are colored by their SOURCE module.
 '
 
 skinparam backgroundColor #FAFAFA
 skinparam shadowing false
 skinparam packageStyle rectangle
+skinparam linetype ortho
+skinparam ArrowColor #555555
+skinparam ArrowFontSize 11
 
-title Runtime layer topology — orchestration / callbacks / fleets / monitor_lock
+' Per-module arrow colors (saturated to read against pastel package fills)
+!define ARROW_ORCH       #C04040
+!define ARROW_CALLBACKS  #D08020
+!define ARROW_FLEET      #A040A0
+!define ARROW_ALLOC      #2860B0
+!define ARROW_MONITOR    #4848A0
+
+title Runtime topology — orchestration / callbacks / fleet / allocation / monitor
 
 ' ============================================================
-' Orchestration layer
+' ORCHESTRATION
 ' ============================================================
 
-package "orchestrator" #FFDDDD {
+package "orchestration" #FFDDDD {
   class RenderOrchestrator <<facade>> {
     + on_job_succeeded(id)
     + on_job_failed(id, err)
     + on_job_running(id)
     + cancel_one_job(id)
-    + is_job_terminal(id)
-    + get_job_raw(id)
-    + get_group_status(id)
-  }
-  class RenderLifecycle <<workhorse>> {
-    + handle_chunk_succeeded(id)
-    + handle_chunk_failed(id, err)
-    + handle_chunk_running(id)
-    + reconcile_group_status(gid)
-    + cancel_one_job(id)
+    + retry_chunk_manually(id)
+    + handle_community_machine_idle(mid)
   }
 
-  RenderOrchestrator --> RenderLifecycle : delegates
+  package "lifecycle" #FFCCCC {
+    class RenderLifecycle <<workhorse>> {
+      + handle_chunk_succeeded(id)
+      + handle_chunk_failed(id, err)
+      + handle_chunk_running(id)
+      + reconcile_group_status(gid)
+      + handle_community_machine_idle(mid)
+    }
+    class RetryExecutor <<retry pipeline>>
+    RenderLifecycle --> RetryExecutor
+  }
+
+  RenderOrchestrator --> RenderLifecycle
 }
 
 ' ============================================================
-' Callbacks layer (adapter between fleet outcomes and orchestrator)
+' CALLBACKS
 ' ============================================================
 
 package "callbacks" #FFEEDD {
   class CallbackRouter <<funnel>> {
-    + route(id, outcome, error?)
+    + route(id, outcome, err?)
+    -- early-out --
+    is_job_terminal(id) ?
   }
   class SuccessHandler
   class FailureHandler
 
-  CallbackRouter --> SuccessHandler : SUCCESS
-  CallbackRouter --> FailureHandler : FAILURE
+  CallbackRouter --> SuccessHandler
+  CallbackRouter --> FailureHandler
 }
 
-SuccessHandler --> RenderOrchestrator : on_job_succeeded
-FailureHandler --> RenderOrchestrator : on_job_failed
-
 ' ============================================================
-' Fleet layer
+' FLEET
 ' ============================================================
 
-package "fleets" #FFE4FF {
+package "fleet" #FFE4FF {
   class FleetRegistry {
     + register(strategy)
-    + get(fleet_name)
+    + get(name)
   }
 
-  package "strategies" {
+  package "strategies" #FFD0FF {
     interface IFleetStrategy {
-      + dispatch(task, ctx, job_id)
-      + cancel(provider_job_id)
+      + dispatch(task, ctx, jid)
+      + cancel(provider_jid)
     }
     class VastFleetStrategy
     class ModalFleetStrategy
@@ -78,11 +89,12 @@ package "fleets" #FFE4FF {
     CommunityStrategy ..|> IFleetStrategy
   }
 
-  package "clients" {
+  package "clients" #FFD0FF {
     class VastClient {
       + dispatch_job()
       + cancel_job(id)
       + instances.list()
+      + instances.destroy(id)
     }
     class ModalClient {
       + dispatch_job()
@@ -90,20 +102,28 @@ package "fleets" #FFE4FF {
     }
   }
 
-  package "fleet monitors" #DDFFDD {
-    class VastFleetMonitor <<singleton, 1 thread>> {
+  package "monitors" #FFD0FF {
+    class VastFleetMonitor <<singleton, ~10s>> {
       + try_start()
       - _tick()
       - _inspect(row, inst)
     }
-    class ModalFleetMonitor <<singleton, 1 thread>> {
+    class ModalFleetMonitor <<singleton, ~10s>> {
       + try_start()
       - _tick()
       - _inspect(row)
     }
-    class CommunityMonitor <<singleton, 1 thread>> {
+    class CommunityMonitor <<singleton, ~10s>> {
       + try_start()
       - _tick()
+    }
+  }
+
+  package "shared" #FFD0FF {
+    class JobCounts <<chunk-completion semantics>> {
+      + is_complete(job)
+      + uploaded(job)
+      + rendered(jid, job)
     }
   }
 
@@ -112,30 +132,90 @@ package "fleets" #FFE4FF {
   FleetRegistry o-- CommunityStrategy
   VastFleetStrategy --> VastClient
   ModalFleetStrategy --> ModalClient
-  VastFleetMonitor --> VastClient : list() once per tick\n+ destroy() on terminal
-  ModalFleetMonitor --> ModalClient : cancel_job() on terminal
+  VastFleetMonitor --> VastClient
+  ModalFleetMonitor --> ModalClient
+  VastFleetMonitor --> JobCounts
+  ModalFleetMonitor --> JobCounts
+  CommunityMonitor --> JobCounts
 }
 
 ' ============================================================
-' monitor_lock layer (the sweep daemon — name is a misnomer)
+' ALLOCATION
 ' ============================================================
 
-package "monitor_lock" #DDEEFF {
-  class MonitorLockFacade <<entry point>> {
+package "allocation" #DDEEFF {
+  class AllocationFacade <<entry>> {
+    + plan_initial(...)
+    + plan_retry(...)
+    + cost_for_dry_run(...)
+    + admin_get_config()
+    + admin_put_config(d)
+  }
+  class AllocationClient <<orchestrator-facing>>
+
+  package "planning" #C0DDFF {
+    class AllocationPlanningService <<single config reader>> {
+      + plan_initial(...)
+      + plan_retry(...)
+      + cost_for_dry_run(...)
+    }
+    class AllocationPlanner <<pure-functional>> {
+      + plan_initial(weights, ...)
+      + plan_retry(req, res, ...)
+    }
+    class AllocationCostAggregator
+    AllocationPlanningService --> AllocationPlanner
+    AllocationPlanningService --> AllocationCostAggregator
+  }
+
+  package "queues" #C0DDFF {
+    class AllocationDispatchQueueRepository <<PG-only>>
+    class AllocationPendingQueueRepository <<PG + Redis mirror>>
+    class PendingQueueRedisMirror <<sync write-through>>
+    AllocationPendingQueueRepository --> PendingQueueRedisMirror
+  }
+
+  package "daemon" #C0DDFF {
+    class AllocationDispatchQueueDaemon <<every ~2s, lock-gated>> {
+      + start()
+      + stop()
+    }
+    class AllocationDispatchTickProcessor
+    class AllocationPendingTickProcessor
+    class AllocationDispatcher
+    AllocationDispatchQueueDaemon --> AllocationDispatchTickProcessor
+    AllocationDispatchQueueDaemon --> AllocationPendingTickProcessor
+    AllocationDispatchTickProcessor --> AllocationDispatcher
+  }
+
+  package "snapshot" #C0DDFF {
+    class FleetAvailabilitySnapshotCache <<60s Redis TTL>>
+  }
+
+  AllocationClient --> AllocationFacade
+  AllocationFacade --> AllocationPlanningService
+  AllocationFacade --> AllocationDispatchQueueRepository
+  AllocationFacade --> AllocationPendingQueueRepository
+  AllocationFacade --> FleetAvailabilitySnapshotCache
+}
+
+' ============================================================
+' MONITOR
+' ============================================================
+
+package "monitor" #DDDDFF {
+  class MonitorLockFacade <<entry>> {
     + start()
     + stop()
   }
-  class MonitorLockSweeper <<every 30s tick>> {
-    + start()
-    + stop()
-  }
+  class MonitorLockSweeper <<every ~30s, every instance>>
   class MonitorLockRepository <<Redis lock primitive>> {
     + try_acquire(key, owner)
     + refresh(key, owner)
     + release(key, owner)
   }
 
-  package "sweep strategies" {
+  package "sweep strategies" #C8C8FF {
     class MonitorLockVastSweepStrategy
     class MonitorLockModalSweepStrategy
     class MonitorLockCommunitySweepStrategy
@@ -150,74 +230,42 @@ package "monitor_lock" #DDEEFF {
 }
 
 ' ============================================================
-' Cross-layer wiring
+' Cross-module arrows — colored by SOURCE module
 ' ============================================================
 
-' sweep strategies poke the singletons / lifecycle every tick
-MonitorLockVastSweepStrategy --> VastFleetMonitor : try_start()
-MonitorLockModalSweepStrategy --> ModalFleetMonitor : try_start()
-MonitorLockCommunitySweepStrategy --> CommunityMonitor : try_start()
-MonitorLockGroupAuditSweepStrategy --> RenderLifecycle : reconcile_group_status()
+' callbacks → orchestration  (orange)
+SuccessHandler -[ARROW_CALLBACKS]-> RenderOrchestrator : on_job_succeeded
+FailureHandler -[ARROW_CALLBACKS]-> RenderOrchestrator : on_job_failed
 
-' singletons hold their per-fleet Redis lock through the lock repo
-VastFleetMonitor ..> MonitorLockRepository : monitor:vast
-ModalFleetMonitor ..> MonitorLockRepository : monitor:modal
-CommunityMonitor ..> MonitorLockRepository : monitor:community
+' orchestration → fleet, allocation  (red)
+RenderLifecycle -[ARROW_ORCH]..> FleetRegistry : strategy.cancel(jid)
+RenderLifecycle -[ARROW_ORCH]-> AllocationClient : retry parking /\nmanual retry
 
-' singletons emit outcomes back up through the callback router
-VastFleetMonitor ..> CallbackRouter : on_failure / on_success / on_running
-ModalFleetMonitor ..> CallbackRouter : on_failure / on_success
-CommunityMonitor ..> CallbackRouter : on_failure
+' fleet → callbacks, monitor  (purple)
+VastFleetMonitor -[ARROW_FLEET]..> CallbackRouter : on_failure / on_success / on_running
+ModalFleetMonitor -[ARROW_FLEET]..> CallbackRouter : on_failure / on_success
+CommunityMonitor -[ARROW_FLEET]..> CallbackRouter : on_failure / on_success
+VastFleetMonitor -[ARROW_FLEET]..> MonitorLockRepository : monitor:vast
+ModalFleetMonitor -[ARROW_FLEET]..> MonitorLockRepository : monitor:modal
+CommunityMonitor -[ARROW_FLEET]..> MonitorLockRepository : monitor:community
 
-' lifecycle eagerly cancels via the strategy on terminal events
-RenderLifecycle --> FleetRegistry : strategy.cancel(provider_job_id)\non success/failure
+' allocation → fleet, monitor  (blue)
+AllocationDispatcher -[ARROW_ALLOC]-> FleetRegistry : strategy.dispatch()
+AllocationDispatchQueueDaemon -[ARROW_ALLOC]..> MonitorLockRepository : allocation:daemon
+
+' monitor → fleet, orchestration  (indigo)
+MonitorLockVastSweepStrategy -[ARROW_MONITOR]-> VastFleetMonitor : try_start()
+MonitorLockModalSweepStrategy -[ARROW_MONITOR]-> ModalFleetMonitor : try_start()
+MonitorLockCommunitySweepStrategy -[ARROW_MONITOR]-> CommunityMonitor : try_start()
+MonitorLockGroupAuditSweepStrategy -[ARROW_MONITOR]-> RenderLifecycle : reconcile_group_status
 
 ' ============================================================
-' Notes
+' Hidden layout hints — keep modules from sprawling
 ' ============================================================
 
-note bottom of MonitorLockSweeper
-  One thread.  Per tick: iterate the four
-  sweep strategies and call sweep() on each.
-  Strategy exceptions are logged and skipped
-  — one fleet's failure does not stall others.
-end note
-
-note bottom of VastFleetMonitor
-  Per tick:
-   1. SELECT active Vast rows (1 PG query)
-   2. vast_client.instances.list()  (1 API call)
-   3. for row: _inspect(row, fleet[row.id])
-  _inspect runs the same decision blocks the
-  per-job VastInstanceMonitor used to run.
-end note
-
-note bottom of ModalFleetMonitor
-  Per tick:
-   1. SELECT active Modal rows (1 PG query)
-   2. for row: _inspect(row)
-  No Modal API call per tick — the per-job
-  monitor only ever read PG + Redis.  SDK
-  cancel_job fires only on terminal events.
-end note
-
-note bottom of CallbackRouter
-  Single funnel for fleet-monitor outcomes.
-  Early-out via is_job_terminal(id) so a
-  worker's mark_failed and the singleton's
-  later detection collapse to one transition.
-end note
-
-note as NAMING #FFFFCC
-  **"monitor_lock" is a misnomer.**
-   The module's job is broader than locking — it owns:
-    1. The 30s sweep daemon thread (MonitorLockSweeper)
-    2. Four sweep strategies (3 fleet + 1 group audit)
-    3. The Redis lock primitive (MonitorLockRepository) used
-       by the fleet singletons themselves, not by this module
-   Only #3 is "lock" in nature.  Rename candidates worth considering:
-      sweep_daemon / fleet_supervisor / runtime_sweeper
-   Holding off until structure is approved.
-end note
+callbacks -[hidden]down- fleet
+orchestration -[hidden]right- callbacks
+fleet -[hidden]down- allocation
+allocation -[hidden]right- monitor
 
 @enduml

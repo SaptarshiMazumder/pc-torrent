@@ -74,12 +74,24 @@ def update_status(
     job_id: str,
     payload: UpdateJobStatusPayload,
 ):
+    """Worker self-reports a status transition.  Two cases reach here:
+
+    * ``running``  — first signal that the worker has the chunk and is
+      rendering.  Stamps ``started_at`` if not yet stamped.
+    * ``failed``   — worker hit a fatal error.  Routes through the
+      orchestrator failure pipeline (retry / reconcile).
+
+    ``done`` is no longer a worker self-report on any fleet -- chunk
+    completion is detected by the fleet singletons via
+    ``JobCounts.is_complete``.  Old agents may still send it; we
+    accept it (the service still writes status='done') but no
+    success-chain firing here -- the singleton's next tick catches
+    the completion via the data and routes through ``on_success``.
+    """
     try:
         result = _get().update_status(job_id, payload.status, payload.error)
         if payload.output_files:
             _get().register_outputs(job_id, payload.output_files)
-        if result.get("needs_completion"):
-            _get().notify_completion(job_id)
         return result
     except JobTerminalError as e:
         # Workers MUST be allowed to update terminal status -- but the

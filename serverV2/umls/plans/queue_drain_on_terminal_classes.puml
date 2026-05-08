@@ -1,0 +1,121 @@
+@startuml queue_drain_on_terminal_classes
+title Class diagram: drain_for_group dependency graph
+
+' Layout hint: orchestrator on top, allocation in middle,
+' repositories at bottom.  Highlight the one new dependency
+' edge added by this change.
+
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #FAFAFA
+  BorderColor #444
+  ArrowColor #444
+}
+
+package "orchestrator" {
+
+  class RenderLifecycle <<SSoT for non-cancel\nterminal transitions>> {
+    - allocation_client : AllocationClient
+    - group_repo : RenderGroupRepository
+    - render_canceler : RenderCanceler
+    - ...
+    + reconcile_group_status(group_id)
+    .. NEW behavior ..
+    <i>after update_status to terminal,</i>
+    <i>call allocation_client.drain_for_group(...)</i>
+  }
+
+  class RenderCanceler <<SSoT for cancel-driven\nterminal + drain>> {
+    - group_repo : RenderGroupRepository
+    - allocation_client : AllocationClient
+    - ...
+    + cancel(group_id)
+    .. existing passes ..
+    Pass1: group_repo.update_status(cancelled)
+    Pass2: mark all jobs terminal
+    Pass3: stop monitors
+    Pass4: allocation_client.drain_for_group(...)
+    Pass5: cancel providers
+  }
+
+  class AllocationClient <<orchestrator-side\ngateway>> {
+    - facade : AllocationFacade
+    + submit_initial(...)
+    + park_retry(...)
+    + drain_for_group(group_id) : int
+    + list_pending_for_group(...)
+    + cost_estimate_for_group(...)
+  }
+
+  class MonitorLockGroupAuditSweepStrategy <<periodic drift audit>> {
+    - lifecycle : RenderLifecycle
+    + sweep()
+  }
+}
+
+package "allocation" {
+  class AllocationFacade {
+    + submit_initial(...)
+    + park_retry(...)
+    + drain_for_group(group_id) : int
+    + list_pending_for_group(...)
+    + admin_get_config()
+    + admin_put_config(...)
+  }
+
+  class AllocationDispatchQueueRepository {
+    + enqueue(group_id, item)
+    + dequeue_for_fleet(fleet)  <<DELETE...RETURNING>>
+    + drain(group_id) : int
+  }
+
+  class AllocationPendingQueueRepository {
+    + enqueue(item)
+    + delete(row_id)
+    + delete_for_group(group_id) : int
+    + list_all()
+    + list_for_group(group_id)
+  }
+}
+
+package "callbacks (pure)" {
+  class compute_group_status <<pure function>> {
+    + (current, statuses, ...) : GroupStatusResult
+  }
+}
+
+package "repositories" {
+  class RenderGroupRepository {
+    + get_by_id(group_id)
+    + update_status(group_id, status)
+    + update_terminal_snapshot(...)
+  }
+}
+
+' ----- relationships -----
+
+RenderLifecycle ..> compute_group_status : uses
+RenderLifecycle --> RenderGroupRepository : reads + writes status
+RenderLifecycle --> RenderCanceler : delegates cancel
+RenderLifecycle --> AllocationClient : <<NEW use site>>\ndrain_for_group on terminal
+
+RenderCanceler --> RenderGroupRepository : update_status(cancelled)
+RenderCanceler --> AllocationClient : drain_for_group (Pass 4)
+
+MonitorLockGroupAuditSweepStrategy --> RenderLifecycle : reconcile_group_status\n(periodic)
+
+AllocationClient --> AllocationFacade : pass-through
+AllocationFacade --> AllocationDispatchQueueRepository : drain
+AllocationFacade --> AllocationPendingQueueRepository : delete_for_group
+
+' Highlight the new edge.
+note right of AllocationClient
+  No new methods, no new ctor args.
+  drain_for_group already exists and
+  is already injected into
+  RenderLifecycle (line 82).
+  This change is one new call site
+  inside reconcile_group_status.
+end note
+
+@enduml

@@ -175,6 +175,8 @@ function FrameAllocationSection({ draft, update }) {
   const rt = fa.render_time || {};
   const fc = rt.factors_cycles || {};
   const fe = rt.factors_eevee || {};
+  const ssC = rt.scene_scaling_cycles || {};
+  const ssE = rt.scene_scaling_eevee || {};
   const ss = rt.startup_sec || {};
   const set = (key, val) => update(["frame_allocation", key], val);
   const setIn = (sub, key, val) => update(["frame_allocation", sub, key], val);
@@ -262,6 +264,50 @@ function FrameAllocationSection({ draft, update }) {
               <RatioSlider key={k} label={k} value={fe[k]} min={0.1} max={4} step={0.05}
                 onChange={(v) => setRTIn("factors_eevee", k, v)} />
             ))}
+          </div>
+        </SectionCard>
+        <SectionCard title="Scene scaling — Cycles"
+          subtitle="pixel + sample curves: factor = max(min, (value/baseline)^exponent)"
+          defaultOpen={false}>
+          <div className="cfg-grid">
+            <NumberField label="baseline_pixels" value={ssC.baseline_pixels} step={1}
+              onChange={(v) => setRTIn("scene_scaling_cycles", "baseline_pixels", v)} />
+            <RatioSlider label="pixel_curve_exponent" value={ssC.pixel_curve_exponent}
+              min={0} max={2} step={0.05} precision={2}
+              onChange={(v) => setRTIn("scene_scaling_cycles", "pixel_curve_exponent", v)} />
+            <RatioSlider label="min_pixel_factor" value={ssC.min_pixel_factor}
+              min={0} max={1} step={0.05} precision={2}
+              onChange={(v) => setRTIn("scene_scaling_cycles", "min_pixel_factor", v)} />
+            <NumberField label="baseline_samples" value={ssC.baseline_samples} step={1}
+              onChange={(v) => setRTIn("scene_scaling_cycles", "baseline_samples", v)} />
+            <RatioSlider label="sample_curve_exponent" value={ssC.sample_curve_exponent}
+              min={0} max={2} step={0.05} precision={2}
+              onChange={(v) => setRTIn("scene_scaling_cycles", "sample_curve_exponent", v)} />
+            <RatioSlider label="min_sample_factor" value={ssC.min_sample_factor}
+              min={0} max={1} step={0.05} precision={2}
+              onChange={(v) => setRTIn("scene_scaling_cycles", "min_sample_factor", v)} />
+          </div>
+        </SectionCard>
+        <SectionCard title="Scene scaling — EEVEE"
+          subtitle="EEVEE TAA + raster scale sublinearly; defaults pixel=0.5, sample=0.4"
+          defaultOpen={false}>
+          <div className="cfg-grid">
+            <NumberField label="baseline_pixels" value={ssE.baseline_pixels} step={1}
+              onChange={(v) => setRTIn("scene_scaling_eevee", "baseline_pixels", v)} />
+            <RatioSlider label="pixel_curve_exponent" value={ssE.pixel_curve_exponent}
+              min={0} max={2} step={0.05} precision={2}
+              onChange={(v) => setRTIn("scene_scaling_eevee", "pixel_curve_exponent", v)} />
+            <RatioSlider label="min_pixel_factor" value={ssE.min_pixel_factor}
+              min={0} max={1} step={0.05} precision={2}
+              onChange={(v) => setRTIn("scene_scaling_eevee", "min_pixel_factor", v)} />
+            <NumberField label="baseline_samples" value={ssE.baseline_samples} step={1}
+              onChange={(v) => setRTIn("scene_scaling_eevee", "baseline_samples", v)} />
+            <RatioSlider label="sample_curve_exponent" value={ssE.sample_curve_exponent}
+              min={0} max={2} step={0.05} precision={2}
+              onChange={(v) => setRTIn("scene_scaling_eevee", "sample_curve_exponent", v)} />
+            <RatioSlider label="min_sample_factor" value={ssE.min_sample_factor}
+              min={0} max={1} step={0.05} precision={2}
+              onChange={(v) => setRTIn("scene_scaling_eevee", "min_sample_factor", v)} />
           </div>
         </SectionCard>
         <SectionCard title="Startup sec breakdown" defaultOpen={false}>

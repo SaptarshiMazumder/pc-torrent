@@ -48,6 +48,7 @@ from serverV2.config import (
     EngineFactors,
     RenderStartupSec,
     RenderTimeConfig,
+    SceneScalingConfig,
 )
 
 _DEFAULT_CALIBRATION = RenderTimeConfig(
@@ -60,6 +61,22 @@ _DEFAULT_CALIBRATION = RenderTimeConfig(
     factors_eevee=EngineFactors(
         subdivision=1.15, displacement=1.15, particles=1.25,
         subsurface=1.20, volumetrics=1.50, adaptive_sampling=0.7,
+    ),
+    scene_scaling_cycles=SceneScalingConfig(
+        baseline_pixels=1920 * 1080,
+        pixel_curve_exponent=0.85,
+        min_pixel_factor=0.25,
+        baseline_samples=1024.0,
+        sample_curve_exponent=0.9,
+        min_sample_factor=0.0,
+    ),
+    scene_scaling_eevee=SceneScalingConfig(
+        baseline_pixels=1920 * 1080,
+        pixel_curve_exponent=0.5,
+        min_pixel_factor=0.25,
+        baseline_samples=64.0,
+        sample_curve_exponent=0.4,
+        min_sample_factor=0.5,
     ),
     startup=RenderStartupSec(
         baseline=90.0, download_per_gb=30.0, bvh_per_million_verts=3.0,
@@ -121,10 +138,12 @@ SHADER_NODE_RAMP = 0.4 / (SHADER_NODE_CAP_THRESHOLD - SHADER_NODE_BASE_THRESHOLD
 TEX_PRESSURE_RAMP_RATE = 0.15
 TEX_PRESSURE_CAP = 1.3
 
-# Floors — guard against pathological inputs producing absurd estimates
-MIN_PIXEL_FACTOR = 0.25
+# Floors — guard against pathological inputs producing absurd estimates.
+# Pixel + sample floors are now per-engine and live in the calibration
+# (``SceneScalingConfig.min_pixel_factor`` / ``min_sample_factor``).  The
+# two below remain hardcoded -- they apply equally to every engine and
+# aren't worth surfacing as a tunable knob.
 MIN_GEOMETRY_FACTOR = 0.7
-MIN_SAMPLE_FACTOR_EEVEE = 0.5
 MIN_RENDER_SPEED = 0.1                    # also guards against /0
 
 
@@ -156,19 +175,43 @@ _BYTES_PER_GB = 1024 ** 3
 # baseline scene; > 1.0 for heavier-than-baseline; < 1.0 for lighter.
 # ---------------------------------------------------------------------------
 
+def _scaling_for(engine: str) -> SceneScalingConfig:
+    if engine in _EEVEE_ENGINES:
+        return _calibration.scene_scaling_eevee
+    return _calibration.scene_scaling_cycles
+
+
 def _sample_factor(samples: int, engine: str) -> float:
-    """Linear in samples for Cycles; EEVEE TAA ratio'd to a smaller baseline."""
+    """Curve = ``max(min, (samples / baseline) ** exponent)``.
+
+    Cycles defaults to near-linear (each path-traced sample adds ~constant
+    cost).  EEVEE defaults to strongly sublinear -- TAA samples are nearly
+    free per-frame.  Both knobs live in config so the curve can be tuned
+    from the admin UI without a code change.
+    """
     if samples <= 0:
         return 1.0
-    if engine in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
-        return max(MIN_SAMPLE_FACTOR_EEVEE, samples / EEVEE_BASELINE_SAMPLES)
-    return samples / CYCLES_BASELINE_SAMPLES
+    s = _scaling_for(engine)
+    if s.baseline_samples <= 0:
+        return 1.0
+    ratio = samples / s.baseline_samples
+    return max(s.min_sample_factor, ratio ** s.sample_curve_exponent)
 
 
-def _pixel_factor(effective_pixels: int) -> float:
+def _pixel_factor(effective_pixels: int, engine: str) -> float:
+    """Curve = ``max(min, (pixels / baseline) ** exponent)``.
+
+    Cycles defaults to slight-sublinear (BVH amortizes across rays).
+    EEVEE defaults to sqrt -- rasterization is mostly fragment-shader-bound,
+    so doubling pixel count is much less than doubling render time.
+    """
     if effective_pixels <= 0:
         return 1.0
-    return max(MIN_PIXEL_FACTOR, effective_pixels / BASELINE_PIXELS)
+    s = _scaling_for(engine)
+    if s.baseline_pixels <= 0:
+        return 1.0
+    ratio = effective_pixels / s.baseline_pixels
+    return max(s.min_pixel_factor, ratio ** s.pixel_curve_exponent)
 
 
 def _geometry_factor(vertex_count: int) -> float:
@@ -282,7 +325,7 @@ def estimate_seconds_per_frame(
 
     multiplier = (
         _sample_factor(heaviness.get("samples", 0), engine)
-        * _pixel_factor(heaviness.get("effective_pixels", 0))
+        * _pixel_factor(heaviness.get("effective_pixels", 0), engine)
         * _geometry_factor(heaviness.get("vertex_count_total", 0))
         * _texture_factor(heaviness.get("texture_total_bytes", 0))
         * _shader_factor(

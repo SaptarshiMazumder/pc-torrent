@@ -579,6 +579,30 @@ class RenderStartupSec:
 
 
 @dataclass(frozen=True)
+class SceneScalingConfig:
+    """Per-engine pixel + sample scaling curves.
+
+    Each axis follows ``factor = max(min, (value / baseline) ** exponent)``.
+    ``exponent = 1.0`` is linear (every doubling adds 100% time);
+    ``0.5`` is sqrt (every doubling adds ~41%);
+    ``0.0`` is flat (no scaling).
+
+    Cycles defaults to slight-sublinear (BVH amortizes, samples are
+    path-traced and dominate).  EEVEE defaults to strongly-sublinear
+    (TAA samples are nearly free; rasterization is mostly fragment-shader
+    bound, scaling weakly with resolution).  Wrong defaults caused
+    Eevee scenes to be estimated 10–50× over actual; the new defaults
+    track real engine behavior.
+    """
+    baseline_pixels: float
+    pixel_curve_exponent: float
+    min_pixel_factor: float
+    baseline_samples: float
+    sample_curve_exponent: float
+    min_sample_factor: float
+
+
+@dataclass(frozen=True)
 class RenderTimeConfig:
     """Calibration knobs for ``allocation_time_analyzer``.  Lifted from
     module constants so they can be tuned via config.json without code
@@ -590,6 +614,8 @@ class RenderTimeConfig:
     baseline_sec_eevee: float
     factors_cycles: EngineFactors
     factors_eevee: EngineFactors
+    scene_scaling_cycles: SceneScalingConfig
+    scene_scaling_eevee: SceneScalingConfig
     startup: RenderStartupSec
 
     @classmethod
@@ -611,6 +637,22 @@ class RenderTimeConfig:
                 adaptive_sampling=_require_field_float(sub, sub_ctx, "adaptive_sampling"),
             )
 
+        def _scene_scaling(key: str, defaults: SceneScalingConfig) -> SceneScalingConfig:
+            # Backwards-compat: callers (Firestore docs especially) that
+            # predate this section get the engine-appropriate default.
+            sub = block.get(key)
+            if not isinstance(sub, dict):
+                return defaults
+            sub_ctx = f"{ctx}.{key}"
+            return SceneScalingConfig(
+                baseline_pixels=_require_field_float(sub, sub_ctx, "baseline_pixels"),
+                pixel_curve_exponent=_require_field_float(sub, sub_ctx, "pixel_curve_exponent"),
+                min_pixel_factor=_require_field_float(sub, sub_ctx, "min_pixel_factor"),
+                baseline_samples=_require_field_float(sub, sub_ctx, "baseline_samples"),
+                sample_curve_exponent=_require_field_float(sub, sub_ctx, "sample_curve_exponent"),
+                min_sample_factor=_require_field_float(sub, sub_ctx, "min_sample_factor"),
+            )
+
         startup_block = block.get("startup_sec")
         if not isinstance(startup_block, dict):
             raise FleetException(f"{ctx}.startup_sec missing or not an object")
@@ -621,6 +663,28 @@ class RenderTimeConfig:
             baseline_sec_eevee=_require_field_float(block, ctx, "baseline_sec_eevee"),
             factors_cycles=_factors("factors_cycles"),
             factors_eevee=_factors("factors_eevee"),
+            scene_scaling_cycles=_scene_scaling(
+                "scene_scaling_cycles",
+                SceneScalingConfig(
+                    baseline_pixels=1920 * 1080,
+                    pixel_curve_exponent=0.85,
+                    min_pixel_factor=0.25,
+                    baseline_samples=1024.0,
+                    sample_curve_exponent=0.9,
+                    min_sample_factor=0.0,
+                ),
+            ),
+            scene_scaling_eevee=_scene_scaling(
+                "scene_scaling_eevee",
+                SceneScalingConfig(
+                    baseline_pixels=1920 * 1080,
+                    pixel_curve_exponent=0.5,
+                    min_pixel_factor=0.25,
+                    baseline_samples=64.0,
+                    sample_curve_exponent=0.4,
+                    min_sample_factor=0.5,
+                ),
+            ),
             startup=RenderStartupSec(
                 baseline=_require_field_float(startup_block, startup_ctx, "baseline"),
                 download_per_gb=_require_field_float(startup_block, startup_ctx, "download_per_gb"),

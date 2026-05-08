@@ -31,7 +31,7 @@ export default function SettingsPage({ backendUrl, onBackendUrlChange }) {
             </button>
           </div>
           <p className="setting-hint">
-            The URL of the PC Rent backend server that manages render jobs.
+            The URL of the Forge backend server that manages render jobs.
           </p>
         </div>
       </div>

@@ -7,11 +7,12 @@ call crashed mid-flight (instance OOM during the success pipeline,
 network partition during a Redis write, etc.).
 
 Every ~30 s (the sweeper's tick), iterate active render groups and
-re-run ``reconcile_group_status`` against each.  The reconcile function
-is idempotent — if state already matches, the aggregator returns
-``should_persist=False`` and no DB write happens.  Only flips state
-when there's actual drift, so steady-state cost is N indexed PG reads
-+ N pure-fn calls.
+re-run ``reconcile_group_status`` against each, then call
+``release_terminal_group_resources`` so any drained-but-not-cleaned
+allocation queue rows for newly-terminal groups get drained on this
+sweep too (drain belongs to the same recovery operation; running it
+only inside the chunk-event pipelines would leave the audit's recovery
+incomplete).  Both calls are idempotent -- no-ops in steady state.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ class MonitorLockGroupAuditSweepStrategy:
                 continue
             try:
                 self._lifecycle.reconcile_group_status(group_id)
+                self._lifecycle.release_terminal_group_resources(group_id)
             except Exception:
                 log.exception(
                     "GroupAudit reconcile failed for group %s", group_id,

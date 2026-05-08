@@ -1,121 +1,217 @@
 @startuml queue_drain_on_terminal_classes
-title Class diagram: drain_for_group dependency graph
-
-' Layout hint: orchestrator on top, allocation in middle,
-' repositories at bottom.  Highlight the one new dependency
-' edge added by this change.
+title Plan: drain dispatch + pending queues on terminal\n(green = NEW entry; green-filled box = NEW class)
 
 skinparam classAttributeIconSize 0
 skinparam class {
   BackgroundColor #FAFAFA
   BorderColor #444
-  ArrowColor #444
+}
+skinparam package {
+  BackgroundColor #F4F4F4
+  BorderColor #888
 }
 
-package "orchestrator" {
+!define NEW <color:#1B7A3E><b>
+!define NEW_END </b></color>
 
-  class RenderLifecycle <<SSoT for non-cancel\nterminal transitions>> {
-    - allocation_client : AllocationClient
-    - group_repo : RenderGroupRepository
-    - render_canceler : RenderCanceler
-    - ...
-    + reconcile_group_status(group_id)
-    .. NEW behavior ..
-    <i>after update_status to terminal,</i>
-    <i>call allocation_client.drain_for_group(...)</i>
+' ============================================================
+' OUTSIDE orchestrator -- must use the lifecycle facade only.
+' ============================================================
+package "monitor_lock/" #FFF8E1 {
+  class MonitorLockGroupAuditSweepStrategy {
+    - lifecycle : RenderLifecycle
+    + sweep()
+    .. updated body ..
+    For each active group:
+      lifecycle.reconcile_group_status(gid)
+      NEW lifecycle.release_terminal_group_resources(gid) NEW_END
   }
+}
 
-  class RenderCanceler <<SSoT for cancel-driven\nterminal + drain>> {
-    - group_repo : RenderGroupRepository
-    - allocation_client : AllocationClient
+' ============================================================
+' orchestrator/  (the facade lives here)
+' ============================================================
+package "orchestrator/" #E3F2FD {
+
+  class RenderLifecycle <<facade>> {
+    - allocation_client
+    - group_repo
+    - render_canceler
     - ...
-    + cancel(group_id)
-    .. existing passes ..
-    Pass1: group_repo.update_status(cancelled)
-    Pass2: mark all jobs terminal
-    Pass3: stop monitors
-    Pass4: allocation_client.drain_for_group(...)
-    Pass5: cancel providers
+    NEW - terminal_group_resource_releaser  : TerminalGroupResourceReleaser NEW_END
+    + reconcile_group_status(gid)
+    NEW + release_terminal_group_resources(gid) : int  // facade passthrough NEW_END
+    .. updated internal call sites ..
+    handle_chunk_success():
+      reconcile_group_status(gid)
+      NEW releaser.release(gid) NEW_END
+    _promote_pending_to_running():
+      reconcile_group_status(gid)
+      NEW releaser.release(gid) NEW_END
   }
 
   class AllocationClient <<orchestrator-side\ngateway>> {
     - facade : AllocationFacade
-    + submit_initial(...)
-    + park_retry(...)
-    + drain_for_group(group_id) : int
-    + list_pending_for_group(...)
-    + cost_estimate_for_group(...)
+    + drain_for_group(gid) : int
+    + ...
   }
 
-  class MonitorLockGroupAuditSweepStrategy <<periodic drift audit>> {
-    - lifecycle : RenderLifecycle
-    + sweep()
+  ' ----------------------------------------------------------
+  ' lifecycle_job_termination/  (internal services + steps)
+  ' ----------------------------------------------------------
+  package "lifecycle_job_termination/" #E8F5E9 {
+
+    package "execution/" {
+
+      class "TerminalGroupResourceReleaser\n<size:11><i>NEW FILE</i></size>" as Releaser <<NEW>> #C8E6C9 {
+        - allocation_client : AllocationClient
+        - group_repo : RenderGroupRepository
+        + release(gid) : int
+        .. behavior ..
+        read group status
+        if not terminal: return 0
+        else: allocation_client.drain_for_group(gid)
+      }
+
+      class RenderCanceler {
+        - group_repo
+        - allocation_client
+        NEW - terminal_group_resource_releaser : TerminalGroupResourceReleaser NEW_END
+        + cancel(gid)
+        .. passes ..
+        Pass1: update_status(cancelled)
+        Pass2: mark all jobs terminal
+        Pass3: stop monitors
+        NEW Pass4: releaser.release(gid)  // was direct drain_for_group NEW_END
+        Pass5: cancel providers
+      }
+
+      class TerminationContext {
+        + deps : TerminationDeps
+        + group_id, job_id, ...
+      }
+
+      class TerminationDeps <<callables\nfor pipeline steps>> {
+        + reconcile_group : Callable[[str], None]
+        NEW + release_terminal_group_resources : Callable[[str], int] NEW_END
+        + ...
+      }
+    }
+
+    package "steps/" {
+      class ReconcileGroupStep {
+        + execute(ctx)
+        ctx.deps.reconcile_group(ctx.group_id)
+      }
+
+      class "ReleaseTerminalGroupResourcesStep\n<size:11><i>NEW FILE</i></size>" as ReleaseStep <<NEW>> #C8E6C9 {
+        + execute(ctx)
+        ctx.deps.release_terminal_group_resources(ctx.group_id)
+      }
+    }
+
+    class TerminationPipelineBuilder {
+      + reconcile_group(...)
+      NEW + release_terminal_group_resources() NEW_END
+      + ...
+      + build() : tuple[Step, ...]
+    }
+
+    note as Pipelines #FFF3E0
+      <b>FAILURE_PIPELINE</b> (pipelines.py)
+      ...
+      .reconcile_group(only_if_not_retried_and_owned=True)
+      NEW .release_terminal_group_resources() NEW_END
+      .build()
+      ----
+      <b>CANCEL_PIPELINE</b> (per-chunk cancel)
+      ...
+      .reconcile_group(only_if_not_retried_and_owned=False)
+      NEW .release_terminal_group_resources() NEW_END
+      .build()
+    end note
   }
 }
 
-package "allocation" {
+' ============================================================
+' allocation/  (drain capability already exists here -- no changes)
+' ============================================================
+package "allocation/" #FCE4EC {
   class AllocationFacade {
-    + submit_initial(...)
-    + park_retry(...)
-    + drain_for_group(group_id) : int
-    + list_pending_for_group(...)
-    + admin_get_config()
-    + admin_put_config(...)
+    + drain_for_group(gid) : int
+    + ...
   }
-
   class AllocationDispatchQueueRepository {
-    + enqueue(group_id, item)
-    + dequeue_for_fleet(fleet)  <<DELETE...RETURNING>>
-    + drain(group_id) : int
+    + drain(gid) : int
   }
-
   class AllocationPendingQueueRepository {
-    + enqueue(item)
-    + delete(row_id)
-    + delete_for_group(group_id) : int
-    + list_all()
-    + list_for_group(group_id)
+    + delete_for_group(gid) : int
   }
 }
 
-package "callbacks (pure)" {
-  class compute_group_status <<pure function>> {
-    + (current, statuses, ...) : GroupStatusResult
-  }
-}
-
-package "repositories" {
+package "repositories/" #F3E5F5 {
   class RenderGroupRepository {
-    + get_by_id(group_id)
-    + update_status(group_id, status)
-    + update_terminal_snapshot(...)
+    + get_by_id(gid)
+    + update_status(gid, status)
   }
 }
 
-' ----- relationships -----
+' ============================================================
+' RELATIONSHIPS  (green = new dependency edge)
+' ============================================================
 
-RenderLifecycle ..> compute_group_status : uses
-RenderLifecycle --> RenderGroupRepository : reads + writes status
-RenderLifecycle --> RenderCanceler : delegates cancel
-RenderLifecycle --> AllocationClient : <<NEW use site>>\ndrain_for_group on terminal
+' --- callers above the facade ---
+MonitorLockGroupAuditSweepStrategy --> RenderLifecycle : facade only
 
-RenderCanceler --> RenderGroupRepository : update_status(cancelled)
-RenderCanceler --> AllocationClient : drain_for_group (Pass 4)
+' --- facade owns the new service + existing deps ---
+RenderLifecycle *--[#1B7A3E,thickness=2] Releaser : <color:#1B7A3E><b>NEW dep</b></color>
+RenderLifecycle --> AllocationClient
+RenderLifecycle --> RenderGroupRepository
+RenderLifecycle --> RenderCanceler
 
-MonitorLockGroupAuditSweepStrategy --> RenderLifecycle : reconcile_group_status\n(periodic)
+' --- canceler keeps allocation_client ref but drain goes through releaser now ---
+RenderCanceler *--[#1B7A3E,thickness=2] Releaser : <color:#1B7A3E><b>NEW dep</b></color>
+RenderCanceler --> RenderGroupRepository
 
-AllocationClient --> AllocationFacade : pass-through
-AllocationFacade --> AllocationDispatchQueueRepository : drain
-AllocationFacade --> AllocationPendingQueueRepository : delete_for_group
+' --- the new service ---
+Releaser --> AllocationClient : drain_for_group
+Releaser --> RenderGroupRepository : read status
 
-' Highlight the new edge.
-note right of AllocationClient
-  No new methods, no new ctor args.
-  drain_for_group already exists and
-  is already injected into
-  RenderLifecycle (line 82).
-  This change is one new call site
-  inside reconcile_group_status.
+' --- pipeline machinery ---
+ReleaseStep ..> TerminationDeps : reads release_terminal_group_resources
+ReconcileGroupStep ..> TerminationDeps : reads reconcile_group
+TerminationContext *-- TerminationDeps
+TerminationPipelineBuilder ..> ReleaseStep : appends
+TerminationPipelineBuilder ..> ReconcileGroupStep : appends
+
+' --- allocation chain (existing) ---
+AllocationClient --> AllocationFacade
+AllocationFacade --> AllocationDispatchQueueRepository
+AllocationFacade --> AllocationPendingQueueRepository
+
+' ============================================================
+' BOOTSTRAP responsibilities (all NEW)
+' ============================================================
+note as BootstrapNote #FFFDE7
+  <b>bootstrap.py changes (all new)</b>
+  <color:#1B7A3E><b>• Construct TerminalGroupResourceReleaser once</b></color>
+    (after allocation_client + group_repo exist)
+  <color:#1B7A3E><b>• Add closure _release_terminal_group_resources</b></color>
+    (parallel to existing _reconcile_group)
+  <color:#1B7A3E><b>• Inject releaser into:</b></color>
+      - RenderLifecycle
+      - RenderCanceler
+      - TerminationDeps (via the closure above)
+  No new methods on AllocationClient / AllocationFacade --
+  drain_for_group already exists.
+end note
+
+note as LayerNote #E1F5FE
+  <b>Layer rule</b>
+  outside orchestrator/  →  RenderLifecycle (facade) ONLY
+  inside  orchestrator/  →  may call Releaser directly
+  Releaser              →  AllocationClient + RenderGroupRepository
+  No layer-skipping.
 end note
 
 @enduml

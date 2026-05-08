@@ -31,7 +31,9 @@
       "Bash(PGPASSWORD='npg_W4czdLm1MTUv' psql -h ep-mute-smoke-aow9soyi-pooler.c-2.ap-southeast-1.aws.neon.tech -U neondb_owner -d neondb --set=sslmode=require -c \"SELECT id, machine_type, status, attempt, started_at IS NULL AS started_null, completed_at IS NULL AS completed_null, price_per_hour_at_dispatch FROM jobs WHERE group_id = '2c3b8069-b6a2-4211-a7e2-5912c712dd96' ORDER BY chunk_index, attempt;\")",
       "Bash(PGPASSWORD='npg_W4czdLm1MTUv' psql -h ep-mute-smoke-aow9soyi-pooler.c-2.ap-southeast-1.aws.neon.tech -U neondb_owner -d neondb --set=sslmode=require -c \"SELECT id, status, total_frames, frame_start, frame_end, render_overrides_json::text FROM render_groups WHERE submitted_at >= NOW\\(\\) - INTERVAL '30 minutes' ORDER BY submitted_at DESC LIMIT 5;\")",
       "Bash(PGPASSWORD='npg_W4czdLm1MTUv' psql -h ep-mute-smoke-aow9soyi-pooler.c-2.ap-southeast-1.aws.neon.tech -U neondb_owner -d neondb --set=sslmode=require -c \"\\\\\\\\d render_groups\")",
-      "Bash(curl -s -m 15 \"https://pcrent-server-v2-930713698987.asia-northeast1.run.app/admin/config\")"
+      "Bash(curl -s -m 15 \"https://pcrent-server-v2-930713698987.asia-northeast1.run.app/admin/config\")",
+      "Bash(grep -nB1 \"border: 1px solid var\\(--glass-border\\)\" \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/App.css\")",
+      "Bash(awk '/^\\\\./ {cls=$0} /border: 1px solid var\\\\\\(--glass-border\\\\\\)/ {print cls}' \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/App.css\")"
     ],
     "additionalDirectories": [
       "\\tmp"

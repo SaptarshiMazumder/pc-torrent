@@ -48,6 +48,10 @@ class LifecycleDeps:
     # Callable into RenderLifecycle.reconcile_group_status -- kept as a
     # callback so the termination package doesn't import lifecycle.
     reconcile_group: Callable[[str], None]
+    # Callable into TerminalGroupResourceReleaser.release -- kept as a
+    # callback for the same reason.  Self-gating on the group's current
+    # status; safe to invoke unconditionally after reconcile_group.
+    release_terminal_group_resources: Callable[[str], int]
 
 
 def _empty_exclusions() -> AntiAffinityExclusions:

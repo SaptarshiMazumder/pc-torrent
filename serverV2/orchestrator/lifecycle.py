@@ -52,6 +52,9 @@ from serverV2.orchestrator.lifecycle_job_termination import (
     JobTerminator,
     RenderCanceler,
 )
+from serverV2.orchestrator.lifecycle_job_termination.execution.terminal_group_resource_releaser import (
+    TerminalGroupResourceReleaser,
+)
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
 from serverV2.repositories.job_repository import JobRepository
 from serverV2.services.machines.machine_repository import MachineRepository
@@ -93,6 +96,7 @@ class RenderLifecycle:
         modal_active_jobs_hooks: ModalActiveJobsHooks,
         job_terminator: JobTerminator,
         render_canceler: RenderCanceler,
+        terminal_group_resource_releaser: TerminalGroupResourceReleaser,
     ) -> None:
         self._allocation_client = allocation_client
         self._job_repo = job_repo
@@ -108,6 +112,7 @@ class RenderLifecycle:
         self._modal_active_jobs_hooks = modal_active_jobs_hooks
         self._terminator = job_terminator
         self._render_canceler = render_canceler
+        self._terminal_group_resource_releaser = terminal_group_resource_releaser
 
     # ------------------------------------------------------------------
     # Cost intelligence — pass-through to the allocation module.
@@ -426,9 +431,10 @@ class RenderLifecycle:
 
         if group_id:
             self.reconcile_group_status(group_id)
-
-        # No drain: the AllocationDispatchQueueDaemon picks up the freed
-        # cap headroom on its next tick (~2s).
+            # Drain dispatch + pending queues iff this transition flipped
+            # the group terminal.  Self-gating; no-op when the group is
+            # still active.
+            self._terminal_group_resource_releaser.release(group_id)
 
     def handle_chunk_running(self, job_id: str) -> None:
         """Transition pending → running without touching the progress
@@ -447,6 +453,11 @@ class RenderLifecycle:
             group_id = raw.get("group_id") or ""
             if group_id:
                 self.reconcile_group_status(group_id)
+                # pending->running can't flip the group terminal, so the
+                # release call is always a no-op here.  Kept for the
+                # invariant "every reconcile is followed by a release"
+                # so future refactors can't reintroduce the leak.
+                self._terminal_group_resource_releaser.release(group_id)
 
     # ------------------------------------------------------------------
     # Read facade — used by monitors instead of repository imports
@@ -572,6 +583,16 @@ class RenderLifecycle:
         self._group_repo.update_status(group_id, result.status)
         if result.status in _TERMINAL_GROUP_STATUSES:
             self._write_terminal_snapshot(group_id, jobs, total_rendered)
+
+    def release_terminal_group_resources(self, group_id: str) -> int:
+        """Facade passthrough to ``TerminalGroupResourceReleaser.release``.
+
+        Provided for callers outside ``orchestrator/`` (e.g. the monitor
+        lock audit sweep) so the layer rule "outside-orchestrator must
+        only touch the lifecycle facade" is preserved.  Self-gating; the
+        underlying releaser no-ops when the group isn't terminal.
+        """
+        return self._terminal_group_resource_releaser.release(group_id)
 
     def _write_terminal_snapshot(
         self,

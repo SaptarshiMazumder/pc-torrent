@@ -74,6 +74,9 @@ from serverV2.orchestrator.lifecycle_job_termination import (
     LifecycleDeps,
     RenderCanceler,
 )
+from serverV2.orchestrator.lifecycle_job_termination.execution.terminal_group_resource_releaser import (
+    TerminalGroupResourceReleaser,
+)
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
 from serverV2.orchestrator.repositories import PendingAllocationRepository
 from serverV2.allocation import AllocationDispatchQueueDaemon, AllocationFacade
@@ -540,6 +543,18 @@ def build(
     def _reconcile_group(group_id: str) -> None:
         lifecycle.reconcile_group_status(group_id)
 
+    # Drain dispatch + pending queues for groups that have just flipped
+    # terminal.  Wrapped as a closure for the same reason as
+    # ``_reconcile_group``: termination steps reach this through
+    # ``ctx.deps`` so the termination package doesn't import lifecycle.
+    terminal_group_resource_releaser = TerminalGroupResourceReleaser(
+        allocation_client=allocation_client,
+        group_repo=group_repo,
+    )
+
+    def _release_terminal_group_resources(group_id: str) -> int:
+        return terminal_group_resource_releaser.release(group_id)
+
     chunk_progress_service = ChunkProgressService(
         output_frame_repo=output_frame_repo,
     )
@@ -562,6 +577,7 @@ def build(
         fleet_registry=registry,
         retry_executor=retry_executor,
         reconcile_group=_reconcile_group,
+        release_terminal_group_resources=_release_terminal_group_resources,
     )
 
     job_terminator = JobTerminator(deps=lifecycle_deps)
@@ -569,7 +585,7 @@ def build(
     render_canceler = RenderCanceler(
         group_repo=group_repo,
         job_repo=job_repo,
-        allocation_client=allocation_client,
+        terminal_group_resource_releaser=terminal_group_resource_releaser,
         in_progress_repo=in_progress_repo,
         deps=lifecycle_deps,
         modal_active_jobs_hooks=modal_active_jobs_hooks,
@@ -592,6 +608,7 @@ def build(
         modal_active_jobs_hooks=modal_active_jobs_hooks,
         job_terminator=job_terminator,
         render_canceler=render_canceler,
+        terminal_group_resource_releaser=terminal_group_resource_releaser,
     )
     orchestrator = RenderOrchestrator(lifecycle)
 

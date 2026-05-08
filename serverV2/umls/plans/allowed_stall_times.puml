@@ -1,0 +1,138 @@
+@startuml allowed_stall_times
+'
+' Plan — surface allowed stall times on each instance card.
+' Server is the single source of truth: snapshot writers compute
+' deadlines per tick from config + per-job state, ship them in the
+' InstanceSnapshot, UI renders one chip per applicable entry.
+'
+
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam linetype ortho
+skinparam ArrowColor #555555
+
+!define ARROW_CONFIG    #2860B0
+!define ARROW_FLEET     #A040A0
+!define ARROW_SNAPSHOT  #228866
+!define ARROW_UI        #B07020
+
+title Allowed stall times — server-computed deadlines pushed to UI
+
+' ============================================================
+' CONFIG (sources)
+' ============================================================
+
+package "config" #DDEEFF {
+  class VastConfig {
+    + startup_timeout_sec
+    + heartbeat_grace_sec
+  }
+  class ModalConfig {
+    + in_queue_timeout_sec
+    + heartbeat_grace_sec  <<90s const>>
+  }
+  class MonitorConfig {
+    + in_progress_stale_sec
+  }
+  class StallConfig {
+    + loading_multiplier
+    + loading_phase_min_sec
+    + loading_phase_max_sec
+    + download_secs_per_gb
+    + download_phase_min_sec
+    + download_phase_max_sec
+    + download_bytes_stall_sec
+    + hard_max_chunk_sec
+  }
+}
+
+' ============================================================
+' MODEL — the new dataclass
+' ============================================================
+
+package "core/models" #EEEEEE {
+  class AllowedStallTimes <<NEW dataclass>> {
+    + startup_timeout_sec : float?       <<Vast only>>
+    + in_queue_timeout_sec : float?      <<Modal only>>
+    + heartbeat_grace_sec : float?       <<Vast / Modal>>
+    + frame_progress_stale_sec : float
+    + loading_stall_sec : float
+    + download_phase_max_sec : float
+    + download_bytes_stall_sec : float
+    + hard_ceiling_sec : float
+  }
+
+  class InstanceSnapshot <<MODIFIED>> {
+    + job_id, fleet_type, gpu_label
+    + rendered_frames, total_frames
+    + provider_status, elapsed_sec
+    + cost, error, status_history
+    -- new --
+    + allowed_stall_times : AllowedStallTimes
+  }
+
+  InstanceSnapshot *-- AllowedStallTimes
+}
+
+' ============================================================
+' FLEET (singletons + snapshot writers)
+' ============================================================
+
+package "fleet" #FFE4FF {
+  package "monitors" #FFD0FF {
+    class VastFleetMonitor
+    class ModalFleetMonitor
+    class CommunityMonitor
+  }
+
+  package "snapshot writers" #FFD0FF {
+    class VastSnapshotWriter
+    class ModalSnapshotWriter
+    class CommunitySnapshotWriter <<NEW>>
+  }
+
+  VastFleetMonitor --> VastSnapshotWriter
+  ModalFleetMonitor --> ModalSnapshotWriter
+  CommunityMonitor --> CommunitySnapshotWriter
+}
+
+' ============================================================
+' UI
+' ============================================================
+
+package "desktop/InstancePanel" #FFFFCC {
+  class InstancePanel <<MODIFIED>> {
+    + ActiveCard
+    + FinishedRow
+    -- chips --
+    one StatChip per applicable
+    AllowedStallTimes field
+  }
+}
+
+' ============================================================
+' Wiring — config → writer → snapshot → UI
+' ============================================================
+
+VastConfig -[ARROW_CONFIG]-> VastSnapshotWriter
+ModalConfig -[ARROW_CONFIG]-> ModalSnapshotWriter
+MonitorConfig -[ARROW_CONFIG]-> VastSnapshotWriter
+MonitorConfig -[ARROW_CONFIG]-> ModalSnapshotWriter
+MonitorConfig -[ARROW_CONFIG]-> CommunitySnapshotWriter
+StallConfig -[ARROW_CONFIG]-> VastSnapshotWriter
+StallConfig -[ARROW_CONFIG]-> ModalSnapshotWriter
+StallConfig -[ARROW_CONFIG]-> CommunitySnapshotWriter
+
+VastSnapshotWriter -[ARROW_FLEET]-> InstanceSnapshot : populate AllowedStallTimes
+ModalSnapshotWriter -[ARROW_FLEET]-> InstanceSnapshot : populate AllowedStallTimes
+CommunitySnapshotWriter -[ARROW_FLEET]-> InstanceSnapshot : populate AllowedStallTimes
+
+InstanceSnapshot -[ARROW_SNAPSHOT]-> InstancePanel : /instances/snapshot
+
+' Hidden layout hints
+config -[hidden]down- "core/models"
+"core/models" -[hidden]down- fleet
+fleet -[hidden]right- "desktop/InstancePanel"
+
+@enduml

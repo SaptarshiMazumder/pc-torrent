@@ -166,17 +166,11 @@ class JobService:
         # billing-start timestamp.
         if status == "running":
             self._jobs.mark_started(job_id)
-        # When the worker self-reports ``done`` (community path -- closes
-        # the reclaim race where a sidecar restart between "last upload"
-        # and "success_notifier firing" leaves the row status='running'
-        # for handle_community_machine_idle to mark failed), tell the
-        # caller to fire the success chain (notify_completion).  Done
-        # synchronously now that the request path is no longer wrapped
-        # in BackgroundTasks -- worker timeouts are 30s, well within the
-        # ~5-30s the success chain takes (provider cancel is the slow
-        # part).  Same shape as register_outputs's completion path.
-        needs_completion = status == "done"
-        return {"job_id": job_id, "status": status, "needs_completion": needs_completion}
+        # No success-chain trigger here.  ``done`` from a worker is
+        # accepted (some old agent installs may still send it) but the
+        # canonical completion-detection path is the fleet singleton
+        # firing on_success via ``JobCounts.is_complete`` on its tick.
+        return {"job_id": job_id, "status": status}
 
     def update_progress(self, job_id: str, rendered_frames: int, total_frames: int) -> dict[str, Any]:
         self._progress.record(job_id, rendered_frames, total_frames)

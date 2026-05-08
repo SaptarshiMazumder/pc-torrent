@@ -264,16 +264,20 @@ class RenderLifecycle:
         """A community machine just signalled "I'm idle, ready for work"
         (via ``PUT /machines/{id}/available``).  Going-idle implies the
         agent has nothing in flight, so any ``status='running'`` jobs
-        still tied to this machine are abandoned — the agent restarted
-        across a sidecar rebuild, OOM, network blip, etc., losing local
-        state — and need to be marked failed so the standard retry path
-        can pick them up.
+        still tied to this machine fall into one of two cases:
 
-        Vast/Modal don't need this: their per-job monitors observe
-        provider-side container death directly.  Community has no
-        per-job monitor; the sidecar restart is otherwise invisible
-        until heartbeat staleness triggers (which doesn't fire if the
-        agent comes back online quickly).
+          1. **Chunk actually finished** — agent uploaded all frames,
+             then signalled idle, but the CommunityMonitor's next tick
+             hasn't fired ``is_complete`` yet (~10s latency).  Route
+             this through the success path so the chunk is marked
+             ``done`` rather than spuriously failed.
+          2. **Chunk genuinely abandoned** — agent restarted, OOM'd,
+             or otherwise lost local state mid-render.  Route through
+             the failure path so retry kicks in.
+
+        Per-chunk decision is made by ``JobCounts.is_complete``, which
+        is sibling-aware (chunk-frame-range coverage rather than
+        per-job_id count).
         """
         if not machine_id:
             return
@@ -282,14 +286,32 @@ class RenderLifecycle:
             job_id = row.get("id")
             if not job_id:
                 continue
-            log.info(
-                "Reclaiming abandoned community job %s on machine %s",
-                job_id, machine_id,
-            )
-            self.handle_chunk_failed(
-                job_id,
-                "Agent went idle while job was running — previous session lost",
-            )
+            total = int(row.get("total_frames") or 0)
+            if total > 0:
+                covered = self._output_frames.count_in_range(
+                    row.get("group_id") or "",
+                    int(row.get("frame_start") or 0),
+                    int(row.get("frame_end") or 0),
+                    int(row.get("frame_step") or 1),
+                )
+            else:
+                covered = 0
+            if total > 0 and covered >= total:
+                log.info(
+                    "Community job %s on idle machine %s has all frames "
+                    "uploaded -- routing through on_success",
+                    job_id, machine_id,
+                )
+                self.handle_chunk_succeeded(job_id)
+            else:
+                log.info(
+                    "Reclaiming abandoned community job %s on machine %s",
+                    job_id, machine_id,
+                )
+                self.handle_chunk_failed(
+                    job_id,
+                    "Agent went idle while job was running — previous session lost",
+                )
 
     # ------------------------------------------------------------------
     # Story 2d: user-triggered retry of a stuck chunk

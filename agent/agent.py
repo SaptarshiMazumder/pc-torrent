@@ -1546,29 +1546,11 @@ def execute_job(job):
             except Exception as exc:
                 _log(f"[JOB] Failed to finalize incremental output uploader: {exc}", level="warn")
 
-        # Community self-mark done.  Server-side update_status writes
-        # status='done' synchronously inside the HTTP request, then
-        # schedules the success-notifier chain as a BackgroundTask
-        # (mirrors register_outputs).  The synchronous DB write is
-        # what closes the reclaim race.  Failure here is non-fatal --
-        # the existing /register-outputs counting path is the
-        # belt-and-suspenders fallback.
-        if final_status == "done":
-            try:
-                final_files = (
-                    output_uploader.uploaded_files
-                    if output_uploader is not None
-                    else []
-                )
-                update_job_status(job_id, "done", output_files=final_files)
-                _log(f"[JOB] Marked job {job_id} done on backend")
-            except Exception as exc:
-                _log(
-                    f"[JOB] Failed to mark job done "
-                    f"(server-side count is the fallback): {exc}",
-                    level="warn",
-                )
-
+        # No agent-side self-mark-done.  The CommunityMonitor singleton
+        # detects chunk completion on its 10s tick via
+        # ``JobCounts.is_complete`` (same path Vast/Modal singletons
+        # use) and fires the success chain through the standard
+        # callback router.  Symmetric across all three fleets.
         if output_dir is not None:
             persist_job_outputs(job_id, output_dir, final_status, final_error)
         clear_active_job(job_id)

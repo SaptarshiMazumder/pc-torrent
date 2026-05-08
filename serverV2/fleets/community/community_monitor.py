@@ -67,6 +67,7 @@ class CommunityMonitor:
         output_frame_repo: OutputFrameRepository,
         progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
+        on_success: Callable[[str], None],
         stall_detector: IPreRenderStallDetector,
         lock_repo: MonitorLockRepository,
         instance_id: str,
@@ -85,6 +86,7 @@ class CommunityMonitor:
         # three fleets agree on what "done" means.
         self._counts = JobCounts(progress_repo, output_frame_repo)
         self._on_failure = on_failure
+        self._on_success = on_success
         self._stall_detector = stall_detector
         self._lock_repo = lock_repo
         self._instance_id = instance_id
@@ -163,6 +165,13 @@ class CommunityMonitor:
                 for job in jobs:
                     if job.is_serverless:
                         continue
+                    # Success check first.  ``is_complete`` is chunk-
+                    # range-based so it sees frames sibling retries
+                    # uploaded -- short-circuits before any failure
+                    # check would falsely flag the chunk.  Mirrors the
+                    # decision-block ordering in Vast/Modal singletons.
+                    if self._check_is_complete(job):
+                        continue
                     self._check_group_terminal(group, job)
                     self._check_machine_offline(job, machine_alive_ids)
                     self._check_pre_render_stall(job)
@@ -212,6 +221,34 @@ class CommunityMonitor:
                 row["id"],
                 f"Agent did not claim within {self._dispatch_claim_timeout}s",
             )
+
+    def _check_is_complete(self, job: RenderJob) -> bool:
+        """Fire on_success when this chunk's frame range is fully
+        covered in ``output_frames`` (sibling-aware via ``is_complete``).
+        Returns True iff success was fired -- caller skips the failure
+        checks for this job.
+
+        Replaces the old agent-side ``mark_done`` self-report.  The
+        agent now uploads frames and exits; this branch detects the
+        chunk's completion server-side, mirroring how Vast/Modal
+        singletons detect completion via ``JobCounts.is_complete`` on
+        their tick.
+        """
+        if job.status != "running":
+            return False
+        row = {
+            "id": job.job_id,
+            "group_id": job.group_id,
+            "frame_start": job.frame_start,
+            "frame_end": job.frame_end,
+            "frame_step": job.frame_step,
+            "total_frames": job.total_frames,
+        }
+        if not self._counts.is_complete(row):
+            return False
+        log.info("Community chunk %s frames covered -- firing on_success", job.job_id)
+        self._on_success(job.job_id)
+        return True
 
     def _check_group_terminal(self, group: dict, job: RenderJob) -> None:
         if job.status in ("done", "failed", "cancelled"):

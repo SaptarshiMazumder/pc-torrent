@@ -642,6 +642,7 @@ def build(
         output_frame_repo=output_frame_repo,
         progress_repo=progress_repo,
         on_failure=_on_failure,
+        on_success=_on_success,
         stall_detector=_make_pre_render_stall_detector(),
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,

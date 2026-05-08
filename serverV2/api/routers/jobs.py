@@ -104,6 +104,18 @@ def update_status(
         raise HTTPException(e.status, e.message)
 
 
+@router.get("/jobs/{job_id}/allowed-stall-times")
+def get_allowed_stall_times(job_id: str):
+    """Return the resolved kill-time deadlines stamped on the job at
+    dispatch.  UI fetches once per active-card mount, caches in memory,
+    and computes "remaining" client-side every second.  404 if the job
+    doesn't exist or pre-dates the column."""
+    result = _get().get_allowed_stall_times(job_id)
+    if result is None:
+        raise HTTPException(404, "No allowed_stall_times for this job")
+    return result
+
+
 @router.put("/jobs/{job_id}/progress")
 def update_progress(job_id: str, payload: UpdateJobProgressPayload):
     try:

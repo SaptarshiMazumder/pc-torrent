@@ -1,41 +1,40 @@
 """DownloadCeilingRule — total time in download phase exceeded a ceiling.
 
-The ceiling is size-aware when the worker reports ``total_bytes``:
+The size-aware ceiling is computed at dispatch and stamped on the
+job row as ``allowed_stall_times["download_phase_max_sec"]``.  At
+runtime this rule just reads that deadline and compares against
+"elapsed in download phase" from the heartbeat window.
 
-    timeout = clamp(secs_per_gb * (total_bytes / 1 GiB), min_sec, max_sec)
-
-When ``total_bytes`` is unknown (worker hasn't sent it yet), we fall
-back to ``max_sec`` — this rule is the "moving but too slow" backstop;
-the bytes_stall rule already catches the "moving zero" case earlier.
+When ``allowed_stall_times`` is None / missing the key (legacy rows
+pre-dating the column), the rule silently skips.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from serverV2.fleets.shared.pre_render_stall_detector.heartbeat_window import (
     HeartbeatWindow,
 )
 from serverV2.fleets.shared.pre_render_stall_detector.stall_reason import StallReason
 
-_GIB = 1024 ** 3
-
 
 class DownloadCeilingRule:
-
-    def __init__(
-        self, secs_per_gb: float, min_sec: float, max_sec: float,
-    ) -> None:
-        if min_sec > max_sec:
-            raise ValueError("DownloadCeilingRule: min_sec > max_sec")
-        self._secs_per_gb = secs_per_gb
-        self._min_sec = min_sec
-        self._max_sec = max_sec
 
     def evaluate(
         self,
         window: HeartbeatWindow,
         job_age_sec: float,
+        *,
+        allowed_stall_times: dict[str, Any] | None = None,
         **_unused: object,
     ) -> StallReason | None:
+        if not allowed_stall_times:
+            return None
+        timeout = allowed_stall_times.get("download_phase_max_sec")
+        if timeout is None:
+            return None
+        timeout = float(timeout)
         latest = window.latest
         if latest is None or latest.phase != "download":
             return None
@@ -44,8 +43,6 @@ class DownloadCeilingRule:
         if oldest_dl is None:
             return None
         elapsed = latest.ts - oldest_dl.ts
-
-        timeout = self._timeout_for(latest.total_bytes)
         if elapsed < timeout:
             return None
 
@@ -53,13 +50,6 @@ class DownloadCeilingRule:
             rule="download_ceiling",
             message=(
                 f"download phase {elapsed:.0f}s exceeded ceiling "
-                f"{timeout:.0f}s (total_bytes="
-                f"{latest.total_bytes if latest.total_bytes is not None else 'unknown'})"
+                f"{timeout:.0f}s"
             ),
         )
-
-    def _timeout_for(self, total_bytes: int | None) -> float:
-        if total_bytes is None or total_bytes <= 0:
-            return self._max_sec
-        size_based = (total_bytes / _GIB) * self._secs_per_gb
-        return max(self._min_sec, min(self._max_sec, size_based))

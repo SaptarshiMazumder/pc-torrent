@@ -6,22 +6,9 @@ load loop, EEVEE init deadlock).  The download stall rules don't fire
 here because the worker's heartbeats report ``phase != "download"``;
 the hard ceiling won't fire for hours.  This rule occupies that gap.
 
-Allowed-time model:
-
-    allowed = clamp(estimated_startup_sec * multiplier, min_sec, max_sec)
-
-``estimated_startup_sec`` is what the planner stamped on the
-``PlannedTask`` at allocation time -- a heaviness-aware setup-time
-estimate (BVH build + texture VRAM upload + shader compile + Blender
-boot).  See ``estimate_startup_seconds`` in
-``allocation_strategies/analyzers/allocation_time_analyzer.py``.
-
-``multiplier`` is a global headroom factor: the planner's estimate is a
-heuristic, real-world variance is wide, so we wait ``multiplier`` ×
-estimate before declaring stall.  Min/max clamp protects against
-pathological estimates on very small or very large scenes.
-
-Rule fires only when:
+Reads its allowed budget from ``allowed_stall_times["loading_stall_sec"]``
+(stamped at dispatch by ``AllowedStallTimesResolver``).  Rule fires
+only when:
 
   * the worker has NOT uploaded a single frame yet (``has_rendered``
     is False); once frames are flowing this rule disengages
@@ -32,12 +19,11 @@ Rule fires only when:
 "Elapsed in loading" is computed by walking the heartbeat window
 newest -> oldest, finding the most recent transition out of the
 download phase, and treating that timestamp as when loading began.
-If the entire window is post-download (the transition happened before
-our window of samples), we conservatively use the oldest sample as the
-entry point.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from serverV2.fleets.shared.pre_render_stall_detector.heartbeat_window import (
     HeartbeatWindow,
@@ -47,25 +33,21 @@ from serverV2.fleets.shared.pre_render_stall_detector.stall_reason import StallR
 
 class LoadingStallRule:
 
-    def __init__(
-        self, *, multiplier: float, min_sec: float, max_sec: float,
-    ) -> None:
-        if min_sec > max_sec:
-            raise ValueError("LoadingStallRule: min_sec > max_sec")
-        self._multiplier = multiplier
-        self._min_sec = min_sec
-        self._max_sec = max_sec
-
     def evaluate(
         self,
         window: HeartbeatWindow,
         job_age_sec: float,
         *,
         has_rendered: bool = False,
-        estimated_startup_sec: float = 0.0,
+        allowed_stall_times: dict[str, Any] | None = None,
         **_unused: object,
     ) -> StallReason | None:
         if has_rendered:
+            return None
+        if not allowed_stall_times:
+            return None
+        allowed = allowed_stall_times.get("loading_stall_sec")
+        if allowed is None:
             return None
         latest = window.latest
         if latest is None:
@@ -78,21 +60,14 @@ class LoadingStallRule:
             return None
 
         elapsed_in_loading = latest.ts - entered_loading_at
-        allowed = max(
-            self._min_sec,
-            min(self._max_sec, estimated_startup_sec * self._multiplier),
-        )
-        if elapsed_in_loading < allowed:
+        if elapsed_in_loading < float(allowed):
             return None
 
         return StallReason(
             rule="loading_stall",
             message=(
                 f"loading phase stuck: {elapsed_in_loading:.0f}s "
-                f"> allowed {allowed:.0f}s "
-                f"(estimate {estimated_startup_sec:.0f}s "
-                f"x {self._multiplier:.1f}, "
-                f"clamped to [{self._min_sec:.0f}, {self._max_sec:.0f}])"
+                f"> allowed {float(allowed):.0f}s"
             ),
         )
 
@@ -107,11 +82,6 @@ class LoadingStallRule:
         last_post_download_ts: float | None = None
         for s in samples:                   # newest -> oldest
             if s.phase == "download":
-                # Found the most recent download sample; loading began
-                # at the sample we last saw before this one.
                 return last_post_download_ts
             last_post_download_ts = s.ts
-        # No download samples in the window at all -- loading began
-        # before our window.  Use the oldest sample as the conservative
-        # entry timestamp.
         return samples[-1].ts

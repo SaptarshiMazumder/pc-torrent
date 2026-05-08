@@ -1,23 +1,19 @@
 """PreRenderStallDetectorBuilder — fluent assembly of rule sets.
 
 Each ``with_*`` method appends a rule and returns ``self``.  ``build``
-freezes the list into an immutable detector.  The builder itself is
-disposable; reuse a closure or a factory if you need to build multiple
-detectors with the same shape.
+freezes the list into an immutable detector.
 
-Bootstrap typically wraps this in a zero-arg factory:
+After the allowed-stall-times refactor, rules no longer hold
+clamp/multiplier values themselves — those live in
+``AllowedStallTimesResolver`` and end up on the job row's
+``allowed_stall_times`` JSONB column at dispatch.  Rules read their
+deadlines from that column at runtime.
 
-    def make_pre_render_stall_detector() -> IPreRenderStallDetector:
-        return (PreRenderStallDetectorBuilder()
-            .with_cpu_stall(threshold_pct=5.0, window_sec=180,
-                            rss_noise_bytes=64 * 1024**2)
-            .with_bytes_stall(stall_sec=300)
-            .with_download_ceiling(secs_per_gb=120,
-                                   min_sec=300, max_sec=1800)
-            .with_hard_ceiling(max_sec=4 * 3600)
-            .build())
-
-so each fleet gets a fresh detector via one call.
+The builder still exists as the assembly entry point; ``with_*``
+methods just register which rules to include rather than configuring
+them.  CpuStallRule is the one rule that still takes config (its
+threshold/window/RSS-noise are not deadlines, they're sampling
+parameters).
 """
 
 from __future__ import annotations
@@ -52,32 +48,20 @@ class PreRenderStallDetectorBuilder:
         ))
         return self
 
-    def with_bytes_stall(
-        self, *, stall_sec: float,
-    ) -> "PreRenderStallDetectorBuilder":
-        self._rules.append(BytesStallRule(stall_sec=stall_sec))
+    def with_bytes_stall(self) -> "PreRenderStallDetectorBuilder":
+        self._rules.append(BytesStallRule())
         return self
 
-    def with_download_ceiling(
-        self, *, secs_per_gb: float, min_sec: float, max_sec: float,
-    ) -> "PreRenderStallDetectorBuilder":
-        self._rules.append(DownloadCeilingRule(
-            secs_per_gb=secs_per_gb, min_sec=min_sec, max_sec=max_sec,
-        ))
+    def with_download_ceiling(self) -> "PreRenderStallDetectorBuilder":
+        self._rules.append(DownloadCeilingRule())
         return self
 
-    def with_loading_stall(
-        self, *, multiplier: float, min_sec: float, max_sec: float,
-    ) -> "PreRenderStallDetectorBuilder":
-        self._rules.append(LoadingStallRule(
-            multiplier=multiplier, min_sec=min_sec, max_sec=max_sec,
-        ))
+    def with_loading_stall(self) -> "PreRenderStallDetectorBuilder":
+        self._rules.append(LoadingStallRule())
         return self
 
-    def with_hard_ceiling(
-        self, *, max_sec: float,
-    ) -> "PreRenderStallDetectorBuilder":
-        self._rules.append(HardCeilingRule(max_sec=max_sec))
+    def with_hard_ceiling(self) -> "PreRenderStallDetectorBuilder":
+        self._rules.append(HardCeilingRule())
         return self
 
     def build(self) -> IPreRenderStallDetector:

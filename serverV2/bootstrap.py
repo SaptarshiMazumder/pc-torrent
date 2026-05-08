@@ -53,6 +53,9 @@ from serverV2.infrastructure.redis_client import RedisClient
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
+from serverV2.allocation.allowed_stall_times_resolver import (
+    AllowedStallTimesResolver,
+)
 from serverV2.allocation.allocation_strategies.validators.allocation_engine_compatibility_validator import (
     AllocationEngineCompatibilityValidator,
 )
@@ -314,25 +317,31 @@ def build(
     # is idle during render so the metric reads ~0% and the rule
     # false-positives.  Re-enable once ProcessSampler walks children.
     def _make_pre_render_stall_detector() -> IPreRenderStallDetector:
-        s = cfg.stall
         # Rule order matters: first match wins.  Download rules fire while
         # phase=='download'; loading_stall fires while phase!='download'
         # AND no frame has uploaded yet; hard_ceiling is the last-resort
-        # safety net regardless of phase.
+        # safety net regardless of phase.  Each rule reads its deadline
+        # from the row's ``allowed_stall_times`` column at evaluate time;
+        # builder no longer carries config values.
         return (PreRenderStallDetectorBuilder()
-            .with_bytes_stall(stall_sec=s.download_bytes_stall_sec)
-            .with_download_ceiling(
-                secs_per_gb=s.download_secs_per_gb,
-                min_sec=s.download_phase_min_sec,
-                max_sec=s.download_phase_max_sec,
-            )
-            .with_loading_stall(
-                multiplier=s.loading_multiplier,
-                min_sec=s.loading_phase_min_sec,
-                max_sec=s.loading_phase_max_sec,
-            )
-            .with_hard_ceiling(max_sec=s.hard_max_chunk_sec)
+            .with_bytes_stall()
+            .with_download_ceiling()
+            .with_loading_stall()
+            .with_hard_ceiling()
             .build())
+
+    # -- allowed-stall-times resolver --
+    # Single source of truth for clamp/multiplier math.  Used at
+    # dispatch by each fleet strategy; stamps the resolved deadlines
+    # onto ``jobs.allowed_stall_times``.  Read at runtime by the
+    # singletons + the new ``GET /jobs/{id}/allowed-stall-times`` route.
+    allowed_stall_times_resolver = AllowedStallTimesResolver(
+        vast_cfg=cfg.vast,
+        modal_cfg=cfg.modal,
+        stall_cfg=cfg.stall,
+        in_progress_stale_sec=cfg.vast.in_progress_stale_sec,
+        group_repo=group_repo,
+    )
 
     # -- vast fleet --
     # No machine registrar — Vast capabilities live in config.json.
@@ -343,6 +352,7 @@ def build(
         config=cfg.vast, client=vast_client,
         job_repo=job_repo,
         on_failure=_on_failure,
+        allowed_stall_times_resolver=allowed_stall_times_resolver,
     )
     registry.register(vast_strategy)
 
@@ -358,6 +368,7 @@ def build(
         job_repo=job_repo,
         on_failure=_on_failure,
         active_jobs_hooks=modal_active_jobs_hooks,
+        allowed_stall_times_resolver=allowed_stall_times_resolver,
     )
     registry.register(modal_strategy)
 
@@ -366,6 +377,7 @@ def build(
         job_repo=job_repo,
         machine_repo=machine_repo,
         price_per_hour=cfg.community_price_per_hour,
+        allowed_stall_times_resolver=allowed_stall_times_resolver,
     )
     registry.register(community_strategy)
 

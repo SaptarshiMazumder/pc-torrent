@@ -429,6 +429,14 @@ def init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS "
                     "estimated_startup_seconds DOUBLE PRECISION"
                 )
+                # Resolved kill-time deadlines stamped on the row at
+                # dispatch.  Single source of truth for both runtime
+                # stall enforcement (read by fleet singletons each tick)
+                # and UI display (read by /jobs/{id}/allowed-stall-times).
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS "
+                    "allowed_stall_times JSONB"
+                )
                 cur.execute(
                     "ALTER TABLE dispatch_queue ADD COLUMN IF NOT EXISTS "
                     "price_per_hour DOUBLE PRECISION"

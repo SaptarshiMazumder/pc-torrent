@@ -183,14 +183,29 @@ class ModalFleetMonitor:
         local_status: str = str(row.get("status") or "")
         elapsed = self._elapsed_since_dispatch(row)
 
+        # Resolved kill-time deadlines stamped at dispatch.  None for
+        # legacy rows -- fall back to per-fleet config below.
+        deadlines = row.get("allowed_stall_times") or {}
+        in_queue_timeout_sec = float(
+            deadlines.get("in_queue_timeout_sec")
+            if deadlines.get("in_queue_timeout_sec") is not None
+            else self._cfg.in_queue_timeout_sec
+        )
+        heartbeat_grace_sec = float(
+            deadlines.get("heartbeat_grace_sec")
+            if deadlines.get("heartbeat_grace_sec") is not None
+            else _HEARTBEAT_GRACE_SEC
+        )
+        frame_progress_stale_sec = float(
+            deadlines.get("frame_progress_stale_sec")
+            if deadlines.get("frame_progress_stale_sec") is not None
+            else self._cfg.in_progress_stale_sec
+        )
+
         state = self._per_job.get(job_id)
         if state is None:
             state = _PerJobState(
-                liveness=LivenessCheck(
-                    heartbeat_repo=self._heartbeats,
-                    stale_sec=self._cfg.in_progress_stale_sec,
-                    heartbeat_grace_sec=_HEARTBEAT_GRACE_SEC,
-                ),
+                liveness=LivenessCheck(heartbeat_repo=self._heartbeats),
             )
             self._per_job[job_id] = state
 
@@ -199,8 +214,6 @@ class ModalFleetMonitor:
         snapshot.write(row, elapsed)
 
         # Block: DB says this job is already over.
-        # Always force-cancel the Modal FunctionCall — see ModalJobMonitor
-        # comment for the reasoning (defends against re-queues + stuck workers).
         if local_status in ("done", "failed", "cancelled"):
             self._cancel(provider_job_id)
             if local_status == "failed":
@@ -228,8 +241,8 @@ class ModalFleetMonitor:
             return
 
         # Block: dispatch lost — pending past queue window AND worker silent.
-        if local_status == "pending" and elapsed > self._cfg.in_queue_timeout_sec:
-            if state.liveness.heartbeat_dead(job_id):
+        if local_status == "pending" and elapsed > in_queue_timeout_sec:
+            if state.liveness.heartbeat_dead(job_id, grace_sec=heartbeat_grace_sec):
                 self._handle_failure(
                     job_id, provider_job_id, snapshot,
                     f"Modal dispatch lost — pending for {elapsed:.0f}s with no heartbeat",
@@ -237,7 +250,9 @@ class ModalFleetMonitor:
                 return
 
         # Block: heartbeat dead while running.
-        if local_status == "running" and state.liveness.heartbeat_dead(job_id):
+        if local_status == "running" and state.liveness.heartbeat_dead(
+            job_id, grace_sec=heartbeat_grace_sec,
+        ):
             self._handle_failure(
                 job_id, provider_job_id, snapshot,
                 "Modal job heartbeat dead",
@@ -245,16 +260,18 @@ class ModalFleetMonitor:
             return
 
         # Block: frame-progress staleness (only fires after first frame uploads).
-        if local_status == "running" and state.liveness.is_stale():
+        if local_status == "running" and state.liveness.is_stale(
+            stale_sec=frame_progress_stale_sec,
+        ):
             self._handle_failure(
                 job_id, provider_job_id, snapshot,
-                f"Modal job stale — no new frames for {self._cfg.in_progress_stale_sec / 60:.0f} min",
+                f"Modal job stale — no new frames for {frame_progress_stale_sec / 60:.0f} min",
             )
             return
 
         # Block: pre-render stall.
         if local_status == "running":
-            stall = self._evaluate_stall(row, elapsed)
+            stall = self._evaluate_stall(row, elapsed, deadlines)
             if stall is not None:
                 self._handle_failure(
                     job_id, provider_job_id, snapshot,
@@ -286,19 +303,21 @@ class ModalFleetMonitor:
         return str(grp.get("status") or "")
 
     def _evaluate_stall(
-        self, row: dict[str, Any], elapsed: float,
+        self,
+        row: dict[str, Any],
+        elapsed: float,
+        deadlines: dict[str, Any],
     ) -> StallReason | None:
         samples = self._heartbeats.get_recent(row["id"], n=30)
         if not samples:
             return None
         window = HeartbeatWindow.from_raw(samples)
         has_rendered = self._counts.uploaded(row) > 0
-        startup_sec = float(row.get("estimated_startup_seconds") or 0.0)
         return self._stall_detector_factory().evaluate(
             window,
             elapsed,
             has_rendered=has_rendered,
-            estimated_startup_sec=startup_sec,
+            allowed_stall_times=deadlines or None,
         )
 
     def _handle_success(

@@ -1,9 +1,13 @@
 @startuml allowed_stall_times
 '
-' Plan — surface allowed stall times on each instance card.
-' Server is the single source of truth: snapshot writers compute
-' deadlines per tick from config + per-job state, ship them in the
-' InstanceSnapshot, UI renders one chip per applicable entry.
+' Plan — write allowed stall times to the job row at dispatch (PG-only).
+' Single source of truth = the jobs.allowed_stall_times JSONB column.
+'   • Resolver writes it at dispatch.
+'   • UI reads it via a new endpoint, caches in the active card.
+'   • Fleet singletons read it on each tick (replacing today's
+'     in-singleton clamp math).
+'
+' One column, three readers, one writer.  No drift possible.
 '
 
 skinparam backgroundColor #FAFAFA
@@ -12,127 +16,200 @@ skinparam packageStyle rectangle
 skinparam linetype ortho
 skinparam ArrowColor #555555
 
-!define ARROW_CONFIG    #2860B0
-!define ARROW_FLEET     #A040A0
-!define ARROW_SNAPSHOT  #228866
-!define ARROW_UI        #B07020
+!define ARROW_DISPATCH  #2860B0
+!define ARROW_REPO      #228866
+!define ARROW_API       #B07020
+!define ARROW_UI        #A040A0
+!define ARROW_FLEET     #C04040
 
-title Allowed stall times — server-computed deadlines pushed to UI
+title Allowed stall times — written once at dispatch, read by UI + singletons
 
 ' ============================================================
-' CONFIG (sources)
+' CONFIG (only the resolver reads these — the singletons no longer do)
 ' ============================================================
 
 package "config" #DDEEFF {
-  class VastConfig {
-    + startup_timeout_sec
-    + heartbeat_grace_sec
+  class VastConfig
+  class ModalConfig
+  class MonitorConfig
+  class StallConfig
+}
+
+' ============================================================
+' DISPATCH (write side)
+' ============================================================
+
+package "allocation" #FFE4FF {
+  class AllocationDispatchTickProcessor <<dispatch hook>> {
+    -- per dispatch_queue pickup --
+    1. resolve(estimated_startup,
+       file_size, configs)
+    2. job_repo.insert(...,
+       allowed_stall_times JSONB)
+    3. strategy.dispatch()
   }
-  class ModalConfig {
-    + in_queue_timeout_sec
-    + heartbeat_grace_sec  <<90s const>>
-  }
-  class MonitorConfig {
-    + in_progress_stale_sec
-  }
-  class StallConfig {
-    + loading_multiplier
-    + loading_phase_min_sec
-    + loading_phase_max_sec
-    + download_secs_per_gb
-    + download_phase_min_sec
-    + download_phase_max_sec
-    + download_bytes_stall_sec
-    + hard_max_chunk_sec
+
+  class AllowedStallTimesResolver <<NEW pure function>> {
+    + resolve(fleet, est_startup_sec,
+        file_size_bytes, configs) : dict
+    -- the ONLY place the clamp/
+       multiplier math lives --
   }
 }
 
 ' ============================================================
-' MODEL — the new dataclass
+' REPOSITORY + PG  (the single source of truth)
 ' ============================================================
 
-package "core/models" #EEEEEE {
-  class AllowedStallTimes <<NEW dataclass>> {
-    + startup_timeout_sec : float?       <<Vast only>>
-    + in_queue_timeout_sec : float?      <<Modal only>>
-    + heartbeat_grace_sec : float?       <<Vast / Modal>>
-    + frame_progress_stale_sec : float
-    + loading_stall_sec : float
-    + download_phase_max_sec : float
-    + download_bytes_stall_sec : float
-    + hard_ceiling_sec : float
+package "repositories + PG" #DDFFDD {
+  class JobRepository <<MODIFIED>> {
+    + insert(...) <<extends with column>>
+    + get_allowed_stall_times(jid) <<NEW>>
   }
 
-  class InstanceSnapshot <<MODIFIED>> {
-    + job_id, fleet_type, gpu_label
-    + rendered_frames, total_frames
-    + provider_status, elapsed_sec
-    + cost, error, status_history
-    -- new --
-    + allowed_stall_times : AllowedStallTimes
+  class "jobs (PG table)" as JobsTable <<MODIFIED schema>> {
+    + ... existing columns ...
+    + estimated_startup_seconds
+    + submitted_at
+    -- NEW --
+    + allowed_stall_times JSONB
   }
 
-  InstanceSnapshot *-- AllowedStallTimes
+  JobRepository --> JobsTable : INSERT / SELECT
 }
 
 ' ============================================================
-' FLEET (singletons + snapshot writers)
+' API
 ' ============================================================
 
-package "fleet" #FFE4FF {
-  package "monitors" #FFD0FF {
-    class VastFleetMonitor
-    class ModalFleetMonitor
-    class CommunityMonitor
+package "api" #FFEEDD {
+  class JobService <<MODIFIED>> {
+    + get_allowed_stall_times(jid) : dict
   }
 
-  package "snapshot writers" #FFD0FF {
-    class VastSnapshotWriter
-    class ModalSnapshotWriter
-    class CommunitySnapshotWriter <<NEW>>
+  class "GET /jobs/{jid}/allowed-stall-times" as Route <<NEW route>> {
+    returns: dict | 404
   }
 
-  VastFleetMonitor --> VastSnapshotWriter
-  ModalFleetMonitor --> ModalSnapshotWriter
-  CommunityMonitor --> CommunitySnapshotWriter
+  Route --> JobService
+}
+
+' ============================================================
+' FLEET SINGLETONS (read deadlines straight from the row)
+' ============================================================
+
+package "fleet singletons" #F5D8FF {
+  class VastFleetMonitor <<MODIFIED>> {
+    -- per-row kill checks --
+    1. startup_timeout (Vast only)
+       inline: elapsed > deadline
+    2. frame-progress stale
+       via LivenessCheck
+    3. heartbeat dead
+       via LivenessCheck
+    4. pre-render stall (4 rules)
+       via PreRenderStallDetector
+  }
+  class ModalFleetMonitor <<MODIFIED>> {
+    -- per-row kill checks --
+    1. in_queue_timeout (Modal only)
+    2. frame-progress stale
+    3. heartbeat dead
+    4. pre-render stall
+  }
+  class CommunityMonitor <<MODIFIED>> {
+    -- per-row kill checks --
+    1. machine offline
+    2. frame-progress stale
+    3. heartbeat dead
+    4. pre-render stall
+  }
+
+  class LivenessCheck <<MODIFIED>> {
+    + is_stale(stale_sec) : bool
+    + heartbeat_dead(jid, grace_sec) : bool
+    -- accepts deadlines per call,
+       no longer holds them --
+  }
+
+  class PreRenderStallDetector <<MODIFIED>> {
+    + evaluate(window, elapsed,
+        has_rendered,
+        allowed_stall_times) : reason?
+    -- accepts deadlines as input,
+       no longer holds clamp math --
+  }
 }
 
 ' ============================================================
 ' UI
 ' ============================================================
 
-package "desktop/InstancePanel" #FFFFCC {
-  class InstancePanel <<MODIFIED>> {
-    + ActiveCard
-    + FinishedRow
-    -- chips --
-    one StatChip per applicable
-    AllowedStallTimes field
+package "desktop / InstancePanel" #FFFFCC {
+  class ActiveCard <<MODIFIED>> {
+    -- on first mount --
+    useEffect(fetch, [job_id])
+    -- state --
+    stallTimes: dict | null
+    isLoading: bool
+    -- render --
+    clock icon button next
+    to existing chips
   }
+
+  class StallTimesOverlay <<NEW>> {
+    -- one chip per non-null --
+    name + countdown
+    (deadline_sec - elapsed_sec)
+    re-renders via 1Hz tick
+  }
+
+  ActiveCard --> StallTimesOverlay : open on icon click
 }
 
 ' ============================================================
-' Wiring — config → writer → snapshot → UI
+' WRITE FLOW — config + dispatch task -> resolver -> JSONB column
 ' ============================================================
 
-VastConfig -[ARROW_CONFIG]-> VastSnapshotWriter
-ModalConfig -[ARROW_CONFIG]-> ModalSnapshotWriter
-MonitorConfig -[ARROW_CONFIG]-> VastSnapshotWriter
-MonitorConfig -[ARROW_CONFIG]-> ModalSnapshotWriter
-MonitorConfig -[ARROW_CONFIG]-> CommunitySnapshotWriter
-StallConfig -[ARROW_CONFIG]-> VastSnapshotWriter
-StallConfig -[ARROW_CONFIG]-> ModalSnapshotWriter
-StallConfig -[ARROW_CONFIG]-> CommunitySnapshotWriter
+VastConfig -[ARROW_DISPATCH]-> AllowedStallTimesResolver
+ModalConfig -[ARROW_DISPATCH]-> AllowedStallTimesResolver
+MonitorConfig -[ARROW_DISPATCH]-> AllowedStallTimesResolver
+StallConfig -[ARROW_DISPATCH]-> AllowedStallTimesResolver
 
-VastSnapshotWriter -[ARROW_FLEET]-> InstanceSnapshot : populate AllowedStallTimes
-ModalSnapshotWriter -[ARROW_FLEET]-> InstanceSnapshot : populate AllowedStallTimes
-CommunitySnapshotWriter -[ARROW_FLEET]-> InstanceSnapshot : populate AllowedStallTimes
+AllocationDispatchTickProcessor -[ARROW_DISPATCH]-> AllowedStallTimesResolver : resolve(...)
+AllocationDispatchTickProcessor -[ARROW_DISPATCH]-> JobRepository : insert(..., allowed_stall_times)
 
-InstanceSnapshot -[ARROW_SNAPSHOT]-> InstancePanel : /instances/snapshot
+' ============================================================
+' UI READ FLOW — card -> route -> service -> repo -> PG
+' ============================================================
 
+ActiveCard -[ARROW_UI]-> Route : GET (async, once per mount)
+JobService -[ARROW_API]-> JobRepository : get_allowed_stall_times(jid)
+
+' ============================================================
+' SINGLETON READ FLOW — every tick, SELECT j.* already returns the JSONB
+' ============================================================
+
+VastFleetMonitor -[ARROW_FLEET]-> JobsTable : SELECT j.* per tick\n(includes allowed_stall_times)
+ModalFleetMonitor -[ARROW_FLEET]-> JobsTable : SELECT j.* per tick
+CommunityMonitor -[ARROW_FLEET]-> JobsTable : SELECT j.* per tick
+
+VastFleetMonitor -[ARROW_FLEET]-> LivenessCheck : is_stale / heartbeat_dead\n(deadlines from row)
+ModalFleetMonitor -[ARROW_FLEET]-> LivenessCheck
+CommunityMonitor -[ARROW_FLEET]-> LivenessCheck
+
+VastFleetMonitor -[ARROW_FLEET]-> PreRenderStallDetector : evaluate\n(deadlines from row)
+ModalFleetMonitor -[ARROW_FLEET]-> PreRenderStallDetector
+CommunityMonitor -[ARROW_FLEET]-> PreRenderStallDetector
+
+' ============================================================
 ' Hidden layout hints
-config -[hidden]down- "core/models"
-"core/models" -[hidden]down- fleet
-fleet -[hidden]right- "desktop/InstancePanel"
+' ============================================================
+
+config -[hidden]down- allocation
+allocation -[hidden]down- "repositories + PG"
+"repositories + PG" -[hidden]right- api
+"repositories + PG" -[hidden]down- "fleet singletons"
+"fleet singletons" -[hidden]right- "desktop / InstancePanel"
 
 @enduml

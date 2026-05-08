@@ -19,11 +19,11 @@ hiccup let our lock expire and a different instance took over -- both
 operations need to compare the value to ``instance_id`` first, and
 that check + the action have to be atomic.
 
-Lock keys live in Redis only; no Postgres mirror needed.  The DB row
-(`jobs.status='running'` for per-job monitors, or the implicit "there
-is community work to scan" for the singleton) is the durable state;
-the lock is just "who is currently allowed to be running the watcher
-for that work."
+Lock keys live in Redis only; no Postgres mirror needed.  Three
+fleet-level singletons exist (``monitor:vast``, ``monitor:modal``,
+``monitor:community``); whichever Cloud Run instance holds a key is
+the one running that fleet's per-tick scan.  The DB rows the scanner
+iterates are the durable state.
 """
 
 from __future__ import annotations
@@ -116,8 +116,12 @@ class MonitorLockRepository:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def per_job_key(job_id: str) -> str:
-        return f"monitor:job:{job_id}"
+    def vast_key() -> str:
+        return "monitor:vast"
+
+    @staticmethod
+    def modal_key() -> str:
+        return "monitor:modal"
 
     @staticmethod
     def community_key() -> str:

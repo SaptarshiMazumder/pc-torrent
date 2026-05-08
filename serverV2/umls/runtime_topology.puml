@@ -1,0 +1,223 @@
+@startuml runtime_topology
+'
+' Class diagram — orchestration, fleet, callbacks, and monitor_lock
+' layers, after the per-job → singleton fleet monitor port.
+'
+' Reflects current state on the orchestration branch.
+'
+
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam packageStyle rectangle
+
+title Runtime layer topology — orchestration / callbacks / fleets / monitor_lock
+
+' ============================================================
+' Orchestration layer
+' ============================================================
+
+package "orchestrator" #FFDDDD {
+  class RenderOrchestrator <<facade>> {
+    + on_job_succeeded(id)
+    + on_job_failed(id, err)
+    + on_job_running(id)
+    + cancel_one_job(id)
+    + is_job_terminal(id)
+    + get_job_raw(id)
+    + get_group_status(id)
+  }
+  class RenderLifecycle <<workhorse>> {
+    + handle_chunk_succeeded(id)
+    + handle_chunk_failed(id, err)
+    + handle_chunk_running(id)
+    + reconcile_group_status(gid)
+    + cancel_one_job(id)
+  }
+
+  RenderOrchestrator --> RenderLifecycle : delegates
+}
+
+' ============================================================
+' Callbacks layer (adapter between fleet outcomes and orchestrator)
+' ============================================================
+
+package "callbacks" #FFEEDD {
+  class CallbackRouter <<funnel>> {
+    + route(id, outcome, error?)
+  }
+  class SuccessHandler
+  class FailureHandler
+
+  CallbackRouter --> SuccessHandler : SUCCESS
+  CallbackRouter --> FailureHandler : FAILURE
+}
+
+SuccessHandler --> RenderOrchestrator : on_job_succeeded
+FailureHandler --> RenderOrchestrator : on_job_failed
+
+' ============================================================
+' Fleet layer
+' ============================================================
+
+package "fleets" #FFE4FF {
+  class FleetRegistry {
+    + register(strategy)
+    + get(fleet_name)
+  }
+
+  package "strategies" {
+    interface IFleetStrategy {
+      + dispatch(task, ctx, job_id)
+      + cancel(provider_job_id)
+    }
+    class VastFleetStrategy
+    class ModalFleetStrategy
+    class CommunityStrategy
+    VastFleetStrategy ..|> IFleetStrategy
+    ModalFleetStrategy ..|> IFleetStrategy
+    CommunityStrategy ..|> IFleetStrategy
+  }
+
+  package "clients" {
+    class VastClient {
+      + dispatch_job()
+      + cancel_job(id)
+      + instances.list()
+    }
+    class ModalClient {
+      + dispatch_job()
+      + cancel_job(id)
+    }
+  }
+
+  package "fleet monitors" #DDFFDD {
+    class VastFleetMonitor <<singleton, 1 thread>> {
+      + try_start()
+      - _tick()
+      - _inspect(row, inst)
+    }
+    class ModalFleetMonitor <<singleton, 1 thread>> {
+      + try_start()
+      - _tick()
+      - _inspect(row)
+    }
+    class CommunityMonitor <<singleton, 1 thread>> {
+      + try_start()
+      - _tick()
+    }
+  }
+
+  FleetRegistry o-- VastFleetStrategy
+  FleetRegistry o-- ModalFleetStrategy
+  FleetRegistry o-- CommunityStrategy
+  VastFleetStrategy --> VastClient
+  ModalFleetStrategy --> ModalClient
+  VastFleetMonitor --> VastClient : list() once per tick\n+ destroy() on terminal
+  ModalFleetMonitor --> ModalClient : cancel_job() on terminal
+}
+
+' ============================================================
+' monitor_lock layer (the sweep daemon — name is a misnomer)
+' ============================================================
+
+package "monitor_lock" #DDEEFF {
+  class MonitorLockFacade <<entry point>> {
+    + start()
+    + stop()
+  }
+  class MonitorLockSweeper <<every 30s tick>> {
+    + start()
+    + stop()
+  }
+  class MonitorLockRepository <<Redis lock primitive>> {
+    + try_acquire(key, owner)
+    + refresh(key, owner)
+    + release(key, owner)
+  }
+
+  package "sweep strategies" {
+    class MonitorLockVastSweepStrategy
+    class MonitorLockModalSweepStrategy
+    class MonitorLockCommunitySweepStrategy
+    class MonitorLockGroupAuditSweepStrategy <<NEW>>
+  }
+
+  MonitorLockFacade --> MonitorLockSweeper
+  MonitorLockSweeper --> MonitorLockVastSweepStrategy
+  MonitorLockSweeper --> MonitorLockModalSweepStrategy
+  MonitorLockSweeper --> MonitorLockCommunitySweepStrategy
+  MonitorLockSweeper --> MonitorLockGroupAuditSweepStrategy
+}
+
+' ============================================================
+' Cross-layer wiring
+' ============================================================
+
+' sweep strategies poke the singletons / lifecycle every tick
+MonitorLockVastSweepStrategy --> VastFleetMonitor : try_start()
+MonitorLockModalSweepStrategy --> ModalFleetMonitor : try_start()
+MonitorLockCommunitySweepStrategy --> CommunityMonitor : try_start()
+MonitorLockGroupAuditSweepStrategy --> RenderLifecycle : reconcile_group_status()
+
+' singletons hold their per-fleet Redis lock through the lock repo
+VastFleetMonitor ..> MonitorLockRepository : monitor:vast
+ModalFleetMonitor ..> MonitorLockRepository : monitor:modal
+CommunityMonitor ..> MonitorLockRepository : monitor:community
+
+' singletons emit outcomes back up through the callback router
+VastFleetMonitor ..> CallbackRouter : on_failure / on_success / on_running
+ModalFleetMonitor ..> CallbackRouter : on_failure / on_success
+CommunityMonitor ..> CallbackRouter : on_failure
+
+' lifecycle eagerly cancels via the strategy on terminal events
+RenderLifecycle --> FleetRegistry : strategy.cancel(provider_job_id)\non success/failure
+
+' ============================================================
+' Notes
+' ============================================================
+
+note bottom of MonitorLockSweeper
+  One thread.  Per tick: iterate the four
+  sweep strategies and call sweep() on each.
+  Strategy exceptions are logged and skipped
+  — one fleet's failure does not stall others.
+end note
+
+note bottom of VastFleetMonitor
+  Per tick:
+   1. SELECT active Vast rows (1 PG query)
+   2. vast_client.instances.list()  (1 API call)
+   3. for row: _inspect(row, fleet[row.id])
+  _inspect runs the same decision blocks the
+  per-job VastInstanceMonitor used to run.
+end note
+
+note bottom of ModalFleetMonitor
+  Per tick:
+   1. SELECT active Modal rows (1 PG query)
+   2. for row: _inspect(row)
+  No Modal API call per tick — the per-job
+  monitor only ever read PG + Redis.  SDK
+  cancel_job fires only on terminal events.
+end note
+
+note bottom of CallbackRouter
+  Single funnel for fleet-monitor outcomes.
+  Early-out via is_job_terminal(id) so a
+  worker's mark_failed and the singleton's
+  later detection collapse to one transition.
+end note
+
+note as NAMING #FFFFCC
+  **"monitor_lock" is a misnomer.**
+   The module's job is broader than locking — it owns:
+    1. The 30s sweep daemon thread (MonitorLockSweeper)
+    2. Four sweep strategies (3 fleet + 1 group audit)
+    3. The Redis lock primitive (MonitorLockRepository) used
+       by the fleet singletons themselves, not by this module
+   Only #3 is "lock" in nature.  Rename candidates worth considering:
+      sweep_daemon / fleet_supervisor / runtime_sweeper
+   Holding off until structure is approved.
+end note
+
+@enduml

@@ -1,5 +1,5 @@
-"""Vast callback layer — public surface is VastMonitorManager."""
+"""Vast monitor layer — public surface is VastFleetMonitor (singleton scanner)."""
 
-from serverV2.fleets.vast.monitor.vast_monitor_manager import VastMonitorManager
+from serverV2.fleets.vast.monitor.vast_fleet_monitor import VastFleetMonitor
 
-__all__ = ["VastMonitorManager"]
+__all__ = ["VastFleetMonitor"]

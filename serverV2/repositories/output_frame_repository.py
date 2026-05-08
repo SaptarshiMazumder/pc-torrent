@@ -66,6 +66,39 @@ class OutputFrameRepository:
         )
         return int(rows[0]["n"]) if rows else 0
 
+    def count_in_range(
+        self,
+        group_id: str,
+        frame_start: int,
+        frame_end: int,
+        frame_step: int = 1,
+    ) -> int:
+        """Count distinct frames in ``[frame_start, frame_end]`` (stepped
+        by ``frame_step``) that exist in ``output_frames`` for this group,
+        regardless of which job_id uploaded them.
+
+        Used for chunk-level completion checks that need to see frames
+        contributed by sibling retries.  ``count_for_job`` only sees
+        rows under one job_id; when ``add_many``'s ON CONFLICT path
+        deduped frames a sibling already uploaded, those frames are
+        invisible to ``count_for_job(this_job)`` even though they exist
+        in the table under ``count_for_job(sibling_job)``.
+        """
+        if frame_end < frame_start or frame_step <= 0:
+            return 0
+        expected = [
+            f"frame{i:04d}.png"
+            for i in range(frame_start, frame_end + 1, frame_step)
+        ]
+        if not expected:
+            return 0
+        rows = query_all(
+            "SELECT COUNT(*) AS n FROM output_frames "
+            "WHERE group_id = %s AND filename = ANY(%s)",
+            (group_id, expected),
+        )
+        return int(rows[0]["n"]) if rows else 0
+
     def list_for_group(self, group_id: str) -> list[str]:
         rows = query_all(
             "SELECT filename FROM output_frames WHERE group_id = %s "

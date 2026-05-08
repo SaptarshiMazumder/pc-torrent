@@ -5,23 +5,24 @@ this; the sweeper / strategies behind it are internal to the service
 layer and never imported from outside the module.
 
 The Redis lock primitive (``MonitorLockRepository``) is also exported
-from the module's ``__init__`` because it's used directly by the
-fleet monitor managers and the per-tick monitor classes -- the lock
-is part of the module's public surface alongside the facade.
+from the module's ``__init__`` because it's used directly by the fleet
+monitors that hold the singleton locks.
 
 ``MonitorLockFacade.build(...)`` is the composition entry point.  It
-takes the high-level fleet refs (configs, monitor managers, the
-community monitor) and assembles the three sweep strategies + the
-sweeper internally, so bootstrap never imports the service layer.
+takes the high-level fleet refs (the three fleet singletons + the
+render lifecycle for group audit) and assembles four sweep strategies
++ the sweeper internally, so bootstrap never imports the service layer.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from serverV2.config import ModalConfig, VastConfig
 from serverV2.monitor_lock.monitor_lock_service.monitor_lock_community_sweep_strategy import (
     MonitorLockCommunitySweepStrategy,
+)
+from serverV2.monitor_lock.monitor_lock_service.monitor_lock_group_audit_sweep_strategy import (
+    MonitorLockGroupAuditSweepStrategy,
 )
 from serverV2.monitor_lock.monitor_lock_service.monitor_lock_modal_sweep_strategy import (
     MonitorLockModalSweepStrategy,
@@ -35,8 +36,10 @@ from serverV2.monitor_lock.monitor_lock_service.monitor_lock_vast_sweep_strategy
 
 if TYPE_CHECKING:
     from serverV2.fleets.community.community_monitor import CommunityMonitor
-    from serverV2.fleets.modal.monitor import ModalMonitorManager
-    from serverV2.fleets.vast.monitor import VastMonitorManager
+    from serverV2.fleets.modal.monitor.modal_fleet_monitor import ModalFleetMonitor
+    from serverV2.fleets.vast.monitor.vast_fleet_monitor import VastFleetMonitor
+    from serverV2.orchestrator.lifecycle import RenderLifecycle
+    from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 
 class MonitorLockFacade:
@@ -48,24 +51,28 @@ class MonitorLockFacade:
     def build(
         cls,
         *,
-        vast_cfg: VastConfig,
-        modal_cfg: ModalConfig,
-        vast_manager: "VastMonitorManager",
-        modal_manager: "ModalMonitorManager",
+        vast_fleet_monitor: "VastFleetMonitor",
+        modal_fleet_monitor: "ModalFleetMonitor",
         community_monitor: "CommunityMonitor",
+        group_repo: "RenderGroupRepository",
+        lifecycle: "RenderLifecycle",
         interval_sec: int = 30,
     ) -> "MonitorLockFacade":
         """Compose the strategies + sweeper for this process.  The only
         constructor bootstrap needs to know."""
         strategies = [
             MonitorLockVastSweepStrategy(
-                vast_cfg=vast_cfg, vast_manager=vast_manager,
+                vast_fleet_monitor=vast_fleet_monitor,
             ),
             MonitorLockModalSweepStrategy(
-                modal_cfg=modal_cfg, modal_manager=modal_manager,
+                modal_fleet_monitor=modal_fleet_monitor,
             ),
             MonitorLockCommunitySweepStrategy(
                 community_monitor=community_monitor,
+            ),
+            MonitorLockGroupAuditSweepStrategy(
+                group_repo=group_repo,
+                lifecycle=lifecycle,
             ),
         ]
         sweeper = MonitorLockSweeper(

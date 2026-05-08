@@ -1,0 +1,417 @@
+@startuml chunk_completion_flow
+'
+' Chunk-completion flow — what happens when the endpoints that call
+' notify_completion fire, traced per fleet.
+'
+' Two trigger endpoints land in the same orchestration chain:
+'   PUT  /jobs/{id}/status         (community: worker self-reports done)
+'   POST /jobs/{id}/register-outputs (all fleets: worker uploaded last frame)
+'
+' Both paths converge into RenderLifecycle.handle_chunk_succeeded.
+' Per-fleet differences are isolated to two steps:
+'   - The provider cancel (step 6a) — different per fleet, expensive
+'   - The community-only machine flip (step 7)
+'
+
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultFontName "Inter, Helvetica, sans-serif"
+
+' ============================================================
+' Class diagram — components and ownership
+' ============================================================
+
+package "HTTP layer" #DDEEFF {
+  class "jobs.py router" as Router {
+    + PUT /jobs/{id}/status
+    + POST /jobs/{id}/register-outputs
+  }
+}
+
+package "service" #DDFFDD {
+  class JobService {
+    + update_status(id, status, error)
+    + register_outputs(id, filenames)
+    + notify_completion(id)
+    -- internals --
+    - _success_notifier  : Callable
+  }
+  note right of JobService::notify_completion
+    One-line method.  Delegates to
+    success_notifier (a lambda from
+    bootstrap that calls
+    callback_router.route(SUCCESS)).
+    "notify" is a misnomer — this is
+    the entry point for the entire
+    chunk-completion lifecycle.
+  end note
+}
+
+package "callbacks" #FFEEDD {
+  class CallbackRouter {
+    + route(job_id, outcome, error?)
+    -- early-out --
+    is_job_terminal(id) ?
+  }
+  class SuccessHandler {
+    + handle(job_id, group_id="")
+  }
+
+  CallbackRouter --> SuccessHandler : SUCCESS path
+}
+
+package "orchestrator" #FFDDDD {
+  class RenderOrchestrator {
+    + on_job_succeeded(id)
+    + on_job_failed(id, err)
+    + is_job_terminal(id)
+  }
+  class RenderLifecycle {
+    + handle_chunk_succeeded(id)
+    + reconcile_group_status(gid)
+    -- helpers --
+    - _record_telemetry(...)
+    - _write_terminal_snapshot(...)
+  }
+
+  RenderOrchestrator --> RenderLifecycle
+}
+
+package "fleet strategies" #EEDDFF {
+  interface FleetStrategy {
+    + cancel(provider_job_id)
+    + stop_monitoring(job_id)
+    + dispatch(...)
+  }
+  class VastFleetStrategy
+  class ModalFleetStrategy
+  class CommunityStrategy
+
+  VastFleetStrategy ..|> FleetStrategy
+  ModalFleetStrategy ..|> FleetStrategy
+  CommunityStrategy ..|> FleetStrategy
+}
+
+package "fleet clients" #FFE4FF {
+  class VastClient {
+    + destroy(instance_id)
+  }
+  note right of VastClient::destroy
+    httpx DELETE, timeout=30s
+  end note
+  class ModalClient {
+    + cancel_job(provider_job_id)
+  }
+  note right of ModalClient::cancel_job
+    Modal SDK gRPC call
+    (no httpx timeout to cap)
+  end note
+
+  VastFleetStrategy --> VastClient
+  ModalFleetStrategy --> ModalClient
+}
+
+package "repositories" #EEEEEE {
+  class JobRepository
+  class RenderGroupRepository
+  class InProgressChunkRepository
+  class OutputFrameRepository
+  class TelemetryRepository
+  class MachineRepository <<community only>>
+  class PendingAllocationRepository
+}
+
+Router --> JobService : update_status / register_outputs
+JobService --> CallbackRouter : success_notifier(jid)
+CallbackRouter --> RenderOrchestrator : on_job_succeeded
+RenderLifecycle --> JobRepository
+RenderLifecycle --> RenderGroupRepository
+RenderLifecycle --> InProgressChunkRepository
+RenderLifecycle --> OutputFrameRepository
+RenderLifecycle --> TelemetryRepository
+RenderLifecycle --> PendingAllocationRepository
+RenderLifecycle --> MachineRepository : community only
+RenderLifecycle --> FleetStrategy : eager cancel + stop_monitoring
+
+@enduml
+
+
+' ============================================================
+' Sequence — Vast fleet
+' ============================================================
+
+@startuml chunk_completion_vast
+
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+title Chunk completion — **Vast** fleet
+
+actor "Vast worker" as W
+participant "POST /register-outputs" as R
+participant "JobService" as JS
+participant "CallbackRouter" as CR
+participant "RenderLifecycle" as RL
+participant "VastFleetStrategy" as VS
+participant "VastClient" as VC
+database "Postgres" as PG
+database "Redis" as RD
+participant "Vast.ai API" as VAST
+
+W ->> R : POST register-outputs (last frame)
+R -> JS : register_outputs(id, files)
+JS -> PG : INSERT output_frames\nupdate progress
+JS --> R : completion_reached=True
+
+R -> JS : notify_completion(id)
+JS -> CR : route(SUCCESS)
+CR -> CR : is_job_terminal? (PG read)
+CR -> RL : handle_chunk_succeeded(id)
+
+RL -> PG : get_raw_by_id(id)
+note right: redundant w/ is_job_terminal\n(both load same row)
+
+RL -> PG : in_progress.release(group, chunk)
+RL -> PG : **mark_done(id)** -- status=done **(early!)**
+note right
+  After this point, any concurrent
+  monitor tick reading the job
+  sees status=done and exits
+  cleanly via the success path.
+end note
+
+== Eager provider cleanup (step 6a) ==
+RL -> VS : cancel(vast_job_id)
+VS -> VC : destroy(instance_id)
+VC ->> VAST : **httpx DELETE /instances/{id}**\ntimeout=30s
+note right: 5–30 s under load.\nThis is the slow part\nof the entire chain.
+VAST -->> VC : 200 / 204
+VC --> VS
+VS --> RL
+
+RL -> VS : stop_monitoring(id)
+note right: kills per-job monitor\nthread (in-process). <1ms
+
+RL -> PG : INSERT render_telemetry
+
+== Group rollup (step 9) ==
+RL -> PG : group + jobs + output_frames + pending_alloc reads (4 queries)
+RL -> RL : compute_group_status (pure)
+alt status changed
+  RL -> PG : update render_groups.status
+  alt terminal (done/failed)
+    RL -> PG : write_terminal_snapshot (3 queries)
+  end
+end
+
+RL --> CR
+CR --> JS
+JS --> R
+R -->> W : 200 OK (or worker has timed out at 30s — server still finishes)
+
+note over W, VAST
+  **No drain step.**  The
+  AllocationDispatchQueueDaemon
+  picks up the freed cap headroom
+  on its next ~2 s tick.
+end note
+
+@enduml
+
+
+' ============================================================
+' Sequence — Modal fleet
+' ============================================================
+
+@startuml chunk_completion_modal
+
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+title Chunk completion — **Modal** fleet
+
+actor "Modal worker" as W
+participant "POST /register-outputs" as R
+participant "JobService" as JS
+participant "CallbackRouter" as CR
+participant "RenderLifecycle" as RL
+participant "ModalFleetStrategy" as MS
+participant "ModalClient" as MC
+database "Postgres" as PG
+database "Redis" as RD
+participant "Modal control plane" as MOD
+
+W ->> R : POST register-outputs (last frame)
+R -> JS : register_outputs(id, files)
+JS -> PG : INSERT output_frames\nupdate progress
+JS --> R : completion_reached=True
+
+R -> JS : notify_completion(id)
+JS -> CR : route(SUCCESS)
+CR -> CR : is_job_terminal? (PG read)
+CR -> RL : handle_chunk_succeeded(id)
+
+RL -> PG : get_raw_by_id(id)
+RL -> RL : _fire_modal_terminal_hook_if_modal
+RL -> RD : ZREM modal active_jobs
+
+RL -> PG : in_progress.release(group, chunk)
+RL -> PG : **mark_done(id)** -- status=done **(early!)**
+
+== Eager provider cleanup (step 6a) ==
+RL -> MS : cancel(modal_function_call_id)
+MS -> MC : cancel_job(fc-...)
+MC ->> MOD : **modal.FunctionCall\n.from_id(id).cancel()**\n(gRPC, no http timeout)
+note right: 5–20 s typical.\nNo httpx timeout to cap;\nrelies on Modal SDK's\ninternal timeouts.
+MOD -->> MC
+MC --> MS
+MS --> RL
+
+RL -> MS : stop_monitoring(id)
+note right: kills per-job ModalJobMonitor\nthread. <1ms
+
+RL -> PG : INSERT render_telemetry
+
+== Group rollup (step 9) ==
+RL -> PG : group + jobs + output_frames + pending_alloc reads (4 queries)
+RL -> RL : compute_group_status (pure)
+alt status changed
+  RL -> PG : update render_groups.status
+  alt terminal
+    RL -> PG : write_terminal_snapshot (3 queries)
+  end
+end
+
+RL --> CR
+CR --> JS
+JS --> R
+R -->> W : 200 OK (or timed out; server still finishes)
+
+note over W, MOD
+  Same shape as Vast.  Differences:
+  • Adds Redis ZREM on Modal active_jobs tracker
+  • Cancel is gRPC (Modal SDK), not httpx
+end note
+
+@enduml
+
+
+' ============================================================
+' Sequence — Community fleet
+' ============================================================
+
+@startuml chunk_completion_community
+
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+title Chunk completion — **Community** fleet (desktop agent)
+
+actor "Desktop agent" as W
+participant "PUT /jobs/{id}/status\nor\nPOST /register-outputs" as R
+participant "JobService" as JS
+participant "CallbackRouter" as CR
+participant "RenderLifecycle" as RL
+participant "CommunityStrategy" as CS
+database "Postgres" as PG
+database "Redis" as RD
+
+W ->> R : PUT status=done (with output_files)\nor POST register-outputs (last frame)
+R -> JS : update_status / register_outputs
+JS -> PG : INSERT output_frames\nupdate progress\nset jobs.status=done (status path)
+JS --> R : needs_completion / completion_reached = True
+
+R -> JS : notify_completion(id)
+JS -> CR : route(SUCCESS)
+CR -> CR : is_job_terminal? (PG read)
+note right of CR
+  On the status=done path the row
+  is **already** terminal here, so
+  the chain short-circuits.  This
+  is fine — the heavy work
+  happened inline in update_status.
+end note
+CR -> RL : handle_chunk_succeeded(id)\n(only if not already terminal)
+
+RL -> PG : get_raw_by_id(id)
+RL -> PG : in_progress.release(group, chunk)
+RL -> PG : mark_done(id)
+
+== Eager provider cleanup (step 6a) ==
+RL -> CS : cancel(provider_job_id="")
+note right: **No-op for community.**\nNo provider, no API to call.\nstrategy.cancel short-circuits\non empty provider_job_id.
+RL -> CS : stop_monitoring(id)
+note right: Community uses singleton\nCommunityMonitor — no per-job\nthread to stop.  Also a no-op.
+
+== Community-only step 7 ==
+RL -> PG : machine_repo.update_status(\nmachine_id, 'available')
+note right
+  Vast/Modal jobs have NO machine
+  row, so this only fires for
+  community.  Allocator can return
+  this PC for the next dispatch.
+end note
+
+RL -> PG : INSERT render_telemetry
+
+== Group rollup (step 9) ==
+RL -> PG : group + jobs + output_frames + pending_alloc reads
+RL -> PG : update render_groups.status (if changed)\nwrite_terminal_snapshot (if terminal)
+
+RL --> CR
+CR --> JS
+JS --> R
+R -->> W : 200 OK
+
+note over W
+  Community has TWO trigger paths:
+  1. **PUT /status** — agent reports done first.
+     update_status sets status=done synchronously,
+     then notify_completion runs the rest.
+  2. **POST /register-outputs** — for the agent's
+     last-file path.  Same shape as Vast/Modal.
+end note
+
+@enduml
+
+
+' ============================================================
+' Per-fleet diff summary (cheat sheet)
+' ============================================================
+
+@startuml chunk_completion_diff
+
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+title Per-fleet diff at the steps that vary
+
+note as N
+  **Common to all fleets** (steps 1–5, 8–9):
+    is_job_terminal check, get_raw_by_id, in_progress.release,
+    mark_done, telemetry, group reconcile, terminal snapshot.
+    All cheap PG hops (~50 ms total with Singapore PG).
+end note
+
+note as V #DDEEFF
+  **Vast fleet** (extras):
+    6a. VastClient.destroy(instance_id) — httpx DELETE, **5–30 s**
+    6b. stop_monitoring — kills per-job VastInstanceMonitor thread
+    Step 7: skipped (no machine row)
+    Step 3 (Modal hook): skipped
+end note
+
+note as M #FFE4FF
+  **Modal fleet** (extras):
+    Step 3: ZREM modal:active_jobs (Redis, <5 ms)
+    6a. ModalClient.cancel_job — Modal SDK gRPC, **5–20 s**
+    6b. stop_monitoring — kills per-job ModalJobMonitor thread
+    Step 7: skipped
+end note
+
+note as C #DDFFDD
+  **Community fleet** (extras):
+    6a. cancel — **no-op** (empty provider_job_id short-circuits)
+    6b. stop_monitoring — **no-op** (singleton CommunityMonitor)
+    Step 7: machine_repo.update_status('available') — frees the PC
+    Step 3: skipped
+    Trigger paths: PUT /status OR POST /register-outputs
+end note
+
+@enduml

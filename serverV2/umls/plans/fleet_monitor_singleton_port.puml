@@ -1,0 +1,126 @@
+@startuml fleet_monitor_singleton_port
+'
+' Plan 3 — Per-job monitor → singleton scanner port
+'
+' Shows the AFTER state: each fleet has ONE singleton monitor thread
+' that scans all active jobs every 30s.  Replaces N per-job threads
+' (one per active render) with 3 fleet-level singletons.
+'
+' Memory math: 50 active Vast + 50 active Modal jobs go from
+' ~1010 MB long-lived thread overhead to ~35 MB.  Constant in active
+' job count.
+
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+
+title Plan 3 — Per-job monitor → singleton scanner port
+
+package "fleets/vast" #FFE4FF {
+  class VastFleetStrategy {
+    + dispatch()
+    + cancel(provider_job_id)
+  }
+  class VastFleetMonitor <<NEW, singleton>> {
+    + try_start()
+    - _loop()
+    - _tick()
+    - _inspect(row, inst)
+  }
+  class VastClient {
+    + destroy(instance_id)
+    + list()
+  }
+
+  VastFleetMonitor --> VastClient
+}
+
+note bottom of VastFleetMonitor
+  Per-tick scan (every 30s):
+   1. SELECT active Vast rows from PG (1 query)
+   2. vast_client.list() — 1 API call, fleet-wide
+   3. for row: _inspect(row, fleet[row.id])
+  _inspect ports VastInstanceMonitor._tick
+  decision blocks verbatim.
+end note
+
+note bottom of VastClient
+  list() is the new bulk endpoint:
+  GET /instances/?owner=me
+  Returns every instance on the account.
+end note
+
+package "fleets/modal" #FFE4FF {
+  class ModalFleetStrategy
+  class ModalFleetMonitor <<NEW, singleton>> {
+    + try_start()
+    - _loop()
+    - _tick()
+    - _inspect(row)
+  }
+
+  ModalFleetStrategy --> ModalFleetMonitor
+}
+
+note bottom of ModalFleetMonitor
+  No Modal API call per tick.
+  Modal's per-job tick already reads only PG + Redis.
+  SDK cancel only fires on terminal events.
+end note
+
+package "fleets/community" #DDFFDD {
+  class CommunityMonitor <<singleton, unchanged>> {
+    + try_start()
+  }
+}
+
+package "monitor_lock" #DDEEFF {
+  class MonitorLockSweeper <<runs every 30 s>>
+
+  class MonitorLockVastSweepStrategy <<collapsed>>
+  class MonitorLockModalSweepStrategy <<collapsed>>
+  class MonitorLockCommunitySweepStrategy
+  class MonitorLockGroupAuditSweepStrategy <<NEW>>
+
+  MonitorLockSweeper --> MonitorLockVastSweepStrategy
+  MonitorLockSweeper --> MonitorLockModalSweepStrategy
+  MonitorLockSweeper --> MonitorLockCommunitySweepStrategy
+  MonitorLockSweeper --> MonitorLockGroupAuditSweepStrategy
+  MonitorLockVastSweepStrategy --> VastFleetMonitor
+  MonitorLockModalSweepStrategy --> ModalFleetMonitor
+  MonitorLockCommunitySweepStrategy --> CommunityMonitor
+}
+
+note bottom of MonitorLockVastSweepStrategy
+  sweep() => vast_fleet_monitor.try_start()
+  All four sweep strategies now share the
+  same shape — same as community today.
+end note
+
+note bottom of MonitorLockGroupAuditSweepStrategy
+  sweep() iterates active render_groups,
+  calls lifecycle.reconcile_group_status(gid).
+  Closes group-status drift bug class:
+  chunks done but render_groups.status stuck.
+end note
+
+note as MEM #CCFFCC
+  **Memory under any load (active job count irrelevant):**
+   • 1 × VastFleetMonitor      = ~10 MB
+   • 1 × ModalFleetMonitor     = ~10 MB
+   • 1 × CommunityMonitor      = ~10 MB
+   • MonitorLockSweeper        = shared (~5 MB)
+   • **Total: ~35 MB**
+   Down from ~1010 MB at 50+50 active jobs.
+   Constant in active job count.  OOM as a class of failure: gone.
+end note
+
+note as DEL #FFE4B5
+  **Deleted:**
+   • vast/monitor/vast_instance_monitor.py
+   • vast/monitor/vast_monitor_manager.py
+   • modal/monitor/modal_job_monitor.py
+   • modal/monitor/modal_monitor_manager.py
+   • MonitorLockRepository.per_job_key()  (unused)
+end note
+
+@enduml

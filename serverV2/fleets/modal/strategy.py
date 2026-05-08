@@ -1,8 +1,13 @@
-"""ModalFleetStrategy — composes ModalClient + ModalMonitorManager + JobRepository.
+"""ModalFleetStrategy — composes ModalClient + JobRepository.
 
-Implements IFleetStrategy via composition.  After Phase 1 of the
-allocator redesign, the strategy reads ``task.gpu_type`` directly from
-the planned task — no machine_id → gpu_type lookup needed.
+Implements IFleetStrategy via composition.  Reads ``task.gpu_type``
+directly from the planned task — no machine_id → gpu_type lookup
+needed.
+
+Monitor lifecycle is owned by the singleton ``ModalFleetMonitor``, not
+by this strategy.  ``dispatch`` writes the row + provider job id and
+returns; the singleton's next 30s sweep observes the row and starts
+running its decision blocks.
 """
 
 from __future__ import annotations
@@ -14,7 +19,6 @@ from serverV2.config import ModalConfig
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
-from serverV2.fleets.modal.monitor import ModalMonitorManager
 from serverV2.repositories.job_repository import JobRepository
 
 log = logging.getLogger(__name__)
@@ -28,14 +32,12 @@ class ModalFleetStrategy:
         self,
         config: ModalConfig,
         client: ModalClient,
-        callback_handler: ModalMonitorManager,
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None],
         active_jobs_hooks: ModalActiveJobsHooks,
     ) -> None:
         self._cfg = config
         self._client = client
-        self._callback = callback_handler
         self._job_repo = job_repo
         self._on_failure = on_failure
         self._active_jobs_hooks = active_jobs_hooks
@@ -114,16 +116,8 @@ class ModalFleetStrategy:
             self._on_failure(job_id, error)
             return DispatchResult(job_id=job_id, machine_id="", status="failed", error=error)
 
-        self._callback.start_monitoring(
-            job_id=job_id,
-            provider_job_id=provider_job_id,
-            machine_id="",
-            blend_url=context.blend_url,
-            render_overrides_json=context.render_overrides_json,
-            group_id=context.group_id,
-            estimated_startup_sec=task.estimated_startup_seconds,
-        )
-
+        # No per-job monitor thread spawn -- the singleton ModalFleetMonitor
+        # picks up this row on its next 30s sweep.
         return DispatchResult(
             job_id=job_id,
             machine_id="",
@@ -135,7 +129,9 @@ class ModalFleetStrategy:
         self._client.cancel_job(provider_job_id)
 
     def stop_monitoring(self, job_id: str) -> None:
-        self._callback.stop_monitoring(job_id)
+        # No-op: the singleton ModalFleetMonitor drops per-job state on
+        # the next tick when it sees the row has gone terminal.
+        return
 
     def provider_job_id_from_job(self, job: dict[str, Any]) -> str | None:
         return (job.get("modal_function_call_id") or "").strip() or None

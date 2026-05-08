@@ -236,22 +236,19 @@ def download_zip(job_id: str):
 
 @router.post("/jobs/{job_id}/register-outputs")
 def register_outputs(job_id: str, body: dict):
-    """Worker tells us a file is in R2.  We record it and (on
-    completion) run the success-notifier chain (telemetry, group
-    reconcile, drain queue, possibly a new dispatch) inline.  Worker
-    waits for the full chain to finish — its HTTP client tolerates
-    up to 30s.
+    """Worker tells us a file is in R2.  We record it and return.
+    Chunk completion is detected by the fleet singleton on its next
+    tick (~10s), which fires the success chain through the standard
+    callback router path.  Keeping this route as a pure write avoids
+    the layering smudge of HTTP-time business logic.
     """
     filenames = body.get("filenames", [])
     if not filenames:
         raise HTTPException(400, "No filenames provided")
     try:
-        result = _get().register_outputs(job_id, filenames)
+        return _get().register_outputs(job_id, filenames)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
-    if result.get("completion_reached"):
-        _get().notify_completion(job_id)
-    return result
 
 
 # ---- user-triggered manual retry ----

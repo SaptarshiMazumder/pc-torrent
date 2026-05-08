@@ -365,11 +365,14 @@ class RenderLifecycle:
         # container in the meantime (re-downloading the blend, billing for
         # a duplicate render until the monitor catches up) and Modal keeps
         # billing the FunctionCall until cancelled.  Doing it here closes
-        # the window from up-to-poll-interval seconds to milliseconds.
-        # Best-effort — try/except + the monitor stays as the safety net.
-        # Community has no provider call (provider_job_id is empty), so the
-        # short-circuit no-ops; the agent's cancel-status poll handles the
-        # community equivalent.
+        # the window from up-to-30s to milliseconds.
+        # Best-effort — try/except + the singleton fleet monitor stays as
+        # the safety net.  Community has no provider call (provider_job_id
+        # is empty), so the short-circuit no-ops; the agent's cancel-status
+        # poll handles the community equivalent.
+        # No stop_monitoring call: with singleton fleet monitors there are
+        # no per-job threads to stop -- the next sweep tick observes the
+        # terminal status and drops in-memory state.
         try:
             provider_job_id = (
                 raw.get("vast_job_id")
@@ -380,7 +383,6 @@ class RenderLifecycle:
                 strategy = self._fleet.get(fleet)
                 if strategy is not None:
                     strategy.cancel(provider_job_id)
-                    strategy.stop_monitoring(job_id)
         except Exception as exc:
             log.warning(
                 "Eager provider cleanup for job %s failed (monitor will "

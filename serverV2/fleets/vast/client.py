@@ -116,6 +116,22 @@ class VastInstanceManager:
         data = resp.json()
         return data["instances"] if "instances" in data else data
 
+    def list(self) -> list[dict[str, Any]]:
+        """Return every instance currently rented on this account.  ONE
+        HTTP call replaces N per-job ``get(instance_id)`` calls per
+        sweep — the singleton VastFleetMonitor builds an in-memory dict
+        keyed by id and looks up each active job's instance from it.
+        """
+        resp = httpx.get(
+            f"{self._cfg.api_base}/instances/",
+            headers=_auth_headers(self._cfg),
+            params={"owner": "me"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return list(data.get("instances") or [])
+
     def destroy(self, instance_id: int) -> None:
         try:
             resp = httpx.delete(

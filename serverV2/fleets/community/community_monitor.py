@@ -194,8 +194,8 @@ class CommunityMonitor:
 
     def _check_pending_dispatch_timeout(self) -> None:
         """Fail community jobs stuck in 'pending' past the claim timeout.
-        Mirrors ``VastInstanceMonitor`` startup-timeout and
-        ``ModalJobMonitor`` in-queue-timeout: dispatch happened, agent
+        Mirrors ``VastFleetMonitor`` startup-timeout and
+        ``ModalFleetMonitor`` in-queue-timeout: dispatch happened, agent
         never claimed.  Failure flows through CallbackRouter ->
         release_machine_step (flips machine back to 'available') ->
         retry pipeline.

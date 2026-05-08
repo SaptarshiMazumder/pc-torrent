@@ -189,6 +189,8 @@ class Container:
         fleet_availability_snapshot_cache: FleetAvailabilitySnapshotCache,
         pre_render_estimator: PreRenderEstimator,
         scene_resolver: SceneResolver,
+        vast_client: VastClient,
+        modal_client: ModalClient,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -219,6 +221,11 @@ class Container:
         # state; safe to share.
         self.pre_render_estimator = pre_render_estimator
         self.scene_resolver = scene_resolver
+        # Provider clients exposed for the internal ghost-instance
+        # endpoints; the orchestrator destroys / cancels on behalf of
+        # the backup monitor (which scans + reports, never writes).
+        self.vast_client = vast_client
+        self.modal_client = modal_client
 
 
 def build(
@@ -784,4 +791,6 @@ def build(
         fleet_availability_snapshot_cache=fleet_availability_snapshot_cache,
         pre_render_estimator=pre_render_estimator,
         scene_resolver=scene_resolver,
+        vast_client=vast_client,
+        modal_client=modal_client,
     )

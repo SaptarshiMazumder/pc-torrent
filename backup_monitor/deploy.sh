@@ -29,6 +29,7 @@ read_env() {
 DATABASE_URL="$(read_env DATABASE_URL)"   || { echo "ERROR: DATABASE_URL not in $ENV_FILE"; exit 1; }
 REDIS_URL="$(read_env REDIS_URL)"         || { echo "ERROR: REDIS_URL not in $ENV_FILE"; exit 1; }
 ORPHAN_SECRET="$(read_env ORPHAN_SECRET)" || { echo "ERROR: ORPHAN_SECRET not in $ENV_FILE (shared with serverV2)"; exit 1; }
+VAST_API_KEY="$(read_env VAST_API_KEY)"   || { echo "ERROR: VAST_API_KEY not in $ENV_FILE (shared with serverV2; needed for ghost-instance scan)"; exit 1; }
 
 REGION="${REGION:-asia-northeast1}"
 JOB_NAME="${JOB_NAME:-pcrent-backup-monitor}"
@@ -71,7 +72,8 @@ gcloud run jobs deploy "$JOB_NAME" \
     --set-env-vars "DATABASE_URL=$DATABASE_URL" \
     --set-env-vars "REDIS_URL=$REDIS_URL" \
     --set-env-vars "ORCHESTRATOR_URL=$ORCHESTRATOR_URL" \
-    --set-env-vars "ORPHAN_SECRET=$ORPHAN_SECRET"
+    --set-env-vars "ORPHAN_SECRET=$ORPHAN_SECRET" \
+    --set-env-vars "VAST_API_KEY=$VAST_API_KEY"
 
 # --- 2. Grant the scheduler service account permission to invoke the job ---
 echo ""

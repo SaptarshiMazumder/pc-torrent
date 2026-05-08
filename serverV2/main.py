@@ -120,7 +120,13 @@ def _wire_routers(c: Container) -> None:
     pre_render.init(c.pre_render_estimator)
     assets.init(c.asset_service)
     debug.init(aggregator=c.status_aggregator)
-    internal.init(c.callback_router, c.config.orphan_secret)
+    internal.init(
+        c.callback_router,
+        c.config.orphan_secret,
+        vast_client=c.vast_client,
+        modal_client=c.modal_client,
+        job_repo=c.job_repo,
+    )
     admin_config.init(c.allocation_client)
 
     app.include_router(health.router)

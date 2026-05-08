@@ -199,7 +199,7 @@ export default function Sidebar({
         <span className="sidebar-brand-mark">
           <CubeLogo />
         </span>
-        <span className="sidebar-brand-text">PC Rent</span>
+        <span className="sidebar-brand-text">Forge</span>
       </div>
 
       <div className="sidebar-mode" ref={modeWrapRef}>

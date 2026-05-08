@@ -41,6 +41,11 @@ from serverV2.orchestrator.lifecycle_job_termination.termination_pipeline_builde
 #        - branch A (lost CAS):              skip
 #        - branch B + retried:               skip
 #        - branch B + not retried:           reconcile
+#   7. release_terminal_group_resources()   -> drain dispatch + pending
+#                                              queues iff reconcile_group
+#                                              flipped the group terminal
+#                                              (self-gating; no-op when
+#                                              the group is still active)
 # ---------------------------------------------------------------------
 
 FAILURE_PIPELINE = (
@@ -51,6 +56,7 @@ FAILURE_PIPELINE = (
     .release_machine_if_community()
     .log_failure_outcome()
     .reconcile_group(only_if_not_retried_and_owned=True)
+    .release_terminal_group_resources()
     .build()
 )
 
@@ -70,6 +76,11 @@ FAILURE_PIPELINE = (
 # 6. try_retry(requires_we_own_retry=False)  -> re-dispatch missing frames
 #                                              to a different worker
 # 7. reconcile_group()                       -> always (no gating)
+# 8. release_terminal_group_resources()      -> drain dispatch + pending
+#                                              queues iff reconcile_group
+#                                              flipped the group terminal
+#                                              (self-gating; no-op when
+#                                              the group is still active)
 # ---------------------------------------------------------------------
 
 CANCEL_PIPELINE = (
@@ -81,5 +92,6 @@ CANCEL_PIPELINE = (
     .cancel_provider()
     .try_retry(requires_we_own_retry=False)
     .reconcile_group(only_if_not_retried_and_owned=False)
+    .release_terminal_group_resources()
     .build()
 )

@@ -21,6 +21,9 @@ from serverV2.orchestrator.lifecycle_job_termination.steps.release_ledger_uncond
     ReleaseLedgerUnconditionalStep,
 )
 from serverV2.orchestrator.lifecycle_job_termination.steps.release_machine_step import ReleaseMachineStep
+from serverV2.orchestrator.lifecycle_job_termination.steps.release_terminal_group_resources_step import (
+    ReleaseTerminalGroupResourcesStep,
+)
 from serverV2.orchestrator.lifecycle_job_termination.steps.stop_monitor_step import StopMonitorStep
 from serverV2.orchestrator.lifecycle_job_termination.steps.termination_step import TerminationStep
 from serverV2.orchestrator.lifecycle_job_termination.steps.try_retry_step import TryRetryStep
@@ -31,6 +34,7 @@ __all__ = [
     "ReleaseMachineStep",
     "ReleaseLedgerAtomicCasStep",
     "ReleaseLedgerUnconditionalStep",
+    "ReleaseTerminalGroupResourcesStep",
     "StopMonitorStep",
     "CancelProviderStep",
     "TryRetryStep",

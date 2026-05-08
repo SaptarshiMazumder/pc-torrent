@@ -31,7 +31,9 @@ import logging
 from typing import Any
 
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
-from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.orchestrator.lifecycle_job_termination.execution.terminal_group_resource_releaser import (
+    TerminalGroupResourceReleaser,
+)
 from serverV2.orchestrator.lifecycle_job_termination.steps import (
     CancelProviderStep,
     MarkTerminalStep,
@@ -59,14 +61,14 @@ class RenderCanceler:
         *,
         group_repo: RenderGroupRepository,
         job_repo: JobRepository,
-        allocation_client: AllocationClient,
+        terminal_group_resource_releaser: TerminalGroupResourceReleaser,
         in_progress_repo: InProgressChunkRepository,
         deps: LifecycleDeps,
         modal_active_jobs_hooks: ModalActiveJobsHooks,
     ) -> None:
         self._group_repo = group_repo
         self._job_repo = job_repo
-        self._allocation = allocation_client
+        self._terminal_group_resource_releaser = terminal_group_resource_releaser
         self._in_progress = in_progress_repo
         self._deps = deps
         self._modal_active_jobs_hooks = modal_active_jobs_hooks
@@ -120,11 +122,11 @@ class RenderCanceler:
 
         # Pass 4 -- drain both queues + release every chunk slot for
         # the group.  Group-scoped operations; no per-job iteration.
-        # Allocation-side facade owns the deletes; canceler stays out
-        # of the queue repos.
-        drained = self._allocation.drain_for_group(group_id)
-        if drained:
-            log.info("Group %s: drained %d allocation row(s) (dispatch + pending)", group_id, drained)
+        # Drain goes through TerminalGroupResourceReleaser so there's
+        # exactly one method in the codebase that knows how to drain;
+        # the releaser sees status=cancelled (written in Pass 1) and
+        # fires.  Canceler stays out of the queue repos.
+        self._terminal_group_resource_releaser.release(group_id)
         self._in_progress.release_all(group_id)
 
         # Pass 5 -- provider-side cancellation (slowest; may RPC out).

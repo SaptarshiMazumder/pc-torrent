@@ -24,6 +24,7 @@ from serverV2.orchestrator.lifecycle_job_termination.steps import (
     ReleaseLedgerAtomicCasStep,
     ReleaseLedgerUnconditionalStep,
     ReleaseMachineStep,
+    ReleaseTerminalGroupResourcesStep,
     StopMonitorStep,
     TerminationStep,
     TryRetryStep,
@@ -103,6 +104,10 @@ class TerminationPipelineBuilder:
                 only_if_not_retried_and_owned=only_if_not_retried_and_owned,
             ),
         )
+        return self
+
+    def release_terminal_group_resources(self) -> "TerminationPipelineBuilder":
+        self._steps.append(ReleaseTerminalGroupResourcesStep())
         return self
 
     # ------------------------------------------------------------------

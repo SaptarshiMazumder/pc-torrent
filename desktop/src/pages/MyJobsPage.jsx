@@ -21,22 +21,11 @@ import {
 import JobGrid from "../components/jobs/JobGrid";
 import JobDetailView from "../components/jobs/JobDetailView";
 import FrameViewerModal from "../components/jobs/FrameViewerModal";
+import Loader from "../components/common/Loader";
 import { useDownloads } from "../contexts/DownloadContext";
 import { useError } from "../contexts/ErrorContext";
 
 const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
-
-function SpinnerIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <circle cx="10" cy="10" r="7.5" stroke="currentColor" strokeWidth="2"
-        strokeDasharray="14 8" strokeLinecap="round">
-        <animateTransform attributeName="transform" type="rotate"
-          from="0 10 10" to="360 10 10" dur="0.8s" repeatCount="indefinite" />
-      </circle>
-    </svg>
-  );
-}
 
 export default function MyJobsPage({
   ongoingJobs,
@@ -224,7 +213,9 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
         setTerminalDetailInCache(selectedJobId, data);
       })
       .catch(() => {
-        // Stays null — spinner stays visible.  User can click "Back to list".
+        // Network error -- terminal data stays unfilled.  The detail view
+        // already renders off the slim list DTO so the user just doesn't
+        // get the rich panels until they hit Refresh.
       });
     return () => {
       cancelled = true;
@@ -382,7 +373,7 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
           </div>
           {loadingOngoing && ongoingJobs.length === 0 ? (
             <div className="myjobs-section-loader">
-              <SpinnerIcon />
+              <Loader size="sm" />
             </div>
           ) : (
             <JobGrid
@@ -398,7 +389,7 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
           )}
           {loadingMoreOngoing && (
             <div className="myjobs-section-loader">
-              <SpinnerIcon />
+              <Loader size="sm" />
             </div>
           )}
         </section>
@@ -414,7 +405,7 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
           </div>
           {loadingPast && pastJobs.length === 0 ? (
             <div className="myjobs-section-loader">
-              <SpinnerIcon />
+              <Loader size="sm" />
             </div>
           ) : (
             <JobGrid
@@ -430,7 +421,7 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
           )}
           {loadingMorePast && (
             <div className="myjobs-section-loader">
-              <SpinnerIcon />
+              <Loader size="sm" />
             </div>
           )}
         </section>

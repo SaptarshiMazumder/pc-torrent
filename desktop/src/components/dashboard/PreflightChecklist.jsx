@@ -1,3 +1,5 @@
+import Loader from "../common/Loader";
+
 export default function PreflightChecklist({ steps }) {
   if (!steps || steps.length === 0) return null;
 
@@ -31,7 +33,7 @@ export default function PreflightChecklist({ steps }) {
           >
             <span className="preflight-step-icon">
               {step.status === "running" && (
-                <span className="spinner spinner--small" />
+                <Loader size="sm" />
               )}
               {step.status === "passed" && (
                 <span className="icon-check">&#10003;</span>

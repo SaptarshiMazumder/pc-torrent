@@ -1,5 +1,6 @@
 import { connectAgent, disconnectAgent } from "../../services/sidecar";
 import { getFirebaseToken } from "../../services/api";
+import Loader from "../common/Loader";
 
 export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
   const isConnected = ["connected", "rendering", "paused"].includes(status);
@@ -40,12 +41,12 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
     >
       {preflightRunning ? (
         <>
-          <span className="spinner" />
+          <Loader size="sm" />
           Checking...
         </>
       ) : connectRunning ? (
         <>
-          <span className="spinner" />
+          <Loader size="sm" />
           Connecting...
         </>
       ) : isConnected ? (

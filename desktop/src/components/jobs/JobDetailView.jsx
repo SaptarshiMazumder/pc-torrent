@@ -7,7 +7,6 @@ import {
   getLatestTaskWithOutput,
 } from "../../utils/jobUtils";
 import JobThumbnail from "./JobThumbnail";
-import loaderGif from "../../assets/animations/heartbeat-loader.gif";
 import { useLiveCostTick, liveActualCost } from "../../hooks/useLiveCostTick";
 import VastInstancePanel from "./VastInstancePanel";
 import ModalInstancePanel from "../ModalInstancePanel";
@@ -16,6 +15,7 @@ import FrameGalleryPanel from "./FrameGalleryPanel";
 import HeavinessPanel from "./HeavinessPanel";
 import FailedChunksPanel from "./FailedChunksPanel";
 import PendingChunksPanel from "./PendingChunksPanel";
+import Loader from "../common/Loader";
 import { usePendingQueue } from "../../hooks/usePendingQueue";
 
 const DRAWER_TITLES = {
@@ -210,7 +210,9 @@ function RenderGroupDetail({
               </div>
             </div>
           ) : (
-            <img src={loaderGif} alt="Rendering..." className="jd-preview-loader-bare" />
+            <div className="jd-preview-loader-wrap">
+              <Loader />
+            </div>
           )}
 
           <div className={`jd-actions${latestOutputFile ? "" : " jd-actions--centered"}`}>

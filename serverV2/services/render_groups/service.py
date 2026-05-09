@@ -325,6 +325,7 @@ class RenderGroupService:
 
     def list_with_status_page(
         self, user_id: str, *, limit: int, offset: int,
+        status_group: str | None = None,
     ) -> dict[str, Any]:
         """List endpoint hot path -- paginated.
 
@@ -334,10 +335,15 @@ class RenderGroupService:
         machines in a single batched query — N+1 collapsed to 3 queries
         regardless of page size.
 
+        ``status_group`` (``"active"`` | ``"terminal"`` | ``None``) lets
+        callers paginate the two halves of the user's history
+        independently, so the desktop's "Ongoing" and "Past" sections
+        each get their own offset cursor.
+
         Returns ``{"groups": [...], "has_more": bool}``.
         """
         groups, has_more = self._groups.get_by_user_page(
-            user_id, limit=limit, offset=offset,
+            user_id, limit=limit, offset=offset, status_group=status_group,
         )
         if not groups:
             return {"groups": [], "has_more": False}

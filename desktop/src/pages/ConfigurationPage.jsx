@@ -207,6 +207,9 @@ function FrameAllocationSection({ draft, update }) {
             onChange={(v) => setIn("weights", "vram_safety_factor", v)} />
           <RatioSlider label="startup_amortization_ratio" value={w.startup_amortization_ratio}
             onChange={(v) => setIn("weights", "startup_amortization_ratio", v)} />
+          <RatioSlider label="chunk_count_curve" value={w.chunk_count_curve}
+            min={0.3} max={3} step={0.1} precision={1}
+            onChange={(v) => setIn("weights", "chunk_count_curve", v)} />
         </div>
       </SectionCard>
 

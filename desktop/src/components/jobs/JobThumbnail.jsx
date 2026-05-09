@@ -1,4 +1,6 @@
+import { useEffect, useRef, useState } from "react";
 import { getGroupPreviewUrl, getSingleJobPreviewUrl } from "../../utils/jobUtils";
+import { getCachedFramePreview } from "../../services/frameCache";
 
 function BlenderLogo() {
   return (
@@ -31,12 +33,58 @@ function BlenderLogo() {
   );
 }
 
+// Stable cache key for the latest-output preview, keyed on the actual
+// frame so a render that produces newer frames busts in the natural way
+// (new key => fresh fetch + cache write; old key's file is harmlessly
+// abandoned on disk).
+function previewCacheKey(job) {
+  if (job?.group_id) {
+    if (job.latest_output_job_id && job.latest_output_file) {
+      return `${job.latest_output_job_id}/${job.latest_output_file}`;
+    }
+    return null;
+  }
+  if (job?.job_id) {
+    const file = job.latest_output_file
+      || (Array.isArray(job.output_files) && job.output_files[job.output_files.length - 1])
+      || null;
+    if (!file) return null;
+    return `${job.job_id}/${file}`;
+  }
+  return null;
+}
+
 export default function JobThumbnail({ job, authToken, backendUrl, className }) {
   const previewUrl = job?.group_id
     ? getGroupPreviewUrl(job, backendUrl, authToken)
     : getSingleJobPreviewUrl(job, backendUrl, authToken);
+  const cacheKey = previewCacheKey(job);
 
-  if (!previewUrl) {
+  const [src, setSrc] = useState("");
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!previewUrl || !cacheKey) {
+      setSrc("");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const localUrl = await getCachedFramePreview(previewUrl, cacheKey);
+        if (!cancelled && mountedRef.current) setSrc(localUrl);
+      } catch {
+        // Leave src empty -> placeholder shows.  Avoids broken-image icon.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [previewUrl, cacheKey]);
+
+  if (!previewUrl || !cacheKey || !src) {
     return (
       <div className={`job-thumb-placeholder ${className || ""}`}>
         <BlenderLogo />
@@ -47,7 +95,7 @@ export default function JobThumbnail({ job, authToken, backendUrl, className }) 
   return (
     <img
       className={`job-thumb-img ${className || ""}`}
-      src={previewUrl}
+      src={src}
       alt="Render preview"
       loading="lazy"
     />

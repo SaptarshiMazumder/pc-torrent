@@ -26,7 +26,42 @@ import { useError } from "../contexts/ErrorContext";
 
 const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
 
-export default function MyJobsPage({ jobs, loading, loadingMore, hasMore, loadMore, removeJob, backendUrl, markRenderGroupCancelled, updateGroup, onRefresh, onNavigate }) {
+function SpinnerIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <circle cx="10" cy="10" r="7.5" stroke="currentColor" strokeWidth="2"
+        strokeDasharray="14 8" strokeLinecap="round">
+        <animateTransform attributeName="transform" type="rotate"
+          from="0 10 10" to="360 10 10" dur="0.8s" repeatCount="indefinite" />
+      </circle>
+    </svg>
+  );
+}
+
+export default function MyJobsPage({
+  ongoingJobs,
+  pastJobs,
+  loadingOngoing,
+  loadingPast,
+  loadingMoreOngoing,
+  loadingMorePast,
+  hasMoreOngoing,
+  hasMorePast,
+  loadMoreOngoing,
+  loadMorePast,
+  removeJob,
+  backendUrl,
+  markRenderGroupCancelled,
+  updateGroup,
+  onRefresh,
+  onNavigate,
+}) {
+  // Combined view for cross-section lookups (selection, gallery fetch).
+  // The two list slices stay separate for rendering + pagination.
+  const allJobs = useMemo(
+    () => [...ongoingJobs, ...pastJobs],
+    [ongoingJobs, pastJobs],
+  );
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [cancelingAll, setCancelingAll] = useState(false);
@@ -44,10 +79,10 @@ export default function MyJobsPage({ jobs, loading, loadingMore, hasMore, loadMo
 
   // If selected job gets removed, go back to grid
   useEffect(() => {
-    if (selectedJobId && !jobs.find((j) => jobKey(j) === selectedJobId)) {
+    if (selectedJobId && !allJobs.find((j) => jobKey(j) === selectedJobId)) {
       setSelectedJobId(null);
     }
-  }, [jobs, selectedJobId]);
+  }, [allJobs, selectedJobId]);
 
   // Auth token — refresh every 10 minutes
   useEffect(() => {
@@ -160,7 +195,7 @@ export default function MyJobsPage({ jobs, loading, loadingMore, hasMore, loadMo
     [fetchFrameGallery, openFrameGalleries]
   );
 
-const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId) : null;
+const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJobId) : null;
   const selectedStatus = selectedJob?.status;
   const isTerminalSelection = !!selectedStatus && TERMINAL_STATUSES.has(selectedStatus);
 
@@ -220,7 +255,27 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
 
   const handleSelectJob = useCallback((id) => {
     setSelectedJobId(id);
+    // Default the frames gallery to open on each navigation.  The
+    // useEffect below kicks the actual fetch when needed.
+    setOpenFrameGalleries((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
   }, []);
+
+  // First-time fetch for the frames gallery when a job is selected and
+  // its gallery is open (which it is by default after handleSelectJob).
+  // Guarded on the *presence* of an entry, not on its file count, so
+  // that the in-flight ``loading: true, files: []`` snapshot doesn't
+  // re-trigger this effect each time setFrameGalleries fires from
+  // inside fetchFrameGallery -- otherwise polling-driven allJobs
+  // updates would stampede the /outputs endpoint.  The Refresh button
+  // calls fetchFrameGallery directly when the user wants a re-fetch.
+  useEffect(() => {
+    if (!selectedJobId) return;
+    if (!openFrameGalleries[selectedJobId]) return;
+    if (frameGalleries[selectedJobId]) return;
+    const job = allJobs.find((j) => jobKey(j) === selectedJobId);
+    if (!job) return;
+    void fetchFrameGallery(job, { silent: false });
+  }, [selectedJobId, openFrameGalleries, frameGalleries, allJobs, fetchFrameGallery]);
 
   const handleBack = useCallback(() => {
     setSelectedJobId(null);
@@ -296,14 +351,11 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
       {!selectedJob && (
         <div className="page-header">
           <h2>My Jobs</h2>
-          <span className="log-count">
-            {jobs.length} job{jobs.length !== 1 ? "s" : ""}
-          </span>
           <button
             className="btn btn-danger"
             type="button"
             onClick={handleCancelAll}
-            disabled={cancelingAll || jobs.length === 0}
+            disabled={cancelingAll || ongoingJobs.length === 0}
             style={{ marginLeft: "auto" }}
           >
             {cancelingAll ? "Cancelling..." : "Cancel All"}
@@ -312,36 +364,76 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
             className="btn btn-secondary"
             type="button"
             onClick={onRefresh}
-            disabled={loading}
+            disabled={loadingOngoing || loadingPast}
             style={{ marginLeft: 8 }}
           >
-            {loading ? "Refreshing..." : "Refresh"}
+            {(loadingOngoing || loadingPast) ? "Refreshing..." : "Refresh"}
           </button>
         </div>
       )}
 
-      {!selectedJob && jobs.length === 0 && (
-        <div className="empty-state">
-          <p>No jobs submitted yet.</p>
-          <p className="muted">Go to Create Render to start your first job.</p>
-        </div>
+      {!selectedJob && (loadingOngoing || ongoingJobs.length > 0) && (
+        <section className="myjobs-section">
+          <div className="myjobs-section-head">
+            <h3>Ongoing renders</h3>
+            <span className="log-count">
+              {ongoingJobs.length}{hasMoreOngoing ? "+" : ""}
+            </span>
+          </div>
+          {loadingOngoing && ongoingJobs.length === 0 ? (
+            <div className="myjobs-section-loader">
+              <SpinnerIcon />
+            </div>
+          ) : (
+            <JobGrid
+              jobs={ongoingJobs}
+              authToken={authToken}
+              backendUrl={backendUrl}
+              onSelect={handleSelectJob}
+              onRemove={removeJob}
+              hasMore={hasMoreOngoing}
+              loadingMore={loadingMoreOngoing}
+              onLoadMore={loadMoreOngoing}
+            />
+          )}
+          {loadingMoreOngoing && (
+            <div className="myjobs-section-loader">
+              <SpinnerIcon />
+            </div>
+          )}
+        </section>
       )}
 
-      {!selectedJob && jobs.length > 0 && (
-        <JobGrid
-          jobs={jobs}
-          authToken={authToken}
-          backendUrl={backendUrl}
-          onSelect={handleSelectJob}
-          onRemove={removeJob}
-          hasMore={hasMore}
-          loadingMore={loadingMore}
-          onLoadMore={loadMore}
-        />
-      )}
-
-      {!selectedJob && loadingMore && (
-        <div className="myjobs-load-more">Loading more...</div>
+      {!selectedJob && (loadingPast || pastJobs.length > 0) && (
+        <section className="myjobs-section">
+          <div className="myjobs-section-head">
+            <h3>Past renders</h3>
+            <span className="log-count">
+              {pastJobs.length}{hasMorePast ? "+" : ""}
+            </span>
+          </div>
+          {loadingPast && pastJobs.length === 0 ? (
+            <div className="myjobs-section-loader">
+              <SpinnerIcon />
+            </div>
+          ) : (
+            <JobGrid
+              jobs={pastJobs}
+              authToken={authToken}
+              backendUrl={backendUrl}
+              onSelect={handleSelectJob}
+              onRemove={removeJob}
+              hasMore={hasMorePast}
+              loadingMore={loadingMorePast}
+              onLoadMore={loadMorePast}
+            />
+          )}
+          {loadingMorePast && (
+            <div className="myjobs-section-loader">
+              <SpinnerIcon />
+            </div>
+          )}
+        </section>
       )}
 
       {jobForDetail && (() => {

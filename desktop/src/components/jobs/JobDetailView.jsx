@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   STATUS_LABELS,
   isTerminalStatus,
@@ -18,31 +18,11 @@ import FailedChunksPanel from "./FailedChunksPanel";
 import PendingChunksPanel from "./PendingChunksPanel";
 import { usePendingQueue } from "../../hooks/usePendingQueue";
 
-const ACTIVE_DRAWER_KEY = "pcrent:jd_active_drawer:v1";
-
 const DRAWER_TITLES = {
   instances: "Instances",
   scene: "Scene",
   costs: "Costs",
 };
-
-function readActiveDrawer() {
-  try {
-    const v = localStorage.getItem(ACTIVE_DRAWER_KEY);
-    return v === "instances" || v === "scene" || v === "costs" ? v : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeActiveDrawer(value) {
-  try {
-    if (value) localStorage.setItem(ACTIVE_DRAWER_KEY, value);
-    else localStorage.removeItem(ACTIVE_DRAWER_KEY);
-  } catch {
-    // storage unavailable — drawer state simply won't persist
-  }
-}
 
 function BigGauge({ pct, color, label }) {
   const size = 96;
@@ -108,11 +88,10 @@ function RenderGroupDetail({
   const gaugeColor = job.status === "done" ? "#22c55e" : job.status === "failed" ? "#ef4444" : job.status === "cancelled" ? "#6b7280" : "#e8724a";
   const canViewFrames = availableOutputCount > 0;
 
-  const [activeDrawer, setActiveDrawer] = useState(readActiveDrawer);
+  const [activeDrawer, setActiveDrawer] = useState(null);
   const instancesOpen = activeDrawer === "instances";
   const sceneOpen = activeDrawer === "scene";
   const costsOpen = activeDrawer === "costs";
-  useEffect(() => { writeActiveDrawer(activeDrawer); }, [activeDrawer]);
   const toggleDrawer = (which) => setActiveDrawer((cur) => (cur === which ? null : which));
 
   const tasksList = job.tasks || [];
@@ -291,12 +270,16 @@ function RenderGroupDetail({
                 {galleryOpen && onRefreshFrames && (
                   <button
                     type="button"
-                    className="btn btn-secondary"
+                    className={`jd-frames-refresh${galleryState?.loading ? " jd-frames-refresh--spinning" : ""}`}
                     onClick={onRefreshFrames}
                     disabled={!!galleryState?.loading}
-                    style={{ padding: "4px 10px", fontSize: 12 }}
+                    title={galleryState?.loading ? "Refreshing..." : "Refresh frames"}
+                    aria-label="Refresh frames"
                   >
-                    {galleryState?.loading ? "Refreshing..." : "Refresh"}
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
+                      <path d="M21 3v5h-5" />
+                    </svg>
                   </button>
                 )}
               </div>
@@ -509,12 +492,16 @@ function SingleJobDetail({
             {galleryOpen && onRefreshFrames && (
               <button
                 type="button"
-                className="btn btn-secondary"
+                className={`jd-frames-refresh${galleryState?.loading ? " jd-frames-refresh--spinning" : ""}`}
                 onClick={onRefreshFrames}
                 disabled={!!galleryState?.loading}
-                style={{ padding: "4px 10px", fontSize: 12 }}
+                title={galleryState?.loading ? "Refreshing..." : "Refresh frames"}
+                aria-label="Refresh frames"
               >
-                {galleryState?.loading ? "Refreshing..." : "Refresh"}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
+                  <path d="M21 3v5h-5" />
+                </svg>
               </button>
             )}
           </div>

@@ -299,6 +299,13 @@ def _per_fleet_block(b: dict, ctx: str) -> dict[str, float]:
 
 def _weights(b: dict) -> AllocationWeights:
     ctx = "frame_allocation.weights"
+    # ``chunk_count_curve`` was added after this section was already
+    # populated in production Firestore docs.  Fall back to the dataclass
+    # default when the key is absent so old docs keep parsing; the strict
+    # parsers stay strict for every other (always-present) field.
+    chunk_count_curve = (
+        _float(b, ctx, "chunk_count_curve") if "chunk_count_curve" in b else 1.0
+    )
     return AllocationWeights(
         speed_weight=_float(b, ctx, "speed_weight"),
         cuda_weight=_float(b, ctx, "cuda_weight"),
@@ -309,6 +316,7 @@ def _weights(b: dict) -> AllocationWeights:
         gpu_type_diversification_cap=_float(b, ctx, "gpu_type_diversification_cap"),
         vram_safety_factor=_float(b, ctx, "vram_safety_factor"),
         startup_amortization_ratio=_float(b, ctx, "startup_amortization_ratio"),
+        chunk_count_curve=chunk_count_curve,
     )
 
 

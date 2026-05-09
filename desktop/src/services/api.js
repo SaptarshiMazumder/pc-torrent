@@ -324,8 +324,14 @@ export async function deleteInputFile(baseUrl, assetId) {
   });
 }
 
-export async function listRenderGroups(baseUrl, { limit = 5, offset = 0, signal } = {}) {
+export async function listRenderGroups(
+  baseUrl,
+  { limit = 5, offset = 0, statusGroup, signal } = {},
+) {
   const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (statusGroup === "active" || statusGroup === "terminal") {
+    qs.set("status_group", statusGroup);
+  }
   return apiFetch(baseUrl, `/render-groups?${qs.toString()}`, { signal });
 }
 

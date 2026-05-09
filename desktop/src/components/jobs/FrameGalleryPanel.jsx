@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import FrameThumb from "./FrameThumb";
 
-const FRAME_BATCH_SIZE = 2;
+const FRAME_BATCH_SIZE = 4;
 
 export default function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenFrame, backendUrl }) {
   const [visibleCount, setVisibleCount] = useState(FRAME_BATCH_SIZE);
@@ -20,7 +20,7 @@ export default function FrameGalleryPanel({ id, files, loading, error, openingFr
           setVisibleCount((n) => Math.min(n + FRAME_BATCH_SIZE, files.length));
         }
       },
-      { rootMargin: "200px" }
+      { rootMargin: "0px" }
     );
     observer.observe(el);
     return () => observer.disconnect();

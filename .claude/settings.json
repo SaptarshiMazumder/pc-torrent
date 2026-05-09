@@ -37,7 +37,8 @@
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\sapma\\\\OneDrive\\\\Desktop\\\\Projects\\\\PC_Rent\\\\pc-torrent\\\\desktop\" -Directory)",
       "Bash(node -e ' *)",
       "Bash(Get-ChildItem -Recurse -Directory)",
-      "Bash(Select-Object -ExpandProperty FullName)"
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(grep -rn '\"loader\\\\|className=.*\\\\\\\\bloader\\\\\\\\b\\\\|class=.*\\\\\\\\bloader\\\\\\\\b' \"c:\\\\Users\\\\sapma\\\\OneDrive\\\\Desktop\\\\Projects\\\\PC_Rent\\\\pc-torrent\\\\desktop\\\\src\" --include=\"*.jsx\" --include=\"*.js\")"
     ],
     "additionalDirectories": [
       "\\tmp"

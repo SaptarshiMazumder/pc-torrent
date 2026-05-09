@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import FrameThumb from "./FrameThumb";
+import Loader from "../common/Loader";
 
 const FRAME_BATCH_SIZE = 4;
 
@@ -32,7 +33,9 @@ export default function FrameGalleryPanel({ id, files, loading, error, openingFr
   return (
     <div className="job-frame-gallery">
       {loading && files.length === 0 && (
-        <div className="job-frame-gallery-empty">Loading frames...</div>
+        <div className="job-frame-gallery-empty">
+          <Loader />
+        </div>
       )}
       {!loading && !error && files.length === 0 && (
         <div className="job-frame-gallery-empty">No frames rendered yet — they'll appear here as machines complete them.</div>

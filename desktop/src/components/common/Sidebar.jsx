@@ -119,6 +119,19 @@ function NavIconLogs() {
   );
 }
 
+function NavIconConfiguration() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+      <circle cx="14" cy="6" r="2.5" fill="var(--bg-primary)" />
+      <circle cx="8" cy="12" r="2.5" fill="var(--bg-primary)" />
+      <circle cx="16" cy="18" r="2.5" fill="var(--bg-primary)" />
+    </svg>
+  );
+}
+
 function NavIconDashboard() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -156,7 +169,7 @@ const RENTEE_PAGES = [
   { id: "myjobs", label: "My Jobs", Icon: NavIconJobs },
   { id: "downloads", label: "Downloads", Icon: NavIconDownloads },
   { id: "available", label: "Available Machines", Icon: NavIconMachines },
-  { id: "configuration", label: "Configuration", Icon: NavIconMachines },
+  { id: "configuration", label: "Configuration", Icon: NavIconConfiguration },
   { id: "logs", label: "Logs", Icon: NavIconLogs },
 ];
 

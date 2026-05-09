@@ -5,6 +5,7 @@ import {
   createDistributedRenderGroup,
   confirmDistributedJob,
   cancelRenderGroup,
+  deleteRenderGroup,
   estimateRenderGroup,
   listInputFiles,
   renameInputFile,
@@ -26,7 +27,6 @@ import {
   getCachedAnalysis,
   setCachedAnalysis,
 } from "../utils/blendAnalysis";
-import HeavinessPanel from "../components/jobs/HeavinessPanel";
 import { useError } from "../contexts/ErrorContext";
 
 // ─── Flow stages ────────────────────────────────────────────
@@ -58,6 +58,35 @@ const SAVED_GROUPS = [
   { key: "earlier", label: "Earlier" },
 ];
 
+const HEAVY_FEATURE_LABELS = {
+  uses_subdivision: "Subdivision",
+  uses_displacement: "Displacement",
+  uses_particles: "Particles",
+  uses_geometry_nodes: "Geometry Nodes",
+  uses_subsurface_scattering: "SSS",
+  uses_volumetrics: "Volumetrics",
+};
+
+function formatStatNumber(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function formatStatBytes(bytes) {
+  if (typeof bytes !== "number" || bytes <= 0) return "—";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function heavyFeatureChips(heaviness) {
+  return Object.entries(HEAVY_FEATURE_LABELS)
+    .filter(([flag]) => Boolean(heaviness?.[flag]))
+    .map(([, label]) => label);
+}
+
 // ─── Reducer ────────────────────────────────────────────────
 
 const INITIAL_STATE = {
@@ -78,11 +107,17 @@ const INITIAL_STATE = {
   forceCameraName: "",
   viewLayerName: "",
   cameraRanges: [],
-  renderEngine: "scene_default",
-  // Resolution overrides — null means "use scene default"
+  // Editable render settings -- pre-filled by applyAnalysis() from the
+  // analyzer snapshot, then mutated by user edits.  No null/sentinel
+  // "scene default" branch: an unedited field IS the scene default
+  // because we pre-fill it.  Only fields the analyzer actually surfaces
+  // are exposed; we don't invent overrides for values the .blend
+  // never gave us.
+  renderEngine: "",
   resolutionX: null,
   resolutionY: null,
   resolutionPercentage: null,
+  cyclesSamples: null,
   // Upload / submission
   groupId: "",
   uploadProgress: 0,
@@ -169,6 +204,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     frameStart, frameEnd, frameStep,
     sceneName, cameraMode, forceCameraName, viewLayerName, cameraRanges, renderEngine,
     resolutionX, resolutionY, resolutionPercentage,
+    cyclesSamples,
     groupId, uploadProgress,
     error, analysisNote,
   } = state;
@@ -232,18 +268,11 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     [cameraMode, cameraRanges, frameRange],
   );
 
-  // Engine resolution mirrors handleStartRender's logic: explicit user
-  // override wins; otherwise fall back to whatever the analyzer detected
-  // for the active scene.  Used by both the pre-render estimate and the
-  // submit-time overrides body so cost preview matches the real submit.
-  const resolvedEngine = useMemo(() => {
-    if (renderEngine && renderEngine !== "scene_default") return renderEngine;
-    if (analysis && Array.isArray(analysis.scenes)) {
-      const active = analysis.scenes.find((s) => s?.is_active) || analysis.scenes[0] || null;
-      if (active?.engine) return active.engine;
-    }
-    return null;
-  }, [renderEngine, analysis]);
+  // After the pre-fill refactor, ``renderEngine`` always holds either
+  // the analyzer-detected engine (default) or the user's explicit
+  // override -- never the "scene_default" sentinel.  The cost-preview
+  // and submit paths therefore consume it directly.
+  const resolvedEngine = renderEngine || null;
 
   // Single source of truth for the render-overrides body.  Both
   // /pre-render/estimate and confirm-upload consume the same dict — the
@@ -271,8 +300,9 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       resolution_x: resolutionX,
       resolution_y: resolutionY,
       resolution_percentage: resolutionPercentage,
+      cycles_samples: cyclesSamples,
     },
-  }), [sceneName, cameraMode, forceCameraName, viewLayerName, cameraValidation, frameRange, resolvedEngine, resolutionX, resolutionY, resolutionPercentage]);
+  }), [sceneName, cameraMode, forceCameraName, viewLayerName, cameraValidation, frameRange, resolvedEngine, resolutionX, resolutionY, resolutionPercentage, cyclesSamples]);
   const rangeCounts = useMemo(() => {
     const m = new Map();
     if (!frameRange) return m;
@@ -315,7 +345,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const isBusy = stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING;
   const hasSource = Boolean(file) || Boolean(savedInputId);
   const sourceLabel = file ? file.name : resolvedSavedAsset ? (resolvedSavedAsset.display_name || resolvedSavedAsset.input_filename) : "";
-  const canStart = stage === STAGE.CONFIGURING && groupId && (cameraMode !== "camera_ranges" || cameraValidation.ok);
+  // Saved-input flow: groupId is empty until Start Render mints it.
+  // For new uploads, groupId is set at upload time and a Start click
+  // just confirms.  Either path can Start once we're past CONFIGURING
+  // with a usable source.
+  const canStart = stage === STAGE.CONFIGURING
+    && (groupId || savedInputId)
+    && (cameraMode !== "camera_ranges" || cameraValidation.ok);
   const needsUpload = stage === STAGE.CONFIGURING && !groupId && Boolean(file);
 
   // Stateless cost preview.  Fires whenever we have an analyzer
@@ -371,6 +407,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   function applyAnalysis(parsed) {
     const s = Array.isArray(parsed?.scenes) ? parsed.scenes : [];
     const active = s.find((sc) => sc?.is_active) || s[0] || null;
+    const h = parsed?.heaviness || {};
     return {
       frameStart: String(parsed.frame_start ?? ""),
       frameEnd: String(parsed.frame_end ?? ""),
@@ -380,6 +417,14 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       viewLayerName: active?.view_layers?.[0] || "",
       cameraRanges: active ? buildDefaultCameraRanges(active) : [],
       cameraMode: "auto_markers",
+      // Pre-fill editable render settings from the analyzer.  An
+      // unedited field equals the scene default; user edits replace
+      // these values in place.  No null/sentinel branch downstream.
+      renderEngine: active?.engine || h.render_engine || "",
+      resolutionX: Number.isFinite(h.resolution_x) && h.resolution_x > 0 ? h.resolution_x : null,
+      resolutionY: Number.isFinite(h.resolution_y) && h.resolution_y > 0 ? h.resolution_y : null,
+      resolutionPercentage: Number.isFinite(h.resolution_percentage) && h.resolution_percentage > 0 ? h.resolution_percentage : null,
+      cyclesSamples: Number.isFinite(h.samples) && h.samples > 0 ? h.samples : null,
     };
   }
 
@@ -401,7 +446,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     if (typeof overrides.camera_mode === "string") settings.cameraMode = overrides.camera_mode || "auto_markers";
     if (typeof overrides.camera_name === "string") settings.forceCameraName = overrides.camera_name;
     if (typeof overrides.view_layer === "string") settings.viewLayerName = overrides.view_layer;
-    if (typeof overrides.render?.engine === "string") settings.renderEngine = overrides.render.engine || "scene_default";
+    const r = overrides.render && typeof overrides.render === "object" ? overrides.render : {};
+    if (typeof r.engine === "string" && r.engine) settings.renderEngine = r.engine;
+    if (Number.isInteger(r.resolution_x) && r.resolution_x > 0) settings.resolutionX = r.resolution_x;
+    if (Number.isInteger(r.resolution_y) && r.resolution_y > 0) settings.resolutionY = r.resolution_y;
+    if (Number.isInteger(r.resolution_percentage) && r.resolution_percentage > 0) settings.resolutionPercentage = r.resolution_percentage;
+    if (Number.isInteger(r.cycles_samples) && r.cycles_samples > 0) settings.cyclesSamples = r.cycles_samples;
     if (overrides.camera_mode === "camera_ranges" && Array.isArray(overrides.camera_ranges)) {
       settings.cameraRanges = parseCameraRangeRows(overrides.camera_ranges);
     }
@@ -419,6 +469,17 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     }
   }
 
+  // Phantom cleanup: when the user abandons an in-flight upload by
+  // picking a different source, resetting, or leaving the page, the
+  // server-side render_group it created has no jobs attached and no
+  // path to ever reach a terminal state.  Fire DELETE so it doesn't
+  // accumulate in the user's My Jobs list.  Server-side delete now
+  // cancels any in-flight orchestrator state before removing the row.
+  function discardPendingGroupId(gid) {
+    if (!gid) return;
+    deleteRenderGroup(backendUrl, gid).catch(() => {});
+  }
+
   // ── File picker ─────────────────────────────────────────
   const handlePickFile = async () => {
     try {
@@ -432,6 +493,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       let size = 0;
       try { size = await invoke("get_file_size", { filePath }); } catch { /* ok */ }
       cancelActiveOps();
+      if (groupId && stage !== STAGE.DONE) discardPendingGroupId(groupId);
       dispatch({ type: "PICK_FILE", file: { name, path: filePath, size } });
     } catch (err) {
       dispatch({ type: "ERROR", message: `Could not open file picker: ${err}` });
@@ -457,12 +519,14 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     let size = Number.isFinite(dropped.size) && dropped.size > 0 ? dropped.size : 0;
     if (!size) { try { size = await invoke("get_file_size", { filePath }); } catch { /* ok */ } }
     cancelActiveOps();
+    if (groupId && stage !== STAGE.DONE) discardPendingGroupId(groupId);
     dispatch({ type: "PICK_FILE", file: { name, path: filePath, size } });
   };
 
   const handleSelectSaved = (asset) => {
     if (isBusy) return;
     cancelActiveOps();
+    if (groupId && stage !== STAGE.DONE) discardPendingGroupId(groupId);
     dispatch({ type: "PICK_SAVED", id: asset.id, asset });
   };
 
@@ -544,27 +608,27 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   };
 
   // ── Use saved input ─────────────────────────────────────
-  const handleUseSavedInput = async () => {
+  // We deliberately do NOT create a render_group here.  The asset row
+  // already carries prefill (analysis_snapshot / render_overrides /
+  // prefill_frame_range) via /me/input-files, so we can drive the
+  // configure stage off the in-memory asset alone.  The real group is
+  // minted at Start Render time -- no phantom rows accumulate when the
+  // user picks Analyze and then walks away.
+  const handleUseSavedInput = () => {
     const assetId = savedInputId;
     if (!assetId) { dispatch({ type: "ERROR", message: "Select a saved file first" }); return; }
+    const asset = resolvedSavedAsset;
+    if (!asset) { dispatch({ type: "ERROR", message: "Saved file metadata unavailable" }); return; }
 
-    dispatch({ type: "START_ANALYZE" });
-    try {
-      const created = await createDistributedRenderGroup(backendUrl, null, null, null, assetId);
-      const asset = created.prefill || created.source_asset || resolvedSavedAsset;
-      const { settings, analysis: snap } = applySavedAssetSettings(asset);
-      dispatch({
-        type: "USE_SAVED_INPUT",
-        groupId: created.group_id || "",
-        savedInputId: assetId,
-        asset,
-        analysis: snap,
-        settings,
-      });
-      void loadSavedInputs();
-    } catch (err) {
-      dispatch({ type: "ERROR", message: err?.message || "Failed to load saved file", returnTo: STAGE.IDLE });
-    }
+    const { settings, analysis: snap } = applySavedAssetSettings(asset);
+    dispatch({
+      type: "USE_SAVED_INPUT",
+      groupId: "",
+      savedInputId: assetId,
+      asset,
+      analysis: snap,
+      settings,
+    });
   };
 
   // ── Upload ──────────────────────────────────────────────
@@ -629,7 +693,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
   // ── Start render ────────────────────────────────────────
   const handleStartRender = async () => {
-    if (!groupId) { dispatch({ type: "ERROR", message: "Upload must complete first" }); return; }
+    if (!groupId && !savedInputId) { dispatch({ type: "ERROR", message: "Upload must complete first" }); return; }
     if (cameraMode === "camera_ranges" && !cameraValidation.ok) {
       dispatch({ type: "ERROR", message: cameraValidation.error });
       return;
@@ -639,16 +703,29 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // Resolve engine: if user kept "scene_default", send the engine detected
-    // by the .blend parser so the worker can pick the EEVEE vs Cycles path.
-    // Sending null leaves the worker blind and EEVEE jobs end up on the
-    // Cycles-default code path.
-    let resolvedEngine = renderEngine !== "scene_default" ? renderEngine : null;
-    if (!resolvedEngine && analysis && Array.isArray(analysis.scenes)) {
-      const activeScene =
-        analysis.scenes.find((s) => s?.is_active) || analysis.scenes[0] || null;
-      if (activeScene?.engine) resolvedEngine = activeScene.engine;
+    // Saved-input flow defers group creation to here so we don't leave
+    // phantom rows when the user picks Analyze and walks away.  Mint
+    // the group now, link to the asset, then fall through to the
+    // existing confirm path.
+    let activeGroupId = groupId;
+    if (!activeGroupId && savedInputId) {
+      try {
+        const created = await createDistributedRenderGroup(backendUrl, null, null, null, savedInputId);
+        activeGroupId = created.group_id || "";
+        if (!activeGroupId) throw new Error("Server did not return a group_id");
+        dispatch({ type: "SET_FIELD", field: "groupId", value: activeGroupId });
+      } catch (err) {
+        dispatch({ type: "ERROR", message: err?.message || "Failed to create render group", returnTo: STAGE.CONFIGURING });
+        abortRef.current = null;
+        return;
+      }
     }
+
+    // ``renderEngine`` is pre-filled by applyAnalysis() from the active
+    // scene's engine, so it's never the legacy "scene_default" sentinel
+    // by the time we get here.  Send what's in the form; null only when
+    // analysis was skipped entirely.
+    const resolvedEngine = renderEngine || null;
 
     const overrides = {
       scene_name: sceneName || null,
@@ -664,12 +741,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         resolution_x: resolutionX,
         resolution_y: resolutionY,
         resolution_percentage: resolutionPercentage,
+        cycles_samples: cyclesSamples,
       },
     };
 
     try {
       const result = await confirmDistributedJob(
-        backendUrl, groupId, null, frameRange, overrides, null, analysis, null, controller.signal,
+        backendUrl, activeGroupId, null, frameRange, overrides, null, analysis, null, controller.signal,
       );
       if (result.needs_frame_input) {
         dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
@@ -697,6 +775,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
   const handleReset = () => {
     cancelActiveOps();
+    if (groupId && stage !== STAGE.DONE) discardPendingGroupId(groupId);
     dispatch({ type: "RESET" });
   };
 
@@ -762,6 +841,19 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
   // ── Render ──────────────────────────────────────────────
   const totalFrameCount = frameRange ? countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step) : null;
+
+  // Effective megapixels reflects the form's current resolution values
+  // (which were pre-filled from the analyzer at ANALYZE_DONE).  Shown
+  // inline next to the resolution inputs as a quick sanity readout.
+  const effMpPreview = (resolutionX && resolutionY)
+    ? ((resolutionX * resolutionY * ((resolutionPercentage ?? 100) / 100) ** 2) / 1_000_000).toFixed(1)
+    : null;
+
+  const numOrNull = (raw) => {
+    if (raw === "" || raw == null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+  };
 
   const formatCost = (entry) => {
     if (!entry) return null;
@@ -953,36 +1045,82 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       {analysisNote && !error && <p className="cr-note">{analysisNote}</p>}
       {error && <p className="error-text">{error}</p>}
 
-      {/* ── Settings grid ── */}
+      {/* ── Settings (single Render Setup card) ── */}
       {showSettings && (
         <div className="cr-settings-grid">
-          {/* Left: Render Settings */}
-          {analysis && (
-            <div className="cr-card">
-              <div className="cr-card-header">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-                <span>Render Settings</span>
-              </div>
-              <div className="cr-settings-form">
-                <label className="cr-field">
-                  <span className="cr-field-label">Scene</span>
-                  <select value={sceneName} onChange={(e) => handleSceneChange(e.target.value)} className="cr-input">
-                    {(scenes.length ? scenes : [{ name: "" }]).map((s) => (
-                      <option key={s.name || "default"} value={s.name || ""}>{s.name || "Default Scene"}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="cr-field">
-                  <span className="cr-field-label">Camera Mode</span>
-                  <select value={cameraMode} onChange={(e) => dispatch({ type: "SET_FIELD", field: "cameraMode", value: e.target.value })} className="cr-input">
-                    {CAMERA_MODES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </label>
+          <div className="cr-card cr-card-form">
+            <div className="cr-card-header">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+              <span>Render Setup</span>
+            </div>
+
+            {/* Output ----------------------------------------------------- */}
+            <section className="cr-form-section">
+              <div className="cr-form-section-title">Output</div>
+              <div className="cr-form-section-body">
                 <div className="cr-field-row">
                   <label className="cr-field">
-                    <span className="cr-field-label">Force Camera</span>
-                    <select value={forceCameraName} onChange={(e) => dispatch({ type: "SET_FIELD", field: "forceCameraName", value: e.target.value })} className="cr-input" disabled={cameraMode !== "force_camera" || cameras.length === 0}>
-                      {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
+                    <span className="cr-field-label">Render Engine</span>
+                    <select value={renderEngine} onChange={(e) => dispatch({ type: "SET_FIELD", field: "renderEngine", value: e.target.value })} className="cr-input">
+                      {renderEngine && !["BLENDER_EEVEE", "CYCLES", "BLENDER_WORKBENCH"].includes(renderEngine) && (
+                        <option value={renderEngine}>{renderEngine}</option>
+                      )}
+                      <option value="BLENDER_EEVEE">EEVEE</option>
+                      <option value="CYCLES">Cycles</option>
+                      <option value="BLENDER_WORKBENCH">Workbench</option>
+                    </select>
+                  </label>
+                  <label className="cr-field">
+                    <span className="cr-field-label">Samples</span>
+                    <input
+                      type="number" min="1"
+                      value={cyclesSamples ?? ""}
+                      onChange={(e) => dispatch({ type: "SET_FIELD", field: "cyclesSamples", value: numOrNull(e.target.value) })}
+                      className="cr-input"
+                    />
+                  </label>
+                </div>
+                <div className="cr-field">
+                  <span className="cr-field-label">Resolution</span>
+                  <div className="cr-resolution-row">
+                    <input
+                      type="number" min="1"
+                      value={resolutionX ?? ""}
+                      onChange={(e) => dispatch({ type: "SET_FIELD", field: "resolutionX", value: numOrNull(e.target.value) })}
+                      className="cr-input cr-input-num"
+                    />
+                    <span className="cr-resolution-sep">×</span>
+                    <input
+                      type="number" min="1"
+                      value={resolutionY ?? ""}
+                      onChange={(e) => dispatch({ type: "SET_FIELD", field: "resolutionY", value: numOrNull(e.target.value) })}
+                      className="cr-input cr-input-num"
+                    />
+                    <span className="cr-resolution-sep">@</span>
+                    <input
+                      type="number" min="1" max="1000"
+                      value={resolutionPercentage ?? ""}
+                      onChange={(e) => dispatch({ type: "SET_FIELD", field: "resolutionPercentage", value: numOrNull(e.target.value) })}
+                      className="cr-input cr-input-pct"
+                    />
+                    <span className="cr-resolution-suffix">%</span>
+                    {effMpPreview && <span className="cr-resolution-mp">{effMpPreview} MP effective</span>}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* Scene & camera -------------------------------------------- */}
+            <section className="cr-form-section">
+              <div className="cr-form-section-title">Scene &amp; Camera</div>
+              <div className="cr-form-section-body">
+                <div className="cr-field-row">
+                  <label className="cr-field">
+                    <span className="cr-field-label">Scene</span>
+                    <select value={sceneName} onChange={(e) => handleSceneChange(e.target.value)} className="cr-input">
+                      {(scenes.length ? scenes : [{ name: "" }]).map((s) => (
+                        <option key={s.name || "default"} value={s.name || ""}>{s.name || "Default Scene"}</option>
+                      ))}
                     </select>
                   </label>
                   <label className="cr-field">
@@ -992,101 +1130,115 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                     </select>
                   </label>
                 </div>
-                <label className="cr-field">
-                  <span className="cr-field-label">Render Engine</span>
-                  <select value={renderEngine} onChange={(e) => dispatch({ type: "SET_FIELD", field: "renderEngine", value: e.target.value })} className="cr-input">
-                    <option value="scene_default">Scene Default</option>
-                    <option value="BLENDER_EEVEE">EEVEE</option>
-                    <option value="CYCLES">Cycles</option>
-                    <option value="BLENDER_WORKBENCH">Workbench</option>
-                  </select>
-                </label>
-              </div>
-
-              {cameraMode === "camera_ranges" && (
-                <div className="camera-ranges-panel">
-                  <div className="camera-ranges-head">
-                    <div className="manual-range-subtitle camera-ranges-subtitle">Edit camera-to-frame mappings.</div>
-                    <div className="camera-ranges-actions">
-                      <button type="button" className="btn btn-secondary" onClick={autoFillRanges}>Use Marker Cuts</button>
-                      <button type="button" className="btn btn-secondary" onClick={addRange}>Add Range</button>
-                    </div>
-                  </div>
-                  <div className="camera-ranges-table-wrap">
-                    <table className="camera-ranges-table">
-                      <thead><tr><th>Use</th><th>Camera</th><th>Start</th><th>End</th><th>Step</th><th>Frames</th><th /></tr></thead>
-                      <tbody>
-                        {cameraRanges.map((row) => (
-                          <tr key={row.id}>
-                            <td><input type="checkbox" checked={row.enabled !== false} onChange={(e) => updateRange(row.id, { enabled: e.target.checked })} /></td>
-                            <td>
-                              <select value={row.camera_name || ""} onChange={(e) => updateRange(row.id, { camera_name: e.target.value })} className="cr-input camera-ranges-input">
-                                {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
-                              </select>
-                            </td>
-                            <td><input type="number" min="1" value={row.frame_start ?? ""} onChange={(e) => updateRange(row.id, { frame_start: e.target.value })} className="cr-input camera-ranges-input" /></td>
-                            <td><input type="number" min="1" value={row.frame_end ?? ""} onChange={(e) => updateRange(row.id, { frame_end: e.target.value })} className="cr-input camera-ranges-input" /></td>
-                            <td><input type="number" min="1" value={row.frame_step ?? 1} onChange={(e) => updateRange(row.id, { frame_step: e.target.value })} className="cr-input camera-ranges-input" /></td>
-                            <td><span className="camera-ranges-count">{rangeCounts.get(row.id) || 0}</span></td>
-                            <td><button type="button" className="btn btn-secondary camera-ranges-remove" onClick={() => removeRange(row.id)}>Remove</button></td>
-                          </tr>
-                        ))}
-                        {cameraRanges.length === 0 && <tr><td colSpan={7} className="camera-ranges-empty">No ranges. Add one to continue.</td></tr>}
-                      </tbody>
-                    </table>
-                  </div>
-                  {frameRange && <div className="manual-range-subtitle camera-ranges-subtitle">{countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step)} frames after step filtering.</div>}
-                  {!cameraValidation.ok && <p className="error-text camera-ranges-error">{cameraValidation.error}</p>}
+                <div className="cr-field-row">
+                  <label className="cr-field">
+                    <span className="cr-field-label">Camera Mode</span>
+                    <select value={cameraMode} onChange={(e) => dispatch({ type: "SET_FIELD", field: "cameraMode", value: e.target.value })} className="cr-input">
+                      {CAMERA_MODES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </label>
+                  <label className="cr-field">
+                    <span className="cr-field-label">Camera</span>
+                    <select value={forceCameraName} onChange={(e) => dispatch({ type: "SET_FIELD", field: "forceCameraName", value: e.target.value })} className="cr-input" disabled={cameraMode !== "force_camera" || cameras.length === 0}>
+                      {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
+                    </select>
+                  </label>
                 </div>
-              )}
-            </div>
-          )}
+                {cameraMode === "camera_ranges" && (
+                  <div className="camera-ranges-panel">
+                    <div className="camera-ranges-head">
+                      <div className="manual-range-subtitle camera-ranges-subtitle">Edit camera-to-frame mappings.</div>
+                      <div className="camera-ranges-actions">
+                        <button type="button" className="btn btn-secondary" onClick={autoFillRanges}>Use Marker Cuts</button>
+                        <button type="button" className="btn btn-secondary" onClick={addRange}>Add Range</button>
+                      </div>
+                    </div>
+                    <div className="camera-ranges-table-wrap">
+                      <table className="camera-ranges-table">
+                        <thead><tr><th>Use</th><th>Camera</th><th>Start</th><th>End</th><th>Step</th><th>Frames</th><th /></tr></thead>
+                        <tbody>
+                          {cameraRanges.map((row) => (
+                            <tr key={row.id}>
+                              <td><input type="checkbox" checked={row.enabled !== false} onChange={(e) => updateRange(row.id, { enabled: e.target.checked })} /></td>
+                              <td>
+                                <select value={row.camera_name || ""} onChange={(e) => updateRange(row.id, { camera_name: e.target.value })} className="cr-input camera-ranges-input">
+                                  {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
+                                </select>
+                              </td>
+                              <td><input type="number" min="1" value={row.frame_start ?? ""} onChange={(e) => updateRange(row.id, { frame_start: e.target.value })} className="cr-input camera-ranges-input" /></td>
+                              <td><input type="number" min="1" value={row.frame_end ?? ""} onChange={(e) => updateRange(row.id, { frame_end: e.target.value })} className="cr-input camera-ranges-input" /></td>
+                              <td><input type="number" min="1" value={row.frame_step ?? 1} onChange={(e) => updateRange(row.id, { frame_step: e.target.value })} className="cr-input camera-ranges-input" /></td>
+                              <td><span className="camera-ranges-count">{rangeCounts.get(row.id) || 0}</span></td>
+                              <td><button type="button" className="btn btn-secondary camera-ranges-remove" onClick={() => removeRange(row.id)}>Remove</button></td>
+                            </tr>
+                          ))}
+                          {cameraRanges.length === 0 && <tr><td colSpan={7} className="camera-ranges-empty">No ranges. Add one to continue.</td></tr>}
+                        </tbody>
+                      </table>
+                    </div>
+                    {frameRange && <div className="manual-range-subtitle camera-ranges-subtitle">{countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step)} frames after step filtering.</div>}
+                    {!cameraValidation.ok && <p className="error-text camera-ranges-error">{cameraValidation.error}</p>}
+                  </div>
+                )}
+              </div>
+            </section>
 
-          {/* Right: Frame Range */}
-          <div className="cr-card">
-            <div className="cr-card-header">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><rect x="2" y="2" width="20" height="20" rx="2.18" /><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5" /></svg>
-              <span>Frame Range</span>
-              {totalFrameCount != null && <span className="cr-card-badge">{totalFrameCount} frames</span>}
-            </div>
-            <div className="cr-card-hint">{analysis ? "Auto-filled from analysis. Edit before starting." : "Enter the frame range manually."}</div>
-            <div className="cr-frame-fields">
-              <label className="cr-field">
-                <span className="cr-field-label">Start</span>
-                <input type="number" min="1" value={frameStart} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStart", value: e.target.value })} className="cr-input" />
-              </label>
-              <label className="cr-field">
-                <span className="cr-field-label">End</span>
-                <input type="number" min="1" value={frameEnd} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameEnd", value: e.target.value })} className="cr-input" />
-              </label>
-              <label className="cr-field">
-                <span className="cr-field-label">Step</span>
-                <input type="number" min="1" value={frameStep} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStep", value: e.target.value })} className="cr-input" />
-              </label>
-            </div>
+            {/* Frames ---------------------------------------------------- */}
+            <section className="cr-form-section">
+              <div className="cr-form-section-title">
+                Frames
+                {totalFrameCount != null && <span className="cr-form-section-badge">{totalFrameCount} frames</span>}
+              </div>
+              <div className="cr-form-section-body">
+                <div className="cr-frame-fields">
+                  <label className="cr-field">
+                    <span className="cr-field-label">Start</span>
+                    <input type="number" min="1" value={frameStart} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStart", value: e.target.value })} className="cr-input" />
+                  </label>
+                  <label className="cr-field">
+                    <span className="cr-field-label">End</span>
+                    <input type="number" min="1" value={frameEnd} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameEnd", value: e.target.value })} className="cr-input" />
+                  </label>
+                  <label className="cr-field">
+                    <span className="cr-field-label">Step</span>
+                    <input type="number" min="1" value={frameStep} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStep", value: e.target.value })} className="cr-input" />
+                  </label>
+                </div>
+              </div>
+            </section>
+            {/* Scene Stats (read-only -- analyzer metadata) -------------- */}
+            {analysis?.heaviness && (
+              <section className="cr-form-section">
+                <div className="cr-form-section-title">Scene Stats</div>
+                <div className="cr-form-section-body">
+                  <div className="cr-stat-grid">
+                    <div className="cr-stat"><span className="cr-stat-label">Vertices</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.vertex_count_total)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">Objects</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.object_count)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">Meshes</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.mesh_count)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">Materials</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.material_count)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">Textures</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.texture_count)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">Texture size</span><span className="cr-stat-value">{formatStatBytes(analysis.heaviness.texture_total_bytes)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">Shader nodes</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.shader_node_count_total)}</span></div>
+                    {typeof analysis.heaviness.file_size_bytes === "number" && analysis.heaviness.file_size_bytes > 0 && (
+                      <div className="cr-stat"><span className="cr-stat-label">Blend size</span><span className="cr-stat-value">{formatStatBytes(analysis.heaviness.file_size_bytes)}</span></div>
+                    )}
+                  </div>
+                  {heavyFeatureChips(analysis.heaviness).length > 0 && (
+                    <div className="cr-stat-features">
+                      <span className="cr-stat-label">Heavy features</span>
+                      <div className="cr-stat-chips">
+                        {heavyFeatureChips(analysis.heaviness).map((label) => (
+                          <span key={label} className="cr-stat-chip">{label}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
           </div>
 
-          {/* Scene heaviness — read from local Blender analysis. Resolution is
-              editable and folds into render_overrides at submit time. */}
-          {analysis?.heaviness && (
-            <HeavinessPanel
-              heaviness={analysis.heaviness}
-              overrides={{
-                resolution_x: resolutionX,
-                resolution_y: resolutionY,
-                resolution_percentage: resolutionPercentage,
-              }}
-              onResolutionChange={({ resolution_x, resolution_y, resolution_percentage }) => {
-                dispatch({ type: "SET_FIELDS", fields: {
-                  resolutionX: resolution_x,
-                  resolutionY: resolution_y,
-                  resolutionPercentage: resolution_percentage,
-                }});
-              }}
-            />
-          )}
-
-          {/* Prep warnings/errors */}
+          {/* ── Below (full-width): preserved Analysis Report ── */}
           {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (
             <div className="cr-card cr-card-warnings">
               <div className="cr-card-header">

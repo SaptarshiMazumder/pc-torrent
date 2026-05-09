@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { listRenderGroups, getRenderGroup, deleteRenderGroup } from "../services/api";
 
 const POLL_INTERVAL = 3000;
-const PAGE_SIZE = 5;
+const PAGE_SIZE = 4;
 
 function toTimestamp(value) {
   const parsed = Date.parse(value || "");
@@ -53,14 +53,15 @@ export function useJobs(backendUrl) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const backendUrlRef = useRef(backendUrl);
   const jobsRef = useRef(jobs);
   const offsetRef = useRef(0);
-  // Holds the current drain's AbortController.  Each new fetchFirstPage
-  // aborts the previous controller -- pending requests are cancelled at
-  // the network layer (no duplicate offsets) AND any drain loop awaiting
-  // a request observes the abort and returns.
+  // Holds the AbortController for the current fetch (first-page or loadMore).
+  // Each new fetch aborts the previous controller so a stale response can't
+  // arrive and clobber fresher state (e.g. refresh during in-flight loadMore).
   const controllerRef = useRef(null);
+  const loadingMoreRef = useRef(false);
 
   useEffect(() => {
     jobsRef.current = jobs;
@@ -82,39 +83,14 @@ export function useJobs(backendUrl) {
     });
   }, []);
 
-  // Drain every remaining page in series.  Started after the first
-  // page lands and runs until the server's ``has_more`` is false or
-  // until ``signal`` is aborted.
-  const drainRemaining = useCallback(async (signal) => {
-    setLoadingMore(true);
-    try {
-      while (!signal.aborted) {
-        const url = backendUrlRef.current;
-        if (!url) return;
-        const data = await listRenderGroups(url, {
-          limit: PAGE_SIZE, offset: offsetRef.current, signal,
-        });
-        const incoming = normalizeGroups(data?.groups || []);
-        appendPage(incoming);
-        offsetRef.current += incoming.length;
-        if (!data?.has_more) return;
-      }
-    } catch (e) {
-      if (e?.name !== "AbortError") throw e;
-    } finally {
-      if (!signal.aborted) setLoadingMore(false);
-    }
-  }, [appendPage]);
-
   const fetchFirstPage = useCallback(async (url) => {
     if (!url) return;
-    // Cancel any prior drain (StrictMode re-mount, refresh mid-drain,
-    // backendUrl flip).  Pending fetch() calls reject with AbortError
-    // and the drain loop exits on its next iteration.
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
     setLoading(true);
+    setLoadingMore(false);
+    loadingMoreRef.current = false;
     try {
       const data = await listRenderGroups(url, {
         limit: PAGE_SIZE, offset: 0, signal: controller.signal,
@@ -122,22 +98,41 @@ export function useJobs(backendUrl) {
       const groups = normalizeGroups(data?.groups || []);
       setJobs(groups);
       offsetRef.current = groups.length;
-      if (data?.has_more) {
-        drainRemaining(controller.signal);   // fire-and-forget
-      } else {
-        setLoadingMore(false);
-      }
+      setHasMore(!!data?.has_more);
     } catch (e) {
       if (e?.name !== "AbortError") throw e;
     } finally {
       if (controllerRef.current === controller) setLoading(false);
     }
-  }, [drainRemaining]);
+  }, []);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current) return;
+    const url = backendUrlRef.current;
+    if (!url) return;
+    loadingMoreRef.current = true;
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setLoadingMore(true);
+    try {
+      const data = await listRenderGroups(url, {
+        limit: PAGE_SIZE, offset: offsetRef.current, signal: controller.signal,
+      });
+      const incoming = normalizeGroups(data?.groups || []);
+      appendPage(incoming);
+      offsetRef.current += incoming.length;
+      setHasMore(!!data?.has_more);
+    } catch (e) {
+      if (e?.name !== "AbortError") throw e;
+    } finally {
+      loadingMoreRef.current = false;
+      if (controllerRef.current === controller) setLoadingMore(false);
+    }
+  }, [appendPage]);
 
   useEffect(() => {
     if (backendUrl) fetchFirstPage(backendUrl);
     return () => {
-      // Cancel any in-flight drain when backendUrl changes / unmount.
       controllerRef.current?.abort();
     };
   }, [backendUrl, fetchFirstPage]);
@@ -166,13 +161,30 @@ export function useJobs(backendUrl) {
 
   const removeJob = useCallback(async (id) => {
     const url = backendUrlRef.current;
+    // Optimistic: yank the row out of local state synchronously so the
+    // card disappears the instant the user clicks delete.  The server
+    // DELETE can take its time -- on rejection we restore the row at
+    // its original index and re-throw so the caller's error toast fires.
+    let snapshot = null;
+    setJobs((prev) => {
+      const idx = prev.findIndex((j) => j.group_id === id);
+      if (idx === -1) return prev;
+      snapshot = { row: prev[idx], index: idx };
+      return prev.slice(0, idx).concat(prev.slice(idx + 1));
+    });
     try {
       await deleteRenderGroup(url, id);
-    } catch {
-      // If the backend rejects (e.g. job still active), don't remove from UI
-      return;
+    } catch (err) {
+      if (snapshot) {
+        setJobs((prev) => {
+          if (prev.some((j) => j.group_id === id)) return prev;
+          const next = prev.slice();
+          next.splice(snapshot.index, 0, snapshot.row);
+          return next;
+        });
+      }
+      throw err;
     }
-    setJobs((prev) => prev.filter((j) => j.group_id !== id));
   }, []);
 
   const markRenderGroupCancelled = useCallback((groupId) => {
@@ -251,6 +263,8 @@ export function useJobs(backendUrl) {
     jobs,
     loading,
     loadingMore,
+    hasMore,
+    loadMore,
     addRenderGroup,
     removeJob,
     markRenderGroupCancelled,

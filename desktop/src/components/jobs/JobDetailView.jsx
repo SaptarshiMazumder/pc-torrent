@@ -7,7 +7,7 @@ import {
   getLatestTaskWithOutput,
 } from "../../utils/jobUtils";
 import JobThumbnail from "./JobThumbnail";
-import loaderGif from "../../assets/animations/glowing-fish-loader.gif";
+import loaderGif from "../../assets/animations/heartbeat-loader.gif";
 import { useLiveCostTick, liveActualCost } from "../../hooks/useLiveCostTick";
 import VastInstancePanel from "./VastInstancePanel";
 import ModalInstancePanel from "../ModalInstancePanel";
@@ -86,7 +86,7 @@ function StatTile({ icon, label, value }) {
 }
 
 function RenderGroupDetail({
-  job, backendUrl, authToken, downloadState, downloadingId, canceling,
+  job, backendUrl, authToken, tasksLoading, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
   onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
   onRefresh, onRefreshFrames,
@@ -203,7 +203,7 @@ function RenderGroupDetail({
             <div className="jd-stat-tile-card">
               <StatTile
                 icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 14h.01M10 14h.01" /></svg>}
-                label="Machines" value={`${tasksDone} / ${taskCount}`}
+                label="Machines" value={tasksLoading ? "…" : `${tasksDone} / ${taskCount}`}
               />
             </div>
             <div className="jd-stat-tile-card">
@@ -215,7 +215,7 @@ function RenderGroupDetail({
             <div className="jd-stat-tile-card">
               <StatTile
                 icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01" /></svg>}
-                label="Failed" value={(tasksList.filter((t) => t.status === "failed")).length}
+                label="Failed" value={tasksLoading ? "…" : (tasksList.filter((t) => t.status === "failed")).length}
               />
             </div>
           </div>
@@ -234,7 +234,7 @@ function RenderGroupDetail({
             <img src={loaderGif} alt="Rendering..." className="jd-preview-loader-bare" />
           )}
 
-          <div className="jd-actions">
+          <div className={`jd-actions${latestOutputFile ? "" : " jd-actions--centered"}`}>
             {canCancel && (
               <button className="btn btn-danger" onClick={onCancel} disabled={canceling}>
                 {canceling ? "Stopping..." : "Stop Render"}
@@ -257,27 +257,49 @@ function RenderGroupDetail({
           )}
           {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
 
-          <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
-          <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
-          <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
+          {tasksLoading ? (
+            <div className="jd-section-loader">Loading instances and chunks…</div>
+          ) : (
+            <>
+              <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
+              <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
+              <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
 
-          <FailedChunksPanel
-            tasks={tasksList}
-            backendUrl={backendUrl}
-            groupId={id}
-            onRefresh={onRefresh}
-            onPendingQueueRefresh={pendingQueue.refresh}
-          />
+              <FailedChunksPanel
+                tasks={tasksList}
+                backendUrl={backendUrl}
+                groupId={id}
+                onRefresh={onRefresh}
+                onPendingQueueRefresh={pendingQueue.refresh}
+              />
+            </>
+          )}
           <PendingChunksPanel pendingQueue={pendingQueue} />
 
           {canViewFrames && (
             <div className="jd-frames-section">
-              <button type="button" className="jd-frames-toggle" onClick={onToggleGallery}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
-                <span>Rendered Frames</span>
-                <span className="jd-frames-count">{availableOutputCount}</span>
-                <svg className={`jd-frames-chevron${galleryOpen ? " open" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6" /></svg>
-              </button>
+              <div className="jd-frames-header">
+                <button type="button" className="jd-frames-toggle" onClick={onToggleGallery}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
+                  <span>Rendered Frames</span>
+                  <span className="jd-frames-count">
+                    {availableOutputCount}
+                    {galleryOpen && (galleryState?.files?.length ?? 0) > 0 && ` (${galleryState.files.length})`}
+                  </span>
+                  <svg className={`jd-frames-chevron${galleryOpen ? " open" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6" /></svg>
+                </button>
+                {galleryOpen && onRefreshFrames && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={onRefreshFrames}
+                    disabled={!!galleryState?.loading}
+                    style={{ padding: "4px 10px", fontSize: 12 }}
+                  >
+                    {galleryState?.loading ? "Refreshing..." : "Refresh"}
+                  </button>
+                )}
+              </div>
               {galleryOpen && (
                 <FrameGalleryPanel
                   id={id}
@@ -286,7 +308,6 @@ function RenderGroupDetail({
                   error={galleryState?.error || ""}
                   openingFrameKey={openingFrameKey}
                   onOpenFrame={onOpenFrame}
-                  onRefresh={onRefreshFrames}
                   backendUrl={backendUrl}
                 />
               )}
@@ -312,11 +333,15 @@ function RenderGroupDetail({
           </div>
           <div className="jd-drawer-panel-body">
             {instancesOpen && (
-              <>
-                <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
-                <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
-                <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
-              </>
+              tasksLoading ? (
+                <div className="jd-section-loader">Loading instances…</div>
+              ) : (
+                <>
+                  <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+                  <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+                  <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
+                </>
+              )
             )}
             {sceneOpen && (
               <HeavinessPanel
@@ -331,18 +356,20 @@ function RenderGroupDetail({
                   <div className="jd-cost-summary-row">
                     <span className="jd-cost-summary-label">Estimated</span>
                     <span className="jd-cost-summary-value">
-                      {totalEstimatedCost > 0 ? `~$${totalEstimatedCost.toFixed(2)}` : "—"}
+                      {tasksLoading ? "…" : totalEstimatedCost > 0 ? `~$${totalEstimatedCost.toFixed(2)}` : "—"}
                     </span>
                   </div>
                   <div className="jd-cost-summary-row">
                     <span className="jd-cost-summary-label">Actual</span>
                     <span className="jd-cost-summary-value">
-                      {groupActualCost > 0 ? `$${groupActualCost.toFixed(2)}` : "—"}
+                      {tasksLoading ? "…" : groupActualCost > 0 ? `$${groupActualCost.toFixed(2)}` : "—"}
                     </span>
                   </div>
                 </div>
 
-                {tasksList.length > 0 ? (
+                {tasksLoading ? (
+                  <div className="jd-cost-empty">Loading per-chunk costs…</div>
+                ) : tasksList.length > 0 ? (
                   <ul className="jd-cost-list">
                     {tasksList
                       .slice()
@@ -469,12 +496,28 @@ function SingleJobDetail({
       {/* Frames — collapsible */}
       {canDownloadAvailable && (
         <div className="jd-frames-section">
-          <button type="button" className="jd-frames-toggle" onClick={onToggleGallery}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
-            <span>Rendered Frames</span>
-            <span className="jd-frames-count">{availableOutputCount}</span>
-            <svg className={`jd-frames-chevron${galleryOpen ? " open" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6" /></svg>
-          </button>
+          <div className="jd-frames-header">
+            <button type="button" className="jd-frames-toggle" onClick={onToggleGallery}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
+              <span>Rendered Frames</span>
+              <span className="jd-frames-count">
+                {availableOutputCount}
+                {galleryOpen && (galleryState?.files?.length ?? 0) > 0 && ` (${galleryState.files.length})`}
+              </span>
+              <svg className={`jd-frames-chevron${galleryOpen ? " open" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6" /></svg>
+            </button>
+            {galleryOpen && onRefreshFrames && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={onRefreshFrames}
+                disabled={!!galleryState?.loading}
+                style={{ padding: "4px 10px", fontSize: 12 }}
+              >
+                {galleryState?.loading ? "Refreshing..." : "Refresh"}
+              </button>
+            )}
+          </div>
           {galleryOpen && (
             <FrameGalleryPanel
               id={id}
@@ -483,7 +526,6 @@ function SingleJobDetail({
               error={galleryState?.error || ""}
               openingFrameKey={openingFrameKey}
               onOpenFrame={onOpenFrame}
-              onRefresh={onRefreshFrames}
               backendUrl={backendUrl}
             />
           )}
@@ -504,7 +546,7 @@ function SingleJobDetail({
 }
 
 export default function JobDetailView({
-  job, backendUrl, authToken, downloadState, downloadingId, canceling,
+  job, backendUrl, authToken, tasksLoading, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey, refreshing,
   onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
   onRefresh, onRefreshFrames,
@@ -513,7 +555,12 @@ export default function JobDetailView({
   const displayName = resolveJobFilename(job);
   const status = job?.status || "pending";
   const id = job?.group_id || job?.job_id || "";
-  const taskCount = isGroup ? (job.tasks || []).length : 1;
+  // Prefer the slim list endpoint's tasks_count snapshot while the full
+  // tasks payload is still in flight, so the header chip doesn't flash
+  // "0 machines" before settling on the real value.
+  const taskCount = isGroup
+    ? (job.tasks?.length ?? job.tasks_count ?? 0)
+    : 1;
 
   return (
     <div className="job-detail">
@@ -566,7 +613,7 @@ export default function JobDetailView({
 
       {isGroup ? (
         <RenderGroupDetail
-          job={job} backendUrl={backendUrl} authToken={authToken}
+          job={job} backendUrl={backendUrl} authToken={authToken} tasksLoading={tasksLoading}
           downloadState={downloadState} downloadingId={downloadingId} canceling={canceling}
           galleryOpen={galleryOpen} galleryState={galleryState} openingFrameKey={openingFrameKey}
           onDownload={onDownload} onCancel={onCancel} onToggleGallery={onToggleGallery}

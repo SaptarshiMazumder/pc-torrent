@@ -33,7 +33,9 @@
       "Bash(PGPASSWORD='npg_W4czdLm1MTUv' psql -h ep-mute-smoke-aow9soyi-pooler.c-2.ap-southeast-1.aws.neon.tech -U neondb_owner -d neondb --set=sslmode=require -c \"\\\\\\\\d render_groups\")",
       "Bash(curl -s -m 15 \"https://pcrent-server-v2-930713698987.asia-northeast1.run.app/admin/config\")",
       "Bash(grep -nB1 \"border: 1px solid var\\(--glass-border\\)\" \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/App.css\")",
-      "Bash(awk '/^\\\\./ {cls=$0} /border: 1px solid var\\\\\\(--glass-border\\\\\\)/ {print cls}' \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/App.css\")"
+      "Bash(awk '/^\\\\./ {cls=$0} /border: 1px solid var\\\\\\(--glass-border\\\\\\)/ {print cls}' \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/App.css\")",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\sapma\\\\OneDrive\\\\Desktop\\\\Projects\\\\PC_Rent\\\\pc-torrent\\\\desktop\" -Directory)",
+      "Bash(node -e ' *)"
     ],
     "additionalDirectories": [
       "\\tmp"

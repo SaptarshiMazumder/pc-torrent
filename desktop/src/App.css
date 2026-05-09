@@ -1501,15 +1501,133 @@ body {
   border: 1px solid rgba(180, 185, 200, 0.06);
 }
 
-/* ── Settings grid ── */
+/* ── Settings grid ── single Render Setup card sits stacked with the
+   Analysis Report.  Both cap at a reading-width so fields don't
+   stretch absurdly wide on large monitors. */
 .cr-settings-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
+  max-width: 760px;
 }
 
-@media (max-width: 720px) {
-  .cr-settings-grid { grid-template-columns: 1fr; }
+.cr-card-form {
+  gap: 4px;
+}
+
+/* Form sections — visual sub-grouping inside the single Render Setup card. */
+.cr-form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 0;
+  border-top: 1px solid rgba(180, 185, 200, 0.06);
+}
+.cr-form-section:first-of-type {
+  padding-top: 4px;
+  border-top: none;
+}
+.cr-form-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.cr-form-section-badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: rgba(180, 185, 200, 0.12);
+  color: var(--accent);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.cr-form-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Resolution composite row (X × Y @ % effective-MP) */
+.cr-resolution-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* Higher specificity (.cr-input.cr-input-num) so these win over the
+   base .cr-input { width: 100% } that sits later in the cascade. */
+.cr-input.cr-input-num { width: 110px; flex: 0 0 110px; }
+.cr-input.cr-input-pct { width: 80px;  flex: 0 0 80px; }
+.cr-resolution-sep {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+.cr-resolution-suffix {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.cr-resolution-mp {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 3px 8px;
+  background: rgba(180, 185, 200, 0.08);
+  border-radius: 6px;
+}
+
+/* Read-only Scene Stats grid inside the form card. */
+.cr-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px 16px;
+}
+.cr-stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 6px;
+  min-width: 0;
+}
+.cr-stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.cr-stat-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cr-stat-features {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.cr-stat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cr-stat-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  background: rgba(232, 114, 74, 0.12);
+  color: var(--accent);
+  border-radius: 6px;
 }
 
 .cr-card {
@@ -2960,7 +3078,7 @@ body {
 
 .job-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
   gap: 20px;
   padding: 4px 0 24px;
 }
@@ -3011,9 +3129,7 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
-  background:
-    radial-gradient(ellipse at 55% 45%, rgba(180, 185, 200, 0.06) 0%, transparent 65%),
-    linear-gradient(145deg, #1c1f25 0%, #0d0f14 100%);
+  background: #15171c;
 }
 
 /* Status pill — floats over thumbnail top-right */
@@ -3092,7 +3208,7 @@ body {
   flex-direction: column;
   gap: 4px;
   padding: 28px 14px 12px;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.55) 55%, transparent 100%);
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.3) 0%, rgba(0, 0, 0, 0.05) 55%, transparent 100%);
   pointer-events: none;
   z-index: 1;
 }
@@ -3498,6 +3614,15 @@ body {
   border-radius: 10px;
 }
 
+.jd-section-loader {
+  padding: 18px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  background: rgba(25, 28, 34, 0.55);
+  border-radius: 14px;
+}
+
 /* Failed chunks compact grid. */
 .fc-grid {
   display: grid;
@@ -3884,11 +4009,11 @@ body {
    frame has rendered yet.  No card chrome, no caption — just the
    animation centered in the available space. */
 .jd-preview-loader-bare {
-  width: 120px;
-  height: 120px;
+  width: 220px;
+  height: 220px;
   object-fit: contain;
   display: block;
-  margin: 4px 0 0;
+  margin: 24px auto 0;
 }
 
 .jd-preview-meta {
@@ -3924,6 +4049,19 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0;
+}
+
+.jd-frames-header {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+/* Shrink toggle to its content width so the Refresh button sits right
+   next to "Rendered Frames N (M)" instead of being shoved to the row's
+   far right by a flex:1 stretch on the toggle. */
+.jd-frames-header .jd-frames-toggle {
+  width: auto;
+  flex: 0 1 auto;
 }
 
 .jd-frames-toggle {
@@ -3974,7 +4112,7 @@ body {
   margin-top: -1px;
 }
 
-.jd-frames-section .jd-frames-toggle:has(+ .job-frame-gallery) {
+.jd-frames-section:has(.job-frame-gallery) .jd-frames-toggle {
   border-bottom-left-radius: 0;
   border-bottom-right-radius: 0;
 }
@@ -3985,6 +4123,10 @@ body {
   gap: 10px;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.jd-actions--centered {
+  justify-content: center;
 }
 
 .jd-actions .btn {
@@ -4414,8 +4556,7 @@ body {
    ============================================================ */
 
 .job-frame-gallery {
-  background: linear-gradient(165deg, rgba(28, 31, 37, 0.5) 0%, rgba(22, 25, 31, 0.6) 100%);
-  border: 1px solid rgba(180, 185, 200, 0.1);
+  background: rgba(25, 28, 34, 0.55);
   border-radius: 16px;
   padding: 20px;
 }
@@ -4464,9 +4605,10 @@ body {
 }
 
 .job-frame-tile {
-  display: flex;
-  flex-direction: column;
-  background: rgba(13, 15, 20, 0.6);
+  position: relative;
+  display: block;
+  background: transparent;
+  border: none;
   border-radius: 12px;
   overflow: hidden;
   cursor: pointer;
@@ -4487,14 +4629,22 @@ body {
 }
 
 .job-frame-name {
-  padding: 8px 10px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 22px 12px 10px;
   font-size: 11px;
   font-family: "Cascadia Code", "Fira Code", monospace;
-  color: var(--text-muted);
+  color: #ffffff;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  border-top: 1px solid rgba(180, 185, 200, 0.06);
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.3) 0%, rgba(0, 0, 0, 0.05) 55%, transparent 100%);
+  pointer-events: none;
+  z-index: 1;
+  display: block;
+  text-align: left;
 }
 
 .job-frame-gallery-empty {

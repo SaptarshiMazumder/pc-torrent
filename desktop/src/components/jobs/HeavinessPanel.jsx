@@ -1,7 +1,13 @@
-// Scene heaviness panel — shared between Create Render (editable resolution)
-// and Job Details (read-only).  Renders the analyzer's per-scene cost signals
-// so users can see why a render is sized the way it is, and tweak resolution
-// before submission.
+// Scene heaviness panel — read-only scene stats from the analyzer.
+// Used by:
+//   * Create Render — alongside the form, as reference info (no edits here)
+//   * Job Details — to show what the running render is actually doing
+//
+// All editable fields (resolution, samples, etc.) live in the Create Render
+// form itself; this panel never owns user input.  The ``overrides`` prop is
+// the resolved settings the render actually uses (Job Details: from
+// ``resolved_render_settings``; Create Render: the user's in-progress
+// overrides).  Falls back to scene defaults when an override is unset.
 
 const HEAVY_FEATURE_LABELS = {
   uses_subdivision: "Subdivision",
@@ -52,73 +58,6 @@ function Row({ label, value }) {
   );
 }
 
-function ResolutionRow({ heaviness, override, onChange }) {
-  const sceneX = heaviness.resolution_x ?? null;
-  const sceneY = heaviness.resolution_y ?? null;
-  const scenePct = heaviness.resolution_percentage ?? null;
-
-  if (!onChange) {
-    const x = override?.resolution_x ?? sceneX;
-    const y = override?.resolution_y ?? sceneY;
-    const pct = override?.resolution_percentage ?? scenePct;
-    const value = x && y
-      ? `${x} × ${y}${pct && pct !== 100 ? ` @ ${pct}%` : ""}`
-      : "—";
-    return <Row label="Resolution" value={value} />;
-  }
-
-  const xVal = override?.resolution_x ?? sceneX ?? "";
-  const yVal = override?.resolution_y ?? sceneY ?? "";
-  const pctVal = override?.resolution_percentage ?? scenePct ?? "";
-
-  const num = (raw) => {
-    if (raw === "" || raw == null) return null;
-    const n = Number(raw);
-    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
-  };
-
-  return (
-    <div className="hp-row hp-row-edit">
-      <span className="hp-row-label">Resolution</span>
-      <div className="hp-resolution-edit">
-        <input
-          type="number" min="1" placeholder={String(sceneX ?? 1920)}
-          value={xVal}
-          onChange={(e) => onChange({
-            resolution_x: num(e.target.value),
-            resolution_y: num(yVal),
-            resolution_percentage: num(pctVal),
-          })}
-          className="hp-input hp-input-num"
-        />
-        <span className="hp-times">×</span>
-        <input
-          type="number" min="1" placeholder={String(sceneY ?? 1080)}
-          value={yVal}
-          onChange={(e) => onChange({
-            resolution_x: num(xVal),
-            resolution_y: num(e.target.value),
-            resolution_percentage: num(pctVal),
-          })}
-          className="hp-input hp-input-num"
-        />
-        <span className="hp-at">@</span>
-        <input
-          type="number" min="1" max="1000" placeholder={String(scenePct ?? 100)}
-          value={pctVal}
-          onChange={(e) => onChange({
-            resolution_x: num(xVal),
-            resolution_y: num(yVal),
-            resolution_percentage: num(e.target.value),
-          })}
-          className="hp-input hp-input-pct"
-        />
-        <span className="hp-pct">%</span>
-      </div>
-    </div>
-  );
-}
-
 function HeavyFeatureChips({ heaviness }) {
   const active = Object.entries(HEAVY_FEATURE_LABELS).filter(
     ([flag]) => Boolean(heaviness[flag])
@@ -135,12 +74,7 @@ function HeavyFeatureChips({ heaviness }) {
   );
 }
 
-export default function HeavinessPanel({
-  heaviness,
-  loading = false,
-  onResolutionChange = null,
-  overrides = null,
-}) {
+export default function HeavinessPanel({ heaviness, loading = false, overrides = null }) {
   if (loading && !heaviness) {
     return (
       <div className="jd-card hp-skeleton">
@@ -163,6 +97,9 @@ export default function HeavinessPanel({
   const effPct = overrides?.resolution_percentage ?? heaviness.resolution_percentage;
   const eMp = effectiveMegapixels(effX, effY, effPct);
   const effSamples = overrides?.cycles_samples ?? heaviness.samples;
+  const resolutionLabel = effX && effY
+    ? `${effX} × ${effY}${effPct && effPct !== 100 ? ` @ ${effPct}%` : ""}`
+    : null;
 
   return (
     <div className="jd-card hp-panel">
@@ -170,15 +107,8 @@ export default function HeavinessPanel({
 
       <Section title="Render">
         <Row label="Engine" value={heaviness.render_engine || "—"} />
-        <ResolutionRow
-          heaviness={heaviness}
-          override={overrides}
-          onChange={onResolutionChange}
-        />
-        <Row
-          label="Effective pixels"
-          value={eMp ? `${eMp} MP` : "—"}
-        />
+        <Row label="Resolution" value={resolutionLabel} />
+        <Row label="Effective pixels" value={eMp ? `${eMp} MP` : "—"} />
         <Row label="Samples" value={formatNumber(effSamples)} />
       </Section>
 

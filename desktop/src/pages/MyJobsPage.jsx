@@ -22,10 +22,11 @@ import JobGrid from "../components/jobs/JobGrid";
 import JobDetailView from "../components/jobs/JobDetailView";
 import FrameViewerModal from "../components/jobs/FrameViewerModal";
 import { useDownloads } from "../contexts/DownloadContext";
+import { useError } from "../contexts/ErrorContext";
 
 const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
 
-export default function MyJobsPage({ jobs, loading, loadingMore, removeJob, backendUrl, markRenderGroupCancelled, updateGroup, onRefresh, onNavigate }) {
+export default function MyJobsPage({ jobs, loading, loadingMore, hasMore, loadMore, removeJob, backendUrl, markRenderGroupCancelled, updateGroup, onRefresh, onNavigate }) {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [cancelingAll, setCancelingAll] = useState(false);
@@ -39,6 +40,7 @@ export default function MyJobsPage({ jobs, loading, loadingMore, removeJob, back
   // and cache it in localStorage forever (terminal data never changes).
   const [terminalDetailJob, setTerminalDetailJob] = useState(null);
   const { downloads, startDownload } = useDownloads();
+  const { showError } = useError();
 
   // If selected job gets removed, go back to grid
   useEffect(() => {
@@ -209,9 +211,12 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
   const jobForDetail = isTerminalSelection
     ? terminalData || selectedJob
     : selectedJob;
-  // Spinner shows whenever a terminal group is selected and we haven't
-  // got the rich DTO yet (neither from cache nor from the network).
-  const showTerminalSpinner = !!selectedJob && isTerminalSelection && !terminalData;
+  // True only while the slow /render-groups/{id} fetch is in flight for
+  // an uncached terminal group.  Active groups already carry tasks via
+  // the list endpoint; cache hits land synchronously.  The detail view
+  // uses this to render the page immediately off the slim list DTO and
+  // show inline loaders on the panels that need the full tasks array.
+  const tasksLoading = !!selectedJob && isTerminalSelection && !terminalData;
 
   const handleSelectJob = useCallback((id) => {
     setSelectedJobId(id);
@@ -271,8 +276,16 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
       onToggleGallery: () => handleToggleFrameGallery(job),
       onOpenFrame: (file) => { void handleOpenFrame(job, file); },
       onRemove: async () => {
-        await removeJob(id);
-        setSelectedJobId(null);
+        try {
+          await removeJob(id);
+          setSelectedJobId(null);
+        } catch (err) {
+          showError({
+            title: "Couldn't delete render",
+            message: err?.message || "Server rejected the delete request.",
+            detail: err?.body || null,
+          });
+        }
       },
       onRefreshFrames: () => { void fetchFrameGallery(job, { silent: false }); },
     };
@@ -321,6 +334,9 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
           backendUrl={backendUrl}
           onSelect={handleSelectJob}
           onRemove={removeJob}
+          hasMore={hasMore}
+          loadingMore={loadingMore}
+          onLoadMore={loadMore}
         />
       )}
 
@@ -328,43 +344,7 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
         <div className="myjobs-load-more">Loading more...</div>
       )}
 
-      {showTerminalSpinner && (
-        <div className="detail-loading">
-          <div className="detail-loading-spinner" aria-hidden="true">
-            <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-              <circle
-                cx="16"
-                cy="16"
-                r="12"
-                stroke="currentColor"
-                strokeWidth="3"
-                strokeDasharray="20 14"
-                strokeLinecap="round"
-              >
-                <animateTransform
-                  attributeName="transform"
-                  type="rotate"
-                  from="0 16 16"
-                  to="360 16 16"
-                  dur="0.9s"
-                  repeatCount="indefinite"
-                />
-              </circle>
-            </svg>
-          </div>
-          <p className="muted">Loading job details...</p>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={handleBack}
-            style={{ marginTop: 12 }}
-          >
-            Back to list
-          </button>
-        </div>
-      )}
-
-      {jobForDetail && !showTerminalSpinner && (() => {
+      {jobForDetail && (() => {
         const dlState = downloads[selectedJobId];
         const contextDownloadState = dlState ? {
           status: dlState.status === "loading" ? "loading" : dlState.status,
@@ -382,6 +362,7 @@ const selectedJob = selectedJobId ? jobs.find((j) => jobKey(j) === selectedJobId
             job={jobForDetail}
             backendUrl={backendUrl}
             authToken={authToken}
+            tasksLoading={tasksLoading}
             downloadState={contextDownloadState}
             downloadingId={dlState?.status === "loading" ? selectedJobId : null}
             canceling={!!cancelingGroupIds[selectedJobId]}

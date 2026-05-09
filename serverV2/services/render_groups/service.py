@@ -619,7 +619,7 @@ class RenderGroupService:
         if not group.get("user_id") or group["user_id"] != user["uid"]:
             raise RenderGroupServiceError(403, "Access denied")
         if group["status"] not in ("done", "failed", "cancelled"):
-            raise RenderGroupServiceError(409, "Only completed, failed, or cancelled groups can be removed")
+            self._orchestrator.cancel_group(group_id)
         self._groups.delete(group_id)
         return {"success": True, "group_id": group_id}
 

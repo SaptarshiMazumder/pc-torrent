@@ -94,6 +94,8 @@ export default function App() {
             jobs={jobsHook.jobs}
             loading={jobsHook.loading}
             loadingMore={jobsHook.loadingMore}
+            hasMore={jobsHook.hasMore}
+            loadMore={jobsHook.loadMore}
             removeJob={jobsHook.removeJob}
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}

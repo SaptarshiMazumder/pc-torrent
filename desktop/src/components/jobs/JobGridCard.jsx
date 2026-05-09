@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { STATUS_LABELS, resolveJobFilename, jobKey } from "../../utils/jobUtils";
 import JobThumbnail from "./JobThumbnail";
+import { useError } from "../../contexts/ErrorContext";
 
 function formatRelativeDate(isoString) {
   if (!isoString) return "";
@@ -40,6 +41,7 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
   const id = jobKey(job);
   const displayName = resolveJobFilename(job);
   const status = job?.status || "pending";
+  const { showError } = useError();
 
   const handleRemove = async (e) => {
     e.stopPropagation();
@@ -47,6 +49,12 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
     setRemoving(true);
     try {
       await onRemove(id);
+    } catch (err) {
+      showError({
+        title: "Couldn't delete render",
+        message: err?.message || "Server rejected the delete request.",
+        detail: err?.body || null,
+      });
     } finally {
       setRemoving(false);
     }

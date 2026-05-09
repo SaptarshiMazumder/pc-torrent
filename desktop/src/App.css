@@ -1233,6 +1233,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  min-height: 100%;
 }
 
 .cr-header {
@@ -1282,6 +1283,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  flex: 1;
+  min-height: 0;
 }
 
 .cr-source-top {
@@ -1712,6 +1715,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  flex: 1;
   min-height: 280px;
 }
 
@@ -1749,7 +1753,7 @@ body {
 .saved-picker-body {
   flex: 1;
   overflow-y: auto;
-  max-height: 390px;
+  min-height: 0;
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
@@ -3611,6 +3615,9 @@ body {
 
 .jd-cost-empty {
   padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   color: var(--text-muted);
   font-size: 12px;
@@ -3620,8 +3627,10 @@ body {
 }
 
 .jd-section-loader {
-  padding: 18px 16px;
-  text-align: center;
+  padding: 28px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-muted);
   font-size: 12px;
   background: rgba(25, 28, 34, 0.55);
@@ -4021,35 +4030,77 @@ body {
   padding: 60px 0 30px;
 }
 
-.loader {
-  height: 60px;
-  aspect-ratio: 2;
-  border-bottom: 3px solid #0000;
-  background:
-    linear-gradient(90deg,#524656 50%,#0000 0)
-    -25% 100%/50% 3px repeat-x border-box;
+.swapping-squares-spinner,
+.swapping-squares-spinner * {
+  box-sizing: border-box;
+}
+
+.swapping-squares-spinner {
+  --size: 65px;
+  height: var(--size);
+  width: var(--size);
   position: relative;
-  animation: l3-0 .75s linear infinite;
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
 }
-.loader--sm {
-  height: 24px;
-  border-bottom-width: 2px;
+
+.swapping-squares-spinner--sm {
+  --size: 26px;
 }
-.loader:before {
-  content: "";
+
+.swapping-squares-spinner .square {
+  height: calc(var(--size) * 0.25 / 1.3);
+  width:  calc(var(--size) * 0.25 / 1.3);
+  animation-duration: 1000ms;
+  border-width: calc(var(--size) * 0.04 / 1.3);
+  border-style: solid;
+  border-color: var(--accent);
+  margin-right: auto;
+  margin-left: auto;
   position: absolute;
-  inset: auto 42.5% 0;
-  aspect-ratio: 1;
-  border-radius: 50%;
-  background: #CF4647;
-  animation: l3-1 .75s cubic-bezier(0,900,1,900) infinite;
+  animation-iteration-count: infinite;
 }
-@keyframes l3-0 {
-  to {background-position: -125% 100%}
+
+.swapping-squares-spinner .square:nth-child(1) {
+  animation-name: swapping-squares-animation-child-1;
+  animation-delay: 500ms;
+  border-color: var(--accent);
 }
-@keyframes l3-1 {
-  0%,2% {bottom: 0%}
-  98%,to {bottom:.1%}
+
+.swapping-squares-spinner .square:nth-child(2) {
+  animation-name: swapping-squares-animation-child-2;
+  animation-delay: 0ms;
+  border-color: color-mix(in srgb, var(--accent) 75%, transparent);
+}
+
+.swapping-squares-spinner .square:nth-child(3) {
+  animation-name: swapping-squares-animation-child-3;
+  animation-delay: 500ms;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.swapping-squares-spinner .square:nth-child(4) {
+  animation-name: swapping-squares-animation-child-4;
+  animation-delay: 0ms;
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+@keyframes swapping-squares-animation-child-1 {
+  50% { transform: translate(150%, 150%) scale(2, 2); }
+}
+
+@keyframes swapping-squares-animation-child-2 {
+  50% { transform: translate(-150%, 150%) scale(2, 2); }
+}
+
+@keyframes swapping-squares-animation-child-3 {
+  50% { transform: translate(-150%, -150%) scale(2, 2); }
+}
+
+@keyframes swapping-squares-animation-child-4 {
+  50% { transform: translate(150%, -150%) scale(2, 2); }
 }
 
 .jd-preview-meta {
@@ -4714,6 +4765,9 @@ body {
 
 .job-frame-gallery-empty {
   padding: 32px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   color: var(--text-muted);
   font-size: 13px;
@@ -4745,7 +4799,9 @@ body {
    Downloads Page
    ============================================================ */
 .dl-page {
-  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
 }
 
 .dl-header {
@@ -4754,6 +4810,7 @@ body {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 20px;
+  max-width: 720px;
 }
 
 .dl-header h2 {
@@ -4784,14 +4841,17 @@ body {
   padding: 5px 12px !important;
 }
 
-/* Empty state */
+/* Empty state — fills the column's remaining vertical space and
+   centers content inside it, so the page doesn't look stranded at the
+   top when there's nothing else to render. */
 .dl-empty {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 60px 20px;
+  padding: 20px;
   text-align: center;
 }
 
@@ -4816,6 +4876,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-width: 720px;
 }
 
 /* Individual download entry */

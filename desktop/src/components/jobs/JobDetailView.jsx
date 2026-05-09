@@ -239,7 +239,9 @@ function RenderGroupDetail({
           {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
 
           {tasksLoading ? (
-            <div className="jd-section-loader">Loading instances and chunks…</div>
+            <div className="jd-section-loader">
+              <Loader />
+            </div>
           ) : (
             <>
               <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="active" />
@@ -319,7 +321,9 @@ function RenderGroupDetail({
           <div className="jd-drawer-panel-body">
             {instancesOpen && (
               tasksLoading ? (
-                <div className="jd-section-loader">Loading instances…</div>
+                <div className="jd-section-loader">
+                  <Loader />
+                </div>
               ) : (
                 <>
                   <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
@@ -353,7 +357,9 @@ function RenderGroupDetail({
                 </div>
 
                 {tasksLoading ? (
-                  <div className="jd-cost-empty">Loading per-chunk costs…</div>
+                  <div className="jd-cost-empty">
+                    <Loader size="sm" />
+                  </div>
                 ) : tasksList.length > 0 ? (
                   <ul className="jd-cost-list">
                     {tasksList

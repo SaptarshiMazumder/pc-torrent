@@ -91,11 +91,16 @@ export default function App() {
         </div>
         {page === "myjobs" && (
           <MyJobsPage
-            jobs={jobsHook.jobs}
-            loading={jobsHook.loading}
-            loadingMore={jobsHook.loadingMore}
-            hasMore={jobsHook.hasMore}
-            loadMore={jobsHook.loadMore}
+            ongoingJobs={jobsHook.ongoingJobs}
+            pastJobs={jobsHook.pastJobs}
+            loadingOngoing={jobsHook.loadingOngoing}
+            loadingPast={jobsHook.loadingPast}
+            loadingMoreOngoing={jobsHook.loadingMoreOngoing}
+            loadingMorePast={jobsHook.loadingMorePast}
+            hasMoreOngoing={jobsHook.hasMoreOngoing}
+            hasMorePast={jobsHook.hasMorePast}
+            loadMoreOngoing={jobsHook.loadMoreOngoing}
+            loadMorePast={jobsHook.loadMorePast}
             removeJob={jobsHook.removeJob}
             backendUrl={backendUrl}
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}

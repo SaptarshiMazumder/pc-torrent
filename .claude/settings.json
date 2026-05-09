@@ -35,7 +35,9 @@
       "Bash(grep -nB1 \"border: 1px solid var\\(--glass-border\\)\" \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/App.css\")",
       "Bash(awk '/^\\\\./ {cls=$0} /border: 1px solid var\\\\\\(--glass-border\\\\\\)/ {print cls}' \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/desktop/src/App.css\")",
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\sapma\\\\OneDrive\\\\Desktop\\\\Projects\\\\PC_Rent\\\\pc-torrent\\\\desktop\" -Directory)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(Get-ChildItem -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)"
     ],
     "additionalDirectories": [
       "\\tmp"

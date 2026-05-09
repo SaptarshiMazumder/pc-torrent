@@ -144,18 +144,31 @@ class RenderGroupRepository:
 
     def get_by_user_page(
         self, user_id: str, *, limit: int, offset: int,
+        status_group: str | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Paginated slice of a user's groups, newest-first.  Returns
         ``(rows, has_more)``.  ``has_more`` is detected by selecting one
         extra row beyond ``limit`` -- avoids a second ``COUNT(*)`` query.
 
+        ``status_group`` filters the slice to either active
+        (uploading/pending/running) or terminal (done/failed/cancelled)
+        groups.  ``None`` returns the full mixed list for backwards
+        compatibility.
+
         Tie-break on ``id DESC`` so groups submitted in the same second
         keep a stable order across pages.
         """
+        params: list[Any] = [user_id]
+        where = "user_id = %s"
+        if status_group == "active":
+            where += " AND status IN ('uploading', 'pending', 'running')"
+        elif status_group == "terminal":
+            where += " AND status IN ('done', 'failed', 'cancelled')"
+        params.extend([limit + 1, offset])
         rows = query_all(
-            "SELECT * FROM render_groups WHERE user_id = %s "
+            f"SELECT * FROM render_groups WHERE {where} "
             "ORDER BY submitted_at DESC, id DESC LIMIT %s OFFSET %s",
-            (user_id, limit + 1, offset),
+            tuple(params),
         )
         has_more = len(rows) > limit
         return rows[:limit], has_more

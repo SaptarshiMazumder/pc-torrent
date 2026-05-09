@@ -69,6 +69,15 @@ class AllocationWeights:
     # Higher ratio -> fewer chunks, more efficient per chunk, slower wall
     startup_amortization_ratio: float = 0.5
 
+    # --- Chunk-count curve (sub-linear growth with frame count) -------
+    # Target chunks ~ ceil(sqrt(total_frames * chunk_count_curve)).
+    # Replaces the old "always max out frames/min_frames_per_chunk"
+    # behaviour that produced too many chunks for medium/large renders.
+    # 1.0 -> sqrt(frames) (50f -> 7, 300f -> 18, 1000f -> 32)
+    # >1   -> more chunks (more parallelism, more startup overhead)
+    # <1   -> fewer chunks (longer per-chunk renders)
+    chunk_count_curve: float = 1.0
+
     # --- Frame distribution -------------------------------------------
     # Time-balanced is the only mode used in production -- frame split
     # equalises wall-time across chunks so the slowest GPU doesn't

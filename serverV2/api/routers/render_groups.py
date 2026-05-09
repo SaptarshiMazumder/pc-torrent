@@ -74,8 +74,14 @@ def list_render_groups(
     user: dict = Depends(get_current_user),
     limit: int = Query(5, ge=1, le=50),
     offset: int = Query(0, ge=0),
+    status_group: str | None = Query(
+        None, regex="^(active|terminal)$",
+        description="Filter to active (uploading/pending/running) or terminal (done/failed/cancelled) groups.",
+    ),
 ):
-    return _get().list_with_status_page(user["uid"], limit=limit, offset=offset)
+    return _get().list_with_status_page(
+        user["uid"], limit=limit, offset=offset, status_group=status_group,
+    )
 
 
 @router.post("/render-groups/create")

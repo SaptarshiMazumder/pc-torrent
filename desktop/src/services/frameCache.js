@@ -36,15 +36,27 @@ function _limited(fn) {
  * @param {string} cacheKey   - Unique key for this frame, e.g. "{job_id}/{filename}"
  * @returns {Promise<string>} - asset:// URL suitable for <img src>
  */
-export function getCachedFramePreview(previewUrl, cacheKey) {
+export async function getCachedFramePreview(previewUrl, cacheKey) {
+  // Disk hit check runs OUTSIDE the limiter — it's a cheap IPC roundtrip
+  // and gating it behind MAX_CONCURRENT meant a fully-cached gallery had
+  // to serialize all its disk lookups behind the network throttle, even
+  // though no network was involved.  Cache hits now resolve in parallel.
+  const existing = await invoke("get_frame_cache_path", { cacheKey });
+  if (existing) {
+    return convertFileSrc(existing);
+  }
+
+  // Cache miss -- network fetch + canvas convert + disk write.  This is
+  // the expensive path; throttle it so a cold gallery doesn't stampede
+  // the server.
   return _limited(async () => {
-    // Check local disk cache first — fast path, no network
-    const existing = await invoke("get_frame_cache_path", { cacheKey });
-    if (existing) {
-      return convertFileSrc(existing);
+    // Re-check the disk inside the limiter: another concurrent caller
+    // may have populated the cache while we were queued.
+    const raced = await invoke("get_frame_cache_path", { cacheKey });
+    if (raced) {
+      return convertFileSrc(raced);
     }
 
-    // Fetch the (already-resized) preview from the server
     const response = await fetch(previewUrl);
     if (!response.ok) {
       throw new Error(`Preview fetch failed: ${response.status}`);

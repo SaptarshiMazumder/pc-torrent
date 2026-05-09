@@ -2643,6 +2643,44 @@ body {
   font-size: 13px;
 }
 
+.myjobs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.myjobs-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.myjobs-section-head h3 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.myjobs-section-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  background: rgba(25, 28, 34, 0.45);
+  border-radius: 14px;
+}
+
+.myjobs-section-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80px;
+  color: var(--text-muted);
+}
+
 /* Job detail loading state — shown briefly on first open of a terminal
    group while the full DTO is fetched (active groups never show this). */
 .detail-loading {
@@ -4082,6 +4120,35 @@ body {
 
 .jd-frames-toggle:hover {
   background: rgba(30, 33, 42, 0.6);
+}
+
+.jd-frames-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  align-self: center;
+  border: none;
+  border-radius: 8px;
+  background: rgba(180, 185, 200, 0.08);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.jd-frames-refresh:hover:not(:disabled) {
+  background: rgba(180, 185, 200, 0.16);
+  color: var(--text-primary);
+}
+
+.jd-frames-refresh:disabled {
+  cursor: default;
+}
+
+.jd-frames-refresh--spinning svg {
+  animation: spin 0.9s linear infinite;
 }
 
 .jd-frames-count {

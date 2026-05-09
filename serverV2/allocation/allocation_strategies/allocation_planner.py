@@ -166,17 +166,32 @@ class AllocationPlanner:
         ratio = max(0.05, weights.startup_amortization_ratio)
         total_render_sec = total_frames * median_spf
         k_amortized = max(1, math.ceil(total_render_sec / (worst_startup * ratio)))
-        max_by_frames = max(1, total_frames // weights.min_frames_per_chunk)
-        ideal_count = min(weights.max_targets, k_amortized, max_by_frames, len(eligible))
+        # Sub-linear chunk-count target: sqrt(total_frames * curve) so
+        # small renders still fan out enough for parallelism while large
+        # renders don't shatter into hundreds of tiny chunks.
+        # ``min_frames_per_chunk`` stays as the hard floor: chunks never
+        # smaller than that, regardless of what the curve suggests.
+        curve = max(0.1, weights.chunk_count_curve)
+        target_by_curve = max(1, math.ceil(math.sqrt(total_frames * curve)))
+        absolute_floor = max(1, total_frames // weights.min_frames_per_chunk)
+        ideal_count = min(
+            weights.max_targets,
+            k_amortized,
+            target_by_curve,
+            absolute_floor,
+            len(eligible),
+        )
         if ideal_count <= 0:
             return []
         even_chunk = max(1, total_frames // ideal_count)
 
         log.info(
             "[ALLOC] knapsack: total_frames=%d median_spf=%.1fs worst_startup=%.0fs"
-            " ratio=%.2f k_amortized=%d max_by_frames=%d eligible=%d -> K=%d",
+            " ratio=%.2f k_amortized=%d target_by_curve=%d (curve=%.2f)"
+            " absolute_floor=%d eligible=%d -> K=%d",
             total_frames, median_spf, worst_startup, ratio,
-            k_amortized, max_by_frames, len(eligible), ideal_count,
+            k_amortized, target_by_curve, curve,
+            absolute_floor, len(eligible), ideal_count,
         )
 
         # Step 3: score every eligible target with composite scorer
@@ -349,7 +364,12 @@ class AllocationPlanner:
             if not self._passes_validators(m, context):
                 continue
             out.append(m)
+
         in_flight = resources.serverless_in_flight
+
+        # Pass 1: filter serverless capabilities and group by fleet so we
+        # can apply per-fleet slot budgeting (rather than per-GPU-type).
+        eligible_by_fleet: dict[str, list] = {}
         for cap in resources.serverless_capabilities:
             if not self._registry.is_enabled(cap.fleet):
                 continue
@@ -357,27 +377,34 @@ class AllocationPlanner:
                 continue
             if not self._passes_validators(cap, context):
                 continue
-            headroom = max(
-                0, cap.fleet_max_parallel - in_flight.get(cap.fleet, 0),
-            )
+            eligible_by_fleet.setdefault(cap.fleet, []).append(cap)
+
+        # Pass 2: materialize slots per fleet.
+        #
+        # Vast-style fleets (offer_id set): each capability is one
+        # rentable marketplace offer; append once per offer.  Total is
+        # naturally bounded by live supply.
+        #
+        # Modal-style fleets (no offer_id): a single capability represents
+        # "I can spawn N of this gpu_type".  Materialize ``headroom``
+        # virtual slots TOTAL across all GPU types for the fleet, round-
+        # robin so every eligible type is represented.  Previously this
+        # branch materialized ``headroom`` slots per gpu_type, inflating
+        # Modal's share of the eligible pool to ``headroom * num_types``
+        # and biasing the picker heavily toward Modal whenever multiple
+        # GPU types were enabled.  Total now matches the fleet cap.
+        for fleet, caps in eligible_by_fleet.items():
+            max_parallel = caps[0].fleet_max_parallel
+            headroom = max(0, max_parallel - in_flight.get(fleet, 0))
             if headroom <= 0:
                 continue
-            if cap.offer_id is not None:
-                # Vast (per-offer): each offer is exactly one rentable
-                # instance.  Append once.  Total slots per fleet =
-                # number of offers, naturally bounded by the live
-                # marketplace pool.
-                out.append(cap)
-            else:
-                # Modal / serverless-without-offer-id: one capability
-                # represents "I can spawn N of these gpu_type".
-                # Materialize up to ``headroom`` virtual slots per
-                # gpu_type so the picker can take multiple chunks of
-                # the same class.  Total may exceed fleet max_parallel
-                # across gpu_types -- dispatch-time fleet cap enforces
-                # the absolute ceiling.
-                for _ in range(headroom):
+            if caps[0].offer_id is not None:
+                for cap in caps:
                     out.append(cap)
+            else:
+                for i in range(headroom):
+                    out.append(caps[i % len(caps)])
+
         return out
 
     def _passes_validators(self, target, context: AllocationValidationContext) -> bool:

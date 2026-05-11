@@ -28,6 +28,12 @@ class CommunityMachine:
     # column exists in the ``machines`` table — every community machine gets
     # the global ``community.price_per_hour`` injected by MachineRepository.
     price_per_hour: float = 1.0
+    # Seconds remaining in the host's commitment window, computed at row-read
+    # time from ``commitment_end_at - now()``.  None when the column is unset
+    # (pre-migration rows) -- planner's time filter treats None as "skip the
+    # check" so the planner stays compatible with legacy rows.  Phase 5 reads
+    # this directly; Phase 1 just plumbs the slot.
+    available_seconds: float | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any], *, price_per_hour: float = 1.0) -> CommunityMachine:
@@ -41,7 +47,31 @@ class CommunityMachine:
             status=row.get("status", "idle"),
             last_seen_at=row.get("last_seen_at"),
             price_per_hour=price_per_hour,
+            available_seconds=_compute_available_seconds(row.get("commitment_end_at")),
         )
+
+
+def _compute_available_seconds(commitment_end_at: Any) -> float | None:
+    """Convert a ``commitment_end_at`` cell into seconds-remaining.
+
+    Returns ``None`` if the column is unset (legacy / unmigrated row).
+    Returns ``0`` for a window that has already expired -- planner will
+    drop the row, the community monitor will retire it on its next tick.
+    """
+    if commitment_end_at is None:
+        return None
+    if isinstance(commitment_end_at, datetime):
+        end_at = commitment_end_at
+    else:
+        # ISO string fallback for DB layers that don't auto-cast TIMESTAMP.
+        try:
+            end_at = datetime.fromisoformat(str(commitment_end_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=timezone.utc)
+    remaining = (end_at - datetime.now(timezone.utc)).total_seconds()
+    return max(0.0, remaining)
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +103,12 @@ class FleetCapability:
     # Host OS string (e.g. "Linux", "Ubuntu 22.04", "Windows Server").
     # Same "None means trust" rule applies.
     host_os: str | None = None
+    # Seconds the underlying resource is committed for.  Modal stamps the
+    # config-driven ``availability_sec``; Vast stamps the offer's
+    # ``duration`` (or ``end_date - now()`` as a fallback).  ``None`` is a
+    # real semantic -- "the source didn't tell us" -- and the planner
+    # respects that by skipping its time check for that target.
+    available_seconds: float | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,7 @@ def list_available_machines():
                 "status": m.status,
                 "last_seen_at": m.last_seen_at,
                 "price_per_hour": m.price_per_hour,
+                "available_seconds": m.available_seconds,
             }
             for m in snapshot.community_available
         ],
@@ -100,6 +101,7 @@ def list_available_machines():
                 "offer_id": c.offer_id,
                 "cuda_version": c.cuda_version,
                 "host_os": c.host_os,
+                "available_seconds": c.available_seconds,
             }
             for c in snapshot.vast_available
         ],
@@ -114,6 +116,7 @@ def list_available_machines():
                 "render_speed": c.render_speed,
                 "fleet_max_parallel": c.fleet_max_parallel,
                 "price_per_hour": c.price_per_hour,
+                "available_seconds": c.available_seconds,
             }
             for c in snapshot.modal_available
         ],

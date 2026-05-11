@@ -496,6 +496,19 @@ def init_db() -> None:
                     END $$
                     """
                 )
+
+                # Phase 10 -- community commitment window.  When a desktop
+                # connects via the agent it sends a user-chosen duration;
+                # the server stamps ``commitment_end_at = now + duration``.
+                # The allocation planner reads ``available_seconds`` off
+                # CommunityMachine (computed at row-read time) to drop
+                # targets whose window can't fit a chunk.  NULL on pre-
+                # migration rows -- planner treats NULL as "skip the check"
+                # so legacy rows keep working until they re-register.
+                cur.execute(
+                    "ALTER TABLE machines ADD COLUMN IF NOT EXISTS "
+                    "commitment_end_at TIMESTAMP WITH TIME ZONE"
+                )
         log.info("Database connection pool initialized")
     except Exception as exc:
         log.error("Failed to initialize database: %s", exc)

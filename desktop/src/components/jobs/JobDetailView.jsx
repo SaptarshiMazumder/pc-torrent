@@ -233,10 +233,6 @@ function RenderGroupDetail({
 
         <div className="jd-right-col">
           {job.status === "failed" && job.error && <div className="inst-error">{job.error}</div>}
-          {downloadState?.status === "done" && (
-            <div className="rentee-job-success">Downloaded to <code>{downloadState.path}</code>{downloadState?.summary ? ` (${downloadState.summary})` : ""}</div>
-          )}
-          {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
 
           {tasksLoading ? (
             <div className="jd-section-loader">
@@ -479,10 +475,6 @@ function SingleJobDetail({
       </div>
 
       {job.status === "failed" && job.error && <div className="inst-error">{job.error}</div>}
-      {downloadState?.status === "done" && (
-        <div className="rentee-job-success">Downloaded to <code>{downloadState.path}</code>{downloadState?.summary ? ` (${downloadState.summary})` : ""}</div>
-      )}
-      {downloadState?.status === "error" && <div className="inst-error">{downloadState.error}</div>}
 
       {/* Frames — collapsible */}
       {canDownloadAvailable && (

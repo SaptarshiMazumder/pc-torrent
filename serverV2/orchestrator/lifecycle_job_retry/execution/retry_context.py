@@ -53,6 +53,12 @@ class RetryDeps:
     # Callable into RenderLifecycle.reconcile_group_status — kept as a
     # callback so this package doesn't import lifecycle.
     reconcile_group: Callable[[str], None]
+    # Reads orchestrator.max_retries fresh from the live Firestore-backed
+    # config on every retry attempt.  Bootstrap wires this to
+    # ``AllocationConfigRepository.get().orchestrator.max_retries`` so a
+    # mid-flight UI edit takes effect on the next failure rather than
+    # being frozen at server-startup.
+    get_max_retries: Callable[[], int]
 
 
 @dataclass

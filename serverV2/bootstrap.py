@@ -78,7 +78,10 @@ from serverV2.orchestrator.lifecycle_job_termination.execution.terminal_group_re
     TerminalGroupResourceReleaser,
 )
 from serverV2.orchestrator.orchestrator import RenderOrchestrator
-from serverV2.orchestrator.repositories import PendingAllocationRepository
+from serverV2.orchestrator.repositories import (
+    DispatchAllocationRepository,
+    PendingAllocationRepository,
+)
 from serverV2.allocation import AllocationDispatchQueueDaemon, AllocationFacade
 from serverV2.allocation.allocation_blend_url_resolver import (
     AllocationBlendUrlResolver,
@@ -562,6 +565,13 @@ def build(
     def _release_terminal_group_resources(group_id: str) -> int:
         return terminal_group_resource_releaser.release(group_id)
 
+    # Live max_retries -- reads orchestrator.max_retries from the live
+    # Firestore-backed config on every call.  Changes saved in the
+    # desktop ConfigurationPage take effect on the next failure /
+    # submission instead of waiting for a server restart.
+    def _get_max_retries() -> int:
+        return allocation_config_repo.get().orchestrator.max_retries
+
     chunk_progress_service = ChunkProgressService(
         output_frame_repo=output_frame_repo,
     )
@@ -573,6 +583,7 @@ def build(
         in_progress_repo=in_progress_repo,
         allocation_client=allocation_client,
         reconcile_group=_reconcile_group,
+        get_max_retries=_get_max_retries,
     )
     retry_executor = RetryExecutor(deps=retry_deps)
 
@@ -599,6 +610,7 @@ def build(
     )
 
     pending_allocation_repo = PendingAllocationRepository()
+    dispatch_allocation_repo = DispatchAllocationRepository()
 
     lifecycle = RenderLifecycle(
         allocation_client=allocation_client,
@@ -609,6 +621,7 @@ def build(
         telemetry_repo=telemetry_repo,
         output_frame_repo=output_frame_repo,
         pending_allocation_repo=pending_allocation_repo,
+        dispatch_allocation_repo=dispatch_allocation_repo,
         fleet_registry=registry,
         retry_executor=retry_executor,
         anti_affinity=anti_affinity_facade,
@@ -616,6 +629,7 @@ def build(
         job_terminator=job_terminator,
         render_canceler=render_canceler,
         terminal_group_resource_releaser=terminal_group_resource_releaser,
+        get_max_retries=_get_max_retries,
     )
     orchestrator = RenderOrchestrator(lifecycle)
 
@@ -726,6 +740,7 @@ def build(
         output_frame_repo=output_frame_repo,
         chunk_progress=chunk_progress_service,
         scene_resolver=scene_resolver,
+        get_max_retries=_get_max_retries,
     )
 
     job_service = JobService(

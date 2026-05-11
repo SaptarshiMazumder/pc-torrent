@@ -73,6 +73,22 @@ export default function MyJobsPage({
     }
   }, [allJobs, selectedJobId]);
 
+  // Auto-refresh on page visit when nothing's in the cache.  ``useJobs``
+  // lives at App level so it persists across navigation -- the initial
+  // fetch fires once on app mount, but a fresh visit to /myjobs after
+  // that gets stale state (or empty state if the initial fetch failed).
+  // Trigger a refresh on mount, but only when both lists are empty AND
+  // nothing is already loading -- avoids stomping a fetch in flight or
+  // re-pulling data the user already has.
+  useEffect(() => {
+    if (!ongoingJobs.length && !pastJobs.length && !loadingOngoing && !loadingPast) {
+      onRefresh?.();
+    }
+    // Mount-only: refresh decision is based on the initial render's
+    // snapshot.  Polling keeps things fresh after that.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auth token — refresh every 10 minutes
   useEffect(() => {
     let cancelled = false;

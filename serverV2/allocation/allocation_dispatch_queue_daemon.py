@@ -56,7 +56,14 @@ _LOCK_KEY = "allocation:dispatch:daemon"
 
 class AllocationDispatchQueueDaemon:
 
-    DEFAULT_TICK_INTERVAL_S = 2.0
+    # 10s tick keeps Redis MonitorLock try_acquire / refresh traffic to
+    # ~6 ops/min per replica.  At 2s (the previous default) a single
+    # always-on replica burned ~260k Redis requests/day on lock polling
+    # alone -- enough to exhaust an Upstash 500k/month quota in 2 days.
+    # Promotion latency from pending->dispatch grows from ~2s to ~10s
+    # in exchange, which is well under the per-frame render time so it
+    # doesn't materially affect wall-clock for new submissions.
+    DEFAULT_TICK_INTERVAL_S = 10.0
 
     def __init__(
         self,

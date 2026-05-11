@@ -1,12 +1,14 @@
 import { createContext, useCallback, useContext, useRef, useState } from "react";
 import { downloadJobOutputToDownloads } from "../services/sidecar";
 import { buildDownloadFolderName } from "../utils/jobUtils";
+import { useToast } from "./ToastContext";
 
 const DownloadContext = createContext(null);
 
 export function DownloadProvider({ children }) {
   const [downloads, setDownloads] = useState({});
   const activeRef = useRef(new Set());
+  const { pushToast } = useToast();
 
   const startDownload = useCallback(async (id, jobName, fetchOutputs) => {
     if (activeRef.current.has(id)) return;
@@ -71,16 +73,31 @@ export function DownloadProvider({ children }) {
         }));
       }
 
+      const finalStatus = stats.failed === files.length ? "error" : "done";
+      const finalError = stats.failed === files.length ? "All files failed to download" : "";
       setDownloads((prev) => ({
         ...prev,
         [id]: {
           ...prev[id],
-          status: stats.failed === files.length ? "error" : "done",
-          error: stats.failed === files.length ? "All files failed to download" : "",
+          status: finalStatus,
+          error: finalError,
           path: lastPath || "Downloads",
           completedAt: Date.now(),
         },
       }));
+      if (finalStatus === "done") {
+        const summary = [
+          stats.downloaded > 0 ? `${stats.downloaded} downloaded` : "",
+          stats.skipped > 0 ? `${stats.skipped} skipped` : "",
+          stats.failed > 0 ? `${stats.failed} failed` : "",
+        ].filter(Boolean).join(", ");
+        pushToast(
+          `Download complete: ${jobName}${summary ? ` (${summary})` : ""}`,
+          "success",
+        );
+      } else {
+        pushToast(`Download failed: ${jobName}`, "error");
+      }
     } catch (error) {
       setDownloads((prev) => ({
         ...prev,
@@ -91,10 +108,14 @@ export function DownloadProvider({ children }) {
           completedAt: Date.now(),
         },
       }));
+      pushToast(
+        `Download failed: ${jobName} — ${error.message || "unknown error"}`,
+        "error",
+      );
     } finally {
       activeRef.current.delete(id);
     }
-  }, []);
+  }, [pushToast]);
 
   const isDownloading = useCallback(
     (id) => activeRef.current.has(id),

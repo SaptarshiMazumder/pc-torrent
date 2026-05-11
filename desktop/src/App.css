@@ -5589,3 +5589,48 @@ body {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* ── Accrued / total cost (detail-page floating pill) ──
+   Fixed at the top-right of the viewport, always visible.
+   Slides left in sync with the dock when a right-side drawer
+   opens so it never gets covered by ``.jd-drawer-panel``. */
+.jd-live-cost {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 45;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  padding: 10px 18px;
+  border-radius: 14px;
+  background: rgba(232, 114, 74, 0.10);
+  border: 1px solid rgba(232, 114, 74, 0.28);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  cursor: default;
+  user-select: none;
+  transition: right 0.22s ease-out;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+}
+.jd-live-cost-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.jd-live-cost-value {
+  font-size: 28px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  line-height: 1.0;
+  text-shadow: 0 0 22px rgba(232, 114, 74, 0.42);
+}
+/* When any right-side drawer is open, slide the pill past it -- same
+   offset the ``.jd-dock`` uses (drawer width 380 + breathing room). */
+.job-detail:has(.jd-drawer-panel) .jd-live-cost {
+  right: 396px;
+}

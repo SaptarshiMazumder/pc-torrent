@@ -1,0 +1,324 @@
+@startuml allocation_target_protocol_classes
+title Plan: AllocationTarget Protocol -- full consumer landscape\n(green = NEW; orange = MODIFIED by refactor; grey = untouched by refactor)
+
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #FAFAFA
+  BorderColor #444
+}
+skinparam package {
+  BackgroundColor #F4F4F4
+  BorderColor #888
+}
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+' =====================================================================
+' THE TWO TYPES (today and proposed)
+' =====================================================================
+package "serverV2/core/models.py" <<Frame>> #FEF3C7 {
+
+  interface AllocationTarget <<NEW_Protocol>> #C8E6C9 {
+    .. shared scoring / filter surface (consumed by the planner) ..
+    + vram_gb : float
+    + cpu_cores : int
+    + ram_gb : float
+    + render_speed : float
+    + price_per_hour : float
+    + available_seconds : float_or_None
+    + cuda_version : str_or_None
+    + host_os : str_or_None
+    .. discrimination via attribute access (no isinstance) ..
+    + fleet_key : str
+    + gpu_type_key : str
+    + dispatch_fleet : str_or_None
+    + startup_buffer_key : str
+    --
+    + to_planned_task(..fields..) : PlannedTask
+  }
+
+  class CommunityMachine <<MODIFIED_dataclass>> #FEF3C7 {
+    .. existing fields ..
+    + id, gpu_model
+    + vram_gb, cpu_cores, ram_gb, render_speed
+    + status, last_seen_at, price_per_hour
+    + available_seconds
+    .. Protocol slots filled None ..
+    + cuda_version, host_os
+    .. NEW computed properties ..
+    + fleet_key, gpu_type_key
+    + dispatch_fleet, startup_buffer_key
+    .. NEW method ..
+    + to_planned_task(...)
+  }
+
+  class FleetCapability <<MODIFIED_dataclass>> #FEF3C7 {
+    .. existing fields ..
+    + fleet, gpu_type, label
+    + vram_gb, cpu_cores, ram_gb, render_speed
+    + fleet_max_parallel
+    + price_per_hour
+    + offer_id, cuda_version, host_os
+    + available_seconds
+    .. NEW computed properties ..
+    + fleet_key, gpu_type_key
+    + dispatch_fleet, startup_buffer_key
+    .. NEW method ..
+    + to_planned_task(...)
+  }
+
+  class AvailableResources <<dataclass_untouched>> {
+    + community_machines : list of CommunityMachine
+    + serverless_capabilities : list of FleetCapability
+    + serverless_in_flight : dict
+  }
+
+  note bottom of AvailableResources #E0E7FF
+    **Bucketing stays split** by fleet kind.
+    The Protocol unifies the scoring/filter
+    surface; the resource snapshot keeps the
+    two-bucket shape because community owns
+    persistent identity, serverless owns
+    fleet_max_parallel capacity.
+  end note
+}
+
+AllocationTarget <|.. CommunityMachine : implements
+AllocationTarget <|.. FleetCapability : implements
+
+' =====================================================================
+' UPSTREAM OF THE PLANNER -- pending_allocation_queue (UNTOUCHED)
+' Stores the work-item BEFORE allocation runs.  Carries frame range,
+' engine, tier, exclusions, overrides -- but ZERO target info, because
+' targets only exist after the snapshot is read at planning time.
+' =====================================================================
+package "serverV2/orchestrator/  pending_allocation_queue  (UNTOUCHED)" <<Frame>> #E0E7FF {
+
+  class PendingAllocationRepository <<existing>> {
+    + enqueue(group_id, frame_range, exclusions, overrides) : None
+    + claim_next() : PendingAllocationRow_or_None
+    + delete(id) : None
+  }
+
+  class AllocationPendingTickProcessor <<existing>> {
+    + tick() : None
+    .. pops queue ; calls planner ; pushes to dispatch_queue ..
+  }
+
+  note bottom of AllocationPendingTickProcessor #DCFCE7
+    **Why upstream is untouched**
+    Pending rows carry (group_id, frame range,
+    engine, tier, exclusions, overrides).
+    No CommunityMachine, no FleetCapability.
+    Targets enter the flow only when the tick
+    processor reads the FleetAvailabilitySnapshot
+    and hands it to the planner.
+  end note
+}
+
+' =====================================================================
+' DIRECT CONSUMERS OF THE TWO TYPES (the refactor blast radius)
+' Three modules touch the types AND do isinstance discrimination.
+' =====================================================================
+package "serverV2/allocation  (REFACTORED by Protocol)" <<Frame>> #FEF3C7 {
+
+  class AllocationPlanner <<MODIFIED>> #FEF3C7 {
+    + plan_initial(...) : list of PlannedTask
+    + plan_retry(...) : PlannedTask_or_None
+    --
+    .. all sub-steps now take target : AllocationTarget ..
+    - _eligible_targets(...)
+    - _select_with_diversification(...)
+    - _distribute_time_balanced(...)
+    - _target_to_task(...)
+    --
+    BEFORE :  9 isinstance branches across helpers
+    AFTER  :  zero isinstance branches; reads via Protocol
+  }
+
+  class EngineCompatibilityValidator <<MODIFIED>> #FEF3C7 {
+    + is_eligible(target, ctx) : bool
+    --
+    BEFORE :  2 isinstance branches
+    AFTER  :  reads target.host_os / target.fleet_key
+  }
+
+  class TargetValidator <<protocol_existing>> {
+    + is_eligible(target, ctx) : bool
+    .. interface now typed as target : AllocationTarget ..
+  }
+}
+
+AllocationPlanner            ..> AllocationTarget : reads Protocol surface
+EngineCompatibilityValidator ..> AllocationTarget : reads Protocol surface
+TargetValidator              ..> AllocationTarget : interface signature
+
+' =====================================================================
+' UNAFFECTED CONSUMERS -- construct, transport, or store the types
+' but never discriminate.  No code change required.
+' =====================================================================
+package "serverV2/fleets/fleet_availability/  (UNTOUCHED)" <<Frame>> #E0E7FF {
+
+  class CommunityAvailabilityBuilder <<existing>> {
+    + build() : tuple of CommunityMachine
+  }
+  class VastAvailabilityBuilder <<existing>> {
+    + build() : tuple of FleetCapability
+  }
+  class ModalAvailabilityBuilder <<existing>> {
+    + build() : tuple of FleetCapability
+  }
+
+  class FleetAvailabilitySnapshot <<existing>> {
+    + community_available : tuple of CommunityMachine
+    + vast_available : tuple of FleetCapability
+    + modal_available : tuple of FleetCapability
+  }
+
+  class MutableFleetAvailabilitySnapshot <<existing>> {
+    + same buckets, mutable for per-dispatch decrement
+  }
+
+  class FleetAvailabilitySnapshotCache <<existing>> {
+    + get_or_build(...) : Snapshot
+    .. Redis serdes; preserves the two buckets ..
+  }
+}
+
+CommunityAvailabilityBuilder --> CommunityMachine : constructs
+VastAvailabilityBuilder      --> FleetCapability  : constructs
+ModalAvailabilityBuilder     --> FleetCapability  : constructs
+FleetAvailabilitySnapshot         o-- CommunityMachine
+FleetAvailabilitySnapshot         o-- FleetCapability
+MutableFleetAvailabilitySnapshot  o-- CommunityMachine
+MutableFleetAvailabilitySnapshot  o-- FleetCapability
+
+' =====================================================================
+package "serverV2/services/machines/  (UNTOUCHED)" <<Frame>> #E0E7FF {
+  class MachineRepository <<existing>> {
+    + get_available_community() : list of CommunityMachine
+    + get_by_id(id) : CommunityMachine_or_None
+    + get_community_by_ids(ids) : list of CommunityMachine
+  }
+}
+MachineRepository --> CommunityMachine : from_row
+
+' =====================================================================
+' FLEET STRATEGIES -- the user asked specifically about these.
+' Verified: they don't touch CommunityMachine / FleetCapability.
+' They consume PlannedTask, which is produced by to_planned_task().
+' =====================================================================
+package "serverV2/fleets/{community,modal,vast}/  (UNTOUCHED)" <<Frame>> #E0E7FF {
+
+  interface IFleetStrategy <<existing>> {
+    + dispatch(task : PlannedTask, ctx, job_id) : DispatchResult
+    + cancel(provider_job_id) : None
+    + stop_monitoring(job_id) : None
+  }
+
+  class CommunityFleetStrategy <<existing>>
+  class VastFleetStrategy <<existing>>
+  class ModalFleetStrategy <<existing>>
+
+  note bottom of IFleetStrategy #DCFCE7
+    **Why these stay untouched**
+    Strategies operate on PlannedTask, not on
+    CommunityMachine / FleetCapability.
+    The Protocol's to_planned_task(...) is the
+    seam: planner reads the Protocol, calls
+    to_planned_task, hands PlannedTask to the
+    strategy.  Strategies never see the source
+    target type, so the Protocol refactor is
+    invisible to them.
+  end note
+}
+
+CommunityFleetStrategy ..|> IFleetStrategy
+VastFleetStrategy      ..|> IFleetStrategy
+ModalFleetStrategy     ..|> IFleetStrategy
+
+' =====================================================================
+' DOWNSTREAM OF THE PLANNER -- dispatch_queue + dispatch + orchestrator
+' Stores PlannedTask rows, dispatched via fleet strategies.  Also UNTOUCHED.
+' =====================================================================
+package "serverV2/allocation_dispatch + orchestrator  (UNTOUCHED)" <<Frame>> #E0E7FF {
+
+  class DispatchQueueRepository <<existing>> {
+    + enqueue(task : PlannedTask, ctx) : None
+    + dequeue_for_fleet(fleet) : DispatchQueueRow_or_None
+    .. row carries serialized PlannedTask fields ..
+  }
+  class AllocationDispatcher <<existing>> {
+    + dispatch_one(task : PlannedTask, ctx, job_id) : DispatchResult
+    .. picks strategy via task.fleet ; no target type knowledge ..
+  }
+  class AllocationDispatchQueueService <<existing>> {
+    + enqueue(group_id, tasks, ctx) : list of DispatchResult
+    + dispatch_pending_for_fleet(fleet) : None
+    .. operates on dispatch_queue rows + PlannedTask ..
+  }
+  class RenderLifecycle <<existing>> {
+    + orchestrator entry; never sees AllocationTarget
+  }
+}
+
+AllocationDispatcher --> IFleetStrategy : routes by task.fleet
+AllocationDispatchQueueService --> AllocationDispatcher
+AllocationDispatchQueueService --> DispatchQueueRepository : dequeue
+RenderLifecycle --> AllocationPlanner : plans here, dispatches downstream
+
+' Upstream + downstream flow around the planner
+PendingAllocationRepository  --> AllocationPendingTickProcessor : claim_next
+AllocationPendingTickProcessor --> AllocationPlanner : plan_initial / plan_retry
+AllocationPlanner            --> DispatchQueueRepository : enqueue(PlannedTask)
+FleetAvailabilitySnapshot    --> AllocationPlanner : targets fed in via AvailableResources
+
+' =====================================================================
+' API ROUTERS -- read concrete-typed fields off the snapshot.
+' Unaffected: they read fields that exist on both today and after.
+' =====================================================================
+package "serverV2/api/routers/machines.py  (UNTOUCHED)" <<Frame>> #E0E7FF {
+  class MachinesRouter <<existing>> {
+    + GET /machines/available
+    .. flattens Snapshot into JSON; reads concrete fields ..
+  }
+}
+
+MachinesRouter --> FleetAvailabilitySnapshot : reads
+
+' =====================================================================
+note as ScopeNote #FEF9C3
+  **Blast radius**
+  Modified by the Protocol refactor:
+    - serverV2/core/models.py (Protocol + computed @property accessors on both classes)
+    - allocation_planner.py (9 isinstance branches removed)
+    - allocation_engine_compatibility_validator.py
+        (2 isinstance branches removed)
+  Untouched:
+    - pending_allocation_queue + PendingAllocationRepository
+        + AllocationPendingTickProcessor (upstream of the planner;
+        rows carry frame range / engine / tier / exclusions, no targets)
+    - dispatch_queue + DispatchQueueRepository
+        (downstream of the planner; rows are serialized PlannedTask)
+    - All 3 fleet strategies (operate on PlannedTask, never on the targets)
+    - AllocationDispatcher + AllocationDispatchQueueService (dispatch is PlannedTask-only)
+    - Orchestrator / RenderLifecycle (calls planner; never inspects targets)
+    - Fleet-availability builders / snapshots / cache / mutable snapshot
+        (construct + transport + serdes the concrete types as-is)
+    - MachineRepository (still returns CommunityMachine)
+    - MachinesRouter (reads concrete fields from the snapshot)
+    - Callback / HTTP boundary (operates on jobs, never on targets)
+end note
+
+note as SeamNote #DBEAFE
+  **The seam that contains the refactor**
+  The Protocol's only output to non-planner code is
+  the PlannedTask produced by to_planned_task(...).
+  Every dispatch / orchestration / callback path
+  downstream consumes PlannedTask, which is unchanged
+  by the refactor.  The Protocol is a planner-internal
+  abstraction with a typed dataclass exit point.
+end note
+
+@enduml

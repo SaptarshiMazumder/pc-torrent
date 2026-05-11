@@ -549,6 +549,34 @@ export default function JobDetailView({
     ? (job.tasks?.length ?? job.tasks_count ?? 0)
     : 1;
 
+  // Accrued cost.  Same formula RenderGroupDetail uses internally,
+  // hoisted to the wrapper so the floating top-right pill stays in sync
+  // with the per-machine cost chips and persists into terminal status
+  // (the user wants to see what each finished job cost them).
+  useLiveCostTick();
+  const now = new Date();
+  const costTasks = isGroup ? (job?.tasks || []) : (job ? [job] : []);
+  const liveCostSum = costTasks.reduce((sum, t) => {
+    if (t?.status === "running" || t?.status === "uploading") {
+      const live = liveActualCost(t, now);
+      return sum + (live ?? 0);
+    }
+    return sum + (typeof t?.actual_cost_usd === "number" ? t.actual_cost_usd : 0);
+  }, 0);
+  const liveCost = liveCostSum > 0
+    ? liveCostSum
+    : isGroup
+      ? (typeof job?.total_actual_cost_usd === "number" ? job.total_actual_cost_usd : 0)
+      : (typeof job?.actual_cost_usd === "number" ? job.actual_cost_usd : 0);
+  // Label flips by status so terminal jobs read "TOTAL COST" / "FINAL COST"
+  // instead of the live-active "LIVE COST".  Same value either way --
+  // it's the actual cost as of now (or end-of-render for terminal).
+  const costLabel = status === "done"
+    ? "Total cost"
+    : status === "failed" || status === "cancelled"
+      ? "Final cost"
+      : "Live cost";
+
   return (
     <div className="job-detail">
       <div className="job-detail-header">
@@ -567,6 +595,10 @@ export default function JobDetailView({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
+        </div>
+        <div className="jd-live-cost" title="Accrued cost for this render">
+          <span className="jd-live-cost-label">{costLabel}</span>
+          <span className="jd-live-cost-value">${liveCost.toFixed(2)}</span>
         </div>
 
         <div className="job-detail-hero">

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
 from serverV2.allocation.services.allocation_planning_service import (
@@ -40,8 +40,10 @@ from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.orchestrator.anti_affinity import AntiAffinityFacade
-from serverV2.orchestrator.repositories import PendingAllocationRepository
-from serverV2.orchestrator.config import MAX_RETRIES
+from serverV2.orchestrator.repositories import (
+    DispatchAllocationRepository,
+    PendingAllocationRepository,
+)
 from serverV2.orchestrator.lifecycle_job_retry import (
     MANUAL_RETRY_PIPELINE,
     RetryExecutor,
@@ -90,6 +92,7 @@ class RenderLifecycle:
         telemetry_repo: TelemetryRepository,
         output_frame_repo: OutputFrameRepository,
         pending_allocation_repo: PendingAllocationRepository,
+        dispatch_allocation_repo: DispatchAllocationRepository,
         fleet_registry: FleetRegistry,
         retry_executor: RetryExecutor,
         anti_affinity: AntiAffinityFacade,
@@ -97,6 +100,7 @@ class RenderLifecycle:
         job_terminator: JobTerminator,
         render_canceler: RenderCanceler,
         terminal_group_resource_releaser: TerminalGroupResourceReleaser,
+        get_max_retries: Callable[[], int],
     ) -> None:
         self._allocation_client = allocation_client
         self._job_repo = job_repo
@@ -106,6 +110,7 @@ class RenderLifecycle:
         self._telemetry = telemetry_repo
         self._output_frames = output_frame_repo
         self._pending_allocation_repo = pending_allocation_repo
+        self._dispatch_allocation_repo = dispatch_allocation_repo
         self._fleet = fleet_registry
         self._retry_executor = retry_executor
         self._anti_affinity = anti_affinity
@@ -113,6 +118,10 @@ class RenderLifecycle:
         self._terminator = job_terminator
         self._render_canceler = render_canceler
         self._terminal_group_resource_releaser = terminal_group_resource_releaser
+        # Reads orchestrator.max_retries fresh from Firestore each call
+        # so a desktop ConfigurationPage edit takes effect on the next
+        # submission instead of waiting for a server restart.
+        self._get_max_retries = get_max_retries
 
     # ------------------------------------------------------------------
     # Cost intelligence — pass-through to the allocation module.
@@ -194,7 +203,7 @@ class RenderLifecycle:
             input_filename=input_filename,
             render_overrides_json=render_overrides_json,
             blend_url="",
-            max_retries=MAX_RETRIES,
+            max_retries=self._get_max_retries(),
             priority=0,
             engine=engine,
         )
@@ -570,7 +579,16 @@ class RenderLifecycle:
         # doesn't flip to "failed" while a retry sits in
         # pending_allocation_queue.  Read goes through the orchestrator-
         # side repo; allocation owns writes.
-        has_pending_allocation = self._pending_allocation_repo.has_any_for_group(group_id)
+        # In-flight allocation work spans both queues during the
+        # pending->dispatch handoff: pending row gets deleted by the
+        # pending tick before the dispatch row is consumed into a
+        # ``jobs`` row.  Without checking both, an audit-sweep
+        # reconcile firing in that window flips the group terminal
+        # and TerminalGroupResourceReleaser drains the in-flight row.
+        has_pending_allocation = (
+            self._pending_allocation_repo.has_pending_for_group(group_id)
+            or self._dispatch_allocation_repo.has_dispatch_queued_for_group(group_id)
+        )
         result = compute_group_status(
             current_group_status=group["status"],
             job_statuses=statuses,

@@ -13,8 +13,11 @@ Allocation never imports anything from this package; the dependency
 points one way (orchestrator → allocation tables, read-only).
 """
 
+from serverV2.orchestrator.repositories.dispatch_allocation_repository import (
+    DispatchAllocationRepository,
+)
 from serverV2.orchestrator.repositories.pending_allocation_repository import (
     PendingAllocationRepository,
 )
 
-__all__ = ["PendingAllocationRepository"]
+__all__ = ["DispatchAllocationRepository", "PendingAllocationRepository"]

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 
-from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.orchestrator.lifecycle_job_retry.execution.retry_context import (
     RetryContext,
 )
@@ -32,5 +31,5 @@ class LogAutoRetryStep:
             ctx.chunk_request.frame_start,
             ctx.chunk_request.frame_end,
             ctx.next_attempt,
-            MAX_RETRIES,
+            ctx.deps.get_max_retries(),
         )

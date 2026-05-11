@@ -20,12 +20,17 @@ from serverV2.infrastructure.db import execute_returning
 
 class PendingAllocationRepository:
 
-    def has_any_for_group(self, group_id: str) -> bool:
+    def has_pending_for_group(self, group_id: str) -> bool:
         """True iff at least one ``pending_allocation_queue`` row
-        belongs to ``group_id``.  Cheap LIMIT-1 existence check —
-        called per group-status reconcile so the aggregator can treat
-        a parked retry/initial as "still active" instead of flipping
-        the group to ``failed`` on the prior chunk's failure signal.
+        belongs to ``group_id``.  Cheap LIMIT-1 existence check.
+
+        The aggregator combines this with the parallel dispatch-queue
+        check (``DispatchAllocationRepository.has_dispatch_queued_for_group``)
+        so a group with in-flight allocation work in EITHER queue stays
+        classified as active across the pending->dispatch handoff
+        window -- otherwise an audit-sweep reconcile firing in that
+        window would flip the group terminal and drain the in-flight
+        dispatch row.
         """
         row = execute_returning(
             "SELECT 1 AS x FROM pending_allocation_queue "

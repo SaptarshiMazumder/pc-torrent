@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from serverV2.core.value_objects import (
@@ -21,7 +21,6 @@ from serverV2.core.value_objects import (
 from serverV2.infrastructure import storage
 from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
 from serverV2.orchestrator.chunk_progress import ChunkProgress, ChunkProgressService
-from serverV2.orchestrator.config import MAX_RETRIES
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.services.assets.serializers import serialize_asset
 from serverV2.services.blend_parser.parser import BlendParseError, parse_upload
@@ -56,6 +55,7 @@ class RenderGroupService:
         output_frame_repo: OutputFrameRepository,
         chunk_progress: ChunkProgressService,
         scene_resolver: SceneResolver,
+        get_max_retries: Callable[[], int],
     ) -> None:
         self._groups = group_repo
         self._jobs = job_repo
@@ -67,6 +67,11 @@ class RenderGroupService:
         self._output_frames = output_frame_repo
         self._chunk_progress = chunk_progress
         self._scene_resolver = scene_resolver
+        # Reads orchestrator.max_retries fresh from Firestore each call.
+        # Used by ``_compute_retryable_job_ids`` to decide which failed
+        # jobs the user can manually retry (i.e. those whose auto-retry
+        # budget is already exhausted).
+        self._get_max_retries = get_max_retries
         self._serializer = RenderGroupSerializer(output_frame_repo=output_frame_repo)
 
     # ------------------------------------------------------------------
@@ -537,7 +542,7 @@ class RenderGroupService:
             ci = j.get("chunk_index") or 0
             if latest_per_chunk.get(ci) != j["id"]:
                 continue
-            if (j.get("attempt") or 0) < MAX_RETRIES:
+            if (j.get("attempt") or 0) < self._get_max_retries():
                 continue
             if ci in active_chunks:
                 continue

@@ -269,6 +269,33 @@ export function useJobs(backendUrl) {
     pastOffsetRef.current = (pastOffsetRef.current || 0) + 1;
   }, [hasMorePast]);
 
+  // Move a row from past -> ongoing (e.g. manual retry on a terminal
+  // group flips it back to pending/running server-side).  Symmetric to
+  // transitionToPast; without this, ``updateGroup`` silently no-ops on
+  // past-listed groups because its in-place map runs over ongoingJobs.
+  const transitionToOngoing = useCallback((groupId, updatedRow) => {
+    let removed = null;
+    setPastJobs((prev) => {
+      const idx = prev.findIndex((j) => j.group_id === groupId);
+      if (idx === -1) return prev;
+      removed = prev[idx];
+      const next = prev.slice(0, idx).concat(prev.slice(idx + 1));
+      _pastCache = {
+        jobs: next.slice(),
+        offset: Math.max(0, (pastOffsetRef.current || 0) - 1),
+        hasMore: hasMorePast,
+      };
+      return next;
+    });
+    if (!removed) return;
+    pastOffsetRef.current = Math.max(0, (pastOffsetRef.current || 0) - 1);
+    const merged = { ...removed, ...(updatedRow || {}) };
+    setOngoingJobs((prev) => {
+      if (prev.some((j) => j.group_id === groupId)) return prev;
+      return [merged, ...prev];
+    });
+  }, [hasMorePast]);
+
   const addRenderGroup = useCallback((groupId, filename, tasks, totalFrames) => {
     setOngoingJobs((prev) => [
       {
@@ -350,19 +377,20 @@ export function useJobs(backendUrl) {
   }, [transitionToPast]);
 
   // Patch a single group's row from outside the hook.  Used by the
-  // detail-page refresh button.  Routes by current status: terminal
-  // updates land in past (and the cache); active updates stay ongoing.
+  // detail-page refresh button.  Routes by current status, handling
+  // both directions of transition: ongoing<->past.  Without the
+  // past->ongoing case, a manual retry on a terminal group would
+  // silently no-op the UI even though the server flipped the status.
   const updateGroup = useCallback((groupId, data) => {
     if (!groupId || !data) return;
     const updated = normalizeRenderGroup(data);
     if (!updated) return;
+    const inOngoing = ongoingRef.current.some((j) => j.group_id === groupId);
+    const inPast = pastRef.current.some((j) => j.group_id === groupId);
     if (isTerminal(updated.status)) {
-      // If the row currently lives in ongoing, transition it.  Otherwise
-      // patch it in place in past.
-      const inOngoing = ongoingRef.current.some((j) => j.group_id === groupId);
       if (inOngoing) {
         transitionToPast(groupId, updated);
-      } else {
+      } else if (inPast) {
         setPastJobs((prev) => {
           const next = prev.map((j) => (j.group_id === groupId ? { ...j, ...updated } : j));
           _pastCache = { jobs: next.slice(), offset: pastOffsetRef.current, hasMore: hasMorePast };
@@ -371,10 +399,16 @@ export function useJobs(backendUrl) {
       }
       return;
     }
-    setOngoingJobs((prev) =>
-      prev.map((job) => (job.group_id === groupId ? { ...job, ...updated } : job))
-    );
-  }, [transitionToPast, hasMorePast]);
+    // Active branch
+    if (inPast) {
+      transitionToOngoing(groupId, updated);
+    } else if (inOngoing) {
+      setOngoingJobs((prev) =>
+        prev.map((job) => (job.group_id === groupId ? { ...job, ...updated } : job))
+      );
+    }
+    // else: not in either list yet -- the next list-refetch will pick it up.
+  }, [transitionToPast, transitionToOngoing, hasMorePast]);
 
   // Poll active groups; on a status flip to terminal, transition the
   // row out of ongoing into past + cache.

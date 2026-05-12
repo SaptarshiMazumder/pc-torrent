@@ -1,0 +1,22 @@
+{
+  "attempt": 1,
+  "chunk_index": 1,
+  "cuda_version": null,
+  "estimated_cost_usd": 0.4625,
+  "estimated_seconds": 1110.0,
+  "estimated_seconds_per_frame": 45.0,
+  "estimated_startup_seconds": 210.0,
+  "fleet": "modal_serverless",
+  "frame_end": 40,
+  "frame_start": 21,
+  "frame_step": 1,
+  "gpu_type": "A100",
+  "host_os": null,
+  "label": "Modal A100",
+  "machine_id": null,
+  "offer_id": null,
+  "price_per_hour": 1.5,
+  "render_speed": 2.0,
+  "total_frames": 20,
+  "vram_gb": 40.0
+}

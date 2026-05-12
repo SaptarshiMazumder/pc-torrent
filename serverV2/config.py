@@ -329,6 +329,12 @@ class ModalConfig:
     in_progress_stale_sec: float
     endpoint_url_prefix: str
     workspace: str
+    # Hardcoded-but-Firestore-tunable availability window stamped onto
+    # every Modal FleetCapability the planner sees.  Modal endpoints
+    # don't expose a per-call lease horizon, so we treat the entire
+    # fleet as "available for this many seconds" and let the planner's
+    # time filter reject chunks whose render time exceeds the window.
+    availability_sec: float = 14400.0
     max_parallel: int = 0
     per_gpu_max_parallel: int = 0
     endpoints: tuple[ModalEndpoint, ...] = field(default_factory=tuple)
@@ -371,6 +377,7 @@ class ModalConfig:
             in_progress_stale_sec=_load_monitor_in_progress_stale_sec(),
             endpoint_url_prefix=_optional_field_str(block, "endpoint_url_prefix").rstrip("/"),
             workspace=_env_str("MODAL_WORKSPACE").strip(),
+            availability_sec=_require_field_float(block, "modal", "availability_sec"),
             max_parallel=_require_fleet_int("modal", "max_parallel"),
             per_gpu_max_parallel=_require_fleet_int("modal", "per_gpu_max_parallel"),
             endpoints=tuple(_parse_modal_endpoints()),

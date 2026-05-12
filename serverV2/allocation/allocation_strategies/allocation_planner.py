@@ -75,8 +75,6 @@ from serverV2.allocation.allocation_strategies.validators.allocation_validation_
 from serverV2.config import StartupBufferConfig, VramFleetBoostConfig
 from serverV2.core.models import (
     AvailableResources,
-    CommunityMachine,
-    FleetCapability,
     PlannedTask,
 )
 from serverV2.fleets.registry import FleetRegistry
@@ -203,14 +201,14 @@ class AllocationPlanner:
                     heaviness=heaviness,
                     estimated_chunk_frames=even_chunk,
                     weights=weights,
-                    cuda_version=_target_cuda(t),
-                    host_os=_target_host_os(t),
+                    cuda_version=t.cuda_version,
+                    host_os=t.host_os,
                     engine=engine,
-                    fleet=_target_fleet(t),
-                    fleet_buffer_sec=_buffer_for_target(startup_buffer, t),
+                    fleet=t.dispatch_fleet,
+                    fleet_buffer_sec=startup_buffer.for_fleet(t.dispatch_fleet),
                 ),
-                fleet_key=_fleet_key(t),
-                gpu_type_key=_gpu_type_key(t),
+                fleet_key=t.fleet_key,
+                gpu_type_key=t.gpu_type_key,
             )
             for t in eligible
         ]
@@ -274,11 +272,16 @@ class AllocationPlanner:
 
         excluded_caps = set(chunk_request.excluded_serverless_capabilities)
         excluded_ids = set(chunk_request.excluded_machine_ids)
+        # Each target answers one of the two exclusion lists via its Protocol
+        # surface: CommunityMachine.machine_id vs FleetCapability.
+        # serverless_capability_key.  The non-matching side returns None and
+        # passes through the filter unconditionally.
         eligible = [
             t for t in eligible
-            if (
-                t.id not in excluded_ids if isinstance(t, CommunityMachine)
-                else (t.fleet, t.gpu_type) not in excluded_caps
+            if (t.machine_id is None or t.machine_id not in excluded_ids)
+            and (
+                t.serverless_capability_key is None
+                or t.serverless_capability_key not in excluded_caps
             )
         ]
         if not eligible:
@@ -298,14 +301,14 @@ class AllocationPlanner:
                     heaviness=heaviness,
                     estimated_chunk_frames=chunk_frames,
                     weights=weights,
-                    cuda_version=_target_cuda(t),
-                    host_os=_target_host_os(t),
+                    cuda_version=t.cuda_version,
+                    host_os=t.host_os,
                     engine=chunk_request.engine,
-                    fleet=_target_fleet(t),
-                    fleet_buffer_sec=_buffer_for_target(startup_buffer, t),
+                    fleet=t.dispatch_fleet,
+                    fleet_buffer_sec=startup_buffer.for_fleet(t.dispatch_fleet),
                 ),
-                fleet_key=_fleet_key(t),
-                gpu_type_key=_gpu_type_key(t),
+                fleet_key=t.fleet_key,
+                gpu_type_key=t.gpu_type_key,
             )
             for t in eligible
         ]
@@ -451,17 +454,20 @@ class AllocationPlanner:
         """
         # Pass 1: take every community machine, in score order, up to
         # max_picks.  Community is exempt from the diversification cap.
+        # ``machine_id`` is non-None for CommunityMachine, None for any
+        # serverless capability -- the Protocol's discrimination surface.
         community_taken: set[str] = set()
         community_picks: list[_ScoredTarget] = []
         serverless_scored: list[_ScoredTarget] = []
         for s in scored:
             t = s.target
-            if isinstance(t, CommunityMachine):
-                if t.id in community_taken:
+            machine_id = t.machine_id
+            if machine_id is not None:
+                if machine_id in community_taken:
                     continue
                 if len(community_picks) < max_picks:
                     community_picks.append(s)
-                    community_taken.add(t.id)
+                    community_taken.add(machine_id)
             else:
                 serverless_scored.append(s)
 
@@ -590,7 +596,7 @@ class AllocationPlanner:
         chunk_index: int | None,
         attempt: int,
     ) -> PlannedTask:
-        fleet_buffer = _buffer_for_target(startup_buffer, target)
+        fleet_buffer = startup_buffer.for_fleet(target.dispatch_fleet)
         spf = estimate_seconds_per_frame(heaviness, target.render_speed)
         startup = estimate_startup_seconds(heaviness) + fleet_buffer
         seconds = chunk_seconds_for(
@@ -607,38 +613,11 @@ class AllocationPlanner:
             fleet_buffer_sec=fleet_buffer,
         )
 
-        if isinstance(target, CommunityMachine):
-            return PlannedTask(
-                fleet="community",
-                machine_id=target.id,
-                gpu_type=None,
-                label=target.gpu_model,
-                vram_gb=target.vram_gb,
-                render_speed=target.render_speed,
-                price_per_hour=target.price_per_hour,
-                frame_start=frame_start,
-                frame_end=frame_end,
-                frame_step=frame_step,
-                total_frames=total_frames,
-                chunk_index=chunk_index,
-                attempt=attempt,
-                estimated_seconds=seconds,
-                estimated_cost_usd=cost,
-                estimated_seconds_per_frame=spf,
-                estimated_startup_seconds=startup,
-            )
-        # FleetCapability -- serverless
-        return PlannedTask(
-            fleet=target.fleet,
-            machine_id=None,
-            gpu_type=target.gpu_type,
-            label=target.label,
-            vram_gb=target.vram_gb,
-            render_speed=target.render_speed,
-            price_per_hour=target.price_per_hour,
-            offer_id=target.offer_id,
-            cuda_version=target.cuda_version,
-            host_os=target.host_os,
+        # Each AllocationTarget knows its own PlannedTask shape -- community
+        # fills in machine_id, serverless fills in gpu_type / offer_id /
+        # cuda / host_os.  Estimates are stamped uniformly by this method
+        # and passed through.
+        return target.to_planned_task(
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
@@ -652,60 +631,3 @@ class AllocationPlanner:
         )
 
 
-def _fleet_key(target) -> str:
-    """The fleet-level diversification cap groups every community
-    machine under one 'community' bucket and each serverless fleet
-    under its own bucket (vast_serverless / modal_serverless).
-    Keeps a single fleet from dominating the mix.
-    """
-    if isinstance(target, CommunityMachine):
-        return "community"
-    if isinstance(target, FleetCapability):
-        return target.fleet
-    return "unknown"
-
-
-def _gpu_type_key(target) -> str:
-    """The per-gpu-type cap key.  Empty for community machines (they're
-    already unique by machine_id); ``"<fleet>:<gpu_type>"`` for
-    serverless, so 'vast_serverless:RTX 4080S' is distinct from
-    'modal_serverless:RTX 4080S' (different supply pools).
-    """
-    if isinstance(target, FleetCapability):
-        return f"{target.fleet}:{target.gpu_type}"
-    return ""
-
-
-def _target_fleet(target) -> str | None:
-    if isinstance(target, CommunityMachine):
-        return "community"
-    if isinstance(target, FleetCapability):
-        return target.fleet
-    return None
-
-
-def _target_cuda(target) -> str | None:
-    """Per-target CUDA version, or None if untracked.  Community
-    machines and Modal capabilities always None for now.  Vast
-    capabilities carry their offer's ``cuda_max_good`` string.
-    """
-    if isinstance(target, FleetCapability):
-        return target.cuda_version
-    return None
-
-
-def _target_host_os(target) -> str | None:
-    """Per-target host OS, or None if untracked.  Same shape as
-    ``_target_cuda`` -- only Vast capabilities populate this today.
-    """
-    if isinstance(target, FleetCapability):
-        return target.host_os
-    return None
-
-
-# Module-level helper: per-target fleet buffer lookup.  Phase 2 dropped
-# the bound-method form because the planner no longer holds a frozen
-# StartupBufferConfig -- callers pull the fresh instance from cfg at the
-# top of each plan call and pass it through.
-def _buffer_for_target(startup_buffer: StartupBufferConfig, target) -> float:
-    return startup_buffer.for_fleet(_target_fleet(target))

@@ -19,6 +19,7 @@ Vast `/bundles/` field semantics (verified live, 2026-05-05):
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +34,13 @@ class VastOffer:
     host_os: str | None          # normalised OS string, e.g. "Linux 24.04"
     machine_id: int | None       # opaque host id (for anti-affinity at retry)
     reliability: float           # 0..1 — Vast's per-host reliability score
+    # Host-side commitment window in seconds.  Vast bundles ship either
+    # ``duration`` (remaining seconds, primary source) or ``end_date``
+    # (epoch when the offer expires, fallback we compute from).  None
+    # only when both fields are missing/null on the bundle -- treated
+    # by the planner as "unbounded; skip the time filter for this
+    # offer" (see plans/time_aware_allocation_phases.md, Phase 5).
+    duration_sec: float | None
 
     @classmethod
     def from_bundle(cls, bundle: dict[str, Any]) -> VastOffer:
@@ -70,4 +78,38 @@ class VastOffer:
             host_os=host_os,
             machine_id=int(bundle["machine_id"]) if bundle.get("machine_id") is not None else None,
             reliability=float(bundle.get("reliability2") or 0.0),
+            duration_sec=_parse_duration_sec(bundle),
         )
+
+
+def _parse_duration_sec(bundle: dict[str, Any]) -> float | None:
+    """Resolve the host's commitment window in seconds.
+
+    Vast surfaces this two ways, preferred order:
+      1. ``duration``  -- seconds remaining on the host's commitment.
+                          Direct read, no clock math.
+      2. ``end_date``  -- epoch when the offer expires.  Subtract wall
+                          clock; clamp to >= 0 so a slightly stale
+                          bundle response doesn't yield a negative window.
+
+    Both fields are populated on normal offers (verified in Phase 0).
+    None when both are missing/null -- planner treats that as
+    "unbounded; skip the time filter for this offer".
+    """
+    raw_duration = bundle.get("duration")
+    if raw_duration is not None:
+        try:
+            value = float(raw_duration)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value >= 0:
+            return value
+    raw_end = bundle.get("end_date")
+    if raw_end is not None:
+        try:
+            end_epoch = float(raw_end)
+        except (TypeError, ValueError):
+            return None
+        remaining = end_epoch - time.time()
+        return max(0.0, remaining)
+    return None

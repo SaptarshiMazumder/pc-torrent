@@ -5,7 +5,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from serverV2.api.dependencies import get_current_user
-from serverV2.api.schemas.machine import RegisterMachinePayload
+from serverV2.api.schemas.machine import (
+    MachineCommitmentPayload,
+    RegisterMachinePayload,
+)
 from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.services.machines.service import MachineService, MachineServiceError
 
@@ -53,6 +56,28 @@ def set_available(machine_id: str):
 def set_idle(machine_id: str):
     try:
         return _get().set_idle(machine_id)
+    except MachineServiceError as e:
+        raise HTTPException(e.status, e.message)
+
+
+@router.put("/machines/{machine_id}/commitment")
+def set_commitment(
+    machine_id: str,
+    payload: MachineCommitmentPayload,
+    user: dict = Depends(get_current_user),
+):
+    """Update a community machine's commitment window.
+
+    - ``commitment_seconds > 0``: stamps ``commitment_end_at = now + value``
+      so the planner sees the refreshed window on its next read.
+    - ``commitment_seconds == 0``: snaps ``commitment_end_at`` to now so
+      the planner immediately stops considering this machine.  Fired by
+      the desktop agent on graceful disconnect.
+
+    403 when the caller doesn't own the machine.
+    """
+    try:
+        return _get().set_commitment(machine_id, payload.commitment_seconds, user["uid"])
     except MachineServiceError as e:
         raise HTTPException(e.status, e.message)
 

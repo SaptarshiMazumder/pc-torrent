@@ -391,6 +391,8 @@ function ModalSection({ draft, update }) {
           onChange={(v) => set("endpoint_url_prefix", v)} />
         <ToggleSwitch label="provisioning_enabled" value={m.provisioning_enabled}
           onChange={(v) => set("provisioning_enabled", v)} />
+        <NumberField label="availability_sec" value={m.availability_sec} step={60}
+          onChange={(v) => set("availability_sec", v)} />
       </div>
     </SectionCard>
   );

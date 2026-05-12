@@ -38,7 +38,11 @@
       "Bash(node -e ' *)",
       "Bash(Get-ChildItem -Recurse -Directory)",
       "Bash(Select-Object -ExpandProperty FullName)",
-      "Bash(grep -rn '\"loader\\\\|className=.*\\\\\\\\bloader\\\\\\\\b\\\\|class=.*\\\\\\\\bloader\\\\\\\\b' \"c:\\\\Users\\\\sapma\\\\OneDrive\\\\Desktop\\\\Projects\\\\PC_Rent\\\\pc-torrent\\\\desktop\\\\src\" --include=\"*.jsx\" --include=\"*.js\")"
+      "Bash(grep -rn '\"loader\\\\|className=.*\\\\\\\\bloader\\\\\\\\b\\\\|class=.*\\\\\\\\bloader\\\\\\\\b' \"c:\\\\Users\\\\sapma\\\\OneDrive\\\\Desktop\\\\Projects\\\\PC_Rent\\\\pc-torrent\\\\desktop\\\\src\" --include=\"*.jsx\" --include=\"*.js\")",
+      "Bash(PYTHONHASHSEED=0 python -m pytest serverV2/tests/allocation/test_planner_golden.py -v)",
+      "Bash(PYTHONHASHSEED=0 python -m pip install --quiet pytest)",
+      "Bash(PYTHONHASHSEED=0 python -m pytest serverV2/tests/allocation/test_planner_golden.py)",
+      "Bash(git commit -m ' *)"
     ],
     "additionalDirectories": [
       "\\tmp"

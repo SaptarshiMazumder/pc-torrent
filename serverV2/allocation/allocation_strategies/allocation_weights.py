@@ -83,3 +83,20 @@ class AllocationWeights:
     # equalises wall-time across chunks so the slowest GPU doesn't
     # bottleneck the render.
     distribute_by: str = "time_balanced"
+
+    # --- Time-aware allocation (Phase 5) -----------------------------
+    # Filter floor: a target survives the eligibility step only if
+    #     available_seconds >= startup_for(target) * time_safety_factor
+    # Loose default (1.5) only kicks out the catastrophic mismatch
+    # where the window can't even cover startup with a small margin.
+    # Real partial-fit handling lives in the headroom factor (below)
+    # plus the distribution clamp.
+    time_safety_factor: float = 1.5
+
+    # Headroom scoring multiplier in [0, 1].  Applied as:
+    #     ratio  = available_seconds / chunk_seconds
+    #     factor = min(1.0, ratio / (1 + time_headroom_falloff))
+    # Falloff=0.5 gives comfortable headroom (~1.5x chunk) full credit
+    # and tighter fits scale linearly toward 0.  None available_seconds
+    # short-circuits to factor=1.0 (no penalty for legacy / unknown).
+    time_headroom_falloff: float = 0.5

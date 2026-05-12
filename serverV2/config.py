@@ -764,6 +764,8 @@ def _load_allocation_weights() -> "AllocationWeights":
         gpu_type_diversification_cap=_require_field_float(block, ctx, "gpu_type_diversification_cap"),
         vram_safety_factor=_require_field_float(block, ctx, "vram_safety_factor"),
         startup_amortization_ratio=_require_field_float(block, ctx, "startup_amortization_ratio"),
+        time_safety_factor=_require_field_float(block, ctx, "time_safety_factor"),
+        time_headroom_falloff=_require_field_float(block, ctx, "time_headroom_falloff"),
     )
 
 

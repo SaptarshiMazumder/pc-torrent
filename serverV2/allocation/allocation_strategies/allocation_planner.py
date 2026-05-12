@@ -142,6 +142,16 @@ class AllocationPlanner:
         if not eligible:
             return []
 
+        # Step 1b: time-budget filter (Phase 5).  Drops targets whose
+        # remaining commitment window can't even cover their own startup
+        # times the safety factor.  Loose floor on purpose -- the partial-
+        # fit handling lives in the headroom factor (score) plus the
+        # frame distribution clamp.  None ``available_seconds`` (legacy
+        # / unknown) passes unconditionally.
+        eligible = self._filter_by_time_budget(eligible, weights, heaviness, startup_buffer)
+        if not eligible:
+            return []
+
         # Step 2: knapsack-aware mix size.
         # max_targets is an upper bound, NOT a goal.  For each render we
         # pick K such that per-chunk render time is meaningfully larger
@@ -206,6 +216,7 @@ class AllocationPlanner:
                     engine=engine,
                     fleet=t.dispatch_fleet,
                     fleet_buffer_sec=startup_buffer.for_fleet(t.dispatch_fleet),
+                    available_seconds=t.available_seconds,
                 ),
                 fleet_key=t.fleet_key,
                 gpu_type_key=t.gpu_type_key,
@@ -227,6 +238,7 @@ class AllocationPlanner:
             frame_start=frame_start,
             frame_end=frame_end,
             frame_step=frame_step,
+            startup_buffer=startup_buffer,
         )
 
         # Step 6: build PlannedTasks with estimate fields stamped
@@ -269,6 +281,7 @@ class AllocationPlanner:
         eligible = self._eligible_targets(resources, heaviness, weights, vram_boost, context)
         if not eligible:
             eligible = self._eligible_targets_no_vram(resources, vram_boost, context)
+        eligible = self._filter_by_time_budget(eligible, weights, heaviness, startup_buffer)
 
         excluded_caps = set(chunk_request.excluded_serverless_capabilities)
         excluded_ids = set(chunk_request.excluded_machine_ids)
@@ -306,6 +319,7 @@ class AllocationPlanner:
                     engine=chunk_request.engine,
                     fleet=t.dispatch_fleet,
                     fleet_buffer_sec=startup_buffer.for_fleet(t.dispatch_fleet),
+                    available_seconds=t.available_seconds,
                 ),
                 fleet_key=t.fleet_key,
                 gpu_type_key=t.gpu_type_key,
@@ -351,6 +365,32 @@ class AllocationPlanner:
         context: AllocationValidationContext,
     ) -> list:
         return self._collect_eligibles(resources, vram_boost, 0.0, context)
+
+    @staticmethod
+    def _filter_by_time_budget(
+        targets: list,
+        weights: AllocationWeights,
+        heaviness: dict,
+        startup_buffer: StartupBufferConfig,
+    ) -> list:
+        """Drop targets whose remaining commitment window can't even
+        cover their own startup * safety_factor.  None passes (unbounded).
+
+        Loose threshold on purpose -- this is the catastrophic-mismatch
+        floor.  Partial-fit handling lives in the headroom score factor
+        and the distribution clamp.
+        """
+        startup_base = estimate_startup_seconds(heaviness)
+        safety = max(1.0, float(weights.time_safety_factor))
+        out: list = []
+        for t in targets:
+            if t.available_seconds is None:
+                out.append(t)
+                continue
+            startup_for_t = startup_base + startup_buffer.for_fleet(t.dispatch_fleet)
+            if t.available_seconds >= startup_for_t * safety:
+                out.append(t)
+        return out
 
     def _collect_eligibles(
         self,
@@ -527,10 +567,18 @@ class AllocationPlanner:
         frame_start: int,
         frame_end: int,
         frame_step: int,
+        startup_buffer: StartupBufferConfig,
     ) -> list["AllocationPlanner._Share"]:
         """Distribute frames so each chunk's wall time is as equal as
         possible.  Faster GPUs get more frames; the slowest GPU doesn't
         bottleneck the render.  Minimises both wall time and total cost.
+
+        Phase 5: per-target caps from ``available_seconds`` (the commitment
+        window).  After the proportional split, any count that exceeds
+        ``floor((available_seconds - startup_for_target) / spf)`` is
+        clamped, and the freed frames are redistributed to targets with
+        remaining headroom in descending weight order.  None caps to
+        infinity (legacy / unknown).
         """
         if not targets or total_frames <= 0:
             return []
@@ -548,6 +596,17 @@ class AllocationPlanner:
             weights = [1.0] * len(targets)
             total_w = float(len(targets))
 
+        # Per-target frame cap from available_seconds.  None -> infinity.
+        startup_base = estimate_startup_seconds(heaviness)
+        caps: list[float] = []
+        for t, spf in zip(targets, spfs):
+            if t.available_seconds is None:
+                caps.append(float("inf"))
+                continue
+            startup_for_t = startup_base + startup_buffer.for_fleet(t.dispatch_fleet)
+            usable = max(0.0, float(t.available_seconds) - startup_for_t)
+            caps.append(math.floor(usable / spf))
+
         # Allocate integer frame counts, rounding down then distributing
         # the residual to the highest-weight slots.
         raw = [w / total_w * total_frames for w in weights]
@@ -558,6 +617,45 @@ class AllocationPlanner:
             order = sorted(range(len(weights)), key=lambda i: -weights[i])
             for i in order[:residual]:
                 counts[i] += 1
+
+        # Phase 5 clamp + redistribute.  Each pass: pull any overflow off
+        # over-capped targets, hand it to under-cap targets in descending
+        # weight order.  Bounded loop -- terminates when no target has
+        # slack OR overflow drains to zero.
+        overflow = 0
+        for i in range(len(counts)):
+            if counts[i] > caps[i]:
+                overflow += counts[i] - int(caps[i])
+                counts[i] = int(caps[i])
+        if overflow > 0:
+            order = sorted(range(len(weights)), key=lambda i: -weights[i])
+            progressed = True
+            while overflow > 0 and progressed:
+                progressed = False
+                for i in order:
+                    if overflow <= 0:
+                        break
+                    slack = caps[i] - counts[i]
+                    # slack can be infinity (None available_seconds).
+                    # Cap the give-amount by overflow so we never int()
+                    # an infinity.
+                    if slack >= 1:
+                        give = overflow if math.isinf(slack) else min(overflow, int(slack))
+                        counts[i] += give
+                        overflow -= give
+                        progressed = True
+            # If overflow > 0 after redistribute, no target can absorb
+            # the remaining frames -- the render genuinely can't fit in
+            # the available windows.  We accept the loss here; the
+            # planner returns shares summing to < total_frames and
+            # higher layers (or the user) re-plan with a longer
+            # commitment.  Logged for visibility.
+            if overflow > 0:
+                log.warning(
+                    "[ALLOC] time-clamp: %d frames could not be placed (every "
+                    "selected target hit its commitment-window cap)",
+                    overflow,
+                )
 
         # Build shares walking the frame range in order of `targets`.
         shares: list[AllocationPlanner._Share] = []

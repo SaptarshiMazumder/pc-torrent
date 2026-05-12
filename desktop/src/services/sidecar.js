@@ -1,7 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export async function connectAgent(backendUrl, firebaseToken = "") {
-  return invoke("connect_agent", { backendUrl, firebaseToken });
+export async function connectAgent(backendUrl, firebaseToken = "", commitmentSeconds = 0) {
+  // commitmentSeconds is the user-chosen availability window from the
+  // dashboard datetime picker.  Server's /machines/register rejects
+  // anything <= 0 with 400; the agent sidecar also short-circuits with
+  // a clear error if it's missing.  Float so sub-second precision flows
+  // through cleanly to the server's commitment_end_at timestamp math.
+  return invoke("connect_agent", {
+    backendUrl,
+    firebaseToken,
+    commitmentSeconds,
+  });
 }
 
 export async function disconnectAgent() {

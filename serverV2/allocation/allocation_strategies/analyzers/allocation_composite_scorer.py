@@ -114,6 +114,7 @@ def score_target(
     engine: str | None = None,
     fleet: str | None = None,
     fleet_buffer_sec: float = 0.0,
+    available_seconds: float | None = None,
 ) -> float:
     """Composite speed+cuda+os score for a single target.  Higher = better.
 
@@ -121,6 +122,12 @@ def score_target(
     startup latency (Vast provisioning ~180s, Modal cold start ~120s,
     community 0s).  Caller passes the right buffer for the target's
     fleet.
+
+    ``available_seconds`` is the target's remaining commitment window
+    (None = unbounded).  Phase 5 multiplies the base composite by a
+    headroom factor in [0, 1]: targets with comfortable headroom get
+    full credit, tighter fits scale linearly toward 0.  None
+    short-circuits to 1.0 (no penalty for legacy / unknown).
     """
     seconds = chunk_seconds_for(
         render_speed=render_speed,
@@ -129,11 +136,38 @@ def score_target(
         fleet_buffer_sec=fleet_buffer_sec,
     )
     speed_factor = REF_SECONDS / max(seconds, _MIN_CHUNK_SECONDS)
-    return (
+    base = (
         weights.speed_weight * speed_factor
         + weights.cuda_weight * cuda_factor(cuda_version)
         + weights.os_weight * os_factor(host_os, engine)
     )
+    return base * time_headroom_factor(
+        available_seconds=available_seconds,
+        chunk_seconds=seconds,
+        falloff=weights.time_headroom_falloff,
+    )
+
+
+def time_headroom_factor(
+    *,
+    available_seconds: float | None,
+    chunk_seconds: float,
+    falloff: float,
+) -> float:
+    """Phase 5 headroom factor in [0, 1].
+
+    None available_seconds -> 1.0 (legacy / unknown; no penalty).
+    Otherwise: ratio = available / chunk; factor = min(1, ratio/(1+falloff)).
+    With falloff=0.5, a window of ~1.5x chunk_seconds saturates the
+    factor at 1.0; tighter fits scale linearly toward 0.
+    """
+    if available_seconds is None:
+        return 1.0
+    if chunk_seconds <= 0:
+        return 1.0
+    ratio = max(0.0, float(available_seconds)) / chunk_seconds
+    denom = 1.0 + max(0.0, float(falloff))
+    return min(1.0, ratio / denom)
 
 
 def chunk_seconds_for(

@@ -1,0 +1,22 @@
+{
+  "attempt": 1,
+  "chunk_index": 0,
+  "cuda_version": null,
+  "estimated_cost_usd": 0.3375,
+  "estimated_seconds": 1215.0,
+  "estimated_seconds_per_frame": 56.25,
+  "estimated_startup_seconds": 90.0,
+  "fleet": "community",
+  "frame_end": 20,
+  "frame_start": 1,
+  "frame_step": 1,
+  "gpu_type": null,
+  "host_os": null,
+  "label": "RTX 4090",
+  "machine_id": "pc-alpha",
+  "offer_id": null,
+  "price_per_hour": 1.0,
+  "render_speed": 1.6,
+  "total_frames": 20,
+  "vram_gb": 24.0
+}

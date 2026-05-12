@@ -74,5 +74,6 @@ class ModalAvailabilityBuilder:
                 render_speed=ep.render_speed,
                 fleet_max_parallel=self._config.max_parallel,
                 price_per_hour=ep.price_per_hour,
+                available_seconds=self._config.availability_sec,
             ))
         return tuple(available)

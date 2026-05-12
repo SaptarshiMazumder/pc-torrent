@@ -1,0 +1,272 @@
+@startuml allocation_target_module
+title AllocationTarget Protocol -- post-refactor class structure\n(as-built; flow reads top -> bottom)
+
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #FAFAFA
+  BorderColor #444
+}
+skinparam package {
+  BackgroundColor #F4F4F4
+  BorderColor #888
+}
+skinparam packageStyle rectangle
+skinparam linetype ortho
+skinparam nodesep 30
+skinparam ranksep 50
+
+' =====================================================================
+' Color palette -- each package's outbound arrows take its own colour.
+' =====================================================================
+!define COL_ORCH    #2563EB
+!define COL_AVAIL   #0EA5E9
+!define COL_REPO    #06B6D4
+!define COL_MODELS  #10B981
+!define COL_PLAN    #D97706
+!define COL_DISP    #6366F1
+
+' =====================================================================
+' BAND 1 (top) -- upstream + construction.  Both feed the planner.
+' =====================================================================
+package "serverV2/orchestrator" <<Frame>> #EFF6FF {
+  class PendingAllocationRepository {
+    + enqueue(group_id, frame_range, exclusions, overrides)
+    + claim_next() : PendingAllocationRow_or_None
+    + delete(id)
+  }
+  class AllocationPendingTickProcessor {
+    + tick()
+    .. pops queue ; reads snapshot ; calls planner ..
+  }
+}
+
+package "serverV2/fleets/fleet_availability" <<Frame>> #F0F9FF {
+  class CommunityAvailabilityBuilder {
+    + build() : tuple_CommunityMachine
+  }
+  class VastAvailabilityBuilder {
+    + build() : tuple_FleetCapability
+  }
+  class ModalAvailabilityBuilder {
+    + build() : tuple_FleetCapability
+  }
+  class FleetAvailabilitySnapshot {
+    + community_available : tuple_CommunityMachine
+    + vast_available : tuple_FleetCapability
+    + modal_available : tuple_FleetCapability
+  }
+  class FleetAvailabilitySnapshotCache {
+    + get_or_build(...) : Snapshot
+  }
+}
+
+package "serverV2/services/machines" <<Frame>> #F0F9FF {
+  class MachineRepository {
+    + get_available_community() : list_CommunityMachine
+    + get_by_id(id) : CommunityMachine_or_None
+  }
+}
+
+' Hidden alignment: keep band-1 packages on one row.
+PendingAllocationRepository           -[hidden]r- CommunityAvailabilityBuilder
+FleetAvailabilitySnapshotCache        -[hidden]r- MachineRepository
+
+' =====================================================================
+' BAND 2 (middle) -- core models (the Protocol seam).
+' =====================================================================
+package "serverV2/core/models" <<Frame>> #ECFDF5 {
+
+  interface AllocationTarget <<Protocol>> #C8E6C9 {
+    .. shared scoring + filter surface ..
+    + vram_gb : float
+    + cpu_cores : int
+    + ram_gb : float
+    + render_speed : float
+    + price_per_hour : float
+    + available_seconds : float_or_None
+    + cuda_version : str_or_None
+    + host_os : str_or_None
+    .. discrimination via attribute access ..
+    + fleet_key : str
+    + gpu_type_key : str
+    + dispatch_fleet : str_or_None
+    + machine_id : str_or_None
+    + serverless_capability_key : tuple_or_None
+    --
+    + to_planned_task(estimates + frame range) : PlannedTask
+  }
+
+  class CommunityMachine <<dataclass>> {
+    + id, gpu_model
+    + vram_gb, cpu_cores, ram_gb, render_speed
+    + status, last_seen_at
+    + price_per_hour, available_seconds
+    .. Protocol impls ..
+    + cuda_version, host_os : None
+    + fleet_key : community
+    + gpu_type_key : empty
+    + dispatch_fleet : community
+    + machine_id : self.id
+    + serverless_capability_key : None
+    + to_planned_task(...)
+    + from_row(row, price_per_hour)
+  }
+
+  class FleetCapability <<dataclass>> {
+    + fleet, gpu_type, label
+    + vram_gb, cpu_cores, ram_gb, render_speed
+    + fleet_max_parallel, price_per_hour
+    + offer_id, cuda_version, host_os
+    + available_seconds
+    .. Protocol impls ..
+    + fleet_key : self.fleet
+    + gpu_type_key : fleet:gpu_type
+    + dispatch_fleet : self.fleet
+    + machine_id : None
+    + serverless_capability_key : (fleet, gpu_type)
+    + to_planned_task(...)
+  }
+
+  class AvailableResources <<dataclass>> {
+    + community_machines : list_CommunityMachine
+    + serverless_capabilities : list_FleetCapability
+    + serverless_in_flight : dict
+  }
+
+  class PlannedTask <<dataclass>> {
+    + fleet, machine_id, gpu_type, offer_id
+    + label, vram_gb, render_speed
+    + price_per_hour
+    + cuda_version, host_os
+    + frame_start, frame_end, frame_step
+    + total_frames, chunk_index, attempt
+    + estimated_seconds, estimated_cost_usd
+    + estimated_seconds_per_frame
+    + estimated_startup_seconds
+  }
+}
+
+' Protocol implementation -- short hops inside the same package.
+AllocationTarget <|.. CommunityMachine
+AllocationTarget <|.. FleetCapability
+AvailableResources o-- CommunityMachine
+AvailableResources o-- FleetCapability
+CommunityMachine -[COL_MODELS]..> PlannedTask : to_planned_task(...)
+FleetCapability  -[COL_MODELS]..> PlannedTask : to_planned_task(...)
+
+' =====================================================================
+' BAND 3 (middle, right of core/models) -- the only Protocol readers.
+' =====================================================================
+package "serverV2/allocation/allocation_strategies" <<Frame>> #FEF3C7 {
+
+  class AllocationPlanner {
+    + plan_initial(...) : list_PlannedTask
+    + plan_retry(chunk_request, ...) : PlannedTask_or_None
+    --
+    .. all internal helpers consume target : AllocationTarget ..
+    - _eligible_targets(...)
+    - _select_with_diversification(...)
+    - _distribute_time_balanced(...)
+    - _target_to_task(...) : delegates to target.to_planned_task
+  }
+
+  interface AllocationTargetValidator {
+    + is_valid(target, context) : bool
+  }
+
+  class AllocationEngineCompatibilityValidator {
+    + is_valid(target, context) : bool
+    .. reads target.dispatch_fleet ..
+  }
+}
+
+AllocationEngineCompatibilityValidator ..|> AllocationTargetValidator
+AllocationPlanner -[COL_PLAN]..> AllocationTarget : reads Protocol surface
+AllocationEngineCompatibilityValidator -[COL_PLAN]..> AllocationTarget : reads dispatch_fleet
+AllocationPlanner -[COL_PLAN]-> AllocationTargetValidator : runs each
+
+' =====================================================================
+' BAND 4 (bottom) -- dispatch + strategies.  Consume PlannedTask only.
+' =====================================================================
+package "serverV2/allocation_dispatch" <<Frame>> #E0E7FF {
+  class DispatchQueueRepository {
+    + enqueue(task : PlannedTask, ctx)
+    + dequeue_for_fleet(fleet) : DispatchQueueRow_or_None
+  }
+  class AllocationDispatcher {
+    + dispatch_one(task : PlannedTask, ctx, job_id) : DispatchResult
+    .. routes by task.fleet ..
+  }
+  class AllocationDispatchQueueService {
+    + enqueue(group_id, tasks, ctx) : list_DispatchResult
+    + dispatch_pending_for_fleet(fleet)
+  }
+}
+
+package "serverV2/fleets/strategies" <<Frame>> #E0E7FF {
+  interface IFleetStrategy {
+    + dispatch(task : PlannedTask, ctx, job_id) : DispatchResult
+    + cancel(provider_job_id)
+    + stop_monitoring(job_id)
+  }
+  class CommunityFleetStrategy
+  class VastFleetStrategy
+  class ModalFleetStrategy
+}
+
+CommunityFleetStrategy ..|> IFleetStrategy
+VastFleetStrategy      ..|> IFleetStrategy
+ModalFleetStrategy     ..|> IFleetStrategy
+AllocationDispatcher -[COL_DISP]-> IFleetStrategy : routes by task.fleet
+AllocationDispatchQueueService -[COL_DISP]-> AllocationDispatcher
+AllocationDispatchQueueService -[COL_DISP]-> DispatchQueueRepository
+
+' =====================================================================
+' BAND-CROSSING FLOW WIRING (the only inter-band arrows).
+' Coloured by source package.
+' =====================================================================
+
+' Band 1 internal: builders make the concrete types; snapshot holds them.
+CommunityAvailabilityBuilder -[COL_AVAIL]-> CommunityMachine : constructs
+VastAvailabilityBuilder      -[COL_AVAIL]-> FleetCapability  : constructs
+ModalAvailabilityBuilder     -[COL_AVAIL]-> FleetCapability  : constructs
+FleetAvailabilitySnapshot   o-[COL_AVAIL]- CommunityMachine
+FleetAvailabilitySnapshot   o-[COL_AVAIL]- FleetCapability
+MachineRepository -[COL_REPO]-> CommunityMachine : from_row
+
+' Band 1 -> Band 3: pending tick + snapshot feed the planner.
+PendingAllocationRepository -[COL_ORCH]-> AllocationPendingTickProcessor : claim_next
+AllocationPendingTickProcessor -[COL_ORCH]-> AllocationPlanner : plan_initial / plan_retry
+FleetAvailabilitySnapshotCache -[COL_AVAIL]-> AllocationPendingTickProcessor : Snapshot read
+
+' Band 3 -> Band 4: planner emits PlannedTask onto the dispatch queue.
+AllocationPlanner -[COL_PLAN]-> DispatchQueueRepository : enqueue(PlannedTask)
+
+' =====================================================================
+note as ProtocolSeamNote #FEF9C3
+  **The Protocol is bounded.**
+  Construction (builders, repo), transport (snapshot, cache), and
+  downstream consumers (dispatcher, strategies) operate on the
+  concrete dataclasses or on PlannedTask.  Only the planner and
+  the engine-compatibility validator read the Protocol surface.
+
+  **to_planned_task(...) is the exit point.**
+  Estimates are stamped by the planner; each target fills in its
+  routing fields (community: machine_id ; serverless: fleet,
+  gpu_type, offer_id, cuda, host_os).
+end note
+
+note as DiscriminationNote #DBEAFE
+  **Discrimination via attribute access.**
+  Six former module helpers + 11 isinstance branches collapsed to:
+    target.fleet_key
+    target.gpu_type_key
+    target.dispatch_fleet
+    target.cuda_version
+    target.host_os
+    target.machine_id
+    target.serverless_capability_key
+end note
+
+@enduml

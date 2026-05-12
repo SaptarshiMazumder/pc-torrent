@@ -1,0 +1,22 @@
+{
+  "attempt": 1,
+  "chunk_index": 2,
+  "cuda_version": null,
+  "estimated_cost_usd": 0.44166666666666665,
+  "estimated_seconds": 1590.0,
+  "estimated_seconds_per_frame": 75.0,
+  "estimated_startup_seconds": 90.0,
+  "fleet": "community",
+  "frame_end": 60,
+  "frame_start": 41,
+  "frame_step": 1,
+  "gpu_type": null,
+  "host_os": null,
+  "label": "RTX 3090",
+  "machine_id": "pc-bravo",
+  "offer_id": null,
+  "price_per_hour": 1.0,
+  "render_speed": 1.2,
+  "total_frames": 20,
+  "vram_gb": 24.0
+}

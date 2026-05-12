@@ -80,6 +80,7 @@ class VastAvailabilityBuilder:
                     offer_id=offer.offer_id,
                     cuda_version=offer.cuda_version,
                     host_os=offer.host_os,
+                    available_seconds=offer.duration_sec,
                 ))
         return tuple(available)
 

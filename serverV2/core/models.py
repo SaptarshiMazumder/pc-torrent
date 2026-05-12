@@ -4,9 +4,85 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from serverV2.core.enums import JobStatus, SERVERLESS_TYPE_VALUES
+
+if TYPE_CHECKING:
+    from serverV2.config import StartupBufferConfig
+
+
+# ---------------------------------------------------------------------------
+# AllocationTarget -- structural typing seam for the allocation planner.
+#
+# Both ``CommunityMachine`` and ``FleetCapability`` satisfy this Protocol.
+# The planner scores and filters against this surface, dropping its
+# previous ``isinstance(target, X)`` discrimination.  Cardinality and
+# dispatch routing stay outside the Protocol -- those remain genuinely
+# different and AllocationDispatcher still pattern-matches on the
+# concrete type.
+#
+# Step 1 (this commit): Protocol declared, no consumers yet.  Pure
+# additive change.  Subsequent steps add the @property implementations
+# on the two dataclasses, then migrate the planner.
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class AllocationTarget(Protocol):
+    # ---- shared scoring / filter surface --------------------------------
+    vram_gb: float
+    cpu_cores: int
+    ram_gb: float
+    render_speed: float
+    price_per_hour: float
+    available_seconds: float | None
+    cuda_version: str | None
+    host_os: str | None
+
+    # ---- discrimination via attribute access ----------------------------
+    # Replaces the planner's six module-level isinstance helpers.
+    #
+    # ``fleet_key``           "community" / fleet name -- diversification bucket.
+    # ``gpu_type_key``        "" for community / "<fleet>:<gpu_type>" else.
+    # ``dispatch_fleet``      Fleet identifier for startup-buffer + telemetry.
+    @property
+    def fleet_key(self) -> str: ...
+
+    @property
+    def gpu_type_key(self) -> str: ...
+
+    @property
+    def dispatch_fleet(self) -> str | None: ...
+
+    # ``machine_id`` and ``serverless_capability_key`` are mutually
+    # exclusive views over the target's identity, used by the retry
+    # exclusion filter and the community-first dedup pass.
+    #   - CommunityMachine: machine_id = self.id, capability_key = None
+    #   - FleetCapability:  machine_id = None,    capability_key = (fleet, gpu_type)
+    @property
+    def machine_id(self) -> str | None: ...
+
+    @property
+    def serverless_capability_key(self) -> tuple[str, str] | None: ...
+
+    # ---- PlannedTask construction ---------------------------------------
+    # Each concrete type knows how to build its own PlannedTask shape
+    # (community sets machine_id; serverless sets gpu_type + offer_id).
+    # The planner computes the time/cost estimates once via its analyzers
+    # and passes them in; the target fills in routing-specific fields.
+    def to_planned_task(
+        self,
+        *,
+        frame_start: int,
+        frame_end: int,
+        frame_step: int,
+        total_frames: int,
+        chunk_index: int | None,
+        attempt: int,
+        estimated_seconds: float,
+        estimated_cost_usd: float,
+        estimated_seconds_per_frame: float,
+        estimated_startup_seconds: float,
+    ) -> "PlannedTask": ...
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +110,75 @@ class CommunityMachine:
     # check" so the planner stays compatible with legacy rows.  Phase 5 reads
     # this directly; Phase 1 just plumbs the slot.
     available_seconds: float | None = None
+
+    # ---- AllocationTarget Protocol -----------------------------------------
+    # Constant slots: community has no driver CUDA / host OS info today.
+    # Kept as @property (not fields) so the dataclass field surface stays
+    # unchanged.
+    @property
+    def cuda_version(self) -> str | None:
+        return None
+
+    @property
+    def host_os(self) -> str | None:
+        return None
+
+    @property
+    def fleet_key(self) -> str:
+        return "community"
+
+    @property
+    def gpu_type_key(self) -> str:
+        # Community machines are unique by ``id`` already -- no per-gpu-type
+        # diversification cap applies to them.  Empty key signals
+        # "skip me from the cap counter" to the diversification step.
+        return ""
+
+    @property
+    def dispatch_fleet(self) -> str | None:
+        return "community"
+
+    @property
+    def machine_id(self) -> str | None:
+        return self.id
+
+    @property
+    def serverless_capability_key(self) -> tuple[str, str] | None:
+        return None
+
+    def to_planned_task(
+        self,
+        *,
+        frame_start: int,
+        frame_end: int,
+        frame_step: int,
+        total_frames: int,
+        chunk_index: int | None,
+        attempt: int,
+        estimated_seconds: float,
+        estimated_cost_usd: float,
+        estimated_seconds_per_frame: float,
+        estimated_startup_seconds: float,
+    ) -> "PlannedTask":
+        return PlannedTask(
+            fleet="community",
+            machine_id=self.id,
+            gpu_type=None,
+            label=self.gpu_model,
+            vram_gb=self.vram_gb,
+            render_speed=self.render_speed,
+            price_per_hour=self.price_per_hour,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            total_frames=total_frames,
+            chunk_index=chunk_index,
+            attempt=attempt,
+            estimated_seconds=estimated_seconds,
+            estimated_cost_usd=estimated_cost_usd,
+            estimated_seconds_per_frame=estimated_seconds_per_frame,
+            estimated_startup_seconds=estimated_startup_seconds,
+        )
 
     @classmethod
     def from_row(cls, row: dict[str, Any], *, price_per_hour: float = 1.0) -> CommunityMachine:
@@ -109,6 +254,64 @@ class FleetCapability:
     # real semantic -- "the source didn't tell us" -- and the planner
     # respects that by skipping its time check for that target.
     available_seconds: float | None = None
+
+    # ---- AllocationTarget Protocol -----------------------------------------
+    @property
+    def fleet_key(self) -> str:
+        return self.fleet
+
+    @property
+    def gpu_type_key(self) -> str:
+        return f"{self.fleet}:{self.gpu_type}"
+
+    @property
+    def dispatch_fleet(self) -> str | None:
+        return self.fleet
+
+    @property
+    def machine_id(self) -> str | None:
+        return None
+
+    @property
+    def serverless_capability_key(self) -> tuple[str, str] | None:
+        return (self.fleet, self.gpu_type)
+
+    def to_planned_task(
+        self,
+        *,
+        frame_start: int,
+        frame_end: int,
+        frame_step: int,
+        total_frames: int,
+        chunk_index: int | None,
+        attempt: int,
+        estimated_seconds: float,
+        estimated_cost_usd: float,
+        estimated_seconds_per_frame: float,
+        estimated_startup_seconds: float,
+    ) -> "PlannedTask":
+        return PlannedTask(
+            fleet=self.fleet,
+            machine_id=None,
+            gpu_type=self.gpu_type,
+            label=self.label,
+            vram_gb=self.vram_gb,
+            render_speed=self.render_speed,
+            price_per_hour=self.price_per_hour,
+            offer_id=self.offer_id,
+            cuda_version=self.cuda_version,
+            host_os=self.host_os,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            total_frames=total_frames,
+            chunk_index=chunk_index,
+            attempt=attempt,
+            estimated_seconds=estimated_seconds,
+            estimated_cost_usd=estimated_cost_usd,
+            estimated_seconds_per_frame=estimated_seconds_per_frame,
+            estimated_startup_seconds=estimated_startup_seconds,
+        )
 
 
 # ---------------------------------------------------------------------------

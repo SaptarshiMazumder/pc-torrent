@@ -5,7 +5,8 @@
     "dispatch_timeout_sec": 21600,
     "in_queue_timeout_sec": 120,
     "endpoint_url_prefix": "",
-    "provisioning_enabled": true
+    "provisioning_enabled": true,
+    "availability_sec": 14400
   },
   "vast": {
     "max_parallel": 30,

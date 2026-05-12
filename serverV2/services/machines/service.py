@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
@@ -55,6 +56,13 @@ class MachineService:
         if not gpu_model or gpu_vram_gb is None:
             raise MachineServiceError(400, "Missing required fields (gpu_model, gpu_vram_gb)")
 
+        commitment_seconds = getattr(payload, "commitment_seconds", None)
+        if commitment_seconds is None or commitment_seconds <= 0:
+            raise MachineServiceError(
+                400, "commitment_seconds is required and must be > 0",
+            )
+        commitment_end_at = datetime.now(timezone.utc) + timedelta(seconds=float(commitment_seconds))
+
         machine_key = (getattr(payload, "machine_key", None) or "").strip() or None
         current_time = now_iso()
 
@@ -69,7 +77,8 @@ class MachineService:
                 UPDATE machines
                 SET machine_key = %s, gpu_model = %s, gpu_vram_gb = %s, cpu_cores = %s,
                     ram_gb = %s, os_version = %s, nvidia_driver = %s, machine_type = %s,
-                    status = 'idle', registered_at = %s, last_seen_at = %s, user_id = %s
+                    status = 'idle', registered_at = %s, last_seen_at = %s, user_id = %s,
+                    commitment_end_at = %s
                 WHERE id = %s
                 """,
                 (
@@ -79,7 +88,7 @@ class MachineService:
                     getattr(payload, "os_version", None),
                     getattr(payload, "nvidia_driver", None),
                     getattr(payload, "machine_type", "windows"),
-                    current_time, current_time, user_id, machine_id,
+                    current_time, current_time, user_id, commitment_end_at, machine_id,
                 ),
             )
         else:
@@ -89,9 +98,9 @@ class MachineService:
                 INSERT INTO machines (
                     id, machine_key, gpu_model, gpu_vram_gb, cpu_cores, ram_gb,
                     os_version, nvidia_driver, machine_type, status,
-                    registered_at, last_seen_at, user_id
+                    registered_at, last_seen_at, user_id, commitment_end_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'idle', %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'idle', %s, %s, %s, %s)
                 """,
                 (
                     machine_id, machine_key, gpu_model, gpu_vram_gb,
@@ -100,7 +109,7 @@ class MachineService:
                     getattr(payload, "os_version", None),
                     getattr(payload, "nvidia_driver", None),
                     getattr(payload, "machine_type", "windows"),
-                    current_time, current_time, user_id,
+                    current_time, current_time, user_id, commitment_end_at,
                 ),
             )
 
@@ -109,6 +118,36 @@ class MachineService:
         # a missing entry on first sight.
         self._mirror.set_status(machine_id, "idle")
         return {"machine_id": machine_id}
+
+    def set_commitment(
+        self, machine_id: str, commitment_seconds: float, user_id: str,
+    ) -> dict[str, Any]:
+        """Update a community machine's commitment window.
+
+        - ``commitment_seconds > 0``: slides the window to ``now + value``.
+        - ``commitment_seconds == 0``: snaps ``commitment_end_at`` to now,
+          retiring the row from planning on the next snapshot read.
+        """
+        row = query_one(
+            "SELECT id, user_id FROM machines WHERE id = %s",
+            (machine_id,),
+        )
+        if not row:
+            raise MachineServiceError(404, "Machine not found")
+        if not row.get("user_id") or row["user_id"] != user_id:
+            raise MachineServiceError(403, "Access denied")
+        if commitment_seconds < 0:
+            raise MachineServiceError(400, "commitment_seconds must be >= 0")
+
+        if commitment_seconds == 0:
+            new_end = datetime.now(timezone.utc)
+        else:
+            new_end = datetime.now(timezone.utc) + timedelta(seconds=float(commitment_seconds))
+        execute(
+            "UPDATE machines SET commitment_end_at = %s WHERE id = %s",
+            (new_end, machine_id),
+        )
+        return {"success": True, "commitment_end_at": new_end.isoformat()}
 
     def set_available(self, machine_id: str) -> dict[str, bool]:
         machine = query_one("SELECT id FROM machines WHERE id = %s", (machine_id,))

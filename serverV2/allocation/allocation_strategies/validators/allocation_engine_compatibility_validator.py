@@ -23,7 +23,6 @@ Currently:
 
 from __future__ import annotations
 
-from serverV2.core.models import CommunityMachine, FleetCapability
 from serverV2.allocation.allocation_strategies.validators.allocation_validation_context import (
     AllocationValidationContext,
 )
@@ -49,12 +48,7 @@ class AllocationEngineCompatibilityValidator:
             )
         if engine.upper() not in _EEVEE_ENGINES:
             return True
-        if isinstance(target, FleetCapability):
-            fleet = target.fleet
-        elif isinstance(target, CommunityMachine):
-            fleet = "community"
-        else:
-            raise TypeError(
-                f"AllocationEngineCompatibilityValidator got unsupported target type: {type(target).__name__}"
-            )
-        return fleet not in _FLEETS_WITHOUT_GRAPHICS_CAPS
+        # ``dispatch_fleet`` from the AllocationTarget Protocol returns
+        # "community" / "vast_serverless" / "modal_serverless" -- a single
+        # attribute read replaces the previous two-branch isinstance check.
+        return target.dispatch_fleet not in _FLEETS_WITHOUT_GRAPHICS_CAPS

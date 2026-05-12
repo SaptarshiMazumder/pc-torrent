@@ -18,6 +18,37 @@ function fmtSpeed(v) {
   return `${v.toFixed(2)}x`;
 }
 
+// `available_seconds` from /machines/available is the planner's
+// time-budget input: how long the target stays in the pool.  Modal
+// gets a config-driven flat value; Vast gets the bundle's `duration`;
+// Community computes commitment_end_at - now() at row-read time.  Null
+// means "unbounded / unknown" -- planner skips its time check there.
+function fmtAvailability(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "—";
+  if (seconds <= 0) return "Expired";
+  const totalSec = Math.floor(seconds);
+  if (totalSec < 60) return `${totalSec}s`;
+  const days = Math.floor(totalSec / 86400);
+  const rem = totalSec - days * 86400;
+  const hours = Math.floor(rem / 3600);
+  const minutes = Math.floor((rem - hours * 3600) / 60);
+  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  return `${minutes}m`;
+}
+
+// Warning threshold for "about to expire" styling.  15min matches the
+// minimum the desktop's commitment picker accepts -- below that, the
+// machine is about to fall off the planner's eligible list.
+const AVAILABILITY_WARN_SECONDS = 15 * 60;
+
+function availabilityClass(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "";
+  if (seconds <= 0) return "info-value--danger";
+  if (seconds < AVAILABILITY_WARN_SECONDS) return "info-value--warn";
+  return "";
+}
+
 function CommunityCard({ m }) {
   return (
     <div className="card machine-card" style={{ cursor: "default" }}>
@@ -45,6 +76,12 @@ function CommunityCard({ m }) {
               <span className="info-value">{fmtSpeed(m.render_speed)}</span>
             </div>
           )}
+          <div className="info-item">
+            <span className="info-label">Available for</span>
+            <span className={`info-value ${availabilityClass(m.available_seconds)}`}>
+              {fmtAvailability(m.available_seconds)}
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -79,6 +116,12 @@ function VastCard({ c }) {
               <span className="info-value">{fmtPrice(c.price_per_hour)}</span>
             </div>
           )}
+          <div className="info-item">
+            <span className="info-label">Available for</span>
+            <span className={`info-value ${availabilityClass(c.available_seconds)}`}>
+              {fmtAvailability(c.available_seconds)}
+            </span>
+          </div>
         </div>
         {chips.length > 0 && (
           <div className="machine-chips" style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -119,6 +162,12 @@ function ModalCard({ c }) {
               <span className="info-value">{fmtPrice(c.price_per_hour)}</span>
             </div>
           )}
+          <div className="info-item">
+            <span className="info-label">Available for</span>
+            <span className={`info-value ${availabilityClass(c.available_seconds)}`}>
+              {fmtAvailability(c.available_seconds)}
+            </span>
+          </div>
         </div>
       </div>
     </div>

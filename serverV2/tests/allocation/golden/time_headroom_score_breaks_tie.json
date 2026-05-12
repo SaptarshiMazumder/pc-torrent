@@ -1,0 +1,24 @@
+[
+  {
+    "attempt": 0,
+    "chunk_index": 0,
+    "cuda_version": "12.4",
+    "estimated_cost_usd": 0.1661029411764706,
+    "estimated_seconds": 1328.8235294117649,
+    "estimated_seconds_per_frame": 52.94117647058824,
+    "estimated_startup_seconds": 270.0,
+    "fleet": "vast_serverless",
+    "frame_end": 20,
+    "frame_start": 1,
+    "frame_step": 1,
+    "gpu_type": "RTX 4090",
+    "host_os": "Linux 22.04",
+    "label": "Vast RTX 4090",
+    "machine_id": null,
+    "offer_id": 22002,
+    "price_per_hour": 0.45,
+    "render_speed": 1.7,
+    "total_frames": 20,
+    "vram_gb": 24.0
+  }
+]

@@ -306,6 +306,16 @@ def _weights(b: dict) -> AllocationWeights:
     chunk_count_curve = (
         _float(b, ctx, "chunk_count_curve") if "chunk_count_curve" in b else 1.0
     )
+    # Phase 5 -- time-aware allocation knobs.  Same backwards-compat
+    # pattern: missing on old docs falls back to dataclass defaults so
+    # we don't fail to load against Firestore until every prod doc has
+    # been re-saved through the ConfigurationPage UI.
+    time_safety_factor = (
+        _float(b, ctx, "time_safety_factor") if "time_safety_factor" in b else 1.5
+    )
+    time_headroom_falloff = (
+        _float(b, ctx, "time_headroom_falloff") if "time_headroom_falloff" in b else 0.5
+    )
     return AllocationWeights(
         speed_weight=_float(b, ctx, "speed_weight"),
         cuda_weight=_float(b, ctx, "cuda_weight"),
@@ -317,6 +327,8 @@ def _weights(b: dict) -> AllocationWeights:
         vram_safety_factor=_float(b, ctx, "vram_safety_factor"),
         startup_amortization_ratio=_float(b, ctx, "startup_amortization_ratio"),
         chunk_count_curve=chunk_count_curve,
+        time_safety_factor=time_safety_factor,
+        time_headroom_falloff=time_headroom_falloff,
     )
 
 

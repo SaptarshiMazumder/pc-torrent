@@ -1208,6 +1208,7 @@ pub async fn connect_agent(
     app: tauri::AppHandle,
     backend_url: String,
     firebase_token: Option<String>,
+    commitment_seconds: f64,
     state: State<'_, Arc<Mutex<AgentState>>>,
     sidecar: State<'_, Arc<Mutex<SidecarHandle>>>,
 ) -> Result<(), String> {
@@ -1217,7 +1218,8 @@ pub async fn connect_agent(
     handle.send_command(&json!({
         "cmd": "connect",
         "backend_url": backend_url,
-        "firebase_token": firebase_token.unwrap_or_default()
+        "firebase_token": firebase_token.unwrap_or_default(),
+        "commitment_seconds": commitment_seconds
     }))?;
 
     let mut s = state.lock().await;

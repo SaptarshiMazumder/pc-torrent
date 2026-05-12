@@ -448,6 +448,104 @@ def available_seconds_mixed() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 scenarios -- exercise the time filter, headroom scoring, and
+# distribution clamp.  Numbers chosen so each new path actually triggers.
+# ---------------------------------------------------------------------------
+
+def time_filter_drops_short_window() -> dict[str, Any]:
+    # Two Vast offers of the same gpu_type.  Offer A has
+    # available_seconds=30 which is below the vast startup floor
+    # (heaviness startup 60s + vast buffer 180s = 240s base, *1.5 safety
+    # = 360s).  Filter must drop A.  Offer B (None) carries every chunk.
+    res = AvailableResources(
+        community_machines=[],
+        serverless_capabilities=[
+            _vast(offer_id=21001, gpu="RTX 4090", vram=24.0, speed=1.70, price=0.45,
+                  available_seconds=30.0),
+            _vast(offer_id=21002, gpu="RTX 4090", vram=24.0, speed=1.70, price=0.45,
+                  available_seconds=None),
+        ],
+        serverless_in_flight={"vast_serverless": 0},
+    )
+    return _wrap_initial(frame_start=1, frame_end=50, resources=res, heaviness=LIGHT_HEAVINESS)
+
+
+def time_headroom_score_breaks_tie() -> dict[str, Any]:
+    # Two Vast offers, identical specs but different commitment windows.
+    # Both pass the filter (each > 360s vast floor).  Offer A's window
+    # (450s) is below the headroom saturation threshold (1.5 * chunk
+    # seconds), so its score is penalised; offer B's huge window (30000s)
+    # saturates the factor at 1.0 and outranks A.
+    res = AvailableResources(
+        community_machines=[],
+        serverless_capabilities=[
+            _vast(offer_id=22001, gpu="RTX 4090", vram=24.0, speed=1.70, price=0.45,
+                  available_seconds=450.0),
+            _vast(offer_id=22002, gpu="RTX 4090", vram=24.0, speed=1.70, price=0.45,
+                  available_seconds=30000.0),
+        ],
+        serverless_in_flight={"vast_serverless": 0},
+    )
+    # Tight max_targets so only the best-scoring offer is picked.
+    weights = AllocationWeights(
+        speed_weight=0.70, cuda_weight=0.20, os_weight=0.10,
+        max_targets=1, min_frames_per_chunk=4,
+        fleet_diversification_cap=0.85, gpu_type_diversification_cap=0.40,
+        vram_safety_factor=1.10, startup_amortization_ratio=0.5,
+        chunk_count_curve=1.0, distribute_by="time_balanced",
+        time_safety_factor=1.5, time_headroom_falloff=0.5,
+    )
+    return _wrap_initial(
+        frame_start=1, frame_end=20, resources=res,
+        heaviness=LIGHT_HEAVINESS, weights=weights,
+    )
+
+
+def time_clamp_caps_share() -> dict[str, Any]:
+    # Two community machines, same speed.  Both passes filter.  The
+    # time-balanced split would naturally allocate ~half the frames to
+    # each (~50/100), but A's window only fits ~14 frames after startup
+    # ((200 - 60) / 10s_spf).  Clamp pulls A down to 14; overflow spills
+    # onto B (unbounded) which renders ~86.
+    res = AvailableResources(
+        community_machines=[
+            _community(id_="pc-bounded", gpu="RTX 3090", vram=24.0, speed=1.0,
+                       price=1.0),
+            _community(id_="pc-unbounded", gpu="RTX 3090", vram=24.0, speed=1.0,
+                       price=1.0),
+        ],
+        serverless_capabilities=[],
+        serverless_in_flight={},
+    )
+    # Inject a finite window on the first community machine.  ``_community``
+    # always stamps None, so we rebuild it with the value.
+    bounded = CommunityMachine(
+        id="pc-bounded", gpu_model="RTX 3090", vram_gb=24.0, cpu_cores=16,
+        ram_gb=32.0, render_speed=1.0, status="available",
+        last_seen_at="2026-05-01T00:00:00+00:00", price_per_hour=1.0,
+        available_seconds=200.0,
+    )
+    res = AvailableResources(
+        community_machines=[bounded, res.community_machines[1]],
+        serverless_capabilities=[],
+        serverless_in_flight={},
+    )
+    # Force at least 2 chunks so the distributor allocates to both.
+    weights = AllocationWeights(
+        speed_weight=0.70, cuda_weight=0.20, os_weight=0.10,
+        max_targets=2, min_frames_per_chunk=4,
+        fleet_diversification_cap=0.85, gpu_type_diversification_cap=0.40,
+        vram_safety_factor=1.10, startup_amortization_ratio=0.5,
+        chunk_count_curve=1.0, distribute_by="time_balanced",
+        time_safety_factor=1.5, time_headroom_falloff=0.5,
+    )
+    return _wrap_initial(
+        frame_start=1, frame_end=100, resources=res,
+        heaviness=LIGHT_HEAVINESS, weights=weights,
+    )
+
+
+# ---------------------------------------------------------------------------
 # plan_retry scenarios
 # ---------------------------------------------------------------------------
 def retry_single_eligible() -> dict[str, Any]:
@@ -538,6 +636,9 @@ INITIAL_SCENARIOS: dict[str, Callable[[], dict[str, Any]]] = {
     "mixed_community_dominates": mixed_community_dominates,
     "mixed_three_fleets_balanced": mixed_three_fleets_balanced,
     "modal_only_single_gpu_type": modal_only_single_gpu_type,
+    "time_clamp_caps_share": time_clamp_caps_share,
+    "time_filter_drops_short_window": time_filter_drops_short_window,
+    "time_headroom_score_breaks_tie": time_headroom_score_breaks_tie,
     "tiny_render_forces_k1": tiny_render_forces_k1,
     "vast_only_many_gpu_types": vast_only_many_gpu_types,
     "vast_only_many_offers_same_gpu": vast_only_many_offers_same_gpu,

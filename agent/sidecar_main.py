@@ -150,6 +150,7 @@ def handle_command(cmd):
     elif action == "connect":
         backend_url = cmd.get("backend_url", "")
         firebase_token = cmd.get("firebase_token", "")
+        commitment_seconds = cmd.get("commitment_seconds")
         cfg = load_config()
         if backend_url:
             os.environ["BACKEND_URL"] = backend_url
@@ -158,6 +159,18 @@ def handle_command(cmd):
             import agent as _agent_mod
             _agent_mod.FIREBASE_TOKEN = firebase_token
         save_config(cfg)
+
+        # The server's /machines/register rejects a missing or <=0 value
+        # with 400, so reject here too -- avoids a wasted preflight gate
+        # check + clearer error surfaced to the UI.
+        try:
+            commitment_seconds = float(commitment_seconds)
+        except (TypeError, ValueError):
+            commitment_seconds = 0.0
+        if commitment_seconds <= 0:
+            emit_error("Pick how long you'll keep the PC available before connecting.")
+            emit_status("disconnected", "Commitment window required")
+            return
 
         preflight_running, connect_running = _get_flags()
         runtime = get_runtime_state()
@@ -174,10 +187,21 @@ def handle_command(cmd):
             return
 
         _set_connect_running(True)
-        threading.Thread(target=run_connect_flow, daemon=True).start()
+        threading.Thread(
+            target=run_connect_flow, args=(commitment_seconds,), daemon=True,
+        ).start()
 
     elif action == "disconnect":
         import agent
+        # Best-effort: tell the server we're retiring before the agent
+        # tears itself down.  Snaps commitment_end_at = now on the row
+        # so the planner stops considering us on its next snapshot.
+        # HTTP failures here just log -- the row's window will expire
+        # naturally and the planner will drop us then.
+        try:
+            agent.set_commitment(getattr(agent, "machine_id", None), 0)
+        except Exception as exc:
+            emit_log(f"set_commitment(0) failed: {exc}", source="agent", level="warn")
         agent.shutdown_agent("Disconnected from UI")
 
     elif action == "pause":
@@ -395,8 +419,13 @@ def run_preflight_flow(force_gpu_recheck=False):
         _set_preflight_running(False)
 
 
-def run_connect_flow():
-    """Connect to the backend after preflight has already completed."""
+def run_connect_flow(commitment_seconds):
+    """Connect to the backend after preflight has already completed.
+
+    ``commitment_seconds`` is the user-chosen availability window from
+    the dashboard datetime picker.  Threaded through to register_machine
+    so the server can stamp commitment_end_at on the machine row.
+    """
     import agent
     from docker_setup import check_docker_running
 
@@ -489,7 +518,7 @@ def run_connect_flow():
 
         saved_id = agent.load_machine_id()
         try:
-            agent.machine_id = agent.register_machine(specs)
+            agent.machine_id = agent.register_machine(specs, commitment_seconds)
             agent.save_machine_id(agent.machine_id)
             emit_log(f"Registered. Machine ID: {agent.machine_id}", source="agent")
         except Exception as exc:

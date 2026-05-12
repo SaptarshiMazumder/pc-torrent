@@ -249,14 +249,29 @@ def _request_with_retries(method, url, *, timeout, retries=HTTP_RETRIES, **kwarg
     raise last_exc
 
 
-def register_machine(specs):
+def register_machine(specs, commitment_seconds):
+    """POST /machines/register.
+
+    ``commitment_seconds`` is required by the server (Phase 4 of the
+    time-aware allocation plan).  Server stamps
+    ``commitment_end_at = now + commitment_seconds`` on the row; the
+    planner reads remaining seconds off that column for its time
+    filter.  Caller (the UI) chose the value via the datetime picker.
+    """
+    if not commitment_seconds or commitment_seconds <= 0:
+        raise RuntimeError(
+            "register_machine requires commitment_seconds > 0 "
+            "(set via the dashboard datetime picker)"
+        )
     headers = {}
     if FIREBASE_TOKEN:
         headers["Authorization"] = f"Bearer {FIREBASE_TOKEN}"
+    body = dict(specs)
+    body["commitment_seconds"] = float(commitment_seconds)
     resp = _request_with_retries(
         "POST",
         f"{BACKEND_URL}/machines/register",
-        json=specs,
+        json=body,
         headers=headers,
         timeout=(HTTP_CONNECT_TIMEOUT, HTTP_STATUS_READ_TIMEOUT),
     )
@@ -266,6 +281,32 @@ def register_machine(specs):
     if not machine:
         raise RuntimeError("Machine registration returned no machine_id")
     return machine
+
+
+def set_commitment(machine_id, commitment_seconds):
+    """PUT /machines/{id}/commitment.
+
+    Fired on graceful disconnect with ``0`` so the planner immediately
+    stops considering this machine.  Best-effort: HTTP failures are
+    logged but don't block shutdown (commitment will expire naturally
+    once ``commitment_end_at`` elapses).
+    """
+    if not machine_id:
+        return
+    headers = {}
+    if FIREBASE_TOKEN:
+        headers["Authorization"] = f"Bearer {FIREBASE_TOKEN}"
+    try:
+        resp = _request_with_retries(
+            "PUT",
+            f"{BACKEND_URL}/machines/{machine_id}/commitment",
+            json={"commitment_seconds": float(commitment_seconds)},
+            headers=headers,
+            timeout=(HTTP_CONNECT_TIMEOUT, HTTP_STATUS_READ_TIMEOUT),
+        )
+        _ensure_http_success(resp, "Machine commitment update")
+    except Exception as exc:
+        _log(f"[AGENT] set_commitment({commitment_seconds}) failed: {exc}", level="warn")
 
 
 def set_available(mid):

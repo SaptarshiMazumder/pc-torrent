@@ -210,6 +210,12 @@ function FrameAllocationSection({ draft, update }) {
           <RatioSlider label="chunk_count_curve" value={w.chunk_count_curve}
             min={0.3} max={3} step={0.1} precision={1}
             onChange={(v) => setIn("weights", "chunk_count_curve", v)} />
+          <RatioSlider label="time_safety_factor" value={w.time_safety_factor}
+            min={1.0} max={3.0} step={0.05} precision={2}
+            onChange={(v) => setIn("weights", "time_safety_factor", v)} />
+          <RatioSlider label="time_headroom_falloff" value={w.time_headroom_falloff}
+            min={0} max={2.0} step={0.05} precision={2}
+            onChange={(v) => setIn("weights", "time_headroom_falloff", v)} />
         </div>
       </SectionCard>
 

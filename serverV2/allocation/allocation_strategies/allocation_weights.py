@@ -100,3 +100,22 @@ class AllocationWeights:
     # and tighter fits scale linearly toward 0.  None available_seconds
     # short-circuits to factor=1.0 (no penalty for legacy / unknown).
     time_headroom_falloff: float = 0.5
+
+    # --- Heavy-feature combination ------------------------------------
+    # How heavy-feature multipliers (texture_factor, shader_factor,
+    # feature_factor) combine when a scene has several of them at once.
+    #
+    # 1.0  -> fully multiplicative (legacy; 5 features at 1.4x compound
+    #         to 5.4x even though reality stacks them more like 2x).
+    # 0.0  -> "dominant feature only" (the worst feature's multiplier
+    #         is the only one that matters; others contribute nothing).
+    # 0.3  -> default.  Each non-dominant heavy feature contributes 30%
+    #         of its excess above 1.0 on top of the dominant feature.
+    #         Matches the empirical observation that real scenes don't
+    #         scale multiplicatively across independent features.
+    secondary_feature_credit: float = 0.3
+
+    # Hard ceiling on the combined heavy-multiplier so a pathological
+    # scene can't blow up the estimate.  Applied AFTER the additive
+    # combination above.  0.0 disables the cap.
+    heavy_multiplier_cap: float = 5.0

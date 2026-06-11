@@ -57,7 +57,9 @@
       "startup_amortization_ratio": 0.5,
       "chunk_count_curve": 1.0,
       "time_safety_factor": 1.5,
-      "time_headroom_falloff": 0.5
+      "time_headroom_falloff": 0.5,
+      "secondary_feature_credit": 0.3,
+      "heavy_multiplier_cap": 5.0
     },
     "vram_fleet_boost": {
       "vast": 1.0,

@@ -316,6 +316,16 @@ def _weights(b: dict) -> AllocationWeights:
     time_headroom_falloff = (
         _float(b, ctx, "time_headroom_falloff") if "time_headroom_falloff" in b else 0.5
     )
+    # Heavy-feature combination knobs -- backwards compatible with old
+    # Firestore docs that pre-date the additive combination.
+    secondary_feature_credit = (
+        _float(b, ctx, "secondary_feature_credit")
+        if "secondary_feature_credit" in b else 0.3
+    )
+    heavy_multiplier_cap = (
+        _float(b, ctx, "heavy_multiplier_cap")
+        if "heavy_multiplier_cap" in b else 5.0
+    )
     return AllocationWeights(
         speed_weight=_float(b, ctx, "speed_weight"),
         cuda_weight=_float(b, ctx, "cuda_weight"),
@@ -329,6 +339,8 @@ def _weights(b: dict) -> AllocationWeights:
         chunk_count_curve=chunk_count_curve,
         time_safety_factor=time_safety_factor,
         time_headroom_falloff=time_headroom_falloff,
+        secondary_feature_credit=secondary_feature_credit,
+        heavy_multiplier_cap=heavy_multiplier_cap,
     )
 
 

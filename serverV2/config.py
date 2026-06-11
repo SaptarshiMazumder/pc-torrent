@@ -766,6 +766,12 @@ def _load_allocation_weights() -> "AllocationWeights":
         startup_amortization_ratio=_require_field_float(block, ctx, "startup_amortization_ratio"),
         time_safety_factor=_require_field_float(block, ctx, "time_safety_factor"),
         time_headroom_falloff=_require_field_float(block, ctx, "time_headroom_falloff"),
+        secondary_feature_credit=_require_field_float(
+            block, ctx, "secondary_feature_credit",
+        ),
+        heavy_multiplier_cap=_require_field_float(
+            block, ctx, "heavy_multiplier_cap",
+        ),
     )
 
 

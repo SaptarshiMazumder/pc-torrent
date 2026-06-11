@@ -28,6 +28,9 @@
   "monitor": {
     "in_progress_stale_sec": 1800
   },
+  "billing": {
+    "credits_per_usd": 100.0
+  },
   "stall": {
     "cpu_threshold_pct": 5.0,
     "cpu_window_sec": 180,

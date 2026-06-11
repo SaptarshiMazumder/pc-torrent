@@ -357,9 +357,21 @@ class RenderJob:
     # fleet singletons (and CommunityMonitor) per-tick to enforce
     # stall checks.  None for legacy rows pre-dating the column.
     allowed_stall_times: dict[str, Any] | None = None
+    # Actual-cost telemetry inputs.  Surfaced on the typed row so the
+    # community monitor can hand them to ``UsersClient`` per billing
+    # tick without a separate raw-row read.  ``None`` for rows pre-
+    # dating the columns or before the worker has started.
+    started_at: Any | None = None
+    completed_at: Any | None = None
+    price_per_hour_at_dispatch: float | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RenderJob:
+        rate = row.get("price_per_hour_at_dispatch")
+        try:
+            rate_f = float(rate) if rate is not None else None
+        except (TypeError, ValueError):
+            rate_f = None
         return cls(
             job_id=row["id"],
             group_id=row.get("group_id", ""),
@@ -381,6 +393,9 @@ class RenderJob:
             priority=row.get("priority") or 0,
             estimated_startup_seconds=float(row.get("estimated_startup_seconds") or 0.0),
             allowed_stall_times=row.get("allowed_stall_times"),
+            started_at=row.get("started_at"),
+            completed_at=row.get("completed_at"),
+            price_per_hour_at_dispatch=rate_f,
         )
 
     @property

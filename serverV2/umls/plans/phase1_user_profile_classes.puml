@@ -1,0 +1,243 @@
+@startuml phase1_user_profile_classes
+
+skinparam classBackgroundColor #FFFFFF
+skinparam classBorderColor #555555
+skinparam classFontSize 12
+skinparam ArrowFontSize 10
+skinparam packageStyle rectangle
+skinparam packageBorderColor #888888
+
+!define ALLOC_BG  #D6E5F5
+!define ALLOC_LN  #2E6FB5
+!define FLEET_BG  #F7DCC9
+!define FLEET_LN  #C25A2E
+!define REPO_BG   #C9E8E5
+!define REPO_LN   #2E8A82
+!define RG_BG     #E2CDF1
+!define RG_LN     #7A3DA8
+!define ORCH_BG   #CFEBCF
+!define ORCH_LN   #2E8A36
+!define USERS_BG  #F5D2DC
+!define USERS_LN  #B33A65
+!define CFG_BG    #D3DBE7
+!define CFG_LN    #5A6A8A
+!define API_BG    #F0E2B5
+!define API_LN    #A88300
+
+title Cost lineage + user credits
+
+legend bottom
+|= colour |= module |
+|<#D6E5F5>| allocation |
+|<#F7DCC9>| fleets |
+|<#C9E8E5>| repositories |
+|<#E2CDF1>| services.render_groups |
+|<#CFEBCF>| orchestrator |
+|<#F5D2DC>| users |
+|<#D3DBE7>| config |
+|<#F0E2B5>| api |
+endlegend
+
+package "allocation" ALLOC_BG {
+  class PreRenderEstimator {
+    + estimate(spec) : EstimateResult
+  }
+  class AllocationPlanningService {
+    + plan(group, snapshot) : list of PlannedTask
+  }
+  class AllocationPlanner {
+    + plan(targets, group, snapshot) : list of PlannedTask
+  }
+  class AllocationDispatcher {
+    + dispatch(planned_task, context)
+  }
+  class PlannedTask <<value>> {
+    + price_per_hour : float
+    + estimated_cost_usd : float
+    + estimated_seconds : float
+  }
+}
+
+package "fleets" FLEET_BG {
+  class VastFleetStrategy {
+    + dispatch(task, context)
+  }
+  class ModalFleetStrategy {
+    + dispatch(task, context)
+  }
+  class CommunityStrategy {
+    - price_per_hour : float
+    + dispatch(task, context)
+  }
+  class VastFleetMonitor {
+    - update_spend_for_chunk : Callable[row]
+    + tick()
+  }
+  class ModalFleetMonitor {
+    - update_spend_for_chunk : Callable[row]
+    + tick()
+  }
+  class CommunityMonitor {
+    - update_spend_for_chunk : Callable[row]
+    + tick()
+  }
+}
+
+package "repositories" REPO_BG {
+  class JobRepository {
+    + create(params)
+    + mark_done(job_id)
+    + mark_failed(job_id, error)
+    + update_status(job_id, status)
+    + get_raw_by_id(job_id) : dict
+    + get_raw_with_owner(job_id) : dict
+    + get_raw_by_group_with_owner(group_id) : list of dict
+  }
+  class jobs_row <<table>> {
+    user_id : str
+    price_per_hour_at_dispatch : float
+    estimated_cost_usd : float
+    started_at : timestamp
+    completed_at : timestamp
+    status : str
+  }
+}
+
+package "services.render_groups" RG_BG {
+  class serializers <<module>> {
+    + serialize_job(row)
+  }
+}
+
+package "orchestrator" ORCH_BG {
+  class RenderOrchestrator <<facade>> {
+    + on_job_succeeded(job_id)
+    + on_job_failed(job_id, error)
+    + update_spend_for_chunk(row)
+    + cancel_group(group_id)
+    + cancel_one_job(job_id)
+    + actual_cost_for_row(row) : tuple
+  }
+  class RenderLifecycle {
+    + handle_chunk_succeeded(job_id)
+    + handle_chunk_failed(job_id, error)
+    + cancel_render(group_id)
+  }
+  class UsersClient {
+    - facade : UserFacade
+    - job_repo : JobRepository
+    - cost : TaskActualCost
+    + update_spend_for_chunk(row) : float
+    + update_spend_for_chunk_by_id(job_id) : float
+    + update_spend_for_group_jobs(group_id) : int
+  }
+  class TaskActualCost {
+    + compute(started_at, completed_at, price_per_hour, status) : tuple
+  }
+}
+
+package "users" USERS_BG {
+  class UserFacade {
+    + get_profile(uid, email) : dict
+    + update_profile(uid, updates)
+    + record_spend(uid, task_id, total_credits_spent) : float
+  }
+  class UserService {
+    - credits_per_usd : float
+    + compute_credit_debit(actual_cost_usd) : float
+  }
+  class UserProfileRepository {
+    + get(uid)
+    + create_if_missing(uid, email)
+    + update(uid, updates)
+    + record_spend(uid, task_id, total_credits_spent) : float
+  }
+  class task_spend <<doc>> {
+    total_credits_spent : float
+    updated_at : timestamp
+  }
+}
+
+package "config" CFG_BG {
+  class BillingConfig {
+    + credits_per_usd : float
+  }
+  class AppConfig {
+    + billing : BillingConfig
+  }
+}
+
+package "api" API_BG {
+  class users_router <<module>> {
+    + GET /me
+    + PUT /me
+  }
+  class UserProfileResponse {
+    + uid : str
+    + email : str
+    + tier : str
+    + credits : float
+  }
+}
+
+' --- pre-submit dry-run + dispatch planning (allocation-blue) ---
+PreRenderEstimator -[ALLOC_LN]-> AllocationPlanningService
+AllocationPlanningService -[ALLOC_LN]-> AllocationPlanner
+AllocationPlanner -[ALLOC_LN]-> PlannedTask : produces
+AllocationDispatcher -[ALLOC_LN]-> PlannedTask : reads
+AllocationDispatcher -[ALLOC_LN]-> VastFleetStrategy : dispatch(task)
+AllocationDispatcher -[ALLOC_LN]-> ModalFleetStrategy : dispatch(task)
+AllocationDispatcher -[ALLOC_LN]-> CommunityStrategy : dispatch(task)
+
+' --- strategies stamp the row (fleets-orange) ---
+VastFleetStrategy -[FLEET_LN]-> JobRepository : create row + price_per_hour_at_dispatch
+ModalFleetStrategy -[FLEET_LN]-> JobRepository : create row + price_per_hour_at_dispatch
+CommunityStrategy -[FLEET_LN]-> JobRepository : create row + price_per_hour_at_dispatch
+
+' --- repo writes table (repositories-teal) ---
+JobRepository -[REPO_LN]-> jobs_row : INSERT and UPDATE
+
+' --- read paths ---
+serializers -[RG_LN]-> RenderOrchestrator : actual_cost_for_row
+
+' --- monitor bulk SELECT joins render_groups for owner_uid (fleets-orange) ---
+VastFleetMonitor -[FLEET_LN]-> jobs_row : SELECT j.*, owner_uid (one bulk per tick)
+ModalFleetMonitor -[FLEET_LN]-> jobs_row : SELECT j.*, owner_uid (one bulk per tick)
+CommunityMonitor -[FLEET_LN]-> jobs_row : SELECT j.*, owner_uid (one bulk per tick)
+
+' --- monitor ticks pass the row straight through; no extra DB read (fleets-orange) ---
+VastFleetMonitor -[FLEET_LN]-> RenderOrchestrator : update_spend_for_chunk(row) per running row
+ModalFleetMonitor -[FLEET_LN]-> RenderOrchestrator : update_spend_for_chunk(row) per running row
+CommunityMonitor -[FLEET_LN]-> RenderOrchestrator : update_spend_for_chunk(row) per running row
+
+' --- terminal transitions (fleets-orange) ---
+VastFleetMonitor -[FLEET_LN]-> RenderOrchestrator : on_job_succeeded / on_job_failed
+ModalFleetMonitor -[FLEET_LN]-> RenderOrchestrator : on_job_succeeded / on_job_failed
+CommunityMonitor -[FLEET_LN]-> RenderOrchestrator : on_job_succeeded / on_job_failed
+
+' --- facade composes lifecycle + spend update (orchestrator-green) ---
+RenderOrchestrator -[ORCH_LN]-> RenderLifecycle : delegates state mutation
+RenderOrchestrator -[ORCH_LN]-> UsersClient : update_spend_for_chunk(row)  [hot path, no DB]
+RenderOrchestrator -[ORCH_LN]-> UsersClient : update_spend_for_chunk_by_id(jid)  [terminal flip]
+RenderOrchestrator -[ORCH_LN]-> TaskActualCost : delegates for UI cost
+
+RenderLifecycle -[ORCH_LN]-> JobRepository : mark_done / mark_failed
+UsersClient -[ORCH_LN]-> JobRepository : get_raw_with_owner  [only on by_id path]
+UsersClient -[ORCH_LN]-> TaskActualCost : compute(running -> uses now)
+UsersClient -[ORCH_LN]-> UserFacade : record_spend(uid, jid, total_credits_spent)
+TaskActualCost -[ORCH_LN]-> jobs_row : reads rate + timestamps
+
+' --- users module composition + Firestore writes (users-pink) ---
+UserFacade o-[USERS_LN]- UserService
+UserFacade o-[USERS_LN]- UserProfileRepository
+UserProfileRepository -[USERS_LN]-> task_spend : read total + write new total
+
+' --- config flow (config-grey-blue) ---
+AppConfig *-[CFG_LN]- BillingConfig
+UserService -[CFG_LN]- BillingConfig : credits_per_usd
+
+' --- api surface (api-gold) ---
+users_router -[API_LN]-> UserFacade : calls
+users_router -[API_LN]-> UserProfileResponse : returns
+
+@enduml

@@ -68,6 +68,7 @@ class CommunityMonitor:
         progress_repo: ProgressRepository,
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
+        update_spend_for_chunk: Callable[[dict], None],
         stall_detector: IPreRenderStallDetector,
         lock_repo: MonitorLockRepository,
         instance_id: str,
@@ -87,6 +88,7 @@ class CommunityMonitor:
         self._counts = JobCounts(progress_repo, output_frame_repo)
         self._on_failure = on_failure
         self._on_success = on_success
+        self._update_spend_for_chunk = update_spend_for_chunk
         self._stall_detector = stall_detector
         self._lock_repo = lock_repo
         self._instance_id = instance_id
@@ -162,9 +164,25 @@ class CommunityMonitor:
         for group in self._group_repo.get_active_groups():
             try:
                 jobs = self._job_repo.get_by_group(group["id"])
+                owner_uid = group.get("user_id")
                 for job in jobs:
                     if job.is_serverless:
                         continue
+                    # Continuous-billing tick: assemble the slim row dict
+                    # UsersClient expects from this RenderJob + group's
+                    # user_id -- no extra repository call on the hot
+                    # path.  Vast/Modal pass their bulk-SELECT row
+                    # directly; community has to build one because its
+                    # iteration is over RenderJob, not raw dicts.
+                    if job.status == "running":
+                        self._update_spend_for_chunk({
+                            "id": job.job_id,
+                            "owner_uid": owner_uid,
+                            "status": job.status,
+                            "started_at": job.started_at,
+                            "completed_at": job.completed_at,
+                            "price_per_hour_at_dispatch": job.price_per_hour_at_dispatch,
+                        })
                     # Success check first.  ``is_complete`` is chunk-
                     # range-based so it sees frames sibling retries
                     # uploaded -- short-circuits before any failure

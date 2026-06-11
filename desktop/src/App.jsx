@@ -10,6 +10,7 @@ import AvailableMachinesPage from "./pages/AvailableMachinesPage";
 import ConfigurationPage from "./pages/ConfigurationPage";
 import LoginPage from "./components/common/LoginPage";
 import ToastViewport from "./components/common/ToastViewport";
+import UserCreditsCorner from "./components/profile/UserCreditsCorner";
 import { useAgent } from "./hooks/useAgent";
 import { useJobs } from "./hooks/useJobs";
 import { useAuth } from "./contexts/AuthContext";
@@ -55,6 +56,7 @@ export default function App() {
   return (
     <div className="app">
       <ToastViewport />
+      <UserCreditsCorner />
       <Sidebar
         activePage={page}
         onNavigate={setPage}

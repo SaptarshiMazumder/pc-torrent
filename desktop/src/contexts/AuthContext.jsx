@@ -53,20 +53,12 @@ export function AuthProvider({ children }) {
         await applyPersistence(readRememberPreference());
       } catch {}
       if (cancelled) return;
-      unsub = onAuthStateChanged(auth, async (u) => {
+      unsub = onAuthStateChanged(auth, (u) => {
         setUser(u);
         setLoading(false);
-        if (u) {
-          // Ensure Firestore profile exists for this user
-          const backendUrl = localStorage.getItem("pcrent_backend_url") ||
-            "https://pcrent-server-v2-930713698987.asia-northeast1.run.app";
-          try {
-            const token = await u.getIdToken();
-            await fetch(`${backendUrl}/me`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-          } catch {}
-        }
+        // UserProfileProvider fetches /me when ``user`` becomes
+        // non-null -- that single fetch both creates the Firestore
+        // profile (if missing) and seeds the credits display.
       });
     })();
 

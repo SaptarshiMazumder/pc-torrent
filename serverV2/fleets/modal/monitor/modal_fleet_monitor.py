@@ -71,6 +71,7 @@ class ModalFleetMonitor:
         output_frame_repo: OutputFrameRepository,
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
+        update_spend_for_chunk: Callable[[dict], None],
         stall_detector_factory: Callable[[], IPreRenderStallDetector],
         lock_repo: MonitorLockRepository,
         instance_id: str,
@@ -85,6 +86,7 @@ class ModalFleetMonitor:
         self._output_frames = output_frame_repo
         self._on_failure = on_failure
         self._on_success = on_success
+        self._update_spend_for_chunk = update_spend_for_chunk
         self._stall_detector_factory = stall_detector_factory
         self._lock_repo = lock_repo
         self._instance_id = instance_id
@@ -142,7 +144,8 @@ class ModalFleetMonitor:
         rows = query_all(
             """
             SELECT j.*,
-                   rg.input_filename AS rg_input_filename
+                   rg.input_filename AS rg_input_filename,
+                   COALESCE(rg.user_id, j.user_id) AS owner_uid
             FROM jobs j
             LEFT JOIN render_groups rg ON rg.id = j.group_id
             WHERE j.status IN ('running', 'pending')
@@ -155,6 +158,11 @@ class ModalFleetMonitor:
         for row in rows:
             job_id = row["id"]
             active_job_ids.add(job_id)
+            if str(row.get("status") or "") == "running":
+                # Continuous-billing tick: row already has owner_uid +
+                # cost fields from the bulk SELECT above; pass through.
+                # See VastFleetMonitor._tick for the full narrative.
+                self._update_spend_for_chunk(row)
             try:
                 self._inspect(row)
             except Exception:

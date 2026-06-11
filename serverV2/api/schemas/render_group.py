@@ -24,9 +24,3 @@ class ConfirmRenderGroupPayload(BaseModel):
 
 class UpdateInputFilePayload(BaseModel):
     display_name: str
-
-
-class UpdateProfilePayload(BaseModel):
-    display_name: str | None = None
-    avatar_url: str | None = None
-    billing_plan: str | None = None

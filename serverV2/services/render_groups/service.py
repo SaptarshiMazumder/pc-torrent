@@ -72,7 +72,10 @@ class RenderGroupService:
         # jobs the user can manually retry (i.e. those whose auto-retry
         # budget is already exhausted).
         self._get_max_retries = get_max_retries
-        self._serializer = RenderGroupSerializer(output_frame_repo=output_frame_repo)
+        self._serializer = RenderGroupSerializer(
+            output_frame_repo=output_frame_repo,
+            actual_cost_compute=orchestrator.actual_cost_for_row,
+        )
 
     # ------------------------------------------------------------------
     # create

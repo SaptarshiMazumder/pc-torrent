@@ -82,6 +82,8 @@ from serverV2.orchestrator.repositories import (
     DispatchAllocationRepository,
     PendingAllocationRepository,
 )
+from serverV2.orchestrator.task_actual_cost import TaskActualCost
+from serverV2.orchestrator.users_client import UsersClient
 from serverV2.allocation import AllocationDispatchQueueDaemon, AllocationFacade
 from serverV2.allocation.allocation_blend_url_resolver import (
     AllocationBlendUrlResolver,
@@ -140,6 +142,7 @@ from serverV2.services.machines.service import MachineService
 from serverV2.services.pre_render import PreRenderEstimator, SceneResolver
 from serverV2.services.render_groups.service import RenderGroupService
 from serverV2.services.upload.coordinator import UploadCoordinator
+from serverV2.users import UserFacade, UserProfileRepository, UserService
 
 
 
@@ -185,6 +188,7 @@ class Container:
         job_service: JobService,
         machine_service: MachineService,
         asset_service: AssetService,
+        user_facade: UserFacade,
         status_aggregator: InstanceStatusAggregator,
         allocation_facade: AllocationFacade,
         allocation_client: AllocationClient,
@@ -212,6 +216,7 @@ class Container:
         self.job_service = job_service
         self.machine_service = machine_service
         self.asset_service = asset_service
+        self.user_facade = user_facade
         self.status_aggregator = status_aggregator
         # Phase A: new allocation module — constructed but inert.
         # Phase B starts the daemon and reroutes callers.
@@ -631,7 +636,28 @@ def build(
         terminal_group_resource_releaser=terminal_group_resource_releaser,
         get_max_retries=_get_max_retries,
     )
-    orchestrator = RenderOrchestrator(lifecycle)
+
+    # ``users`` module + orchestrator-side client.  Constructed here
+    # (not at the bottom alongside asset_service) because the
+    # ``RenderOrchestrator`` facade needs the client at construction
+    # time so terminal callbacks debit the user atomically.
+    user_profile_repo = UserProfileRepository()
+    user_service = UserService(credits_per_usd=cfg.billing.credits_per_usd)
+    user_facade = UserFacade(
+        repository=user_profile_repo,
+        service=user_service,
+    )
+    task_actual_cost = TaskActualCost()
+    orchestrator_users_client = UsersClient(
+        facade=user_facade,
+        job_repo=job_repo,
+        cost=task_actual_cost,
+    )
+    orchestrator = RenderOrchestrator(
+        lifecycle,
+        users_client=orchestrator_users_client,
+        task_actual_cost=task_actual_cost,
+    )
 
     # -- callbacks --
     # Adapter layer between fleet-monitor outcomes and the orchestrator.
@@ -645,6 +671,15 @@ def build(
 
     def _on_running(job_id: str) -> None:
         orchestrator.on_job_running(job_id)
+
+    # Per-monitor-tick spend update.  Each fleet's singleton iterates
+    # active rows; for every still-running row it calls this hook with
+    # the row it already fetched.  The row carries ``owner_uid`` joined
+    # from ``render_groups`` so the billing path needs no extra
+    # repository call.  Ends in a Firestore high-water-mark write
+    # against the user's recorded spend for that chunk.
+    def _update_spend_for_chunk(row: dict) -> None:
+        orchestrator.update_spend_for_chunk(row)
 
     # -- vast & modal singleton fleet monitors --
     # One thread per fleet across the entire Cloud Run service, gated by
@@ -661,6 +696,7 @@ def build(
         on_failure=_on_failure,
         on_success=_on_success,
         on_running=_on_running,
+        update_spend_for_chunk=_update_spend_for_chunk,
         stall_detector_factory=_make_pre_render_stall_detector,
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
@@ -675,6 +711,7 @@ def build(
         output_frame_repo=output_frame_repo,
         on_failure=_on_failure,
         on_success=_on_success,
+        update_spend_for_chunk=_update_spend_for_chunk,
         stall_detector_factory=_make_pre_render_stall_detector,
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
@@ -693,6 +730,7 @@ def build(
         progress_repo=progress_repo,
         on_failure=_on_failure,
         on_success=_on_success,
+        update_spend_for_chunk=_update_spend_for_chunk,
         stall_detector=_make_pre_render_stall_detector(),
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
@@ -799,6 +837,7 @@ def build(
         job_service=job_service,
         machine_service=machine_service,
         asset_service=asset_service,
+        user_facade=user_facade,
         status_aggregator=status_aggregator,
         allocation_facade=allocation_facade,
         allocation_client=allocation_client,

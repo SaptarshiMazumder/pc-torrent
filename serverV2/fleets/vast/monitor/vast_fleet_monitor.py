@@ -79,6 +79,7 @@ class VastFleetMonitor:
         on_failure: Callable[[str, str], None],
         on_success: Callable[[str], None],
         on_running: Callable[[str], None],
+        update_spend_for_chunk: Callable[[dict], None],
         stall_detector_factory: Callable[[], IPreRenderStallDetector],
         lock_repo: MonitorLockRepository,
         instance_id: str,
@@ -94,6 +95,7 @@ class VastFleetMonitor:
         self._on_failure = on_failure
         self._on_success = on_success
         self._on_running = on_running
+        self._update_spend_for_chunk = update_spend_for_chunk
         self._stall_detector_factory = stall_detector_factory
         self._lock_repo = lock_repo
         self._instance_id = instance_id
@@ -161,7 +163,8 @@ class VastFleetMonitor:
         rows = query_all(
             """
             SELECT j.*,
-                   rg.input_filename AS rg_input_filename
+                   rg.input_filename AS rg_input_filename,
+                   COALESCE(rg.user_id, j.user_id) AS owner_uid
             FROM jobs j
             LEFT JOIN render_groups rg ON rg.id = j.group_id
             WHERE j.status IN ('running', 'pending')
@@ -198,6 +201,14 @@ class VastFleetMonitor:
         for row in rows:
             job_id = row["id"]
             active_job_ids.add(job_id)
+            # Continuous-billing tick: bring the user's recorded spend
+            # for this chunk up to the current cost-so-far.  The row we
+            # already fetched above has every field the billing path
+            # needs (started_at, completed_at, price_per_hour, status,
+            # owner_uid), so we pass it through directly -- no extra
+            # repository call on the hot tick path.
+            if str(row.get("status") or "") == "running":
+                self._update_spend_for_chunk(row)
             try:
                 provider_id = int(row["vast_job_id"])
             except (TypeError, ValueError):

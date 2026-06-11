@@ -9,19 +9,14 @@ from the ``output_frames`` table directly via the repo.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
+from typing import Any, Callable
 
 from serverV2.core.value_objects import (
     compute_progress_pct,
     output_frame_sort_key,
 )
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
-
-# Statuses for which "actual cost so far" is meaningful even though
-# ``completed_at`` is still NULL.  For these we substitute ``now``
-# as the end timestamp so the UI can show a live-ticking value.
-_INFLIGHT_STATUSES = frozenset({"running", "uploading"})
 
 # Stall-rule extractor for the per-task DTO.  When a job fails because
 # a PreRenderStallDetector rule fired, the failure handler writes the
@@ -31,10 +26,22 @@ _INFLIGHT_STATUSES = frozenset({"running", "uploading"})
 _STALL_RULE_RE = re.compile(r"^Pre-render stall \(([a-z_]+)\)")
 
 
+# Actual-cost callback signature.  Provided by the orchestrator facade
+# (``RenderOrchestrator.actual_cost_for_row``) so the UI value and the
+# server-side credit debit derive from one formula.
+ActualCostCompute = Callable[..., tuple[float | None, float | None]]
+
+
 class RenderGroupSerializer:
 
-    def __init__(self, *, output_frame_repo: OutputFrameRepository) -> None:
+    def __init__(
+        self,
+        *,
+        output_frame_repo: OutputFrameRepository,
+        actual_cost_compute: ActualCostCompute,
+    ) -> None:
         self._output_frames = output_frame_repo
+        self._actual_cost = actual_cost_compute
 
     def serialize_task(
         self,
@@ -101,7 +108,7 @@ class RenderGroupSerializer:
         started_at_raw = job.get("started_at")
         completed_at_raw = job.get("completed_at")
         price_per_hour_raw = job.get("price_per_hour_at_dispatch")
-        actual_seconds, actual_cost_usd = _actual_cost(
+        actual_seconds, actual_cost_usd = self._actual_cost(
             started_at=started_at_raw,
             completed_at=completed_at_raw,
             price_per_hour=price_per_hour_raw,
@@ -176,64 +183,6 @@ def _iso(value: Any) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
-
-
-def _to_datetime(value: Any) -> datetime | None:
-    """Parse a row's TIMESTAMPTZ value into a tz-aware ``datetime``.
-    Accepts both ``datetime`` (psycopg2 default for tz-aware columns)
-    and ISO strings (some pooled drivers / serialisations).  Returns
-    ``None`` on missing or unparseable input -- the caller treats that
-    as "no actual cost computable yet"."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _actual_cost(
-    *,
-    started_at: Any,
-    completed_at: Any,
-    price_per_hour: Any,
-    status: str,
-) -> tuple[float | None, float | None]:
-    """Compute (actual_seconds, actual_cost_usd) for a job row.
-
-    Rules:
-      * ``started_at`` missing -> both None (worker hasn't run yet).
-      * ``completed_at`` present -> use it as the end (terminal job).
-      * status in {running, uploading} and no ``completed_at`` -> use ``now``
-        so the UI can render a live value; the next real callback will
-        replace this with the canonical ``completed_at - started_at``.
-      * ``price_per_hour`` missing -> seconds may be returned but cost is None
-        (e.g. legacy community rows pre-fix that have ``started_at``
-        but no rate).
-    """
-    started = _to_datetime(started_at)
-    if started is None:
-        return None, None
-
-    end = _to_datetime(completed_at)
-    if end is None and status in _INFLIGHT_STATUSES:
-        end = datetime.now(timezone.utc)
-    if end is None:
-        return None, None
-
-    seconds = (end - started).total_seconds()
-    if seconds < 0:
-        # Clock skew between rows / appservers — better to show 0 than
-        # a negative duration.  Small race windows.
-        seconds = 0.0
-
-    rate = _maybe_float(price_per_hour)
-    if rate is None:
-        return seconds, None
-
-    return seconds, seconds * rate / 3600.0
 
 
 def _extract_stall_rule(error: str | None) -> str | None:

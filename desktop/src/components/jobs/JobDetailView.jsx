@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   STATUS_LABELS,
   isTerminalStatus,
@@ -16,6 +16,8 @@ import HeavinessPanel from "./HeavinessPanel";
 import FailedChunksPanel from "./FailedChunksPanel";
 import PendingChunksPanel from "./PendingChunksPanel";
 import Loader from "../common/Loader";
+import UserCreditsHeader from "../profile/UserCreditsHeader";
+import { useUserProfile } from "../../contexts/UserProfileContext";
 import { usePendingQueue } from "../../hooks/usePendingQueue";
 
 const DRAWER_TITLES = {
@@ -320,12 +322,16 @@ function RenderGroupDetail({
                 <div className="jd-section-loader">
                   <Loader />
                 </div>
-              ) : (
+              ) : tasksList.some((t) => ["done", "failed", "cancelled"].includes(t.status)) ? (
                 <>
                   <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
                   <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
                   <CommunityInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
                 </>
+              ) : (
+                <div className="jd-drawer-empty">
+                  <p className="muted">Terminated machines will be displayed here.</p>
+                </div>
               )
             )}
             {sceneOpen && (
@@ -556,6 +562,22 @@ export default function JobDetailView({
   useLiveCostTick();
   const now = new Date();
   const costTasks = isGroup ? (job?.tasks || []) : (job ? [job] : []);
+  const runningTasks = useMemo(
+    () => costTasks.filter((t) => t?.status === "running" || t?.status === "uploading"),
+    [costTasks],
+  );
+  // Refetch the user's credit balance when the count of terminal tasks
+  // grows -- a chunk just landed, server has debited, pull the new
+  // authoritative balance.  Count is strictly monotonic so this fires
+  // exactly once per chunk-completion.
+  const terminalCount = useMemo(
+    () => costTasks.filter((t) => ["done", "failed", "cancelled"].includes(t?.status)).length,
+    [costTasks],
+  );
+  const { refetch: refetchUserProfile } = useUserProfile();
+  useEffect(() => {
+    void refetchUserProfile();
+  }, [terminalCount, refetchUserProfile]);
   const liveCostSum = costTasks.reduce((sum, t) => {
     if (t?.status === "running" || t?.status === "uploading") {
       const live = liveActualCost(t, now);
@@ -595,6 +617,9 @@ export default function JobDetailView({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
+          <div style={{ marginLeft: "auto" }}>
+            <UserCreditsHeader runningTasks={runningTasks} />
+          </div>
         </div>
         <div className="jd-live-cost" title="Accrued cost for this render">
           <span className="jd-live-cost-label">{costLabel}</span>

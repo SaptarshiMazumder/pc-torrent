@@ -18,12 +18,43 @@ from serverV2.allocation.services.allocation_planning_service import (
     GroupCostEstimate,
 )
 from serverV2.orchestrator.lifecycle import RenderLifecycle
+from serverV2.orchestrator.task_actual_cost import TaskActualCost
+from serverV2.orchestrator.users_client import UsersClient
 
 
 class RenderOrchestrator:
 
-    def __init__(self, lifecycle: RenderLifecycle) -> None:
+    def __init__(
+        self,
+        lifecycle: RenderLifecycle,
+        *,
+        users_client: UsersClient,
+        task_actual_cost: TaskActualCost,
+    ) -> None:
         self._lifecycle = lifecycle
+        self._users = users_client
+        self._cost = task_actual_cost
+
+    # ---- per-row actual cost (UI display path) ----
+
+    def actual_cost_for_row(
+        self,
+        *,
+        started_at: Any,
+        completed_at: Any,
+        price_per_hour: Any,
+        status: str,
+    ) -> tuple[float | None, float | None]:
+        """Single source of truth for ``(actual_seconds, actual_cost_usd)``.
+        The serializer goes through here so the UI value matches the
+        number ``UsersClient`` debits when the chunk lands terminal.
+        """
+        return self._cost.compute(
+            started_at=started_at,
+            completed_at=completed_at,
+            price_per_hour=price_per_hour,
+            status=status,
+        )
 
     # ---- cost intelligence ----
 
@@ -92,15 +123,37 @@ class RenderOrchestrator:
         """A job reported failure (worker self-report or monitor detection).
         Lifecycle decides retry vs terminal, marks the job failed, drains
         the failed fleet's queue, and rolls the change up to the group.
+
+        After lifecycle returns, the user's spend is brought up to date
+        for this chunk.  When lifecycle went terminal, this seals the
+        final number; when lifecycle retried instead, this catches any
+        spend accrued since the last tick.
         """
         self._lifecycle.handle_chunk_failed(job_id, error)
+        self._users.update_spend_for_chunk_by_id(job_id)
 
     def on_job_succeeded(self, job_id: str) -> None:
         """A job reported success.  Lifecycle marks it done, releases the
         in-progress ledger, writes telemetry, drains the fleet's queue,
         and rolls the change up to the group.
+
+        After lifecycle returns, the user's spend is brought up to
+        the final number for this chunk.
         """
         self._lifecycle.handle_chunk_succeeded(job_id)
+        self._users.update_spend_for_chunk_by_id(job_id)
+
+    def update_spend_for_chunk(self, row: dict[str, Any]) -> None:
+        """Per-monitor-tick hook: recompute live cost for a still-running
+        chunk and bring the user's recorded spend up to that number.
+
+        The monitor already fetched ``row`` (with ``owner_uid`` joined
+        from ``render_groups``) for its own decision logic; we re-use
+        it so the hot tick path does no extra repository work.
+        Idempotent and converging: each call charges only the delta
+        since last call thanks to the high-water-mark marker doc.
+        """
+        self._users.update_spend_for_chunk(row)
 
     def on_job_running(self, job_id: str) -> None:
         """Fleet monitor saw the container reach 'running' state before
@@ -145,9 +198,17 @@ class RenderOrchestrator:
     # ---- cancellation ----
 
     def cancel_group(self, group_id: str) -> dict[str, Any]:
-        return self._lifecycle.cancel_render(group_id)
+        result = self._lifecycle.cancel_render(group_id)
+        # Mid-render chunks are now ``cancelled`` with completed_at set.
+        # Seal each chunk's spend at its final number; pending chunks
+        # produce zero-cost no-ops; already-terminal chunks whose
+        # marker is at the final number produce zero-delta no-ops.
+        self._users.update_spend_for_group_jobs(group_id)
+        return result
 
     def cancel_one_job(self, job_id: str) -> dict[str, Any]:
         """User pressed Cancel on a single in-flight chunk (B2).
         Idempotent; no-op on unknown / already-terminal jobs."""
-        return self._lifecycle.cancel_one_job(job_id)
+        result = self._lifecycle.cancel_one_job(job_id)
+        self._users.update_spend_for_chunk_by_id(job_id)
+        return result

@@ -294,6 +294,10 @@ export async function getAvailableMachines(baseUrl) {
   return apiFetch(baseUrl, "/machines/available");
 }
 
+export async function getMyProfile(baseUrl) {
+  return apiFetch(baseUrl, "/me");
+}
+
 export async function getAdminConfig(baseUrl) {
   return apiFetch(baseUrl, "/admin/config");
 }

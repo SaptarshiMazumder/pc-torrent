@@ -91,6 +91,43 @@ class JobRepository:
     def get_raw_by_id(self, job_id: str) -> dict[str, Any] | None:
         return self._raw_with_machine_type(job_id)
 
+    def get_raw_with_owner(self, job_id: str) -> dict[str, Any] | None:
+        """Same as ``get_raw_by_id`` but also resolves the owning user.
+
+        For group-render rows ``user_id`` lives on ``render_groups``, not
+        on ``jobs`` -- the join here surfaces it as ``owner_uid``.  Legacy
+        non-group rows have ``user_id`` stamped on the jobs row directly;
+        the COALESCE picks it up.  Used by ``UsersClient`` to bill a
+        single just-flipped chunk without a second query.
+        """
+        row = query_one(
+            """
+            SELECT j.*, COALESCE(rg.user_id, j.user_id) AS owner_uid
+            FROM jobs j
+            LEFT JOIN render_groups rg ON rg.id = j.group_id
+            WHERE j.id = %s
+            """,
+            (job_id,),
+        )
+        return self._attach_machine_type(row) if row else None
+
+    def get_raw_by_group_with_owner(self, group_id: str) -> list[dict[str, Any]]:
+        """Bulk variant of ``get_raw_with_owner``: every job in a group
+        with ``owner_uid`` resolved.  Used by the cancel path so the
+        spend update can iterate without per-row repository calls.
+        """
+        rows = query_all(
+            """
+            SELECT j.*, COALESCE(rg.user_id, j.user_id) AS owner_uid
+            FROM jobs j
+            LEFT JOIN render_groups rg ON rg.id = j.group_id
+            WHERE j.group_id = %s
+            ORDER BY j.frame_start ASC
+            """,
+            (group_id,),
+        )
+        return [self._attach_machine_type(r) for r in rows]
+
     def get_raw_by_vast_id(self, vast_id: int) -> dict[str, Any] | None:
         """Look up the local job that owns a given Vast.ai instance id.
         Used by the internal ghost-instance endpoint to defensively

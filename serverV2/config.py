@@ -795,11 +795,30 @@ class FrameAllocationConfig:
 
 
 @dataclass(frozen=True)
+class BillingConfig:
+    """User-credit accounting tunables.  ``credits_per_usd`` is the
+    abstract-token rate: every $1 of ``actual_cost_usd`` debits this
+    many credits from the user's Firestore balance.  Decouples display
+    units from USD so promo / bonus rates can change without touching
+    the cost path.
+    """
+    credits_per_usd: float = 100.0
+
+    @classmethod
+    def from_env(cls) -> "BillingConfig":
+        block = _require_block("billing")
+        return cls(
+            credits_per_usd=_require_field_float(block, "billing", "credits_per_usd"),
+        )
+
+
+@dataclass(frozen=True)
 class AppConfig:
     vast: VastConfig
     modal: ModalConfig
     public_backend_url: str
     frame_allocation: FrameAllocationConfig
+    billing: BillingConfig
     min_frames_per_worker: int = 2
     # Allocator threshold: how recently a community machine must have
     # heartbeated to be eligible for new dispatches.  Tight (15s) so we
@@ -842,6 +861,7 @@ class AppConfig:
             modal=modal,
             public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
             frame_allocation=FrameAllocationConfig.from_env(),
+            billing=BillingConfig.from_env(),
             community_price_per_hour=_load_community_price_per_hour(),
             community_dispatch_claim_timeout_sec=_require_field_int(
                 community_block, "community", "dispatch_claim_timeout_sec",

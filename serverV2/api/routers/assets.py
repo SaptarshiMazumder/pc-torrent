@@ -1,17 +1,11 @@
-"""Assets (user input files) + profile routes — thin controllers."""
+"""Assets router — user input files (upload metadata, list, rename, delete)."""
 
 from __future__ import annotations
-
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from serverV2.api.dependencies import get_current_user
-from serverV2.api.schemas.render_group import UpdateInputFilePayload, UpdateProfilePayload
-from serverV2.infrastructure.auth.firestore_client import (
-    get_or_create_profile,
-    update_user_profile,
-)
+from serverV2.api.schemas.render_group import UpdateInputFilePayload
 from serverV2.services.assets.service import AssetService, AssetServiceError
 
 router = APIRouter(tags=["assets"])
@@ -29,24 +23,6 @@ def _get() -> AssetService:
         raise HTTPException(500, "AssetService not initialized")
     return _svc
 
-
-# ---- profile ----
-
-@router.get("/me")
-def get_profile(user: dict = Depends(get_current_user)):
-    profile = get_or_create_profile(user["uid"], user.get("email"))
-    return profile
-
-
-@router.put("/me")
-def update_profile(payload: UpdateProfilePayload, user: dict = Depends(get_current_user)):
-    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
-    if updates:
-        update_user_profile(user["uid"], updates)
-    return {"success": True}
-
-
-# ---- input files ----
 
 @router.get("/me/input-files")
 def list_input_files(user: dict = Depends(get_current_user)):

@@ -409,6 +409,10 @@ def build(
         allocation_time_analyzer,
     )
     allocation_time_analyzer.configure(cfg.frame_allocation.render_time)
+    allocation_time_analyzer.configure_combination(
+        secondary_feature_credit=cfg.frame_allocation.weights.secondary_feature_credit,
+        heavy_multiplier_cap=cfg.frame_allocation.weights.heavy_multiplier_cap,
+    )
 
     # Single planner does the work.  Owns target validators (engine
     # compatibility today; future: tier / price caps).

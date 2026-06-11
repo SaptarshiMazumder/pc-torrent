@@ -95,6 +95,31 @@ def configure(cfg: RenderTimeConfig) -> None:
     global _calibration
     _calibration = cfg
 
+
+# Heavy-feature combination knobs.  Populated by ``configure_combination``
+# at boot from ``AllocationWeights`` (Firestore-tunable).  Defaults match
+# the dataclass defaults; tests that bypass boot get the same numbers.
+_secondary_feature_credit: float = 0.3
+_heavy_multiplier_cap: float = 5.0
+
+
+def configure_combination(
+    *, secondary_feature_credit: float, heavy_multiplier_cap: float,
+) -> None:
+    """Replace the module-level heavy-feature combination knobs.
+
+    ``secondary_feature_credit`` (0..1): how much each non-dominant
+    heavy feature contributes on top of the dominant one when several
+    features fire on the same scene.  1.0 = legacy multiplicative
+    combination.  0.0 = "only the worst feature counts".
+
+    ``heavy_multiplier_cap`` (>= 0): hard ceiling on the combined heavy
+    multiplier.  0 disables the cap.
+    """
+    global _secondary_feature_credit, _heavy_multiplier_cap
+    _secondary_feature_credit = float(secondary_feature_credit)
+    _heavy_multiplier_cap = float(heavy_multiplier_cap)
+
 # Back-compat alias.  External callers historically read BASELINE_SEC
 # expecting the Cycles baseline.  Kept for the smoke tests and any
 # legacy consumers; new code should read via ``_calibration``.
@@ -323,31 +348,54 @@ def estimate_seconds_per_frame(
     else:
         baseline_sec = _calibration.baseline_sec_cycles  # conservative fallback
 
-    multiplier = (
+    # Scene-size factors -- multiplicative.  These describe "how big is
+    # the work" (samples, pixels, vertices), and that compounds correctly.
+    scene_multiplier = (
         _sample_factor(heaviness.get("samples", 0), engine)
         * _pixel_factor(heaviness.get("effective_pixels", 0), engine)
         * _geometry_factor(heaviness.get("vertex_count_total", 0))
-        * _texture_factor(heaviness.get("texture_total_bytes", 0))
-        * _shader_factor(
-            heaviness.get("shader_node_count_total", 0),
-            bool(heaviness.get("uses_subsurface_scattering", False)),
-            bool(heaviness.get("uses_volumetrics", False)),
-            engine,
-        )
-        * _feature_factor(
-            bool(heaviness.get("uses_subdivision", False)),
-            bool(heaviness.get("uses_displacement", False)),
-            bool(heaviness.get("uses_particles", False)),
-            bool(heaviness.get("uses_geometry_nodes", False)),
-            int(heaviness.get("geometry_nodes_complexity", 0)),
-            engine,
-        )
-        * _adaptive_sampling_factor(
-            bool(heaviness.get("uses_adaptive_sampling", False)),
-            engine,
-        )
     )
 
+    # Heavy-feature factors -- NON-multiplicative.  Real scenes don't
+    # see subdivision*volumetrics*particles compounding; the dominant
+    # feature dictates most of the slowdown and the others add modest
+    # extras.  Anchor on the worst factor; weight the rest by
+    # ``_secondary_feature_credit``.
+    texture = _texture_factor(heaviness.get("texture_total_bytes", 0))
+    shader = _shader_factor(
+        heaviness.get("shader_node_count_total", 0),
+        bool(heaviness.get("uses_subsurface_scattering", False)),
+        bool(heaviness.get("uses_volumetrics", False)),
+        engine,
+    )
+    feature = _feature_factor(
+        bool(heaviness.get("uses_subdivision", False)),
+        bool(heaviness.get("uses_displacement", False)),
+        bool(heaviness.get("uses_particles", False)),
+        bool(heaviness.get("uses_geometry_nodes", False)),
+        int(heaviness.get("geometry_nodes_complexity", 0)),
+        engine,
+    )
+    above_one = sorted(
+        (f for f in (texture, shader, feature) if f > 1.0), reverse=True,
+    )
+    if above_one:
+        dominant = above_one[0]
+        extras_excess = sum(f - 1.0 for f in above_one[1:])
+        heavy_multiplier = dominant + extras_excess * _secondary_feature_credit
+    else:
+        heavy_multiplier = 1.0
+    if _heavy_multiplier_cap > 0:
+        heavy_multiplier = min(heavy_multiplier, _heavy_multiplier_cap)
+
+    # Adaptive sampling is a discount (< 1 when on), so it stays
+    # multiplicative -- it's an optimisation, not a heavy feature.
+    discount = _adaptive_sampling_factor(
+        bool(heaviness.get("uses_adaptive_sampling", False)),
+        engine,
+    )
+
+    multiplier = scene_multiplier * heavy_multiplier * discount
     return baseline_sec * multiplier / max(MIN_RENDER_SPEED, render_speed)
 
 

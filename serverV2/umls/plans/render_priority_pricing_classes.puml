@@ -1,0 +1,216 @@
+@startuml render_priority_pricing_classes
+
+skinparam classBackgroundColor #FFFFFF
+skinparam classBorderColor #555555
+skinparam classFontSize 12
+skinparam ArrowFontSize 10
+skinparam packageStyle rectangle
+skinparam packageBorderColor #888888
+
+!define DESK_BG   #FCDDE1
+!define DESK_LN   #B33A65
+!define API_BG    #F0E2B5
+!define API_LN    #A88300
+!define PRE_BG    #E2CDF1
+!define PRE_LN    #7A3DA8
+!define RG_BG     #E8D5F5
+!define RG_LN     #9050C0
+!define ORCH_BG   #CFEBCF
+!define ORCH_LN   #2E8A36
+!define ALLOC_BG  #D6E5F5
+!define ALLOC_LN  #2E6FB5
+!define USERS_BG  #F5D2DC
+!define USERS_LN  #B33A65
+!define CFG_BG    #D3DBE7
+!define CFG_LN    #5A6A8A
+!define FS_BG     #FCE4B5
+!define FS_LN     #C8821C
+
+title Priority pricing (server-side) + Firestore live credits (frontend)
+
+legend bottom
+|= colour |= module |
+|<#FCDDE1>| desktop UI |
+|<#F0E2B5>| api |
+|<#E2CDF1>| services.pre_render |
+|<#E8D5F5>| services.render_groups |
+|<#CFEBCF>| orchestrator |
+|<#D6E5F5>| allocation |
+|<#F5D2DC>| users |
+|<#FCE4B5>| Firestore |
+|<#D3DBE7>| config |
+endlegend
+
+package "config" CFG_BG {
+  class AllocationWeights <<modified>> {
+    + speed_weight : float
+    + cuda_weight : float
+    + os_weight : float
+    + priority_cost_multipliers : dict
+    + multiplier_for(priority) : float
+  }
+}
+
+package "desktop" DESK_BG {
+  class CreateRenderPage <<modified>> {
+    - priority : int
+    + onPriorityChange() : refetch estimate
+    + renderQueueDepthChip(estimate.queue_depth)
+  }
+  class UserProfileContext <<modified>> {
+    + onSnapshot(users/uid) : live credits
+    + GET /me : initial seed (tier, email)
+  }
+  class UserCreditsCorner <<modified>> {
+    + reads profile.credits from context
+  }
+  class UserCreditsHeader <<modified>> {
+    + reads profile.credits from context
+  }
+  class JobDetailView <<modified>> {
+    + priority badge
+    + polled actual_cost_usd (no local tick)
+  }
+}
+
+package "api" API_BG {
+  class users_router <<module>> {
+    + GET /me : initial profile seed
+  }
+  class UserProfileResponse {
+    + uid : str
+    + email : str
+    + tier : str
+    + credits : float
+  }
+}
+
+package "services.pre_render" PRE_BG {
+  class PreRenderEstimator <<modified>> {
+    + estimate(request) : { cost, queue_depth }
+  }
+  class PreRenderEstimateRequest <<modified>> {
+    + priority : int = 1
+  }
+}
+
+package "services.render_groups" RG_BG {
+  class RenderGroupSerializer <<modified>> {
+    + serialize_task(job) : passes priority into cost callback
+  }
+}
+
+package "orchestrator" ORCH_BG {
+  class RenderOrchestrator <<facade modified>> {
+    + actual_cost_for_row(... priority) : tuple
+    + cost_estimate_for_dry_run(... priority) : GroupCostEstimate
+    + get_queue_depth() : dict
+  }
+  class TaskActualCost {
+    + compute(started_at, completed_at, price_per_hour, status) : tuple
+  }
+  class UsersClient <<modified>> {
+    + update_spend_for_chunk(row) : applies multiplier from row.priority
+  }
+  class AllocationClient <<modified>> {
+    + cost_estimate_for_dry_run(... priority)
+    + get_queue_depth() : dict
+  }
+}
+
+package "allocation" ALLOC_BG {
+  class AllocationFacade <<modified>> {
+    + cost_estimate_for_dry_run(... priority)
+    + get_queue_depth() : dict
+  }
+  class AllocationPlanningService <<modified>> {
+    + plan_dry_run(... priority)
+  }
+  class AllocationPlanner {
+    + plan(targets, group, snapshot)
+  }
+  class AllocationCostAggregator <<modified>> {
+    + from_planned_tasks(tasks, failure_rate, priority_multiplier)
+  }
+  class PlannedTask <<value>> {
+    + estimated_cost_usd : float (multiplier-included)
+    + estimated_seconds : float
+  }
+  class AllocationPendingQueueRepository <<modified>> {
+    + count_by_priority_and_fleet() : dict
+  }
+  class AllocationDispatchQueueRepository <<modified>> {
+    + count_by_priority_and_fleet() : dict
+  }
+  class pending_allocation_queue <<table>> {
+    priority : int
+    fleet : str
+  }
+  class dispatch_queue <<table>> {
+    priority : int
+    fleet : str
+  }
+}
+
+package "users" USERS_BG {
+  class UserFacade {
+    + record_spend(uid, task_id, total_credits_spent)
+  }
+  class UserProfileRepository {
+    + record_spend(uid, task_id, total_credits_spent) : Firestore txn
+  }
+}
+
+package "firestore" FS_BG {
+  class users_doc <<doc>> {
+    credits : float
+    tier : str
+    email : str
+    display_name : str
+  }
+}
+
+' --- ESTIMATE PATH ---
+CreateRenderPage -[DESK_LN]-> PreRenderEstimator : POST { priority }
+PreRenderEstimator -[PRE_LN]-> PreRenderEstimateRequest : priority
+PreRenderEstimator -[PRE_LN]-> RenderOrchestrator : cost_estimate_for_dry_run(... priority)
+RenderOrchestrator -[ORCH_LN]-> AllocationClient : cost_estimate_for_dry_run
+AllocationClient -[ORCH_LN]-> AllocationFacade : cost_estimate_for_dry_run
+AllocationFacade -[ALLOC_LN]-> AllocationPlanningService : plan_dry_run(... priority)
+AllocationPlanningService -[ALLOC_LN]-> AllocationPlanner : plan
+AllocationPlanningService -[ALLOC_LN]-> AllocationCostAggregator : from_planned_tasks(... priority)
+AllocationCostAggregator -[ALLOC_LN]-> AllocationWeights : multiplier_for(priority)
+AllocationCostAggregator -[ALLOC_LN]-> PlannedTask : cost x multiplier x (1 + failure_rate)
+
+' --- QUEUE DEPTH PATH ---
+PreRenderEstimator -[PRE_LN]-> RenderOrchestrator : get_queue_depth()
+RenderOrchestrator -[ORCH_LN]-> AllocationClient : get_queue_depth()
+AllocationClient -[ORCH_LN]-> AllocationFacade : get_queue_depth()
+AllocationFacade -[ALLOC_LN]-> AllocationPendingQueueRepository : count_by_priority_and_fleet()
+AllocationFacade -[ALLOC_LN]-> AllocationDispatchQueueRepository : count_by_priority_and_fleet()
+AllocationPendingQueueRepository -[ALLOC_LN]-> pending_allocation_queue : GROUP BY fleet, priority
+AllocationDispatchQueueRepository -[ALLOC_LN]-> dispatch_queue : GROUP BY fleet, priority
+
+' --- ACTUAL COST PATH (server-side multiplier) ---
+RenderGroupSerializer -[RG_LN]-> RenderOrchestrator : actual_cost_for_row(... priority)
+RenderOrchestrator -[ORCH_LN]-> TaskActualCost : compute (pure)
+RenderOrchestrator -[ORCH_LN]-> AllocationWeights : multiplier_for(priority)
+UsersClient -[ORCH_LN]-> TaskActualCost : compute (pure)
+UsersClient -[ORCH_LN]-> AllocationWeights : multiplier_for(row.priority)
+
+' --- BILLING WRITES TO FIRESTORE (server) ---
+UsersClient -[ORCH_LN]-> UserFacade : record_spend(uid, task_id, total_credits_spent)
+UserFacade -[USERS_LN]-> UserProfileRepository : record_spend
+UserProfileRepository -[USERS_LN]-> users_doc : Firestore txn updates credits
+
+' --- FRONTEND CREDITS (Firestore live listener) ---
+UserProfileContext -[FS_LN]-> users_doc : onSnapshot (live)
+UserProfileContext -[DESK_LN]-> users_router : GET /me (initial seed)
+users_router -[API_LN]-> UserProfileResponse : tier, email, credits seed
+UserCreditsCorner -[DESK_LN]-> UserProfileContext : reads profile.credits
+UserCreditsHeader -[DESK_LN]-> UserProfileContext : reads profile.credits
+
+' --- TASK COST ON DETAIL PAGE (existing 10s poll, no live tick) ---
+JobDetailView -[DESK_LN]-> RenderGroupSerializer : GET /render-groups/id (10s poll)
+
+@enduml

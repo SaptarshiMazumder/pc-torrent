@@ -36,6 +36,10 @@ from serverV2.core.models import (
     DispatchResult,
     RenderJob,
 )
+from serverV2.core.value_objects import (
+    RENDER_PRIORITY_DEFAULT,
+    clamp_render_priority,
+)
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.orchestrator.allocation_client import AllocationClient
@@ -142,6 +146,7 @@ class RenderLifecycle:
         total_frames: int,
         engine: str | None = None,
         heaviness: dict | None = None,
+        priority: int = RENDER_PRIORITY_DEFAULT,
     ) -> GroupCostEstimate:
         return self._allocation_client.cost_estimate_for_dry_run(
             frame_start=frame_start,
@@ -150,7 +155,11 @@ class RenderLifecycle:
             total_frames=total_frames,
             engine=engine,
             heaviness=heaviness,
+            priority=priority,
         )
+
+    def get_queue_depth(self) -> dict:
+        return self._allocation_client.get_queue_depth()
 
 
     def _fire_modal_terminal_hook_if_modal(
@@ -188,6 +197,7 @@ class RenderLifecycle:
         tier: str | None,
         input_filename: str,
         render_overrides_json: str,
+        priority: int = RENDER_PRIORITY_DEFAULT,
     ) -> None:
         """Submit a whole render group: park to ``pending_allocation_queue``.
 
@@ -196,15 +206,20 @@ class RenderLifecycle:
         confirm-upload response just acks the submission, then the UI
         polls ``GET /render-groups/{id}`` for live chunk state as the
         daemon dispatches.
+
+        ``priority`` is the user-selected queue ordering key.  The clamp
+        here is the belt-and-braces fallback for callers that bypass
+        the API's Pydantic validator (tests, programmatic submits).
         """
         resolved_tier = tiers.normalize(tier)
+        resolved_priority = clamp_render_priority(priority)
         dispatch_context = DispatchContext(
             group_id=group_id,
             input_filename=input_filename,
             render_overrides_json=render_overrides_json,
             blend_url="",
             max_retries=self._get_max_retries(),
-            priority=0,
+            priority=resolved_priority,
             engine=engine,
         )
         self._allocation_client.submit_initial(

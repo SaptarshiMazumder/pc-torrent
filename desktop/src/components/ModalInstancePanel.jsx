@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { getModalInstances } from "../lib/api";
+import { formatCredits } from "../utils/creditsFormat";
 import InstancePanel from "./jobs/InstancePanel";
 
 const MODAL_ICON = (
@@ -50,8 +51,8 @@ const modalProvider = {
       total,
       rangeLabel,
       elapsedSec: live?.elapsed_sec ?? null,
-      cost: task.estimated_cost_usd != null
-        ? `~$${Number(task.estimated_cost_usd).toFixed(2)} est.`
+      cost: task.estimated_cost_credits != null
+        ? `~${formatCredits(Number(task.estimated_cost_credits))} credits est.`
         : null,
       error: live?.error || (task.status === "failed" ? task.error : "") || "",
       stallRule: task.stall_rule || null,

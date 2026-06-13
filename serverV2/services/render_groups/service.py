@@ -13,7 +13,9 @@ from uuid import uuid4
 
 from serverV2.core.value_objects import (
     MAX_UPLOAD_BYTES,
+    RENDER_PRIORITY_DEFAULT,
     SINGLE_PUT_MAX_BYTES,
+    clamp_render_priority,
     now_iso,
     parse_json_object,
     sanitize_filename,
@@ -56,6 +58,7 @@ class RenderGroupService:
         chunk_progress: ChunkProgressService,
         scene_resolver: SceneResolver,
         get_max_retries: Callable[[], int],
+        credits_per_usd: float,
     ) -> None:
         self._groups = group_repo
         self._jobs = job_repo
@@ -75,6 +78,7 @@ class RenderGroupService:
         self._serializer = RenderGroupSerializer(
             output_frame_repo=output_frame_repo,
             actual_cost_compute=orchestrator.actual_cost_for_row,
+            credits_per_usd=credits_per_usd,
         )
 
     # ------------------------------------------------------------------
@@ -251,6 +255,14 @@ class RenderGroupService:
         # Persisted on the group row so list/detail responses can show it.
         resolved_tier = tiers.normalize(getattr(payload, "tier", None))
 
+        # Priority — user-selected queue ordering key.  Pydantic has
+        # already clamped via Field(ge=LOW, le=HIGH); the clamp here is
+        # the belt-and-braces fallback for callers (tests, future
+        # internal submits) that bypass the API validator.
+        priority = clamp_render_priority(
+            getattr(payload, "priority", RENDER_PRIORITY_DEFAULT),
+        )
+
         self._groups.full_update(
             group_id,
             total_frames=plan.total_frames,
@@ -290,6 +302,7 @@ class RenderGroupService:
             heaviness=heaviness,
             engine=engine,
             tier=resolved_tier,
+            priority=priority,
             input_filename=group["input_filename"],
             render_overrides_json=overrides_json,
         )
@@ -444,9 +457,11 @@ class RenderGroupService:
         # Group-level actual-cost rollup -- sum of per-task actuals.
         # Tasks pre-start contribute None (treated as 0), so the rollup
         # converges to the real total as chunks complete.  Cheap reduce
-        # over the in-memory ``tasks`` list; no extra SQL.
-        total_actual_cost_usd = sum(
-            (t.get("actual_cost_usd") or 0.0) for t in tasks
+        # over the in-memory ``tasks`` list; no extra SQL.  Each task's
+        # value is already in credits (serializer projected at the wire
+        # boundary), so the rollup stays in credits too.
+        total_actual_cost_credits = sum(
+            (t.get("actual_cost_credits") or 0.0) for t in tasks
         )
 
         return {
@@ -469,7 +484,7 @@ class RenderGroupService:
             "available_output_files_count": min(total_frames, unique_rendered),
             "latest_output_file": latest_output,
             "latest_output_job_id": latest_output_job_id,
-            "total_actual_cost_usd": total_actual_cost_usd,
+            "total_actual_cost_credits": total_actual_cost_credits,
             "tasks_count": len(tasks),
             "tasks": tasks,
         }

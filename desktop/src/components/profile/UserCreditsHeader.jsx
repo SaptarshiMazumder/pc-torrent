@@ -1,5 +1,4 @@
 import { useUserProfile } from "../../contexts/UserProfileContext";
-import { liveActualCost, useLiveCostTick } from "../../hooks/useLiveCostTick";
 
 function formatCredits(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "—";
@@ -7,24 +6,15 @@ function formatCredits(value) {
 }
 
 /**
- * Header chip rendering the user's tier and live credit balance.
+ * Header chip rendering the user's tier and credit balance.
  *
- * The persisted balance in ``profile.credits`` reflects the latest
- * monitor-tick debit on the server -- it lags reality by up to one
- * monitor cycle.  We close that gap locally:
- *
- *   displayed = persisted - Σ (live cost per running task × rate)
- *
- * ``liveActualCost`` is the same formula the per-task cost chips use,
- * so the credits display ticks at the same cadence and stays
- * consistent with what the user already sees on the task cards.
- *
- * @param {{runningTasks: Array}} props
+ * The balance comes from the ``UserProfileContext`` which subscribes
+ * to ``users/{uid}`` in Firestore via ``onSnapshot``.  When the server's
+ * monitor tick atomically debits the document, this component re-renders
+ * within milliseconds -- no local extrapolation, no in-flight subtraction
+ * math, no polling.
  */
-export default function UserCreditsHeader({ runningTasks = [] }) {
-  // 1Hz signal so the displayed value re-renders even though
-  // ``liveActualCost`` is closed-form and stateless.
-  useLiveCostTick();
+export default function UserCreditsHeader() {
   const { profile, loading } = useUserProfile();
 
   if (loading && !profile) {
@@ -36,24 +26,11 @@ export default function UserCreditsHeader({ runningTasks = [] }) {
   }
   if (!profile) return null;
 
-  const now = new Date();
-  const rate = typeof profile.credits_per_usd === "number"
-    ? profile.credits_per_usd
-    : 0;
-  let inFlightCredits = 0;
-  for (const task of runningTasks) {
-    const usd = liveActualCost(task, now);
-    if (typeof usd === "number" && usd > 0) {
-      inFlightCredits += usd * rate;
-    }
-  }
-  const displayed = (profile.credits ?? 0) - inFlightCredits;
-
   return (
-    <div className="user-credits-header" title={`Persisted: ${formatCredits(profile.credits)} · In-flight: ${formatCredits(inFlightCredits)}`}>
+    <div className="user-credits-header">
       <span className="user-credits-header-tier">{profile.tier || "free"}</span>
       <span className="user-credits-header-sep">·</span>
-      <span className="user-credits-header-credits">{formatCredits(displayed)}</span>
+      <span className="user-credits-header-credits">{formatCredits(profile.credits)}</span>
       <span className="user-credits-header-unit">credits</span>
     </div>
   );

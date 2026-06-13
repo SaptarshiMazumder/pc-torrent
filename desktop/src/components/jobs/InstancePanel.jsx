@@ -1,21 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { cancelJob, getAllowedStallTimes } from "../../services/api";
-import { useLiveCostTick, liveActualCost } from "../../hooks/useLiveCostTick";
+import { formatCredits } from "../../utils/creditsFormat";
 import AllowedStallTimesOverlay from "./AllowedStallTimesOverlay";
 
-function formatActualCost(task, now) {
-  // Terminal tasks: trust the canonical ``actual_cost_usd`` from the
-  // server.  Running tasks: compute live from started_at + price so the
-  // chip ticks every second.  Returns ``null`` if neither is computable
-  // (worker hasn't started or pre-Phase-5 row missing rate).
-  if (task?.status === "running" || task?.status === "uploading") {
-    const live = liveActualCost(task, now);
-    return live != null ? `$${live.toFixed(2)} live` : null;
-  }
-  if (typeof task?.actual_cost_usd === "number") {
-    return `$${task.actual_cost_usd.toFixed(2)} actual`;
-  }
-  return null;
+function formatActualCost(task) {
+  // ``actual_cost_credits`` is computed server-side on every read.
+  // Running tasks substitute ``now`` in the formula; terminal tasks
+  // have frozen values.  Server applies the priority multiplier and
+  // USD->credits conversion at the wire boundary, so we just display.
+  if (typeof task?.actual_cost_credits !== "number") return null;
+  const label = (task.status === "running" || task.status === "uploading")
+    ? "live"
+    : "actual";
+  return `${formatCredits(task.actual_cost_credits)} credits ${label}`;
 }
 
 const MERGED_STATUS_COLORS = {
@@ -361,11 +358,8 @@ function FinishedRow({ data }) {
  */
 export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, mode = "both" }) {
   const [liveMap, setLiveMap] = useState({});
-  // 1Hz signal — drives the inline ``liveActualCost`` recomputation on
-  // running tasks between server polls.  Subscribers don't read this
-  // value; they just depend on the re-render.
-  useLiveCostTick();
-  const now = new Date();
+  // Cost values come from the polled task DTOs (server-computed live
+  // for running tasks).  No local 1Hz tick.
 
   const filteredTasks = (tasks || []).filter(
     (t) => provider.filterTask(t) && ["pending", "running", "done", "failed", "cancelled"].includes(t.status)
@@ -423,7 +417,7 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, 
         <div className="inst-active-list">
           {activeTasks.map((task) => {
             const data = provider.extractCardData(task, liveMap[task.job_id] || null);
-            data.actualCost = formatActualCost(task, now);
+            data.actualCost = formatActualCost(task);
             return (
               <ActiveCard
                 key={task.job_id}
@@ -442,7 +436,7 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, 
           {showActive && activeTasks.length > 0 && <div className="inst-fin-divider">Completed</div>}
           {finishedTasks.map((task) => {
             const data = provider.extractCardData(task, null);
-            data.actualCost = formatActualCost(task, now);
+            data.actualCost = formatActualCost(task);
             return <FinishedRow key={task.job_id} data={data} />;
           })}
         </div>

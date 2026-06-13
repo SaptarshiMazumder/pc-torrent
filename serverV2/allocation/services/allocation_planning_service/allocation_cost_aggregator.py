@@ -52,6 +52,7 @@ class AllocationCostAggregator:
         self,
         tasks: list[PlannedTask],
         failure_rate: FailureRateConfig | None = None,
+        priority_multiplier: float = 1.0,
     ) -> list[CostBearingItem]:
         """Project PlannedTasks to CostBearingItems.
 
@@ -63,6 +64,11 @@ class AllocationCostAggregator:
         dry-run preview so the UI doesn't advertise the happy-path-only
         number; NOT applied to ``from_jobs_rows`` (that path reads
         actuals, retries are already in the data).
+
+        ``priority_multiplier``: user-priority cost markup (1.0 LOW,
+        1.1 NORMAL, 1.2 HIGH by default; tunable in Firestore).
+        Applied to cost only -- the chunk takes the same wall time
+        regardless of priority, so seconds aren't multiplied.
         """
         items: list[CostBearingItem] = []
         for t in tasks:
@@ -72,6 +78,8 @@ class AllocationCostAggregator:
                 p = failure_rate.for_fleet(t.fleet)
                 cost = cost * (1.0 + p)
                 secs = secs * (1.0 + p)
+            if priority_multiplier != 1.0:
+                cost = cost * float(priority_multiplier)
             items.append(CostBearingItem(
                 estimated_cost_usd=cost,
                 estimated_seconds=secs,

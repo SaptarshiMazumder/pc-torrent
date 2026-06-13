@@ -16,7 +16,15 @@ the config loader.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from serverV2.core.value_objects import (
+    RENDER_PRIORITY_DEFAULT,
+    RENDER_PRIORITY_HIGH,
+    RENDER_PRIORITY_LOW,
+    RENDER_PRIORITY_NORMAL,
+    clamp_render_priority,
+)
 
 
 @dataclass(frozen=True)
@@ -119,3 +127,32 @@ class AllocationWeights:
     # scene can't blow up the estimate.  Applied AFTER the additive
     # combination above.  0.0 disables the cap.
     heavy_multiplier_cap: float = 5.0
+
+    # --- Priority cost multiplier -------------------------------------
+    # Per-priority cost multiplier.  Index = priority level (0 LOW,
+    # 1 NORMAL, 2 HIGH).  Applied to BOTH the estimated cost surfaced
+    # in the UI and the actual debit billed against the user's credit
+    # balance.  Default 1.0 / 1.1 / 1.2 -- HIGH costs 20% more than
+    # LOW.  Tunable via ConfigurationPage.
+    priority_cost_multipliers: dict = field(default_factory=lambda: {
+        "low": 1.0,
+        "normal": 1.1,
+        "high": 1.2,
+    })
+
+    def multiplier_for(self, priority: int) -> float:
+        """Look up the cost multiplier for a priority level.  Defaults
+        to NORMAL when the input is out of range -- belt-and-braces for
+        callers that bypass the API validator.
+        """
+        p = clamp_render_priority(priority)
+        if p == RENDER_PRIORITY_LOW:
+            key = "low"
+        elif p == RENDER_PRIORITY_HIGH:
+            key = "high"
+        else:
+            key = "normal"
+        try:
+            return float(self.priority_cost_multipliers.get(key, 1.0))
+        except (TypeError, ValueError):
+            return 1.0

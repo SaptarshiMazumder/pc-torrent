@@ -42,7 +42,9 @@
       "Bash(PYTHONHASHSEED=0 python -m pytest serverV2/tests/allocation/test_planner_golden.py -v)",
       "Bash(PYTHONHASHSEED=0 python -m pip install --quiet pytest)",
       "Bash(PYTHONHASHSEED=0 python -m pytest serverV2/tests/allocation/test_planner_golden.py)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(command -v plantuml)",
+      "Bash(plantuml -checkonly \"c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/serverV2/umls/plans/admin_role_authz_classes.puml\")"
     ],
     "additionalDirectories": [
       "\\tmp"

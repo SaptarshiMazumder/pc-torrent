@@ -25,6 +25,33 @@ DEFAULT_DEVICE_POLICY = "AUTO"
 ALLOWED_DEVICE_POLICIES = {"AUTO", "OPTIX", "CUDA", "CPU"}
 ALLOWED_CAMERA_MODES = {"auto_markers", "force_camera", "camera_ranges"}
 
+# Render priority: user-selected ordering key for the pending / dispatch
+# queues.  Larger number = higher priority.  Three levels keep the UI
+# simple and the ordering decisive.  Default NORMAL when no value is
+# supplied or the input is out of range.
+RENDER_PRIORITY_LOW = 0
+RENDER_PRIORITY_NORMAL = 1
+RENDER_PRIORITY_HIGH = 2
+RENDER_PRIORITY_DEFAULT = RENDER_PRIORITY_NORMAL
+
+
+def clamp_render_priority(value: int) -> int:
+    """Clamp an integer priority into the allowed [LOW, HIGH] range.
+
+    Belt-and-braces alongside the Pydantic validator on the API schema:
+    any code path that constructs a ``DispatchContext`` programmatically
+    (tests, future internal callers) still gets a sane value.
+    """
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return RENDER_PRIORITY_DEFAULT
+    if v < RENDER_PRIORITY_LOW:
+        return RENDER_PRIORITY_LOW
+    if v > RENDER_PRIORITY_HIGH:
+        return RENDER_PRIORITY_HIGH
+    return v
+
 
 # ---------------------------------------------------------------------------
 # Time

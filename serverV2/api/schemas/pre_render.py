@@ -8,7 +8,13 @@ the database.
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from serverV2.core.value_objects import (
+    RENDER_PRIORITY_DEFAULT,
+    RENDER_PRIORITY_HIGH,
+    RENDER_PRIORITY_LOW,
+)
 
 
 class PreRenderEstimatePayload(BaseModel):
@@ -26,3 +32,8 @@ class PreRenderEstimatePayload(BaseModel):
     frame_step: int | None = None
     machine_ids: list[str] | None = None
     file_size_bytes: int | None = None
+    priority: int = Field(
+        default=RENDER_PRIORITY_DEFAULT,
+        ge=RENDER_PRIORITY_LOW,
+        le=RENDER_PRIORITY_HIGH,
+    )

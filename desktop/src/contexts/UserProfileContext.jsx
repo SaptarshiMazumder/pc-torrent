@@ -1,4 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
+import { doc, onSnapshot } from "firebase/firestore";
+import { firestore } from "../firebase/config";
 import { getMyProfile } from "../services/api";
 import { useAuth } from "./AuthContext";
 
@@ -11,48 +13,86 @@ function getBackendUrl() {
   );
 }
 
+/**
+ * Live user profile context.
+ *
+ * On sign-in:
+ *   1. Fires a one-shot ``GET /me`` so the server creates the Firestore
+ *      doc on first login (and so we have ``tier`` / ``email`` before
+ *      Firestore returns).
+ *   2. Opens an ``onSnapshot`` listener on ``users/{uid}``.  Every time
+ *      the server's monitor tick atomically debits the doc via
+ *      ``UserProfileRepository.record_spend``, this listener fires
+ *      within milliseconds and React re-renders.
+ *
+ * No polling.  No 5s auto-refresh.  No client-side multiplier math.
+ * The displayed ``credits`` value is whatever Firestore last said.
+ */
 export function UserProfileProvider({ children }) {
   const { user } = useAuth();
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  // Guards against a stale fetch (older request) overwriting a fresh
-  // result when refetch() is called in quick succession.
-  const fetchSeq = useRef(0);
-
-  const refetch = useCallback(async () => {
-    if (!user) return null;
-    const seq = ++fetchSeq.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await getMyProfile(getBackendUrl());
-      if (seq === fetchSeq.current) {
-        setProfile(data);
-      }
-      return data;
-    } catch (e) {
-      if (seq === fetchSeq.current) {
-        setError(e);
-      }
-      return null;
-    } finally {
-      if (seq === fetchSeq.current) {
-        setLoading(false);
-      }
-    }
-  }, [user]);
 
   useEffect(() => {
     if (!user) {
       setProfile(null);
-      return;
+      setLoading(false);
+      setError(null);
+      return undefined;
     }
-    void refetch();
-  }, [user, refetch]);
+
+    let unsub = () => {};
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    (async () => {
+      // One-shot /me ensures the Firestore doc exists.  We don't need
+      // the response body -- the snapshot listener below will pick up
+      // the document content as soon as the server's create_if_missing
+      // commits.
+      try {
+        await getMyProfile(getBackendUrl());
+      } catch (e) {
+        if (!cancelled) setError(e);
+      }
+      if (cancelled) return;
+
+      unsub = onSnapshot(
+        doc(firestore, "users", user.uid),
+        (snap) => {
+          if (cancelled) return;
+          if (!snap.exists()) {
+            setProfile(null);
+          } else {
+            const data = snap.data() || {};
+            setProfile({
+              uid: user.uid,
+              email: data.email || user.email || "",
+              display_name: data.display_name || "",
+              tier: data.tier || "free",
+              credits: typeof data.credits === "number" ? data.credits : 0,
+            });
+          }
+          setLoading(false);
+        },
+        (e) => {
+          if (cancelled) return;
+          setError(e);
+          setLoading(false);
+        },
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [user]);
 
   return (
-    <UserProfileContext.Provider value={{ profile, loading, error, refetch }}>
+    <UserProfileContext.Provider value={{ profile, loading, error }}>
       {children}
     </UserProfileContext.Provider>
   );

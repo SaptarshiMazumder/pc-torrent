@@ -122,6 +122,7 @@ class AllocationClient:
         total_frames: int,
         engine: str | None = None,
         heaviness: dict | None = None,
+        priority: int = 1,
     ) -> GroupCostEstimate:
         return self._facade.cost_estimate_for_dry_run(
             frame_start=frame_start,
@@ -130,4 +131,11 @@ class AllocationClient:
             total_frames=total_frames,
             engine=engine,
             heaviness=heaviness,
+            priority=priority,
         )
+
+    def get_queue_depth(self) -> dict:
+        """Per-fleet, per-priority counts of items waiting to dispatch.
+        Pure pass-through to ``AllocationFacade.get_queue_depth``.
+        """
+        return self._facade.get_queue_depth()

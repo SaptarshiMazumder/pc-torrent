@@ -12,11 +12,12 @@ render's lifetime, open ``orchestrator/lifecycle.py``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from serverV2.allocation.services.allocation_planning_service import (
     GroupCostEstimate,
 )
+from serverV2.core.value_objects import RENDER_PRIORITY_DEFAULT
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 from serverV2.orchestrator.task_actual_cost import TaskActualCost
 from serverV2.orchestrator.users_client import UsersClient
@@ -30,10 +31,16 @@ class RenderOrchestrator:
         *,
         users_client: UsersClient,
         task_actual_cost: TaskActualCost,
+        get_priority_multiplier: Callable[[int], float],
     ) -> None:
         self._lifecycle = lifecycle
         self._users = users_client
         self._cost = task_actual_cost
+        # Fresh-config lookup so an admin tuning multipliers in
+        # ConfigurationPage takes effect immediately on the next
+        # estimate / display / billing read.  Defaults to NORMAL when
+        # the priority is out of range.
+        self._get_priority_multiplier = get_priority_multiplier
 
     # ---- per-row actual cost (UI display path) ----
 
@@ -44,17 +51,27 @@ class RenderOrchestrator:
         completed_at: Any,
         price_per_hour: Any,
         status: str,
+        priority: int = RENDER_PRIORITY_DEFAULT,
     ) -> tuple[float | None, float | None]:
         """Single source of truth for ``(actual_seconds, actual_cost_usd)``.
         The serializer goes through here so the UI value matches the
         number ``UsersClient`` debits when the chunk lands terminal.
+
+        The priority cost multiplier is applied here so every consumer
+        of the actual cost (UI display, billing) sees the priced-as-
+        billed number.  Seconds are NOT multiplied -- the chunk takes
+        the same wall time regardless of priority.
         """
-        return self._cost.compute(
+        seconds, base_cost = self._cost.compute(
             started_at=started_at,
             completed_at=completed_at,
             price_per_hour=price_per_hour,
             status=status,
         )
+        if base_cost is None or base_cost <= 0:
+            return seconds, base_cost
+        multiplier = self._get_priority_multiplier(priority)
+        return seconds, base_cost * multiplier
 
     # ---- cost intelligence ----
 
@@ -72,8 +89,12 @@ class RenderOrchestrator:
         total_frames: int,
         engine: str | None = None,
         heaviness: dict | None = None,
+        priority: int = RENDER_PRIORITY_DEFAULT,
     ) -> GroupCostEstimate:
-        """Pre-submit cost preview for a hypothetical group."""
+        """Pre-submit cost preview for a hypothetical group.  ``priority``
+        flows into the cost aggregator's multiplier so the preview matches
+        what the user will actually be billed.
+        """
         return self._lifecycle.cost_estimate_for_dry_run(
             frame_start=frame_start,
             frame_end=frame_end,
@@ -81,7 +102,15 @@ class RenderOrchestrator:
             total_frames=total_frames,
             engine=engine,
             heaviness=heaviness,
+            priority=priority,
         )
+
+    def get_queue_depth(self) -> dict:
+        """Per-fleet, per-priority counts of items waiting in the
+        pending + dispatch queues.  Used by the Create Render page to
+        show the user what's ahead at each priority level.
+        """
+        return self._lifecycle.get_queue_depth()
 
     def submit_initial(
         self,
@@ -97,11 +126,16 @@ class RenderOrchestrator:
         tier: str | None,
         input_filename: str,
         render_overrides_json: str,
+        priority: int = RENDER_PRIORITY_DEFAULT,
     ) -> None:
         """Park a whole render group on ``pending_allocation_queue``.
         Returns nothing -- the daemon plans + dispatches asynchronously
         on its next tick.  See ``Lifecycle.submit_initial`` and
         ``AllocationFacade.submit_initial`` for details.
+
+        ``priority`` is the user-selected queue ordering key (LOW / NORMAL
+        / HIGH; see ``core.value_objects``).  Defaults to NORMAL so
+        callers that don't surface it to the user keep today's behaviour.
         """
         self._lifecycle.submit_initial(
             group_id=group_id,
@@ -115,6 +149,7 @@ class RenderOrchestrator:
             tier=tier,
             input_filename=input_filename,
             render_overrides_json=render_overrides_json,
+            priority=priority,
         )
 
     # ---- chunk-level callbacks (full flow — adapters call these) ----

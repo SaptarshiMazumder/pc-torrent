@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { formatCredits } from "../../utils/creditsFormat";
 import InstancePanel from "./InstancePanel";
 
 const COMMUNITY_ICON = (
@@ -44,8 +45,8 @@ const communityProvider = {
       total,
       rangeLabel,
       elapsedSec: null,
-      cost: task.estimated_cost_usd != null
-        ? `~$${Number(task.estimated_cost_usd).toFixed(2)} est.`
+      cost: task.estimated_cost_credits != null
+        ? `~${formatCredits(Number(task.estimated_cost_credits))} credits est.`
         : null,
       error: task.status === "failed" ? (task.error || "") : "",
       stallRule: task.stall_rule || null,

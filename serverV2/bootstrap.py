@@ -356,7 +356,7 @@ def build(
     allowed_stall_times_resolver = AllowedStallTimesResolver(
         vast_cfg=cfg.vast,
         modal_cfg=cfg.modal,
-        stall_cfg=cfg.stall,
+        config_repo=allocation_config_repo,
         in_progress_stale_sec=cfg.vast.in_progress_stale_sec,
         group_repo=group_repo,
     )
@@ -400,19 +400,12 @@ def build(
     registry.register(community_strategy)
 
     # -- allocation + dispatch --
-    # Push render-time calibration (per-engine baselines, feature
-    # multipliers, startup additives) from config.json into the time
-    # analyzer module.  Must happen before the planner runs so the
-    # first dry-run estimate uses production calibration rather than
-    # the module's hand-tuned defaults.
-    from serverV2.allocation.allocation_strategies.analyzers import (
-        allocation_time_analyzer,
-    )
-    allocation_time_analyzer.configure(cfg.frame_allocation.render_time)
-    allocation_time_analyzer.configure_combination(
-        secondary_feature_credit=cfg.frame_allocation.weights.secondary_feature_credit,
-        heavy_multiplier_cap=cfg.frame_allocation.weights.heavy_multiplier_cap,
-    )
+    # Time-analyzer calibration is re-applied from the live Firestore
+    # config at the top of every planning call (see
+    # AllocationPlanningService._apply_analyzer_calibration), so admin-UI
+    # edits take effect immediately without a redeploy.  No boot-time
+    # seed needed -- the analyzer's _DEFAULT_CALIBRATION covers the
+    # before-first-plan-call window (smoke tests, ad-hoc scripts).
 
     # Single planner does the work.  Owns target validators (engine
     # compatibility today; future: tier / price caps).
@@ -581,6 +574,13 @@ def build(
     def _get_max_retries() -> int:
         return allocation_config_repo.get().orchestrator.max_retries
 
+    # Live priority cost multiplier -- read from Firestore on each
+    # call so admin tunes take effect immediately on both the
+    # displayed estimate (planner aggregator) and the billed amount
+    # (UsersClient + actual_cost_for_row).
+    def _get_priority_multiplier(priority: int) -> float:
+        return allocation_config_repo.get().frame_allocation.weights.multiplier_for(priority)
+
     chunk_progress_service = ChunkProgressService(
         output_frame_repo=output_frame_repo,
     )
@@ -656,11 +656,13 @@ def build(
         facade=user_facade,
         job_repo=job_repo,
         cost=task_actual_cost,
+        get_priority_multiplier=_get_priority_multiplier,
     )
     orchestrator = RenderOrchestrator(
         lifecycle,
         users_client=orchestrator_users_client,
         task_actual_cost=task_actual_cost,
+        get_priority_multiplier=_get_priority_multiplier,
     )
 
     # -- callbacks --
@@ -783,6 +785,7 @@ def build(
         chunk_progress=chunk_progress_service,
         scene_resolver=scene_resolver,
         get_max_retries=_get_max_retries,
+        credits_per_usd=cfg.billing.credits_per_usd,
     )
 
     job_service = JobService(
@@ -821,6 +824,7 @@ def build(
     pre_render_estimator = PreRenderEstimator(
         orchestrator=orchestrator,
         scene_resolver=scene_resolver,
+        credits_per_usd=cfg.billing.credits_per_usd,
     )
 
     return Container(

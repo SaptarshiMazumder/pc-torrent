@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 from typing import Any, Callable
 
+from serverV2.config import usd_to_credits
 from serverV2.core.value_objects import (
     compute_progress_pct,
     output_frame_sort_key,
@@ -39,9 +40,11 @@ class RenderGroupSerializer:
         *,
         output_frame_repo: OutputFrameRepository,
         actual_cost_compute: ActualCostCompute,
+        credits_per_usd: float,
     ) -> None:
         self._output_frames = output_frame_repo
         self._actual_cost = actual_cost_compute
+        self._credits_per_usd = float(credits_per_usd)
 
     def serialize_task(
         self,
@@ -113,8 +116,10 @@ class RenderGroupSerializer:
             completed_at=completed_at_raw,
             price_per_hour=price_per_hour_raw,
             status=job.get("status", ""),
+            priority=int(job.get("priority") or 1),
         )
         price_per_hour = _maybe_float(price_per_hour_raw)
+        estimated_cost_usd = _maybe_float(job.get("estimated_cost_usd"))
 
         return {
             "job_id": job["id"],
@@ -143,20 +148,20 @@ class RenderGroupSerializer:
             "remaining_frame_end": remaining_end,
             "is_retryable": is_retryable,
             # Per-chunk estimates stamped at allocation time by
-            # ``AllocationPlanner``.  Cost service / UI sum these for
-            # group totals and live projections.
+            # ``AllocationPlanner``.  Costs projected into credits at
+            # the wire boundary -- USD stays internal.
             "estimated_seconds": _maybe_float(job.get("estimated_seconds")),
-            "estimated_cost_usd": _maybe_float(job.get("estimated_cost_usd")),
+            "estimated_cost_credits": usd_to_credits(estimated_cost_usd, self._credits_per_usd),
             "estimated_seconds_per_frame": _maybe_float(job.get("estimated_seconds_per_frame")),
             "estimated_startup_seconds": _maybe_float(job.get("estimated_startup_seconds")),
             # Actual-cost telemetry.  Raw timestamps + rate flow through so
-            # the desktop client can tick in-flight values locally without
-            # a server poll, using the same formula as ``_actual_cost``.
+            # the desktop client knows the inputs; cost itself is shown
+            # in credits.
             "started_at": _iso(started_at_raw),
             "completed_at": _iso(completed_at_raw),
             "price_per_hour_at_dispatch": price_per_hour,
             "actual_seconds": actual_seconds,
-            "actual_cost_usd": actual_cost_usd,
+            "actual_cost_credits": usd_to_credits(actual_cost_usd, self._credits_per_usd),
         }
 
 

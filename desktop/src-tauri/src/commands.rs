@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 
 // Embed the prepare script at compile time so it ships inside the binary
-const PREPARE_BLEND_PY: &str = include_str!("../../../vast_worker/scripts/prepare_blend.py");
+const PREPARE_BLEND_PY: &str = include_str!("../scripts/prepare_blend.py");
 const ANALYZE_BLEND_PY: &str = r#"
 import json
 import bpy
@@ -1760,7 +1760,13 @@ pub async fn prepare_blend_for_upload(
 
     let is_zip = filename.to_lowercase().ends_with(".zip");
 
+    // ``blend_path`` is what Blender opens.  ``prep_output_path`` is where
+    // the prepared (packed) .blend is written by the script.  Bare-.blend
+    // case: open the user's ORIGINAL so relative texture paths resolve;
+    // the prepared copy lands in work_dir.  Zip case: open the extracted
+    // .blend and overwrite it in-place.
     let blend_path: PathBuf;
+    let prep_output_path: PathBuf;
     let extract_dir: Option<PathBuf>;
 
     if is_zip {
@@ -1776,12 +1782,11 @@ pub async fn prepare_blend_for_upload(
             .and_then(|s| s.to_str())
             .unwrap_or("");
         blend_path = _choose_target_blend(source_stem, &ex, &blends);
+        prep_output_path = blend_path.clone();
         extract_dir = Some(ex);
     } else {
-        // Copy blend to work dir so Blender writes the prepared file there
-        let dest = work_dir.join(&filename);
-        fs::copy(source, &dest).map_err(|e| format!("Cannot copy blend: {e}"))?;
-        blend_path = dest;
+        blend_path = source.to_path_buf();
+        prep_output_path = work_dir.join(&filename);
         extract_dir = None;
     }
 
@@ -1791,6 +1796,7 @@ pub async fn prepare_blend_for_upload(
         .arg(&blend_path)
         .arg("--python")
         .arg(&prep_script)
+        .env("PCR_PREP_OUTPUT_PATH", &prep_output_path)
         .output()
         .map_err(|e| format!("Failed to launch Blender: {e}"))?;
 
@@ -1821,7 +1827,7 @@ pub async fn prepare_blend_for_upload(
         _zip_dir(&ex, &new_zip)?;
         (new_zip.to_string_lossy().to_string(), filename)
     } else {
-        (blend_path.to_string_lossy().to_string(), filename)
+        (prep_output_path.to_string_lossy().to_string(), filename)
     };
 
     Ok(PrepareResult {
@@ -1866,7 +1872,14 @@ pub async fn analyze_and_prepare_blend(
         .map_err(|e| format!("Cannot write analyze/prepare script: {e}"))?;
 
     let is_zip = filename.to_lowercase().ends_with(".zip");
+    // ``blend_path`` is what Blender opens.  ``prep_output_path`` is where
+    // the prepared (packed) .blend is written by the script.  Bare-.blend
+    // case: open the user's ORIGINAL so relative texture paths resolve
+    // against the directory the user has the assets in; the prepared
+    // copy lands in work_dir.  Zip case: open the extracted .blend and
+    // overwrite it in-place (textures sit next to it inside ``extracted``).
     let blend_path: PathBuf;
+    let prep_output_path: PathBuf;
     let extract_dir: Option<PathBuf>;
 
     if is_zip {
@@ -1900,11 +1913,11 @@ pub async fn analyze_and_prepare_blend(
             .and_then(|s| s.to_str())
             .unwrap_or("");
         blend_path = _choose_target_blend(source_stem, &ex, &blends);
+        prep_output_path = blend_path.clone();
         extract_dir = Some(ex);
     } else {
-        let dest = work_dir.join(&filename);
-        fs::copy(source, &dest).map_err(|e| format!("Cannot copy blend: {e}"))?;
-        blend_path = dest;
+        blend_path = source.to_path_buf();
+        prep_output_path = work_dir.join(&filename);
         extract_dir = None;
     }
 
@@ -1913,6 +1926,7 @@ pub async fn analyze_and_prepare_blend(
         .arg(&blend_path)
         .arg("--python")
         .arg(&prep_script)
+        .env("PCR_PREP_OUTPUT_PATH", &prep_output_path)
         .output()
         .map_err(|e| format!("Failed to launch Blender: {e}"))?;
 
@@ -1939,7 +1953,15 @@ pub async fn analyze_and_prepare_blend(
         ));
     }
     if analysis.is_none() {
-        let fallback_blend_path = blend_path.to_string_lossy().to_string();
+        // For bare .blend we open the user's ORIGINAL above, but for the
+        // fallback analyzer we want the just-saved prepared output (so
+        // packing has already happened).  Fall back to ``blend_path`` if
+        // the script never wrote the output (prep_done=false path).
+        let fallback_blend_path = if prep_output_path.is_file() {
+            prep_output_path.to_string_lossy().to_string()
+        } else {
+            blend_path.to_string_lossy().to_string()
+        };
         match analyze_blend_with_blender(fallback_blend_path, blender_bin.clone()).await {
             Ok(parsed) => {
                 analysis = Some(parsed);
@@ -1978,7 +2000,7 @@ pub async fn analyze_and_prepare_blend(
                 None
             }
         } else {
-            Some(blend_path.to_string_lossy().to_string())
+            Some(prep_output_path.to_string_lossy().to_string())
         }
     } else {
         None

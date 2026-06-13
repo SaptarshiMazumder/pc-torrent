@@ -1735,6 +1735,7 @@ fn _parse_prepare_output(
 pub async fn prepare_blend_for_upload(
     file_path: String,
     blender_bin: String,
+    deep_search: bool,
 ) -> Result<PrepareResult, String> {
     let source = Path::new(&file_path);
     let filename = source
@@ -1791,12 +1792,16 @@ pub async fn prepare_blend_for_upload(
     }
 
     // Run Blender headless with prepare script
-    let output = std::process::Command::new(&blender_bin)
-        .arg("-b")
+    let mut cmd = std::process::Command::new(&blender_bin);
+    cmd.arg("-b")
         .arg(&blend_path)
         .arg("--python")
         .arg(&prep_script)
-        .env("PCR_PREP_OUTPUT_PATH", &prep_output_path)
+        .env("PCR_PREP_OUTPUT_PATH", &prep_output_path);
+    if deep_search {
+        cmd.env("PCR_DEEP_SEARCH", "1");
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to launch Blender: {e}"))?;
 
@@ -1843,6 +1848,7 @@ pub async fn prepare_blend_for_upload(
 pub async fn analyze_and_prepare_blend(
     file_path: String,
     blender_bin: String,
+    deep_search: bool,
 ) -> Result<AnalyzeAndPrepareResult, String> {
     let source = Path::new(&file_path);
     if !source.is_file() {
@@ -1921,12 +1927,16 @@ pub async fn analyze_and_prepare_blend(
         extract_dir = None;
     }
 
-    let output = std::process::Command::new(&blender_bin)
-        .arg("-b")
+    let mut cmd = std::process::Command::new(&blender_bin);
+    cmd.arg("-b")
         .arg(&blend_path)
         .arg("--python")
         .arg(&prep_script)
-        .env("PCR_PREP_OUTPUT_PATH", &prep_output_path)
+        .env("PCR_PREP_OUTPUT_PATH", &prep_output_path);
+    if deep_search {
+        cmd.env("PCR_DEEP_SEARCH", "1");
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to launch Blender: {e}"))?;
 

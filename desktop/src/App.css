@@ -2432,6 +2432,22 @@ body {
   color: var(--success);
 }
 
+.prep-result-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(180, 185, 200, 0.12);
+}
+
+.prep-result-action-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 .btn-back {
   background: none;
   border: none;

@@ -35,12 +35,17 @@ from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chu
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
+from serverV2.allocation.allocation_strategies.analyzers import (
+    allocation_time_analyzer,
+)
+from serverV2.allocation.render_config import RenderConfig
 from serverV2.allocation.services.allocation_planning_service.allocation_cost_aggregator import (
     AllocationCostAggregator,
 )
 from serverV2.allocation.services.allocation_planning_service.group_cost_estimate import (
     GroupCostEstimate,
 )
+from serverV2.config import RenderTimeConfig
 from serverV2.core.models import AvailableResources, PlannedTask
 
 
@@ -56,6 +61,31 @@ class AllocationPlanningService:
         self._planner = planner
         self._cost_aggregator = cost_aggregator
         self._config_repo = config_repo
+
+    # ------------------------------------------------------------------
+    # Push the freshly-loaded Firestore RenderConfig into the time
+    # analyzer module's calibration globals.  Called at the top of every
+    # planning entry point so config edits via the admin UI take effect
+    # immediately without a redeploy.  Mirrors the bootstrap-time call
+    # that used to seed from config.json -- config.json is now only
+    # consulted by the Firestore seeder script (one-shot at deploy).
+    # ------------------------------------------------------------------
+
+    def _apply_analyzer_calibration(self, cfg: RenderConfig) -> None:
+        rt = cfg.frame_allocation.render_time
+        allocation_time_analyzer.configure(RenderTimeConfig(
+            baseline_sec_cycles=rt.baseline_sec_cycles,
+            baseline_sec_eevee=rt.baseline_sec_eevee,
+            factors_cycles=rt.factors_cycles,
+            factors_eevee=rt.factors_eevee,
+            scene_scaling_cycles=rt.scene_scaling_cycles,
+            scene_scaling_eevee=rt.scene_scaling_eevee,
+            startup=rt.startup_sec,
+        ))
+        allocation_time_analyzer.configure_combination(
+            secondary_feature_credit=cfg.frame_allocation.weights.secondary_feature_credit,
+            heavy_multiplier_cap=cfg.frame_allocation.weights.heavy_multiplier_cap,
+        )
 
     # ------------------------------------------------------------------
     # planning surface (used by AllocationPendingTickProcessor)
@@ -75,6 +105,7 @@ class AllocationPlanningService:
     ) -> list[PlannedTask]:
         del tier
         cfg = self._config_repo.get()
+        self._apply_analyzer_calibration(cfg)
         return self._planner.plan_initial(
             frame_start=frame_start,
             frame_end=frame_end,
@@ -98,6 +129,7 @@ class AllocationPlanningService:
     ) -> PlannedTask | None:
         del tier
         cfg = self._config_repo.get()
+        self._apply_analyzer_calibration(cfg)
         return self._planner.plan_retry(
             chunk_request,
             resources,
@@ -121,10 +153,12 @@ class AllocationPlanningService:
         resources: AvailableResources,
         engine: str | None = None,
         heaviness: dict | None = None,
+        priority: int = 1,
     ) -> GroupCostEstimate:
         # Single config read shared between planning and cost aggregation
         # so both halves of dry-run see the SAME snapshot.
         cfg = self._config_repo.get()
+        self._apply_analyzer_calibration(cfg)
         tasks = self._planner.plan_initial(
             frame_start=frame_start,
             frame_end=frame_end,
@@ -138,7 +172,9 @@ class AllocationPlanningService:
             heaviness=heaviness,
         )
         items = self._cost_aggregator.from_planned_tasks(
-            tasks, failure_rate=cfg.frame_allocation.failure_rate,
+            tasks,
+            failure_rate=cfg.frame_allocation.failure_rate,
+            priority_multiplier=cfg.frame_allocation.weights.multiplier_for(priority),
         )
         return self._cost_aggregator.aggregate(items)
 

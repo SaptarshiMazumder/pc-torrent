@@ -28,6 +28,7 @@ import {
   setCachedAnalysis,
 } from "../utils/blendAnalysis";
 import { useError } from "../contexts/ErrorContext";
+import { formatCredits } from "../utils/creditsFormat";
 
 // ─── Flow stages ────────────────────────────────────────────
 // IDLE          → user picks a file / saved input
@@ -229,9 +230,15 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const abortRef = useRef(null);
 
   // Cost / wall-time estimate, populated after analysis completes.
-  // Shape: { wall_time_seconds, cost_low_usd, cost_mid_usd, cost_high_usd, machines } | null
+  // Shape: { wall_time_seconds, cost_low_credits, cost_mid_credits, cost_high_credits, machines } | null
   const [costEstimate, setCostEstimate] = useState(null);
   const [costEstimateLoading, setCostEstimateLoading] = useState(false);
+
+  // User-selected queue priority.  Sent verbatim on confirm-upload;
+  // server-side Pydantic clamps + validates.  0 = LOW, 1 = NORMAL,
+  // 2 = HIGH.  Default NORMAL so the queue ordering is unchanged for
+  // anyone who never touches the selector.
+  const [priority, setPriority] = useState(1);
 
   // ── Blender detection ───────────────────────────────────
   useEffect(() => {
@@ -367,9 +374,11 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   // tracked dep changed would be a no-op).  The ref-based cancellation
   // ensures the latest call always wins if the user spams the button.
   const costEstimateCallSeq = useRef(0);
+  const [queueDepth, setQueueDepth] = useState(null);
   const refreshCostEstimate = useCallback(() => {
     if (stage !== STAGE.CONFIGURING || !analysis || !frameRange) {
       setCostEstimate(null);
+      setQueueDepth(null);
       return;
     }
     const seq = ++costEstimateCallSeq.current;
@@ -381,15 +390,18 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       frameEnd: frameRange.frame_end,
       frameStep: frameRange.frame_step,
       fileSizeBytes: file?.size || savedInputAsset?.r2_input_size_bytes || null,
+      priority,
     })
       .then((data) => {
         if (seq !== costEstimateCallSeq.current) return;  // superseded
         setCostEstimate(data?.estimate || null);
+        setQueueDepth(data?.queue_depth || null);
         setCostEstimateLoading(false);
       })
       .catch((err) => {
         if (seq !== costEstimateCallSeq.current) return;
         setCostEstimate(null);
+        setQueueDepth(null);
         setCostEstimateLoading(false);
         showError({
           title: "Couldn't compute cost estimate",
@@ -397,7 +409,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
           detail: err?.body || null,
         });
       });
-  }, [stage, analysis, frameRange, renderOverridesForServer, backendUrl, file, savedInputAsset, showError]);
+  }, [stage, analysis, frameRange, renderOverridesForServer, backendUrl, file, savedInputAsset, showError, priority]);
 
   useEffect(() => {
     refreshCostEstimate();
@@ -747,7 +759,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
     try {
       const result = await confirmDistributedJob(
-        backendUrl, activeGroupId, null, frameRange, overrides, null, analysis, null, controller.signal,
+        backendUrl, activeGroupId, null, frameRange, overrides, null, analysis, null, priority, controller.signal,
       );
       if (result.needs_frame_input) {
         dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
@@ -857,9 +869,9 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
   const formatCost = (entry) => {
     if (!entry) return null;
-    const lo = entry.cost_low_usd ?? 0;
-    const hi = entry.cost_high_usd ?? 0;
-    return `$${lo.toFixed(2)}-$${hi.toFixed(2)}`;
+    const lo = entry.cost_low_credits ?? 0;
+    const hi = entry.cost_high_credits ?? 0;
+    return `${formatCredits(lo)}-${formatCredits(hi)} credits`;
   };
   const formatTime = (entry) => {
     if (!entry?.wall_time_seconds) return null;
@@ -1204,6 +1216,70 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                     <input type="number" min="1" value={frameStep} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStep", value: e.target.value })} className="cr-input" />
                   </label>
                 </div>
+              </div>
+            </section>
+            {/* Queue priority ------------------------------------------- */}
+            <section className="cr-form-section">
+              <div className="cr-form-section-title">Queue Priority</div>
+              <div className="cr-form-section-body">
+                <div className="cr-priority-group" role="radiogroup" aria-label="Queue priority">
+                  {[
+                    { value: 0, label: "Low",    hint: "100% cost · runs last" },
+                    { value: 1, label: "Normal", hint: "110% cost · default" },
+                    { value: 2, label: "High",   hint: "120% cost · runs first" },
+                  ].map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={priority === opt.value}
+                      onClick={() => setPriority(opt.value)}
+                      className={`cr-priority-option${priority === opt.value ? " cr-priority-option--active" : ""}`}
+                    >
+                      <span className="cr-priority-option-label">{opt.label}</span>
+                      <span className="cr-priority-option-hint">{opt.hint}</span>
+                    </button>
+                  ))}
+                </div>
+                {queueDepth && (
+                  <div className="cr-queue-depth">
+                    <div className="cr-queue-depth-title">Queue right now</div>
+                    <table className="cr-queue-depth-table">
+                      <thead>
+                        <tr>
+                          <th />
+                          <th>HIGH</th>
+                          <th>NORMAL</th>
+                          <th>LOW</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {["vast", "modal", "community"].map((fleet) => {
+                          const f = queueDepth[fleet] || {};
+                          return (
+                            <tr key={fleet}>
+                              <td className="cr-queue-depth-fleet">{fleet}</td>
+                              {["high", "normal", "low"].map((level) => {
+                                const cell = f[level] || { jobs: 0, frames: 0 };
+                                return (
+                                  <td key={level} className="cr-queue-depth-cell">
+                                    <span className="cr-queue-depth-jobs">{cell.jobs}</span>
+                                    {cell.jobs > 0 && (
+                                      <span className="cr-queue-depth-frames"> ({cell.frames} f)</span>
+                                    )}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="cr-queue-depth-note">
+                      Estimate is render time only — queue wait depends on what's ahead of your priority.
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
             {/* Scene Stats (read-only -- analyzer metadata) -------------- */}

@@ -230,11 +230,17 @@ class AllocationFacade:
         total_frames: int,
         engine: str | None = None,
         heaviness: dict | None = None,
+        priority: int = 1,
     ) -> GroupCostEstimate:
         """Pre-submit cost preview for a hypothetical group.  Reads the
         cached fleet-availability snapshot (no persist), runs the
         planner against the user's heaviness, and aggregates the
-        resulting per-task estimates.  No DB reads, no DB writes."""
+        resulting per-task estimates.  No DB reads, no DB writes.
+
+        ``priority`` flows into the cost aggregator's priority
+        multiplier so the preview reflects what the user will actually
+        be billed.
+        """
         snapshot = self._snapshot_cache.get_or_build()
         resources = _adapt_frozen_snapshot_to_resources(snapshot)
         return self._planning.cost_for_dry_run(
@@ -245,7 +251,40 @@ class AllocationFacade:
             resources=resources,
             engine=engine,
             heaviness=heaviness,
+            priority=priority,
         )
+
+    def get_queue_depth(self) -> dict:
+        """Per-fleet, per-priority counts of items waiting to dispatch.
+
+        Combines ``pending_allocation_queue`` (not yet planned) +
+        ``dispatch_queue`` (planned, waiting for a slot).  Currently-
+        running jobs are NOT counted -- those slots clear naturally.
+
+        Returned shape::
+
+            {
+                "vast":      {"low": {"jobs": N, "frames": F},
+                              "normal": {...}, "high": {...}},
+                "modal":     {...},
+                "community": {...},
+            }
+        """
+        pending_counts = self._pending_repo.count_by_priority_and_fleet()
+        dispatch_counts = self._dispatch_repo.count_by_priority_and_fleet()
+        out: dict[str, dict[str, dict[str, int]]] = {}
+        for fleet in ("vast", "modal", "community"):
+            out[fleet] = {}
+            for level in ("low", "normal", "high"):
+                p_jobs = pending_counts.get(fleet, {}).get(level, {}).get("jobs", 0)
+                p_frames = pending_counts.get(fleet, {}).get(level, {}).get("frames", 0)
+                d_jobs = dispatch_counts.get(fleet, {}).get(level, {}).get("jobs", 0)
+                d_frames = dispatch_counts.get(fleet, {}).get(level, {}).get("frames", 0)
+                out[fleet][level] = {
+                    "jobs": p_jobs + d_jobs,
+                    "frames": p_frames + d_frames,
+                }
+        return out
 
 
 def _adapt_frozen_snapshot_to_resources(

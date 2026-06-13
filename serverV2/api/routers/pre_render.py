@@ -58,6 +58,7 @@ def estimate(
         payload_frame_step=payload.frame_step,
         machine_ids=payload.machine_ids,
         file_size_bytes=payload.file_size_bytes,
+        priority=payload.priority,
     )
     try:
         return _get().estimate(request)

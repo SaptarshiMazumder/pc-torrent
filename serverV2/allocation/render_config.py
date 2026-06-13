@@ -82,6 +82,29 @@ class MonitorSection:
 
 
 @dataclass(frozen=True)
+class StallLoadingSafetyConfig:
+    """Per-heaviness coefficients the AllowedStallTimesResolver uses to
+    compute its OWN expected-loading-time, independent of the cost-time
+    analyzer's calibration.
+
+    The cost analyzer's ``startup_sec`` is tuned for accuracy (estimate
+    ~= actual cost paid).  This block is tuned for safety (window wide
+    enough to let real loading finish).  Same shape -- file_size,
+    verts, textures, shader nodes, per-fleet provisioning buffer --
+    but separately tunable so future cost re-calibration can't silently
+    shrink the stall window.
+    """
+    baseline_sec: float
+    per_gb_file: float
+    per_million_verts: float
+    per_gb_texture: float
+    per_shader_node: float
+    fleet_buffer_vast: float
+    fleet_buffer_modal: float
+    fleet_buffer_community: float
+
+
+@dataclass(frozen=True)
 class StallSection:
     """Mirror of the ``stall`` block in config.json.  Field names match
     the JSON keys verbatim so ``asdict`` round-trips."""
@@ -95,6 +118,7 @@ class StallSection:
     loading_multiplier: float
     loading_phase_min_sec: float
     loading_phase_max_sec: float
+    loading_safety: StallLoadingSafetyConfig
     hard_max_chunk_sec: float
 
 
@@ -274,6 +298,9 @@ def _monitor(b: dict) -> MonitorSection:
 
 def _stall(b: dict) -> StallSection:
     ctx = "stall"
+    loading_safety_block = b.get("loading_safety")
+    if not isinstance(loading_safety_block, dict):
+        raise FleetException(f"{ctx}.loading_safety missing or not an object")
     return StallSection(
         cpu_threshold_pct=_float(b, ctx, "cpu_threshold_pct"),
         cpu_window_sec=_float(b, ctx, "cpu_window_sec"),
@@ -285,7 +312,22 @@ def _stall(b: dict) -> StallSection:
         loading_multiplier=_float(b, ctx, "loading_multiplier"),
         loading_phase_min_sec=_float(b, ctx, "loading_phase_min_sec"),
         loading_phase_max_sec=_float(b, ctx, "loading_phase_max_sec"),
+        loading_safety=_loading_safety(loading_safety_block),
         hard_max_chunk_sec=_float(b, ctx, "hard_max_chunk_sec"),
+    )
+
+
+def _loading_safety(b: dict) -> StallLoadingSafetyConfig:
+    ctx = "stall.loading_safety"
+    return StallLoadingSafetyConfig(
+        baseline_sec=_float(b, ctx, "baseline_sec"),
+        per_gb_file=_float(b, ctx, "per_gb_file"),
+        per_million_verts=_float(b, ctx, "per_million_verts"),
+        per_gb_texture=_float(b, ctx, "per_gb_texture"),
+        per_shader_node=_float(b, ctx, "per_shader_node"),
+        fleet_buffer_vast=_float(b, ctx, "fleet_buffer_vast"),
+        fleet_buffer_modal=_float(b, ctx, "fleet_buffer_modal"),
+        fleet_buffer_community=_float(b, ctx, "fleet_buffer_community"),
     )
 
 
@@ -326,6 +368,17 @@ def _weights(b: dict) -> AllocationWeights:
         _float(b, ctx, "heavy_multiplier_cap")
         if "heavy_multiplier_cap" in b else 5.0
     )
+    # Per-priority cost multipliers.  Backwards-compatible with old
+    # Firestore docs: any missing key falls back to (1.0, 1.1, 1.2).
+    raw_pcm = b.get("priority_cost_multipliers")
+    if isinstance(raw_pcm, dict):
+        priority_cost_multipliers = {
+            "low":    float(raw_pcm.get("low", 1.0)),
+            "normal": float(raw_pcm.get("normal", 1.1)),
+            "high":   float(raw_pcm.get("high", 1.2)),
+        }
+    else:
+        priority_cost_multipliers = {"low": 1.0, "normal": 1.1, "high": 1.2}
     return AllocationWeights(
         speed_weight=_float(b, ctx, "speed_weight"),
         cuda_weight=_float(b, ctx, "cuda_weight"),
@@ -341,6 +394,7 @@ def _weights(b: dict) -> AllocationWeights:
         time_headroom_falloff=time_headroom_falloff,
         secondary_feature_credit=secondary_feature_credit,
         heavy_multiplier_cap=heavy_multiplier_cap,
+        priority_cost_multipliers=priority_cost_multipliers,
     )
 
 

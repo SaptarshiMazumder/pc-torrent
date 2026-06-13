@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import {
   STATUS_LABELS,
   isTerminalStatus,
@@ -7,7 +7,6 @@ import {
   getLatestTaskWithOutput,
 } from "../../utils/jobUtils";
 import JobThumbnail from "./JobThumbnail";
-import { useLiveCostTick, liveActualCost } from "../../hooks/useLiveCostTick";
 import VastInstancePanel from "./VastInstancePanel";
 import ModalInstancePanel from "../ModalInstancePanel";
 import CommunityInstancePanel from "./CommunityInstancePanel";
@@ -17,8 +16,8 @@ import FailedChunksPanel from "./FailedChunksPanel";
 import PendingChunksPanel from "./PendingChunksPanel";
 import Loader from "../common/Loader";
 import UserCreditsHeader from "../profile/UserCreditsHeader";
-import { useUserProfile } from "../../contexts/UserProfileContext";
 import { usePendingQueue } from "../../hooks/usePendingQueue";
+import { formatCredits } from "../../utils/creditsFormat";
 
 const DRAWER_TITLES = {
   instances: "Instances",
@@ -111,35 +110,26 @@ function RenderGroupDetail({
   const latestOutputFile =
     job.latest_output_file || getLatestTaskWithOutput(job.tasks)?.latest_output_file || null;
 
-  // Sum of per-task projected costs.  Tasks pre-AllocationPlanner have null
-  // estimates -- treated as 0 so we don't poison the rollup.  When everything
-  // is null/0 we hide the row entirely (no point showing "$0.00 est.").
+  // Sum of per-task projected costs in credits.  Tasks pre-
+  // AllocationPlanner have null estimates -- treated as 0.
   const totalEstimatedCost = tasksList.reduce(
-    (sum, t) => sum + (typeof t.estimated_cost_usd === "number" ? t.estimated_cost_usd : 0),
+    (sum, t) => sum + (typeof t.estimated_cost_credits === "number" ? t.estimated_cost_credits : 0),
     0,
   );
 
-  // 1Hz tick so the actual-cost rollup recomputes for in-flight tasks
-  // between polls.  liveActualCost mirrors the server's serializer formula
-  // exactly so the live value lines up with the canonical one the next
-  // poll will deliver.
-  useLiveCostTick();
-  const now = new Date();
-  const totalActualCost = tasksList.reduce((sum, t) => {
-    if (t.status === "running" || t.status === "uploading") {
-      const live = liveActualCost(t, now);
-      return sum + (live ?? 0);
-    }
-    return sum + (typeof t.actual_cost_usd === "number" ? t.actual_cost_usd : 0);
-  }, 0);
-  // Server already provides ``total_actual_cost_usd`` on the group payload
-  // for terminal groups (where ``now`` doesn't matter).  Prefer the live
-  // sum so running tasks tick smoothly; fall back to the server value
-  // when the live sum is 0 but the server snapshot has data (covers
-  // pre-tick first render).
+  // Actual-cost rollup uses the polled per-task ``actual_cost_credits``
+  // directly.  Server computes live values at request time (running
+  // tasks substitute ``now``); each ~10s poll refreshes.
+  const totalActualCost = tasksList.reduce(
+    (sum, t) => sum + (typeof t.actual_cost_credits === "number" ? t.actual_cost_credits : 0),
+    0,
+  );
+  // Server provides ``total_actual_cost_credits`` on the group payload
+  // for terminal groups.  Prefer the live sum; fall back to the
+  // server snapshot when the live sum is 0 (covers first render).
   const groupActualCost = totalActualCost > 0
     ? totalActualCost
-    : (typeof job.total_actual_cost_usd === "number" ? job.total_actual_cost_usd : 0);
+    : (typeof job.total_actual_cost_credits === "number" ? job.total_actual_cost_credits : 0);
 
   return (
     <div className="jd-body jd-body-split">
@@ -168,7 +158,7 @@ function RenderGroupDetail({
               {totalEstimatedCost > 0 && (
                 <div className="jd-headline-cost">
                   <span className="jd-headline-cost-label">Estimated cost</span>
-                  <span className="jd-headline-cost-value">~${totalEstimatedCost.toFixed(2)}</span>
+                  <span className="jd-headline-cost-value">~{formatCredits(totalEstimatedCost)} credits</span>
                 </div>
               )}
             </div>
@@ -347,13 +337,13 @@ function RenderGroupDetail({
                   <div className="jd-cost-summary-row">
                     <span className="jd-cost-summary-label">Estimated</span>
                     <span className="jd-cost-summary-value">
-                      {tasksLoading ? "…" : totalEstimatedCost > 0 ? `~$${totalEstimatedCost.toFixed(2)}` : "—"}
+                      {tasksLoading ? "…" : totalEstimatedCost > 0 ? `~${formatCredits(totalEstimatedCost)} cr` : "—"}
                     </span>
                   </div>
                   <div className="jd-cost-summary-row">
                     <span className="jd-cost-summary-label">Actual</span>
                     <span className="jd-cost-summary-value">
-                      {tasksLoading ? "…" : groupActualCost > 0 ? `$${groupActualCost.toFixed(2)}` : "—"}
+                      {tasksLoading ? "…" : groupActualCost > 0 ? `${formatCredits(groupActualCost)} cr` : "—"}
                     </span>
                   </div>
                 </div>
@@ -371,13 +361,12 @@ function RenderGroupDetail({
                         const range = t.frame_start != null && t.frame_end != null
                           ? `${t.frame_start}–${t.frame_end}`
                           : "—";
-                        const est = typeof t.estimated_cost_usd === "number"
-                          ? `~$${t.estimated_cost_usd.toFixed(2)}`
+                        const est = typeof t.estimated_cost_credits === "number"
+                          ? `~${formatCredits(t.estimated_cost_credits)} cr`
                           : "—";
-                        const liveCost = (t.status === "running" || t.status === "uploading")
-                          ? liveActualCost(t, now)
-                          : (typeof t.actual_cost_usd === "number" ? t.actual_cost_usd : null);
-                        const actual = liveCost != null ? `$${liveCost.toFixed(2)}` : "—";
+                        const actual = typeof t.actual_cost_credits === "number"
+                          ? `${formatCredits(t.actual_cost_credits)} cr`
+                          : "—";
                         return (
                           <li key={t.job_id} className="jd-cost-item">
                             <span className="jd-cost-item-range">{range}</span>
@@ -558,38 +547,19 @@ export default function JobDetailView({
   // Accrued cost.  Same formula RenderGroupDetail uses internally,
   // hoisted to the wrapper so the floating top-right pill stays in sync
   // with the per-machine cost chips and persists into terminal status
-  // (the user wants to see what each finished job cost them).
-  useLiveCostTick();
-  const now = new Date();
+  // Cost rollup reads polled ``actual_cost_credits`` directly.
+  // Server applies the priority multiplier + USD->credits conversion
+  // at the wire boundary; we just sum and display.
   const costTasks = isGroup ? (job?.tasks || []) : (job ? [job] : []);
-  const runningTasks = useMemo(
-    () => costTasks.filter((t) => t?.status === "running" || t?.status === "uploading"),
-    [costTasks],
+  const liveCostSum = costTasks.reduce(
+    (sum, t) => sum + (typeof t?.actual_cost_credits === "number" ? t.actual_cost_credits : 0),
+    0,
   );
-  // Refetch the user's credit balance when the count of terminal tasks
-  // grows -- a chunk just landed, server has debited, pull the new
-  // authoritative balance.  Count is strictly monotonic so this fires
-  // exactly once per chunk-completion.
-  const terminalCount = useMemo(
-    () => costTasks.filter((t) => ["done", "failed", "cancelled"].includes(t?.status)).length,
-    [costTasks],
-  );
-  const { refetch: refetchUserProfile } = useUserProfile();
-  useEffect(() => {
-    void refetchUserProfile();
-  }, [terminalCount, refetchUserProfile]);
-  const liveCostSum = costTasks.reduce((sum, t) => {
-    if (t?.status === "running" || t?.status === "uploading") {
-      const live = liveActualCost(t, now);
-      return sum + (live ?? 0);
-    }
-    return sum + (typeof t?.actual_cost_usd === "number" ? t.actual_cost_usd : 0);
-  }, 0);
   const liveCost = liveCostSum > 0
     ? liveCostSum
     : isGroup
-      ? (typeof job?.total_actual_cost_usd === "number" ? job.total_actual_cost_usd : 0)
-      : (typeof job?.actual_cost_usd === "number" ? job.actual_cost_usd : 0);
+      ? (typeof job?.total_actual_cost_credits === "number" ? job.total_actual_cost_credits : 0)
+      : (typeof job?.actual_cost_credits === "number" ? job.actual_cost_credits : 0);
   // Label flips by status so terminal jobs read "TOTAL COST" / "FINAL COST"
   // instead of the live-active "LIVE COST".  Same value either way --
   // it's the actual cost as of now (or end-of-render for terminal).
@@ -618,12 +588,12 @@ export default function JobDetailView({
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
           <div style={{ marginLeft: "auto" }}>
-            <UserCreditsHeader runningTasks={runningTasks} />
+            <UserCreditsHeader />
           </div>
         </div>
         <div className="jd-live-cost" title="Accrued cost for this render">
           <span className="jd-live-cost-label">{costLabel}</span>
-          <span className="jd-live-cost-value">${liveCost.toFixed(2)}</span>
+          <span className="jd-live-cost-value">{formatCredits(liveCost)} cr</span>
         </div>
 
         <div className="job-detail-hero">
@@ -640,6 +610,20 @@ export default function JobDetailView({
                 {status === "running" && <span className="status-badge-dot" />}
                 {STATUS_LABELS[status] || status}
               </span>
+              {(() => {
+                // Priority surfaces from any task row (every chunk stamps
+                // the group's priority).  Show only when it's not NORMAL
+                // (1) -- a NORMAL render is the default and the badge
+                // would be noise.
+                const p = costTasks[0]?.priority;
+                if (p === 0) {
+                  return <span className="priority-badge priority-low">LOW</span>;
+                }
+                if (p === 2) {
+                  return <span className="priority-badge priority-high">HIGH</span>;
+                }
+                return null;
+              })()}
               <span className="job-detail-meta-chip">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 14h.01M10 14h.01" /></svg>
                 {taskCount} machine{taskCount !== 1 ? "s" : ""}

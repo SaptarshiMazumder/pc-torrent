@@ -169,6 +169,40 @@ class AllocationPendingQueueRepository:
         )
         return row is not None
 
+    def count_by_priority_and_fleet(self) -> dict[str, dict[str, dict[str, int]]]:
+        """Job + frame counts grouped by fleet + priority level.
+
+        Pending rows here don't yet have a target fleet (the planner
+        picks one at the next tick), so the heuristic distributes them
+        across all three fleets equally -- one row's frames count
+        toward each.  The UI uses this to show "X jobs waiting" per
+        fleet/priority, and the equal-distribution heuristic is the
+        honest answer when we don't yet know where each pending row
+        will land.
+
+        Returned shape::
+
+            {fleet: {priority_level: {"jobs": N, "frames": F}}}
+        """
+        rows = query_all(
+            """SELECT priority,
+                      COUNT(*) AS jobs,
+                      COALESCE(SUM(total_frames), 0) AS frames
+               FROM pending_allocation_queue
+               GROUP BY priority""",
+        )
+        out: dict[str, dict[str, dict[str, int]]] = {
+            f: {l: {"jobs": 0, "frames": 0}
+                for l in ("low", "normal", "high")}
+            for f in ("vast", "modal", "community")
+        }
+        for r in rows:
+            level = _priority_level_label(int(r.get("priority") or 0))
+            for fleet in ("vast", "modal", "community"):
+                out[fleet][level]["jobs"] += int(r.get("jobs") or 0)
+                out[fleet][level]["frames"] += int(r.get("frames") or 0)
+        return out
+
     def list_for_group(self, group_id: str) -> list[AllocationPendingItem]:
         """Per-group read used by the detail-page poller.  Tries Redis
         first; falls back to Postgres on a cold cache and rehydrates the
@@ -193,6 +227,19 @@ class AllocationPendingQueueRepository:
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
+
+def _priority_level_label(priority: int) -> str:
+    """Map a numeric priority into the queue-depth bucket label.
+
+    Buckets the unknown / out-of-range cases into the NORMAL slot.
+    Keeps the count-by-priority result schema simple and predictable.
+    """
+    if priority <= 0:
+        return "low"
+    if priority >= 2:
+        return "high"
+    return "normal"
+
 
 def _row_to_item(row: dict) -> AllocationPendingItem:
     return AllocationPendingItem(

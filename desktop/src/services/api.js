@@ -376,6 +376,7 @@ export async function confirmDistributedJob(
   scheduling = null,
   analysisSnapshot = null,
   tier = null,
+  priority = null,
   signal = null
 ) {
   const body = {};
@@ -391,6 +392,8 @@ export async function confirmDistributedJob(
   if (scheduling) body.scheduling = scheduling;
   if (analysisSnapshot) body.analysis_snapshot = analysisSnapshot;
   if (tier) body.tier = tier;
+  // 0 (LOW) is a valid choice; only skip when the caller hasn't picked one.
+  if (typeof priority === "number") body.priority = priority;
 
   return apiFetch(baseUrl, `/render-groups/${groupId}/confirm-upload`, {
     method: "POST",
@@ -410,6 +413,7 @@ export async function estimateRenderGroup(
     frameStep = null,
     machineIds = null,
     fileSizeBytes = null,
+    priority = null,
   } = {},
 ) {
   // Stateless RPC — frontend has both the analyzer snapshot (desktop
@@ -425,6 +429,7 @@ export async function estimateRenderGroup(
     machine_ids: machineIds,
     file_size_bytes: fileSizeBytes,
   };
+  if (typeof priority === "number") body.priority = priority;
   return apiFetch(baseUrl, `/pre-render/estimate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -72,7 +72,6 @@ class VastFleetStrategy:
         allowed_stall_times = self._stall_resolver.resolve(
             fleet=_FLEET,
             group_id=context.group_id,
-            estimated_startup_seconds=task.estimated_startup_seconds,
         )
         self._job_repo.create(CreateJobParams(
             job_id=job_id,

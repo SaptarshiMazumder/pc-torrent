@@ -172,6 +172,38 @@ class AllocationDispatchQueueRepository:
         )
         return row is not None
 
+    def count_by_priority_and_fleet(self) -> dict[str, dict[str, dict[str, int]]]:
+        """Job + frame counts grouped by fleet + priority level.
+
+        Reads the dispatch queue (items planned but not yet sent to a
+        provider).  Used together with the pending-queue counts to
+        populate the per-fleet queue-depth chip shown in the UI.
+
+        Returned shape::
+
+            {fleet: {priority_level: {"jobs": N, "frames": F}}}
+        """
+        rows = query_all(
+            """SELECT fleet, priority,
+                      COUNT(*) AS jobs,
+                      COALESCE(SUM(total_frames), 0) AS frames
+               FROM dispatch_queue
+               GROUP BY fleet, priority""",
+        )
+        out: dict[str, dict[str, dict[str, int]]] = {
+            f: {l: {"jobs": 0, "frames": 0}
+                for l in ("low", "normal", "high")}
+            for f in ("vast", "modal", "community")
+        }
+        for r in rows:
+            fleet = _normalize_fleet_label(str(r.get("fleet") or ""))
+            if fleet not in out:
+                continue
+            level = _priority_level_label(int(r.get("priority") or 0))
+            out[fleet][level]["jobs"] += int(r.get("jobs") or 0)
+            out[fleet][level]["frames"] += int(r.get("frames") or 0)
+        return out
+
     def count_for_fleet(self, fleet: str) -> int:
         row = execute_returning(
             "SELECT COUNT(*) AS cnt FROM dispatch_queue WHERE fleet = %s",
@@ -198,6 +230,29 @@ class AllocationDispatchQueueRepository:
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
+
+def _priority_level_label(priority: int) -> str:
+    """Map a numeric priority into the queue-depth bucket label."""
+    if priority <= 0:
+        return "low"
+    if priority >= 2:
+        return "high"
+    return "normal"
+
+
+def _normalize_fleet_label(fleet: str) -> str:
+    """Map the row's fleet string into the queue-depth bucket name.
+
+    ``machine_type`` values in the dispatch queue follow the live names
+    (``vast_serverless`` / ``modal_serverless`` / ``windows`` for
+    community).  The UI surface uses short labels.
+    """
+    if fleet.startswith("vast"):
+        return "vast"
+    if fleet.startswith("modal"):
+        return "modal"
+    return "community"
+
 
 def _row_to_item(row: dict) -> AllocationQueueItem:
     offer_raw = row.get("offer_id")

@@ -1,5 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBnIRWjCDnmOnOhoCEg1rgbdxVyT0W_WDg",
@@ -12,3 +13,8 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+// Firestore client SDK -- used by UserProfileContext's onSnapshot to
+// stream live credit balance updates the moment the server's monitor
+// tick commits a debit transaction.  Same project as auth; no extra
+// config needed.
+export const firestore = getFirestore(app);

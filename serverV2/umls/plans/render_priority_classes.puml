@@ -1,0 +1,188 @@
+@startuml render_priority_classes
+
+skinparam classBackgroundColor #FFFFFF
+skinparam classBorderColor #555555
+skinparam classFontSize 12
+skinparam ArrowFontSize 10
+skinparam packageStyle rectangle
+skinparam packageBorderColor #888888
+
+!define DESK_BG   #FCDDE1
+!define DESK_LN   #B33A65
+!define API_BG    #F0E2B5
+!define API_LN    #A88300
+!define RG_BG     #E2CDF1
+!define RG_LN     #7A3DA8
+!define ORCH_BG   #CFEBCF
+!define ORCH_LN   #2E8A36
+!define ALLOC_BG  #D6E5F5
+!define ALLOC_LN  #2E6FB5
+!define REPO_BG   #C9E8E5
+!define REPO_LN   #2E8A82
+!define FLEET_BG  #F7DCC9
+!define FLEET_LN  #C25A2E
+
+title Render priority — user-selected value flowing through pending + dispatch queues
+
+legend bottom
+|= colour |= module |
+|<#FCDDE1>| desktop UI |
+|<#F0E2B5>| api |
+|<#E2CDF1>| services.render_groups |
+|<#CFEBCF>| orchestrator |
+|<#D6E5F5>| allocation |
+|<#C9E8E5>| repositories |
+|<#F7DCC9>| fleets |
+endlegend
+
+package "desktop" DESK_BG {
+  class CreateRenderPage <<modified>> {
+    + state.priority : int (0/1/2)
+    + onSubmit() : POST /render-groups/.../confirm
+  }
+  class JobDetailView <<modified>> {
+    + render priority badge
+  }
+}
+
+package "api" API_BG {
+  class ConfirmRenderGroupPayload <<modified>> {
+    + priority : int = 1
+    + machine_ids : list of str
+    + tier : str
+    + ...
+  }
+  class render_groups_router <<module>> {
+    + POST /render-groups/id/confirm
+  }
+}
+
+package "services.render_groups" RG_BG {
+  class RenderGroupService <<modified>> {
+    + confirm_upload(group_id, payload)
+  }
+}
+
+package "orchestrator" ORCH_BG {
+  class RenderOrchestrator <<facade modified>> {
+    + submit_initial(... priority)
+  }
+  class RenderLifecycle <<modified>> {
+    + submit_initial(... priority)
+  }
+  class AllocationClient {
+    + submit_initial(... dispatch_context)
+  }
+  class DispatchContext <<value>> {
+    + priority : int
+  }
+}
+
+package "allocation" ALLOC_BG {
+  class AllocationFacade {
+    + submit_initial(... dispatch_context)
+  }
+  class AllocationPendingQueueRepository {
+    + enqueue(item)
+    + list_all() ORDER BY priority DESC, created_at ASC
+  }
+  class AllocationPendingItem <<value>> {
+    + priority : int
+  }
+  class pending_allocation_queue <<table>> {
+    priority : int
+  }
+  class AllocationPendingTickProcessor {
+    + tick()
+  }
+  class AllocationDispatchQueueRepository {
+    + enqueue(item)
+    + dequeue_for_fleet(fleet) ORDER BY priority DESC, id ASC
+  }
+  class AllocationQueueItem <<value>> {
+    + priority : int
+  }
+  class dispatch_queue <<table>> {
+    priority : int
+  }
+  class AllocationDispatchTickProcessor {
+    + tick()
+  }
+  class AllocationDispatcher {
+    + dispatch(item)
+  }
+  class AllocationQueueItemCodec {
+    + encode(task, context)
+  }
+}
+
+package "fleets" FLEET_BG {
+  class VastFleetStrategy {
+    + dispatch(task)
+  }
+  class ModalFleetStrategy {
+    + dispatch(task)
+  }
+  class CommunityStrategy {
+    + dispatch(task)
+  }
+}
+
+package "repositories" REPO_BG {
+  class JobRepository {
+    + create(params)
+  }
+  class jobs_row <<table>> {
+    priority : int
+  }
+  class CreateJobParams <<value>> {
+    + priority : int
+  }
+}
+
+' --- INGRESS: user selects, flows through API + service (UI = pink) ---
+CreateRenderPage -[DESK_LN]-> ConfirmRenderGroupPayload : POST { priority }
+
+' --- API hands off (gold) ---
+render_groups_router -[API_LN]-> RenderGroupService : confirm_upload(payload)
+render_groups_router -[API_LN]-> ConfirmRenderGroupPayload : parses
+
+' --- Service threads priority (purple) ---
+RenderGroupService -[RG_LN]-> RenderOrchestrator : submit_initial(... priority)
+
+' --- Orchestrator (green) ---
+RenderOrchestrator -[ORCH_LN]-> RenderLifecycle : submit_initial(... priority)
+RenderLifecycle -[ORCH_LN]-> DispatchContext : DispatchContext(priority=...)
+RenderLifecycle -[ORCH_LN]-> AllocationClient : submit_initial(dispatch_context)
+AllocationClient -[ORCH_LN]-> AllocationFacade : submit_initial(dispatch_context)
+
+' --- Allocation: park to pending queue (blue) ---
+AllocationFacade -[ALLOC_LN]-> AllocationPendingItem : built from dispatch_context
+AllocationFacade -[ALLOC_LN]-> AllocationPendingQueueRepository : enqueue(item)
+AllocationPendingQueueRepository -[ALLOC_LN]-> pending_allocation_queue : INSERT (priority)
+
+' --- Pending tick promotes highest-priority pending into dispatch queue ---
+AllocationPendingTickProcessor -[ALLOC_LN]-> AllocationPendingQueueRepository : list_all()
+AllocationPendingTickProcessor -[ALLOC_LN]-> AllocationQueueItemCodec : encode(task, context)
+AllocationQueueItemCodec -[ALLOC_LN]-> AllocationQueueItem : carries priority
+AllocationPendingTickProcessor -[ALLOC_LN]-> AllocationDispatchQueueRepository : enqueue(item)
+AllocationDispatchQueueRepository -[ALLOC_LN]-> dispatch_queue : INSERT (priority)
+
+' --- Dispatch tick pops highest-priority item per fleet ---
+AllocationDispatchTickProcessor -[ALLOC_LN]-> AllocationDispatchQueueRepository : dequeue_for_fleet(fleet)
+AllocationDispatchTickProcessor -[ALLOC_LN]-> AllocationDispatcher : dispatch(item)
+
+' --- Dispatcher routes to strategy; strategy stamps priority on jobs row ---
+AllocationDispatcher -[ALLOC_LN]-> VastFleetStrategy : dispatch(task)
+AllocationDispatcher -[ALLOC_LN]-> ModalFleetStrategy : dispatch(task)
+AllocationDispatcher -[ALLOC_LN]-> CommunityStrategy : dispatch(task)
+VastFleetStrategy -[FLEET_LN]-> CreateJobParams : priority preserved
+ModalFleetStrategy -[FLEET_LN]-> CreateJobParams : priority preserved
+CommunityStrategy -[FLEET_LN]-> CreateJobParams : priority preserved
+CreateJobParams -[FLEET_LN]-> JobRepository : create(params)
+JobRepository -[REPO_LN]-> jobs_row : INSERT (priority)
+
+' --- Detail view reads priority back (pink) ---
+JobDetailView -[DESK_LN]-> jobs_row : reads (via GET /render-groups/id)
+
+@enduml

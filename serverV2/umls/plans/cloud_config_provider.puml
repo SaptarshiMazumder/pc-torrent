@@ -1,5 +1,5 @@
 @startuml cloud_config_provider
-title Cloud config — Phases 1 + 2 + 2b (DONE), Phase 3 (admin UI, planned)
+title Cloud config — Phases 1 + 2 + 2b + 3 (DONE) + Phase 4: analyzer reads live (DONE)
 
 skinparam shadowing false
 skinparam BackgroundColor white
@@ -11,6 +11,7 @@ legend top right
   | <#fef3c7> | EXISTING (unchanged) |
   | <#bbf7d0> | DONE — new class/file |
   | <#bfdbfe> | DONE — modified |
+  | <#fde68a> | PHASE 4 — analyzer live-reads (DONE) |
   | <#e9d5ff> | PHASE 3 (planned — admin UI) |
   | <#fecaca> | Storage |
 endlegend
@@ -106,21 +107,38 @@ package "serverV2/allocation" <<Frame>> #e0f2fe {
         AllocationConfigRepository.
       + plan_initial(...)
         ' cfg = self._config_repo.get()  <<single read>>
+        ' self._apply_analyzer_calibration(cfg)  <<PHASE 4>>
         ' planner.plan_initial(
         '     weights=cfg.frame_allocation.weights,
         '     startup_buffer_sec=cfg.frame_allocation.startup_buffer_sec,
         '     vram_fleet_boost=cfg.frame_allocation.vram_fleet_boost,
         '     ...)
       + plan_retry(...)
-        ' same single-read pattern.
+        ' same single-read + analyzer-apply pattern.
       + cost_for_dry_run(...)
         ' ONE cfg.get() shared between planning
         ' and cost aggregation:
+        '   self._apply_analyzer_calibration(cfg)
         '   tasks = planner.plan_initial(... cfg slices ...)
         '   items = aggregator.from_planned_tasks(
         '              tasks,
         '              failure_rate=cfg.frame_allocation.failure_rate)
       + cost_for_committed_jobs(rows)
+      .. PHASE 4 (DONE) — analyzer live-read ..
+      - _apply_analyzer_calibration(cfg : RenderConfig)
+        ' rt = cfg.frame_allocation.render_time
+        ' allocation_time_analyzer.configure(RenderTimeConfig(
+        '     baseline_sec_cycles=rt.baseline_sec_cycles,
+        '     baseline_sec_eevee=rt.baseline_sec_eevee,
+        '     factors_cycles=rt.factors_cycles,
+        '     factors_eevee=rt.factors_eevee,
+        '     scene_scaling_cycles=rt.scene_scaling_cycles,
+        '     scene_scaling_eevee=rt.scene_scaling_eevee,
+        '     startup=rt.startup_sec,   <<field rename>>
+        ' ))
+        ' allocation_time_analyzer.configure_combination(
+        '     secondary_feature_credit=...weights.secondary_feature_credit,
+        '     heavy_multiplier_cap=...weights.heavy_multiplier_cap)
       --
       One Firestore read per call.
       Public API unchanged for upstream
@@ -134,6 +152,38 @@ package "serverV2/allocation" <<Frame>> #e0f2fe {
   package "(existing — unchanged)" <<Rectangle>> #fef3c7 {
     class AllocationDispatchQueueDaemon {
       tick(): plan via planning_service.
+    }
+  }
+
+  package "(Phase 4 — analyzer live-read DONE)" <<Rectangle>> #fde68a {
+    class "allocation_time_analyzer\n(allocation_strategies/analyzers/\nallocation_time_analyzer.py)" as Analyzer {
+      .. module-level state, reset per plan call ..
+      - _calibration : RenderTimeConfig
+      - _secondary_feature_credit : float
+      - _heavy_multiplier_cap : float
+      --
+      + configure(cfg : RenderTimeConfig)
+      + configure_combination(*,
+            secondary_feature_credit,
+            heavy_multiplier_cap)
+      + estimate_seconds_per_frame(
+            heaviness, render_speed) : float
+      + estimate_startup_seconds(
+            heaviness) : float
+      --
+      PHASE 4: configure() now called by
+      AllocationPlanningService at the top
+      of every plan_initial / plan_retry /
+      cost_for_dry_run call.  Boot-time
+      seed from config.json was REMOVED.
+      _DEFAULT_CALIBRATION still covers
+      the before-first-plan-call window
+      (smoke tests, ad-hoc scripts).
+
+      Single Python process: each plan
+      call runs sync end-to-end, no
+      coroutine yields between configure()
+      and planner return -> race-free.
     }
   }
 
@@ -181,7 +231,7 @@ package "serverV2/config (legacy boot path)" <<Frame>> #e0f2fe {
 ' MODULE: serverV2/bootstrap.py
 ' ===========================================================
 package "serverV2/bootstrap.py" <<Frame>> #e0f2fe {
-  package "(Phases 1 + 2b — DONE)" <<Rectangle>> #bfdbfe {
+  package "(Phases 1 + 2b + 4 — DONE)" <<Rectangle>> #fde68a {
     class "build()" as Bootstrap {
       Boot wiring:
         cfg = AppConfig.from_env()
@@ -195,11 +245,23 @@ package "serverV2/bootstrap.py" <<Frame>> #e0f2fe {
             planner=planner,
             cost_aggregator=...,
             config_repo=config_repo)
-            ' Phase 2b: takes planner directly,
-            ' no AllocationStrategy hop
+            ' Phase 2b: takes planner directly
         ... wire frozen-at-boot consumers
             (stall watchdog, monitors,
              registry) with cfg ...
+        --
+        PHASE 4 (DONE) — DELETED:
+          allocation_time_analyzer.configure(
+              cfg.frame_allocation.render_time)
+          allocation_time_analyzer
+              .configure_combination(
+                  secondary_feature_credit=...,
+                  heavy_multiplier_cap=...)
+        Was here to seed the analyzer at
+        boot from config.json.  Now the
+        planning service re-applies fresh
+        Firestore values on every plan
+        call, so this block is redundant.
     }
   }
 }
@@ -333,6 +395,12 @@ AllocationPlanningService ..> AllocationPlanner : plan_initial(weights, buffer, 
 AllocationFacade --> AllocationPlanningService : cost_estimate_for_dry_run
 
 ' ===========================================================
+' Phase 4 — analyzer calibration re-applied per plan call
+' ===========================================================
+AllocationPlanningService ..> Analyzer : configure() + configure_combination() per call
+AllocationPlanner ..> Analyzer : estimate_seconds_per_frame / estimate_startup_seconds
+
+' ===========================================================
 ' Phase 3 — admin endpoint flow (strict layering)
 ' ===========================================================
 ConfigPage --> FormComps : composes
@@ -362,6 +430,22 @@ note right of AllocationPlanningService
   so they always see the same snapshot.
   Planner is now pure-functional in its
   config inputs -- no double reads.
+end note
+
+note left of Analyzer
+  PRE-PHASE-4 BUG: analyzer was seeded
+  ONCE at boot from bundled config.json.
+  ConfigurationPage edits in Firestore
+  silently dropped on the floor -- the
+  running server kept old baselines and
+  feature multipliers until a redeploy.
+
+  Phase 4 fix: planning service re-applies
+  the calibration from the fresh Firestore
+  RenderConfig at the top of every plan
+  call.  Now ConfigurationPage saves take
+  effect on the NEXT plan call -- no
+  redeploy, no restart.
 end note
 
 note bottom of AdminRouter

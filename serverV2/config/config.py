@@ -98,7 +98,13 @@ class VastConfig:
 
 
 def _load_config_json(config_json_path: str | None = None) -> dict:
-    path = config_json_path or os.path.join(os.path.dirname(__file__), "config.json")
+    # ``config.json`` lives at ``serverV2/config.json`` -- one directory
+    # up from this module after the move into the ``serverV2/config/``
+    # package.  Resolve relative to ``__file__`` so the lookup works
+    # under any working directory (uvicorn / pytest / Cloud Run).
+    path = config_json_path or os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "config.json",
+    )
     try:
         with open(path, "r") as f:
             return json.load(f)
@@ -772,7 +778,34 @@ def _load_allocation_weights() -> "AllocationWeights":
         heavy_multiplier_cap=_require_field_float(
             block, ctx, "heavy_multiplier_cap",
         ),
+        priority_cost_multipliers=_load_priority_cost_multipliers(block, ctx),
     )
+
+
+def _load_priority_cost_multipliers(block: dict, ctx: str) -> dict[str, float]:
+    """Load the per-priority cost multipliers from a weights block.
+
+    Defaults to 1.0 / 1.1 / 1.2 when the section is absent so existing
+    Firestore docs that pre-date the field keep loading.  Missing
+    individual keys fall back to 1.0 (no markup) -- the safe default.
+    """
+    sub = block.get("priority_cost_multipliers")
+    if not isinstance(sub, dict):
+        return {"low": 1.0, "normal": 1.1, "high": 1.2}
+    sub_ctx = f"{ctx}.priority_cost_multipliers"
+    out: dict[str, float] = {}
+    for key, fallback in (("low", 1.0), ("normal", 1.1), ("high", 1.2)):
+        if key in sub:
+            try:
+                out[key] = float(sub[key])
+                continue
+            except (TypeError, ValueError) as exc:
+                raise FleetException(
+                    f"config.json {sub_ctx}.{key} is not a valid number: "
+                    f"{sub[key]!r}",
+                ) from exc
+        out[key] = fallback
+    return out
 
 
 @dataclass(frozen=True)

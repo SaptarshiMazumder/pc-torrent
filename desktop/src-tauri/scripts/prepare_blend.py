@@ -32,8 +32,11 @@ Output prefixes (parsed by the desktop app):
 import bpy
 import json
 import os
+import platform
 import re
+import string
 import sys
+import time
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -84,6 +87,188 @@ def _make_paths_relative():
         _log("All file paths remapped to relative")
     except Exception as e:
         _warn(f"Could not make paths relative: {e}")
+
+
+# ── 3b. Recover missing external file references ─────────────────────────────
+#
+# When a .blend references an external asset that's not where the file
+# claims it is (absolute path from a different machine, sibling textures/
+# folder one level too deep, etc.), Blender flags it "missing" at load
+# time and pack() then fails because there's no on-disk file to read.
+#
+# We try to recover by walking the user's machine with
+# ``bpy.ops.file.find_missing_files`` -- it builds a basename index of
+# every file under a given directory and re-points missing references
+# whose basenames match.  Tiered from cheap (blend's own folder) to
+# expensive (every fixed drive root) with a global time budget so we
+# don't hang the analyze step on a big drive.
+
+_RECOVER_TOTAL_BUDGET_SEC = 90.0
+_DRIVE_FIXED = 3  # Windows GetDriveTypeW: DRIVE_FIXED
+
+
+def _count_missing_refs() -> int:
+    """Total external references whose resolved path is missing on disk.
+
+    Mirrors the set of data blocks the pack/check steps care about.
+    Skips items that are already packed (no need to recover) or have
+    empty filepaths (no reference to resolve).
+    """
+    missing = 0
+
+    def _is_missing(item, packed_attr: str = "packed_file") -> bool:
+        fp = getattr(item, "filepath", "")
+        if not fp:
+            return False
+        if packed_attr and getattr(item, packed_attr, None):
+            return False
+        try:
+            return not os.path.exists(bpy.path.abspath(fp))
+        except Exception:
+            return False
+
+    for img in bpy.data.images:
+        if img.source in ("FILE", "SEQUENCE", "MOVIE", "TILED") and _is_missing(img):
+            missing += 1
+    for lib in bpy.data.libraries:
+        if getattr(lib, "is_missing", False):
+            missing += 1
+    for font in bpy.data.fonts:
+        if font.filepath in ("<builtin>", ""):
+            continue
+        if _is_missing(font):
+            missing += 1
+    for snd in bpy.data.sounds:
+        if _is_missing(snd):
+            missing += 1
+    for clip in bpy.data.movieclips:
+        if _is_missing(clip, packed_attr=""):
+            missing += 1
+    for vol in bpy.data.volumes:
+        if _is_missing(vol, packed_attr=""):
+            missing += 1
+    for cf in bpy.data.cache_files:
+        if _is_missing(cf, packed_attr=""):
+            missing += 1
+    return missing
+
+
+def _fixed_drive_roots() -> list[str]:
+    """Return existing fixed-disk drive roots on Windows; '/' elsewhere.
+
+    We skip removable / CD / network drives -- walking them risks
+    multi-minute hangs or random media-not-ready prompts.
+    """
+    if platform.system() != "Windows":
+        return ["/"]
+
+    roots: list[str] = []
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        for letter in string.ascii_uppercase:
+            root = f"{letter}:\\"
+            if not os.path.exists(root):
+                continue
+            try:
+                kind = kernel32.GetDriveTypeW(root)
+            except Exception:
+                kind = 0
+            if kind == _DRIVE_FIXED:
+                roots.append(root)
+    except Exception as exc:
+        _warn(f"Could not enumerate fixed drives: {exc}")
+    return roots
+
+
+def _try_find_under(directory: str, label: str, time_left: float) -> int:
+    """Run find_missing_files on ``directory`` and return resolved count.
+
+    Returns the drop in missing-ref count after the op.  The op walks
+    the tree fully regardless of how many refs are missing, so a fast
+    early-exit when count drops to 0 is enforced by the caller.
+    """
+    if time_left <= 0 or not directory:
+        return 0
+    if not os.path.isdir(directory):
+        return 0
+    before = _count_missing_refs()
+    if before == 0:
+        return 0
+    t_start = time.monotonic()
+    try:
+        bpy.ops.file.find_missing_files(directory=directory, find_all=True)
+    except Exception as exc:
+        _warn(f"find_missing_files({label}) failed: {exc}")
+        return 0
+    elapsed = time.monotonic() - t_start
+    after = _count_missing_refs()
+    resolved = max(0, before - after)
+    _log(
+        f"search {label}: resolved {resolved}/{before} missing reference(s) "
+        f"in {elapsed:.1f}s"
+    )
+    return resolved
+
+
+def _recover_missing_files(blend_dir: str) -> int:
+    """Tiered hunt for missing external files anywhere on the machine.
+
+    Tiers, cheapest to most expensive, share a single time budget:
+      1. The .blend's own folder
+      2. The .blend's parent folder
+      3. The user's home directory
+      4. Every fixed drive root (C:\\, D:\\ ...)
+    Stops as soon as nothing is missing OR the budget runs out.
+    """
+    initial = _count_missing_refs()
+    if initial == 0:
+        return 0
+    _log(f"Recovering {initial} missing external reference(s) -- tiered search")
+
+    deadline = time.monotonic() + _RECOVER_TOTAL_BUDGET_SEC
+    total_resolved = 0
+
+    def _remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    # Tier 1: the .blend's own directory.
+    total_resolved += _try_find_under(blend_dir, "tier1 (blend dir)", _remaining())
+    if _count_missing_refs() == 0:
+        return total_resolved
+
+    # Tier 2: parent of the .blend's directory.
+    parent_dir = os.path.dirname(blend_dir.rstrip("\\/")) if blend_dir else ""
+    if parent_dir and parent_dir != blend_dir:
+        total_resolved += _try_find_under(parent_dir, "tier2 (parent dir)", _remaining())
+        if _count_missing_refs() == 0:
+            return total_resolved
+
+    # Tier 3: user home.
+    home = os.path.expanduser("~")
+    if home and home != blend_dir and home != parent_dir:
+        total_resolved += _try_find_under(home, "tier3 (user home)", _remaining())
+        if _count_missing_refs() == 0:
+            return total_resolved
+
+    # Tier 4: every fixed drive root.  Slowest by far -- this is the
+    # "anywhere on the machine" case.  Each root call competes for the
+    # remaining time budget.
+    skip = {blend_dir, parent_dir, home}
+    for root in _fixed_drive_roots():
+        if _remaining() <= 0:
+            _warn(
+                f"Search budget ({_RECOVER_TOTAL_BUDGET_SEC:.0f}s) exhausted; "
+                f"{_count_missing_refs()} reference(s) still missing"
+            )
+            break
+        if root in skip:
+            continue
+        total_resolved += _try_find_under(root, f"tier4 ({root})", _remaining())
+        if _count_missing_refs() == 0:
+            break
+
+    return total_resolved
 
 
 # ── 4.  Relink missing libraries ─────────────────────────────────────────────
@@ -743,6 +928,9 @@ def prepare():
     # ── 3. Make paths relative ───────────────────────────────────────────
     _make_paths_relative()
 
+    # ── 3b. Recover missing files via tiered machine-wide search ────────
+    _recover_missing_files(blend_dir)
+
     # ── 4. Relink missing libraries ──────────────────────────────────────
     total_libs = len(list(bpy.data.libraries))
     if total_libs:
@@ -798,8 +986,14 @@ def prepare():
     _validate_scenes()
 
     # ── 13. Save ─────────────────────────────────────────────────────────
-    bpy.ops.wm.save_as_mainfile(filepath=filepath)
-    _log("Saved prepared blend file")
+    # ``PCR_PREP_OUTPUT_PATH`` is set by the Tauri host: where the prepared
+    # (packed) .blend should land.  Bare-.blend case: a fresh path in the
+    # job work dir, so the user's original on disk is left untouched.
+    # Zip case: the extracted .blend inside the work dir, overwritten in
+    # place.  No fallback -- if the host forgot to set it, fail loud.
+    output_path = os.environ["PCR_PREP_OUTPUT_PATH"]
+    bpy.ops.wm.save_as_mainfile(filepath=output_path)
+    _log(f"Saved prepared blend file to {output_path}")
     try:
         _emit_analysis_json()
     except Exception as e:

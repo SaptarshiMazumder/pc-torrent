@@ -72,6 +72,7 @@ export function UserProfileProvider({ children }) {
               email: data.email || user.email || "",
               display_name: data.display_name || "",
               tier: data.tier || "free",
+              role: data.role === "admin" ? "admin" : "user",
               credits: typeof data.credits === "number" ? data.credits : 0,
             });
           }

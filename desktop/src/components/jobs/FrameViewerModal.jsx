@@ -90,11 +90,6 @@ export default function FrameViewerModal({ viewer, onClose }) {
           </div>
         )}
 
-        {viewer?.localPath ? (
-          <div className="frame-viewer-foot">
-            Saved at <code>{viewer.localPath}</code>
-          </div>
-        ) : null}
       </div>
     </div>
   );

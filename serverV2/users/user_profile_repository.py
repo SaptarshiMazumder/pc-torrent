@@ -7,6 +7,7 @@ from typing import Any
 
 from firebase_admin import firestore
 
+from serverV2.core.user_role import UserRole
 from serverV2.core.value_objects import now_iso
 from serverV2.infrastructure.auth.firebase_app import init_firebase
 
@@ -43,6 +44,15 @@ class UserProfileRepository:
             data["tier"] = data["billing_plan"]
         return data
 
+    def get_role(self, uid: str) -> UserRole:
+        """Resolve the authorization role for ``uid``.
+
+        Missing doc or missing/unknown field -> ``UserRole.USER``.  Never
+        elevates on absent data; ADMIN requires the exact stored string.
+        """
+        data = self.get(uid)
+        return UserRole.from_value((data or {}).get("role"))
+
     def create_if_missing(self, uid: str, email: str | None) -> dict[str, Any]:
         existing = self.get(uid)
         if existing is not None:
@@ -52,6 +62,7 @@ class UserProfileRepository:
             "display_name": (email or "").split("@")[0] if email else "",
             "email": email or "",
             "tier": "free",
+            "role": UserRole.USER.value,
             "credits": 0.0,
             "created_at": ts,
             "updated_at": ts,
@@ -115,6 +126,7 @@ class UserProfileRepository:
                 txn.set(user_ref, {
                     "credits": -delta,
                     "tier": "free",
+                    "role": UserRole.USER.value,
                     "email": "",
                     "display_name": "",
                     "created_at": ts,

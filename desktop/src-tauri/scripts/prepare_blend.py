@@ -181,32 +181,192 @@ def _fixed_drive_roots() -> list[str]:
     return roots
 
 
-def _try_find_under(directory: str, label: str, time_left: float) -> int:
-    """Run find_missing_files on ``directory`` and return resolved count.
+# Directories that never contain user textures and would otherwise
+# dominate the walk time.  Pruned during ``os.walk`` so we never descend
+# into them.  Comparison is case-insensitive (Windows is case-insensitive
+# for filenames; we lowercase both sides at compare time).
+_NOISE_DIRS = frozenset(name.lower() for name in (
+    # Windows system / vendor
+    "$Recycle.Bin", "System Volume Information", "Recovery",
+    "Windows", "Windows.old", "WinSxS",
+    "Program Files", "Program Files (x86)", "ProgramData",
+    "PerfLogs", "MSOCache",
+    # macOS noise
+    ".Trashes", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100",
+    # Cross-platform dev / cache noise (typically tens of thousands of files)
+    "node_modules", ".git", ".svn", ".hg", "__pycache__", ".venv", "venv",
+    ".cache", ".tox",
+))
 
-    Returns the drop in missing-ref count after the op.  The op walks
-    the tree fully regardless of how many refs are missing, so a fast
-    early-exit when count drops to 0 is enforced by the caller.
+
+def _missing_basenames() -> set[str]:
+    """Lowercased basenames of every still-missing external reference.
+
+    Used as the lookup set during the custom walk -- a file matches
+    when its lowercased name is in this set.  Lowercase because Windows
+    paths are case-insensitive and we want a match either way.
+    """
+    names: set[str] = set()
+
+    def _add(item, packed_attr: str = "packed_file") -> None:
+        fp = getattr(item, "filepath", "")
+        if not fp:
+            return
+        if packed_attr and getattr(item, packed_attr, None):
+            return
+        try:
+            if os.path.exists(bpy.path.abspath(fp)):
+                return
+        except Exception:
+            return
+        base = os.path.basename(fp.replace("\\", "/")).lower()
+        if base:
+            names.add(base)
+
+    for img in bpy.data.images:
+        if img.source in ("FILE", "SEQUENCE", "MOVIE", "TILED"):
+            _add(img)
+    for lib in bpy.data.libraries:
+        if getattr(lib, "is_missing", False):
+            base = os.path.basename(lib.filepath.replace("\\", "/")).lower()
+            if base:
+                names.add(base)
+    for font in bpy.data.fonts:
+        if font.filepath not in ("<builtin>", ""):
+            _add(font)
+    for snd in bpy.data.sounds:
+        _add(snd)
+    for clip in bpy.data.movieclips:
+        _add(clip, packed_attr="")
+    for vol in bpy.data.volumes:
+        _add(vol, packed_attr="")
+    for cf in bpy.data.cache_files:
+        _add(cf, packed_attr="")
+    return names
+
+
+def _apply_found_paths(found: dict[str, str]) -> None:
+    """Re-point every still-missing data block whose basename matches a
+    found path.  Mirrors the data types that ``_count_missing_refs``
+    counts -- if you add a type there, add it here too.
+
+    Image data blocks need ``reload()`` after a filepath change so
+    Blender re-reads the pixels from the new location; otherwise pack()
+    would still see the stale missing state.
+    """
+    def _maybe_apply(item, packed_attr: str = "packed_file") -> bool:
+        fp = getattr(item, "filepath", "")
+        if not fp:
+            return False
+        if packed_attr and getattr(item, packed_attr, None):
+            return False
+        try:
+            if os.path.exists(bpy.path.abspath(fp)):
+                return False  # already resolves; nothing to fix
+        except Exception:
+            return False
+        base = os.path.basename(fp.replace("\\", "/")).lower()
+        new_path = found.get(base)
+        if not new_path:
+            return False
+        item.filepath = new_path
+        return True
+
+    for img in bpy.data.images:
+        if img.source not in ("FILE", "SEQUENCE", "MOVIE", "TILED"):
+            continue
+        if _maybe_apply(img):
+            try:
+                img.reload()
+            except Exception:
+                pass
+    for lib in bpy.data.libraries:
+        if not getattr(lib, "is_missing", False):
+            continue
+        base = os.path.basename(lib.filepath.replace("\\", "/")).lower()
+        new_path = found.get(base)
+        if not new_path:
+            continue
+        lib.filepath = new_path
+        try:
+            lib.reload()
+        except Exception:
+            pass
+    for font in bpy.data.fonts:
+        if font.filepath in ("<builtin>", ""):
+            continue
+        _maybe_apply(font)
+    for snd in bpy.data.sounds:
+        _maybe_apply(snd)
+    for clip in bpy.data.movieclips:
+        _maybe_apply(clip, packed_attr="")
+    for vol in bpy.data.volumes:
+        _maybe_apply(vol, packed_attr="")
+    for cf in bpy.data.cache_files:
+        _maybe_apply(cf, packed_attr="")
+
+
+def _try_find_under(directory: str, label: str, time_left: float) -> int:
+    """Walk ``directory`` with ``os.walk``, looking for files whose
+    basename matches a still-missing reference.  Time-budgeted (checked
+    at every directory entry) and noise-pruned (system / cache dirs
+    skipped before descending).
+
+    Returns the number of references resolved.  Compared with the old
+    Blender op, this is interruptible mid-walk so the global budget is
+    actually enforced.
     """
     if time_left <= 0 or not directory:
         return 0
     if not os.path.isdir(directory):
         return 0
-    before = _count_missing_refs()
-    if before == 0:
+
+    needed = _missing_basenames()
+    if not needed:
         return 0
+
+    deadline = time.monotonic() + time_left
     t_start = time.monotonic()
+    found: dict[str, str] = {}
+    dirs_visited = 0
+    budget_exhausted = False
+
     try:
-        bpy.ops.file.find_missing_files(directory=directory, find_all=True)
+        walker = os.walk(directory, topdown=True, onerror=lambda _e: None)
+        for root, dirs, files in walker:
+            dirs_visited += 1
+
+            # Real interruption: check at every directory entry.
+            if time.monotonic() >= deadline:
+                budget_exhausted = True
+                break
+
+            # Prune noise BEFORE descending -- os.walk respects in-place
+            # mutation of dirs[] on topdown.
+            dirs[:] = [d for d in dirs if d.lower() not in _NOISE_DIRS]
+
+            for fname in files:
+                low = fname.lower()
+                if low in needed and low not in found:
+                    found[low] = os.path.join(root, fname)
+                    needed.discard(low)
+                    if not needed:
+                        break
+
+            if not needed:
+                break
     except Exception as exc:
-        _warn(f"find_missing_files({label}) failed: {exc}")
-        return 0
+        _warn(f"walk under {label} failed: {exc}")
+
     elapsed = time.monotonic() - t_start
-    after = _count_missing_refs()
-    resolved = max(0, before - after)
+    if found:
+        _apply_found_paths(found)
+    resolved = len(found)
+
+    suffix = " (budget exhausted)" if budget_exhausted else ""
     _log(
-        f"search {label}: resolved {resolved}/{before} missing reference(s) "
-        f"in {elapsed:.1f}s"
+        f"search {label}: resolved {resolved} reference(s) in {elapsed:.1f}s "
+        f"after visiting {dirs_visited} directories{suffix}"
     )
     return resolved
 
@@ -929,7 +1089,15 @@ def prepare():
     _make_paths_relative()
 
     # ── 3b. Recover missing files via tiered machine-wide search ────────
-    _recover_missing_files(blend_dir)
+    # Opt-in via PCR_DEEP_SEARCH=1.  The host enables it only when the
+    # user clicks "Search this machine for missing files" in the UI,
+    # after a default analyze surfaced missing-file warnings.  Default
+    # off because the tier-4 drive walk costs up to 90s and the common
+    # case (assets next to the .blend) doesn't need it.
+    if os.environ.get("PCR_DEEP_SEARCH") == "1":
+        _recover_missing_files(blend_dir)
+    else:
+        _log("Deep search disabled (default). Re-run with deep search if assets are missing.")
 
     # ── 4. Relink missing libraries ──────────────────────────────────────
     total_libs = len(list(bpy.data.libraries))

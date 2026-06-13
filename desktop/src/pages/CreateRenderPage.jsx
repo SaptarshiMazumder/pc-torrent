@@ -543,7 +543,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   };
 
   // ── Analyze ─────────────────────────────────────────────
-  const handleAnalyze = async () => {
+  // ``deepSearch`` is opt-in -- by default the prepare script skips its
+  // tier-4 drive walk for missing-file recovery (fast).  The Analysis
+  // Report's "Search this machine for missing files" button calls
+  // through with deepSearch=true; that bypasses the cache, runs Blender
+  // with PCR_DEEP_SEARCH=1, and the result deliberately isn't cached
+  // (a re-pick should re-run the cheap path, not replay the deep one).
+  const handleAnalyze = async (deepSearch = false) => {
     if (savedInputId && !file) {
       await handleUseSavedInput();
       return;
@@ -553,17 +559,20 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       return;
     }
 
-    // Check analysis cache first
-    const cached = file.path ? getCachedAnalysis(file.path, file.size) : null;
-    if (cached) {
-      dispatch({
-        type: "ANALYZE_DONE",
-        analysis: cached.analysis,
-        prepResult: cached.prepResult,
-        settings: cached.analysis ? applyAnalysis(cached.analysis) : {},
-        note: cached.note || "",
-      });
-      return;
+    // Check analysis cache first -- but skip when the user explicitly
+    // asked for a deep-search re-analyze.
+    if (!deepSearch) {
+      const cached = file.path ? getCachedAnalysis(file.path, file.size) : null;
+      if (cached) {
+        dispatch({
+          type: "ANALYZE_DONE",
+          analysis: cached.analysis,
+          prepResult: cached.prepResult,
+          settings: cached.analysis ? applyAnalysis(cached.analysis) : {},
+          note: cached.note || "",
+        });
+        return;
+      }
     }
 
     dispatch({ type: "START_ANALYZE" });
@@ -579,7 +588,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     }
 
     try {
-      const result = await invoke("analyze_and_prepare_blend", { filePath: file.path, blenderBin: blenderBinRef.current });
+      const result = await invoke("analyze_and_prepare_blend", { filePath: file.path, blenderBin: blenderBinRef.current, deepSearch });
       if (runId !== runIdRef.current) return;
 
       const analysisPayload = result?.analysis && typeof result.analysis === "object" ? result.analysis : null;
@@ -591,6 +600,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         prepare_warnings: result?.prepare_warnings || result?.warnings || [],
         prepare_errors: result?.prepare_errors || result?.errors || [],
         prep_done: Boolean(result?.prep_done),
+        deep_search_ran: deepSearch,
       };
 
       let note = "";
@@ -601,8 +611,9 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         note = `Prepare: ${detail}. Upload will use original file.`;
       }
 
-      // Cache the result
-      if (file.path) {
+      // Only cache the cheap default analyze.  Deep-search results are
+      // one-shot -- next file pick should still get the fast path.
+      if (!deepSearch && file.path) {
         setCachedAnalysis(file.path, file.size, { analysis: analysisPayload, prepResult: prep, note });
       }
 
@@ -966,7 +977,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
               <span className="cr-drop-hint">{file ? formatSizeMb(file.size) : ".blend or .zip"}</span>
             </button>
 
-            <button className="btn btn-primary cr-analyze-btn" type="button" onClick={handleAnalyze} disabled={!hasSource}>
+            <button className="btn btn-primary cr-analyze-btn" type="button" onClick={() => handleAnalyze()} disabled={!hasSource}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
               Analyze &amp; Continue
             </button>
@@ -1315,20 +1326,48 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
           </div>
 
           {/* ── Below (full-width): preserved Analysis Report ── */}
-          {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (
-            <div className="cr-card cr-card-warnings">
-              <div className="cr-card-header">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
-                <span>Analysis Report</span>
+          {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (() => {
+            const allWarnings = [...(prepResult.analysis_warnings || []), ...(prepResult.prepare_warnings || [])];
+            const missingFilePattern = /cannot pack|missing images|missing image|still missing|search budget/i;
+            const hasMissingFileIssue = allWarnings.some((msg) => missingFilePattern.test(String(msg)));
+            return (
+              <div className="cr-card cr-card-warnings">
+                <div className="cr-card-header">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+                  <span>Analysis Report</span>
+                </div>
+                {[...(prepResult.analysis_errors || []), ...(prepResult.prepare_errors || [])].map((msg, i) => (
+                  <div key={`err-${i}`} className="prep-result-item prep-result-error"><span className="prep-result-tag">[ERROR]</span> {msg}</div>
+                ))}
+                {allWarnings.map((msg, i) => (
+                  <div key={`warn-${i}`} className="prep-result-item prep-result-warning"><span className="prep-result-tag">[WARNING]</span> {msg}</div>
+                ))}
+                {hasMissingFileIssue && (
+                  <div className="prep-result-action">
+                    {prepResult.deep_search_ran ? (
+                      <span className="prep-result-action-note">
+                        Already searched every fixed drive — these files aren't on this machine. Get them from the .blend's source or upload as a .zip with the assets alongside.
+                      </span>
+                    ) : (
+                      <>
+                        <button
+                          className="btn btn-secondary"
+                          type="button"
+                          onClick={() => handleAnalyze(true)}
+                          disabled={isBusy}
+                        >
+                          {stage === STAGE.ANALYZING ? "Searching this machine…" : "Search this machine for missing files"}
+                        </button>
+                        <span className="prep-result-action-note">
+                          Walks every fixed drive looking for the missing files by filename. Up to ~90 seconds.
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
-              {[...(prepResult.analysis_errors || []), ...(prepResult.prepare_errors || [])].map((msg, i) => (
-                <div key={`err-${i}`} className="prep-result-item prep-result-error"><span className="prep-result-tag">[ERROR]</span> {msg}</div>
-              ))}
-              {[...(prepResult.analysis_warnings || []), ...(prepResult.prepare_warnings || [])].map((msg, i) => (
-                <div key={`warn-${i}`} className="prep-result-item prep-result-warning"><span className="prep-result-tag">[WARNING]</span> {msg}</div>
-              ))}
-            </div>
-          )}
+            );
+          })()}
         </div>
       )}
 

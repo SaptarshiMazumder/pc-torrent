@@ -168,16 +168,16 @@ export default function MyJobsPage({
     const fileKey = `${id}:${file.job_id || ""}:${file.filename}`;
     const cacheKey = `${id}_${file.job_id || ""}_${file.filename}`;
     setOpeningFrameKey(fileKey);
-    setFrameViewer({ title: file.filename, loading: true, error: "", imageSrc: "", localPath: "", action: "" });
+    setFrameViewer({ title: file.filename, loading: true, error: "", imageSrc: "", action: "" });
     try {
       const localPath = await cacheViewerFrame(
         file.url,
         cacheKey,
         Number.isFinite(file.size_bytes) ? file.size_bytes : null,
       );
-      setFrameViewer({ title: file.filename, loading: false, error: "", imageSrc: convertFileSrc(localPath), localPath, action: "cached" });
+      setFrameViewer({ title: file.filename, loading: false, error: "", imageSrc: convertFileSrc(localPath), action: "cached" });
     } catch (error) {
-      setFrameViewer({ title: file.filename, loading: false, error: error?.message || "Failed to load frame", imageSrc: "", localPath: "", action: "" });
+      setFrameViewer({ title: file.filename, loading: false, error: error?.message || "Failed to load frame", imageSrc: "", action: "" });
     } finally {
       setOpeningFrameKey("");
     }

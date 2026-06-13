@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from serverV2.core.user_role import UserRole
 from serverV2.users.user_profile_repository import UserProfileRepository
 from serverV2.users.user_service import UserService
 
@@ -37,6 +38,10 @@ class UserFacade:
 
     def update_profile(self, uid: str, updates: dict[str, Any]) -> None:
         self._repository.update(uid, updates)
+
+    def get_role(self, uid: str) -> UserRole:
+        """Authorization role for ``uid`` -- defaults to USER on absent data."""
+        return self._repository.get_role(uid)
 
     def usd_to_credits(self, total_cost_usd: float) -> float:
         """USD to credits using the configured rate.  Stateless."""

@@ -8,14 +8,17 @@ PUT  /admin/config -> accepts ``{config: <dict>}``.  Facade validates
                       bad shape -> 400 with the validation error
                       message, never reaches Firestore.
 
-No auth gate today (will gate admin-only later).  No write-side
-validation rules beyond the implicit shape check at the facade.
+GET is intentionally open -- reading the config is not privileged on the
+server.  PUT is admin-gated via ``require_admin`` (403 for non-admins).
+The desktop additionally hides the Configuration view from non-admins,
+but that is UX, not the security boundary.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 
+from serverV2.api.dependencies import require_admin
 from serverV2.fleets.fleet_exception import FleetException
 from serverV2.orchestrator.allocation_client import AllocationClient
 
@@ -41,7 +44,10 @@ def get_admin_config():
 
 
 @router.put("/admin/config")
-def put_admin_config(body: dict = Body(...)):
+def put_admin_config(
+    body: dict = Body(...),
+    _admin: dict = Depends(require_admin),
+):
     cfg = body.get("config")
     if not isinstance(cfg, dict):
         raise HTTPException(400, "Body must include a 'config' object")

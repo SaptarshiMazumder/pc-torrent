@@ -4,25 +4,38 @@ skinparam shadowing false
 skinparam classFontSize 12
 skinparam ArrowFontSize 10
 skinparam packageStyle rectangle
-skinparam packageBorderColor #888888
+skinparam packageBorderColor #666666
 skinparam classBorderColor #555555
 
-title Admin role authorization — files grouped by folder
+title Admin role authorization — only PUT /admin/config is gated (GET stays open)
 
 legend top right
-|= colour |= meaning |
-|<#bbf7d0>| NEW file |
-|<#bfdbfe>| EDITED existing file |
-|<#e5e7eb>| unchanged (context) |
-|<#fde68a>| Firestore data (not a code file) |
+|= fill |= class state |   |= tint |= module (folder) |
+|<#bbf7d0> NEW file | |<#E6D9F2> core/ |
+|<#bfdbfe> EDITED file | |<#F8D9E4> users/ |
+|<#e5e7eb> unchanged (context) | |<#FAE3CC> infrastructure/auth/ |
+|<#fde68a> Firestore data | |<#FBF0C4> api/ (+ routers/) |
+| | |<#D9EFE5> desktop contexts/ |
+| | |<#D9E4F5> desktop components/common/ |
+| | |<#EAD9F2> desktop pages/ |
 endlegend
+
+note as N_scope
+  SCOPE (locked):
+  - role lives on users/{uid} (Firestore), seeded "user", set "admin" by hand.
+  - BACKEND gates ONLY PUT /admin/config.  GET /admin/config stays OPEN.
+  - Hiding the config VIEW is a FRONTEND-only concern (Sidebar + App read role).
+  - token_verifier stays PURE identity; require_admin is the new authz layer.
+  - /me router + UserProfileResponse NOT touched: the desktop reads role straight
+    from the Firestore snapshot, so adding it to /me would be dead code.
+end note
 
 ' =====================================================================
 ' BACKEND : serverV2/
 ' =====================================================================
-package "serverV2/" {
+package "serverV2/" #EEF2F7 {
 
-  package "core/" {
+  package "core/" #E6D9F2 {
     class "user_role.py" as user_role #bbf7d0 {
       class UserRole(str, Enum)
       ADMIN = "admin"
@@ -30,30 +43,25 @@ package "serverV2/" {
     }
   }
 
-  package "users/" {
+  package "users/" #F8D9E4 {
     class "user_profile_repository.py" as repo #bfdbfe {
       create_if_missing(): seed role = user
       get(): surface role
       get_role(uid) : UserRole   [added]
     }
     class "user_facade.py" as facade #bfdbfe {
-      get_role(uid) : UserRole   [added]
-      delegates to repo
-    }
-    class "user_service.py" as svc #e5e7eb {
-      unchanged
+      get_role(uid) : UserRole   [added, delegates to repo]
     }
   }
 
-  package "infrastructure/auth/" {
+  package "infrastructure/auth/" #FAE3CC {
     class "token_verifier.py" as token #e5e7eb {
       get_current_user(req) : uid, email
-      verifies Firebase token only
-      UNCHANGED (stays pure)
+      UNCHANGED (pure identity, no DB)
     }
   }
 
-  package "api/" {
+  package "api/" #FBF0C4 {
     class "dependencies.py" as deps #bfdbfe {
       get_current_user   [existing re-export]
       init_authz(user_facade)   [added]
@@ -63,60 +71,51 @@ package "serverV2/" {
       if role not ADMIN: raise 403
     }
 
-    package "routers/" {
+    package "routers/" #FBF0C4 {
       class "admin_config.py" as admin_router #bfdbfe {
-        GET /admin/config   + Depends(require_admin)
-        PUT /admin/config   + Depends(require_admin)
+        GET /admin/config   --> OPEN (unchanged)
+        PUT /admin/config   --> + Depends(require_admin)
         remove "no auth gate" TODO
-      }
-      class "users.py" as users_router #bfdbfe {
-        GET /me : now returns role
-        PUT /me : role NOT accepted
-      }
-    }
-
-    package "schemas/" {
-      class "user_profile.py" as schema #bfdbfe {
-        UserProfileResponse: add role : str
-        UpdateProfilePayload: no role
       }
     }
   }
 
-  class "bootstrap.py" as boot #bfdbfe {
-    dependencies.init_authz(user_facade)
-    [one added line]
+  class "main.py" as mainpy #bfdbfe {
+    _wire_routers():
+    dependencies.init_authz(c.user_facade)   [added line]
   }
 }
 
 ' =====================================================================
 ' FRONTEND : desktop/src/
 ' =====================================================================
-package "desktop/src/" {
+package "desktop/src/" #EEF2F7 {
 
-  package "contexts/" {
+  package "contexts/" #D9EFE5 {
     class "UserProfileContext.jsx" as ctx #bfdbfe {
       add role to profile shape
-      from /me + live onSnapshot
+      role = snap.data().role or "user"
     }
   }
 
-  package "components/common/" {
+  package "components/common/" #D9E4F5 {
     class "Sidebar.jsx" as sidebar #bfdbfe {
-      show Configuration entry
-      only if role == admin
+      useUserProfile() -> role
+      drop "Configuration" entry
+      from RENTEE_PAGES if role not admin
     }
   }
 
   class "App.jsx" as app #bfdbfe {
-    guard Configuration page
-    render for non-admins
+    useUserProfile() -> role
+    render ConfigurationPage
+    only if role == admin
   }
 
-  package "pages/" {
+  package "pages/" #EAD9F2 {
     class "ConfigurationPage.jsx" as configpage #e5e7eb {
-      unchanged
-      calls GET/PUT /admin/config
+      UNCHANGED
+      GET (open) + PUT (403 if not admin)
     }
   }
 }
@@ -124,7 +123,7 @@ package "desktop/src/" {
 ' =====================================================================
 ' STORAGE
 ' =====================================================================
-package "Firestore" {
+package "Firestore" #FBE9A8 {
   class "users slash uid" as fsdoc #fde68a {
     display_name, email, tier, credits
     role : str   [NEW field: admin or user]
@@ -136,33 +135,40 @@ package "Firestore" {
 }
 
 ' =====================================================================
-' SERVER AUTHORIZATION FLOW
+' BACKEND AUTHZ FLOW  (PUT only)
 ' =====================================================================
-admin_router --> deps        : Depends(require_admin)
+admin_router --> deps        : PUT: Depends(require_admin)
 deps --> token               : Depends(get_current_user)
 deps --> facade              : get_role(uid)
 facade --> repo              : get_role(uid)
-repo --> fsdoc               : read role
+repo --> fsdoc               : read role (default user)
 repo ..> user_role           : returns UserRole
-boot --> deps                : init_authz(facade)
+mainpy --> deps              : init_authz(c.user_facade)
+mainpy --> admin_router      : init + include_router
 
-users_router --> facade      : get_profile incl role
-users_router --> schema      : returns role
+' create seeds the field
+repo --> fsdoc               : create_if_missing seeds role=user
 
 ' =====================================================================
 ' FRONTEND FLOW
 ' =====================================================================
-ctx --> fsdoc                : onSnapshot (role)
-ctx --> users_router         : GET /me (role seed)
-sidebar --> ctx              : reads role
-app --> ctx                  : reads role
+ctx --> fsdoc                : onSnapshot reads role
+sidebar --> ctx              : reads role (hide nav entry)
+app --> ctx                  : reads role (guard render)
 app --> configpage           : render iff admin
-configpage --> admin_router  : GET/PUT (403 if not admin)
+configpage --> admin_router  : GET open / PUT 403 if not admin
 
 note bottom of fsdoc
   SECURITY: Firestore rules MUST block client
   writes to this doc (esp. role) so a user
   cannot self-promote. Verify before shipping.
+end note
+
+note bottom of admin_router
+  GET deliberately ungated: viewing config
+  is not privileged on the server.  The
+  desktop only SHOWS the page to admins,
+  but that is UX, not a security boundary.
 end note
 
 @enduml

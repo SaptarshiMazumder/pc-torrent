@@ -100,6 +100,7 @@ def on_startup() -> None:
 
 
 def _wire_routers(c: Container) -> None:
+    from serverV2.api import dependencies
     from serverV2.api.routers import (
         admin_config,
         assets,
@@ -114,6 +115,10 @@ def _wire_routers(c: Container) -> None:
         render_groups,
         users,
     )
+
+    # Authorization layer: require_admin resolves the caller's role
+    # through the user facade.  Wired here alongside the router inits.
+    dependencies.init_authz(c.user_facade)
 
     machines.init(c.machine_service, c.allocation_client)
     jobs.init(c.job_service, orchestrator=c.orchestrator, callback_router=c.callback_router)

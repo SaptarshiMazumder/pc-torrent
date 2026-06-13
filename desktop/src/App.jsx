@@ -2,7 +2,6 @@ import { useState, useCallback } from "react";
 import Sidebar from "./components/common/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import LogsPage from "./pages/LogsPage";
-import SettingsPage from "./pages/SettingsPage";
 import CreateRenderPage from "./pages/CreateRenderPage";
 import MyJobsPage from "./pages/MyJobsPage";
 import DownloadsPage from "./pages/DownloadsPage";
@@ -14,19 +13,20 @@ import UserCreditsCorner from "./components/profile/UserCreditsCorner";
 import { useAgent } from "./hooks/useAgent";
 import { useJobs } from "./hooks/useJobs";
 import { useAuth } from "./contexts/AuthContext";
+import { useUserProfile } from "./contexts/UserProfileContext";
 import { useDownloads } from "./contexts/DownloadContext";
 
 const DEFAULT_PAGES = { renter: "dashboard", rentee: "create" };
 
 export default function App() {
   const { user, loading: authLoading } = useAuth();
+  const { profile } = useUserProfile();
+  const isAdmin = profile?.role === "admin";
   const [mode, setMode] = useState(
     () => localStorage.getItem("pcrent_mode") || "rentee"
   );
   const [page, setPage] = useState(() => DEFAULT_PAGES[localStorage.getItem("pcrent_mode") || "rentee"] || "create");
-  const [backendUrl, setBackendUrl] = useState(
-    "https://pcrent-server-v2-930713698987.asia-northeast1.run.app"
-  );
+  const backendUrl = "https://pcrent-server-v2-930713698987.asia-northeast1.run.app";
 
   const agent = useAgent(user && mode === "renter" ? backendUrl : null);
   const jobsHook = useJobs(user ? backendUrl : null);
@@ -121,14 +121,8 @@ export default function App() {
         )}
 
         {/* Shared pages */}
-        {page === "configuration" && (
+        {page === "configuration" && isAdmin && (
           <ConfigurationPage backendUrl={backendUrl} />
-        )}
-        {page === "settings" && (
-          <SettingsPage
-            backendUrl={backendUrl}
-            onBackendUrlChange={setBackendUrl}
-          />
         )}
       </main>
     </div>

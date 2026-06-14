@@ -192,6 +192,7 @@ class Container:
         status_aggregator: InstanceStatusAggregator,
         allocation_facade: AllocationFacade,
         allocation_client: AllocationClient,
+        allocation_config_repo: AllocationConfigRepository,
         allocation_dispatch_queue_daemon: AllocationDispatchQueueDaemon,
         fleet_availability_snapshot_cache: FleetAvailabilitySnapshotCache,
         pre_render_estimator: PreRenderEstimator,
@@ -222,6 +223,10 @@ class Container:
         # Phase B starts the daemon and reroutes callers.
         self.allocation_facade = allocation_facade
         self.allocation_client = allocation_client
+        # Exposed so the app_meta public router can pull the live
+        # ``desktop`` section from Firestore each request without
+        # going through the (privileged) admin client surface.
+        self.allocation_config_repo = allocation_config_repo
         self.allocation_dispatch_queue_daemon = allocation_dispatch_queue_daemon
         self.fleet_availability_snapshot_cache = fleet_availability_snapshot_cache
         # Pre-submit RPC layer — stateless cost / wall-time estimator
@@ -849,6 +854,7 @@ def build(
         status_aggregator=status_aggregator,
         allocation_facade=allocation_facade,
         allocation_client=allocation_client,
+        allocation_config_repo=allocation_config_repo,
         allocation_dispatch_queue_daemon=allocation_dispatch_queue_daemon,
         fleet_availability_snapshot_cache=fleet_availability_snapshot_cache,
         pre_render_estimator=pre_render_estimator,

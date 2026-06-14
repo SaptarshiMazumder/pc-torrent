@@ -28,6 +28,10 @@
   "monitor": {
     "in_progress_stale_sec": 1800
   },
+  "desktop": {
+    "min_version": "1.0.0",
+    "latest_url": "https://github.com/SaptarshiMazumder/pc-torrent/releases/latest/download/pc-rent-windows-x64.exe"
+  },
   "billing": {
     "credits_per_usd": 100.0
   },

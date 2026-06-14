@@ -2442,6 +2442,66 @@ body {
   border-top: 1px solid rgba(180, 185, 200, 0.12);
 }
 
+/* Update Required modal -- full-screen force-update blocker */
+.update-required-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 14, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 24px;
+}
+
+.update-required-card {
+  max-width: 480px;
+  width: 100%;
+  background: rgba(20, 24, 32, 0.96);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px 28px;
+  text-align: center;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+.update-required-icon {
+  margin-bottom: 14px;
+  display: flex;
+  justify-content: center;
+}
+
+.update-required-card h2 {
+  margin: 0 0 10px;
+  font-size: 20px;
+}
+
+.update-required-body {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0 0 6px;
+}
+
+.update-required-sub {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 20px;
+}
+
+.update-required-btn {
+  min-width: 220px;
+}
+
+.update-required-url {
+  margin-top: 16px;
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+  font-family: "Consolas", "Monaco", monospace;
+}
+
 .prep-result-action-note {
   font-size: 12px;
   color: var(--text-muted);

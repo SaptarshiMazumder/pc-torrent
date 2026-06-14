@@ -82,6 +82,23 @@ class MonitorSection:
 
 
 @dataclass(frozen=True)
+class DesktopSection:
+    """Force-update gate for the desktop client.
+
+    The /app/min-version endpoint hands these values to running
+    desktops; if the desktop's bundled version is below ``min_version``
+    it renders UpdateRequiredModal which deep-links to ``latest_url``
+    for the user to download + install the new installer.
+
+    Live-tunable via the ConfigurationPage admin UI -- bumping
+    ``min_version`` after a new GitHub release force-blocks every
+    older client on its next launch without a serverV2 redeploy.
+    """
+    min_version: str
+    latest_url: str
+
+
+@dataclass(frozen=True)
 class StallLoadingSafetyConfig:
     """Per-heaviness coefficients the AllowedStallTimesResolver uses to
     compute its OWN expected-loading-time, independent of the cost-time
@@ -182,6 +199,7 @@ class RenderConfig:
     monitor: MonitorSection
     stall: StallSection
     frame_allocation: FrameAllocationSection
+    desktop: DesktopSection
     vast_instances: tuple[VastInstanceEntry, ...]
     modal_instances: tuple[ModalInstanceEntry, ...]
 
@@ -195,6 +213,7 @@ class RenderConfig:
             monitor=_monitor(_block(d, "monitor")),
             stall=_stall(_block(d, "stall")),
             frame_allocation=_frame_allocation(_block(d, "frame_allocation")),
+            desktop=_desktop(_block(d, "desktop")),
             vast_instances=tuple(
                 _vast_instance(e, i)
                 for i, e in enumerate(_list(d, "vast_instances"))
@@ -294,6 +313,14 @@ def _community(b: dict) -> CommunitySection:
 
 def _monitor(b: dict) -> MonitorSection:
     return MonitorSection(in_progress_stale_sec=_int(b, "monitor", "in_progress_stale_sec"))
+
+
+def _desktop(b: dict) -> DesktopSection:
+    ctx = "desktop"
+    return DesktopSection(
+        min_version=_str(b, ctx, "min_version"),
+        latest_url=_str(b, ctx, "latest_url"),
+    )
 
 
 def _stall(b: dict) -> StallSection:

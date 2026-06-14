@@ -44,6 +44,7 @@ export default function MyJobsPage({
   updateGroup,
   onRefresh,
   onNavigate,
+  initialSelectedJobId = null,
 }) {
   // Combined view for cross-section lookups (selection, gallery fetch).
   // The two list slices stay separate for rendering + pagination.
@@ -51,7 +52,10 @@ export default function MyJobsPage({
     () => [...ongoingJobs, ...pastJobs],
     [ongoingJobs, pastJobs],
   );
-  const [selectedJobId, setSelectedJobId] = useState(null);
+  // Seeded from a deep-link (e.g. just-submitted render) so we open straight
+  // into that job's detail view.  Mount-only: this page remounts on every
+  // navigation to it, so the prop is re-read each fresh visit.
+  const [selectedJobId, setSelectedJobId] = useState(initialSelectedJobId);
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [cancelingAll, setCancelingAll] = useState(false);
   const [openFrameGalleries, setOpenFrameGalleries] = useState({});

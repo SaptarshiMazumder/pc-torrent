@@ -70,7 +70,7 @@ export default function LoginPage() {
   return (
     <div className="login-container">
       <div className="login-card">
-        <h1 className="login-title">Forge</h1>
+        <h1 className="login-title">PC-Torrenter</h1>
         <p className="login-subtitle">Distributed GPU Rendering</p>
 
         <form onSubmit={handleSubmit} className="login-form">

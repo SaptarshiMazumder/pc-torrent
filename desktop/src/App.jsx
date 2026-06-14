@@ -23,6 +23,10 @@ export default function App() {
     () => localStorage.getItem("pcrent_mode") || "rentee"
   );
   const [page, setPage] = useState(() => DEFAULT_PAGES[localStorage.getItem("pcrent_mode") || "rentee"] || "create");
+  // When a render is submitted we navigate to My Jobs AND deep-link straight
+  // into the new job's detail view.  This holds the group_id to pre-select;
+  // any manual navigation clears it so a later visit lands on the list.
+  const [pendingJobId, setPendingJobId] = useState(null);
   const [backendUrl, setBackendUrl] = useState(
     "https://pcrent-server-v2-930713698987.asia-northeast1.run.app"
   );
@@ -32,10 +36,18 @@ export default function App() {
   const { downloads } = useDownloads();
   const activeDownloadCount = Object.values(downloads).filter((d) => d.status === "loading").length;
 
+  // Manual navigation (sidebar, in-page links) clears any pending deep-link
+  // so the user lands on the page they asked for, not a stale job detail.
+  const handleNavigate = useCallback((nextPage) => {
+    setPendingJobId(null);
+    setPage(nextPage);
+  }, []);
+
   const handleModeChange = useCallback(
     (newMode) => {
       setMode(newMode);
       localStorage.setItem("pcrent_mode", newMode);
+      setPendingJobId(null);
       setPage(DEFAULT_PAGES[newMode]);
     },
     []
@@ -44,6 +56,7 @@ export default function App() {
   const handleJobSubmitted = useCallback(
     (groupId, filename, tasks, totalFrames) => {
       jobsHook.addRenderGroup(groupId, filename, tasks, totalFrames);
+      setPendingJobId(groupId);
       setPage("myjobs");
     },
     [jobsHook.addRenderGroup]
@@ -57,7 +70,7 @@ export default function App() {
       <ToastViewport />
       <Sidebar
         activePage={page}
-        onNavigate={setPage}
+        onNavigate={handleNavigate}
         status={agent.status}
         mode={mode}
         onModeChange={handleModeChange}
@@ -108,7 +121,8 @@ export default function App() {
             markRenderGroupCancelled={jobsHook.markRenderGroupCancelled}
             updateGroup={jobsHook.updateGroup}
             onRefresh={jobsHook.refresh}
-            onNavigate={setPage}
+            onNavigate={handleNavigate}
+            initialSelectedJobId={pendingJobId}
           />
         )}
         {page === "downloads" && (

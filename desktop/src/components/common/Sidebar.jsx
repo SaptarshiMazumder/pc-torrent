@@ -212,7 +212,7 @@ export default function Sidebar({
         <span className="sidebar-brand-mark">
           <CubeLogo />
         </span>
-        <span className="sidebar-brand-text">Forge</span>
+        <span className="sidebar-brand-text">PC-Torrenter</span>
       </div>
 
       <div className="sidebar-mode" ref={modeWrapRef}>
@@ -308,10 +308,14 @@ export default function Sidebar({
             </button>
           </div>
         )}
-        <div className="sidebar-status-pill">
-          <span className="status-dot" style={{ backgroundColor: dotColor, color: dotColor }} />
-          <span className="status-label">{statusText}</span>
-        </div>
+        {/* Agent connection status is only meaningful when offering a PC
+            (renter mode runs the local agent); hide it in rentee mode. */}
+        {mode === "renter" && (
+          <div className="sidebar-status-pill">
+            <span className="status-dot" style={{ backgroundColor: dotColor, color: dotColor }} />
+            <span className="status-label">{statusText}</span>
+          </div>
+        )}
         <div className="sidebar-version">v1.0.0</div>
       </div>
     </nav>

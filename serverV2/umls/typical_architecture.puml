@@ -1,0 +1,215 @@
+@startuml typical_arch_layers
+allowmixing
+'
+' A TYPICAL layered / clean architecture — the building blocks and where
+' they live.  Generic (not this project), for learning the vocabulary.
+'
+' THE GOLDEN RULE: dependencies point DOWNWARD / INWARD only.
+'   Presentation -> API -> Application -> Domain
+'   Infrastructure also depends INWARD on Domain (implements its interfaces).
+'   Domain depends on NOTHING.  That is what makes it "clean".
+'
+
+skinparam shadowing false
+skinparam backgroundColor #FAFAFA
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+skinparam ArrowFontSize 11
+
+title Typical architecture — layers (top = outside world, bottom = pure core)
+
+' ===================== PRESENTATION =====================
+package "1 · PRESENTATION  (what the user sees)" #E8F5E9 {
+    class "UI / Client\n(browser, mobile, desktop app)" as UI {
+        renders screens
+        sends HTTP requests
+        shows responses
+    }
+}
+
+' ===================== API / DELIVERY =====================
+package "2 · API / DELIVERY  (the front door)" #E3F2FD {
+    class "Router / Controller" as Router <<adapter>> {
+        maps HTTP route -> a method call
+        NO business logic
+    }
+    class "Request DTO" as ReqDTO <<DTO>> {
+        shape of incoming JSON
+        (validated at the edge)
+    }
+    class "Response DTO" as RespDTO <<DTO>> {
+        shape of outgoing JSON
+        (never leaks DB rows)
+    }
+    class "Middleware\n(auth, logging, errors)" as Middleware <<cross-cutting>>
+}
+
+' ===================== APPLICATION / SERVICE =====================
+package "3 · APPLICATION / SERVICE  (orchestrates a use case)" #E0F7FA {
+    class "Service / Use-Case" as Service <<service>> {
+        validate + coordinate steps
+        calls repos + domain + other services
+        owns the 'how' of a feature
+    }
+    class "Mapper / Assembler" as Mapper <<mapper>> {
+        DTO  <->  Entity
+        keeps the two worlds separate
+    }
+}
+
+' ===================== DOMAIN / CORE =====================
+package "4 · DOMAIN / CORE  (pure business — no tech)" #FFF8E1 {
+    class "Entity / Domain Model" as Entity <<entity>> {
+        the business 'noun': Order, RenderJob
+        identity + business rules + behavior
+    }
+    class "Value Object" as VO <<value object>> {
+        immutable, no identity
+        Money, FrameRange, DispatchContext
+    }
+    interface "Repository INTERFACE\n(a 'Port')" as RepoPort <<port>> {
+        save(entity)
+        get_by_id(id) : Entity
+    }
+    interface "External Port\n(e.g. IPaymentGateway)" as ExtPort <<port>>
+    class "Domain Service" as DomainSvc <<domain service>> {
+        rules that span entities
+        (pure functions)
+    }
+}
+
+' ===================== INFRASTRUCTURE =====================
+package "5 · INFRASTRUCTURE  (where data physically lives)" #FFF3E0 {
+    class "Repository IMPL" as RepoImpl <<adapter>> {
+        implements Repository INTERFACE
+        writes/reads the DB
+    }
+    class "External Client / Adapter" as ExtClient <<adapter>> {
+        implements External Port
+        calls a 3rd-party API
+    }
+    database "Database" as DB
+    database "Cache (Redis)" as Cache
+    cloud "3rd-party API" as ExtAPI
+}
+
+' ---------- the dependency flow (top -> down) ----------
+UI       --> Router       : HTTP request
+Router   ..> ReqDTO       : parses into
+Router   ..> RespDTO      : returns
+Router   --> Middleware   : passes through
+Router   --> Service      : calls (plain method)
+Service  --> Mapper       : convert DTO <-> Entity
+Service  --> Entity       : uses / mutates
+Service  --> DomainSvc    : applies rules
+Service  --> RepoPort     : save / load  (depends on the INTERFACE)
+Mapper   ..> Entity
+Mapper   ..> ReqDTO
+
+' ---------- dependency INVERSION (the clever bit) ----------
+RepoImpl  ..|> RepoPort   : implements
+ExtClient ..|> ExtPort    : implements
+RepoImpl  --> DB
+RepoImpl  --> Cache
+ExtClient --> ExtAPI
+
+note right of RepoPort
+  **Dependency Inversion**
+  The domain declares WHAT it needs
+  (the interface / port).  Infrastructure
+  provides HOW (the impl).  So the arrow
+  points INWARD: infra depends on domain,
+  never the reverse.  Swap the DB and the
+  domain never notices.
+end note
+
+note as RULE #FFE0E0
+  **THE GOLDEN RULE — dependencies point inward**
+  1 Presentation  ->  2 API  ->  3 Application  ->  4 Domain
+                       5 Infrastructure  ->  4 Domain
+  The DOMAIN (4) imports nothing technical.
+  Everything depends on it; it depends on no one.
+end note
+
+@enduml
+
+
+' ##########################################################################
+' SEQUENCE — one request flowing DOWN the layers and the response back UP
+' ##########################################################################
+
+@startuml typical_arch_flow
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+title One request, end to end — "create an Order" (generic example)
+
+actor User
+participant "UI / Client" as UI
+participant "Router\n(API layer)" as Router
+participant "Request DTO" as DTO
+participant "OrderService\n(Application)" as Service
+participant "Mapper" as Mapper
+participant "Order Entity\n(Domain)" as Entity
+participant "OrderRepository\n(interface = Port)" as RepoPort
+participant "OrderRepositoryImpl\n(Infrastructure)" as RepoImpl
+database "Database" as DB
+
+== request travels DOWN (outside -> inside) ==
+User ->> UI : fills form, clicks Submit
+UI ->> Router : POST /orders  { items, address }
+activate Router
+Router -> DTO : validate & parse JSON\ninto CreateOrderRequest
+note right of DTO
+  **DTO = Data Transfer Object.**
+  A dumb data bag matching the WIRE
+  shape. NOT a domain object — it has
+  no business rules, just fields.
+end note
+Router -> Service : create_order(dto)
+activate Service
+
+== application coordinates the use case ==
+Service -> Mapper : dto -> Order entity
+Mapper -> Entity : new Order(items, address)
+activate Entity
+Entity -> Entity : business rules\n(total > 0? address valid?)
+note right of Entity
+  **Entity / Domain Model.**
+  The real business object. Holds rules
+  + behavior. Knows nothing about HTTP
+  or SQL. This is the valuable core.
+end note
+Entity --> Service : valid Order
+deactivate Entity
+
+Service -> RepoPort : save(order)
+note right of RepoPort
+  Service depends on the **interface**,
+  not the DB. At runtime the injected
+  Impl runs (Dependency Injection).
+end note
+RepoPort -> RepoImpl : (actual implementation)
+activate RepoImpl
+RepoImpl -> DB : INSERT INTO orders ...
+DB --> RepoImpl : new id
+RepoImpl --> Service : saved Order (with id)
+deactivate RepoImpl
+
+== response travels UP (inside -> outside) ==
+Service -> Mapper : Order entity -> Response DTO
+Mapper --> Service : OrderResponse
+Service --> Router : OrderResponse
+deactivate Service
+Router -->> UI : 201 Created  { id, status }
+deactivate Router
+UI -->> User : shows "Order placed ✔"
+
+note over User, DB
+  DOWN: each layer adapts the request a little closer to the core.
+  UP:   each layer adapts the result a little closer to the wire.
+  DTOs guard the OUTER boundary; Entities live in the INNER core;
+  the Mapper is the translator between the two worlds.
+end note
+
+@enduml

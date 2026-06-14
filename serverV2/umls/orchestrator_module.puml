@@ -1,0 +1,204 @@
+@startuml orchestrator_module
+'
+' Orchestrator module — internal structure + how it talks to its siblings.
+'
+' The orchestrator owns every state transition that touches a render_group:
+' submit, success, failure (retry coordination), cancel, and the group-status
+' rollup that follows any job change.  Siblings reach it through exactly two
+' surfaces:
+'   - RenderOrchestrator   (the public facade — callbacks + monitor call in)
+'   - release_terminal_group_resources / read facade (monitor audit sweep)
+' and it reaches OUT to siblings through exactly two gateways:
+'   - AllocationClient     (the ONLY importer of AllocationFacade)
+'   - FleetRegistry        (provider cancel / stop_monitoring, Modal hooks)
+'
+' Cross-module arrows are colored by their SOURCE module (same convention
+' as runtime_topology.puml).
+'
+
+skinparam shadowing false
+skinparam backgroundColor #FAFAFA
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+skinparam ArrowFontSize 11
+
+!define ARROW_ORCH       #C04040
+!define ARROW_CALLBACKS  #D08020
+!define ARROW_MONITOR    #4848A0
+!define ARROW_FLEET      #A040A0
+
+title Orchestrator module — internal structure & sibling communication
+
+' ===========================================================
+' INBOUND siblings — call into the facade.  Place ABOVE.
+' ===========================================================
+package "<<inbound siblings>>" <<Cloud>> #FFEEDD {
+    class "CallbackRouter\nserverV2/callbacks" as ExtCallbacks {
+        + route(job_id, outcome, err?)
+    }
+    class "Fleet monitors\nserverV2/fleets/monitors" as ExtMonitors {
+        Vast / Modal / Community
+    }
+    class "MonitorLockGroupAuditSweep\nserverV2/monitor" as ExtAuditSweep
+    class "Bootstrap\nserverV2/bootstrap" as ExtBootstrap
+    class "API routers\nserverV2/api/routers" as ExtRouters
+}
+
+' ===========================================================
+' INSIDE serverV2/orchestrator/
+' ===========================================================
+package "serverV2/orchestrator" <<Frame>> #FFDDDD {
+
+    class RenderOrchestrator <<facade, entry>> #b9e3a3 {
+        .. write surface (adapters) ..
+        + submit_initial(...)
+        + on_job_succeeded(id)
+        + on_job_failed(id, err)
+        + on_job_running(id)
+        + cancel_group(gid) / cancel_one_job(id)
+        + retry_chunk_manually(id)
+        + handle_community_machine_idle(mid)
+        .. read surface (monitors) ..
+        + is_job_terminal(id)
+        + get_job_raw(id) / get_*_status(...)
+        + cost_estimate_for_group / _for_dry_run(...)
+    }
+
+    class RenderLifecycle <<workhorse — owns group state>> #fcd34d {
+        + submit_initial(...)
+        + handle_chunk_succeeded(id)
+        + handle_chunk_failed(id, err)
+        + handle_chunk_running(id)
+        + cancel_render(gid) / cancel_one_job(id)
+        + reconcile_group_status(gid)
+        + release_terminal_group_resources(gid)
+        - _record_telemetry / _write_terminal_snapshot
+    }
+
+    class AllocationClient <<gateway — sole AllocationFacade importer>> #c7d2fe {
+        + submit_initial(...) / park_retry(...)
+        + drain_for_group(gid)
+        + list_pending_for_group(gid)
+        + cost_estimate_for_group / _for_dry_run
+    }
+
+    package "lifecycle_job_termination" <<Frame>> #FFCCCC {
+        class JobTerminator <<executor>> {
+            + execute(pipeline, job_id, raw, ...)
+        }
+        class RenderCanceler <<group-level teardown>>
+        class TerminalGroupResourceReleaser <<self-gating drain>>
+        class "FAILURE_PIPELINE\nCANCEL_PIPELINE" as TermPipelines <<immutable step tuples>>
+        class "steps/*\n(mark_terminal, cancel_provider,\nstop_monitor, try_retry,\nreconcile_group, release_*)" as TermSteps <<step>>
+        JobTerminator --> TermPipelines : runs
+        TermPipelines ..> TermSteps
+        RenderCanceler ..> TermSteps : per-job atom
+    }
+
+    package "lifecycle_job_retry" <<Frame>> #FFCCCC {
+        class RetryExecutor <<executor>> {
+            + execute(pipeline, raw, exclusions)
+        }
+        class "AUTO_RETRY_PIPELINE\nMANUAL_RETRY_PIPELINE" as RetryPipelines <<immutable step tuples>>
+        class "steps/*\n(enforce_max_retries,\nbuild_retry_chunk_request,\npark_retry_to_pending, ...)" as RetrySteps <<step>>
+        RetryExecutor --> RetryPipelines : runs
+        RetryPipelines ..> RetrySteps
+    }
+
+    package "anti_affinity" <<Frame>> #fde68a {
+        class AntiAffinityFacade {
+            + exclusions_for_chunk(gid, idx) : Exclusions
+        }
+    }
+
+    package "repositories (orchestrator-side reads)" <<Frame>> #fde68a {
+        class PendingAllocationRepository <<repo>> #f9c1c1 {
+            + has_pending_for_group(gid)
+        }
+        class DispatchAllocationRepository <<repo>> #f9c1c1 {
+            + has_dispatch_queued_for_group(gid)
+        }
+    }
+}
+
+' ===========================================================
+' OUTBOUND siblings — orchestrator reaches these.  RIGHT/BELOW.
+' ===========================================================
+package "<<allocation>>" <<Cloud>> #DDEEFF {
+    class "AllocationFacade\nserverV2/allocation" as ExtAllocFacade {
+        + submit_initial / park_retry
+        + drain_for_group / list_pending_for_group
+        + cost_estimate_for_group / _for_dry_run
+    }
+}
+
+package "<<fleets>>" <<Cloud>> #FFE4FF {
+    class "FleetRegistry\nserverV2/fleets/registry" as ExtFleetRegistry {
+        + get(fleet) : IFleetStrategy
+    }
+    class "IFleetStrategy\n(Vast/Modal/Community)" as ExtFleetStrategy {
+        + cancel(provider_job_id)
+        + stop_monitoring(job_id)
+    }
+    class "ModalActiveJobsHooks\nserverV2/fleets/modal" as ExtModalHooks {
+        + on_terminal(job_id, gpu_type)
+    }
+    ExtFleetRegistry --> ExtFleetStrategy
+}
+
+package "<<shared repositories>>" <<Cloud>> #fecaca {
+    class "Job / RenderGroup / Machine\nInProgressChunk / OutputFrame\nTelemetry\nserverV2/repositories" as ExtRepos
+}
+
+package "<<callbacks (pure)>>" <<Cloud>> #FFEEDD {
+    class "compute_group_status\nserverV2/callbacks" as ExtAggregator <<pure function>>
+}
+
+' ===========================================================
+' INBOUND wiring (siblings -> orchestrator) — colored by source
+' ===========================================================
+ExtCallbacks  -[ARROW_CALLBACKS]-> RenderOrchestrator : on_job_succeeded /\n_failed / _running
+ExtMonitors   -[ARROW_FLEET]-> RenderOrchestrator     : read facade\n(is_job_terminal, get_job_raw)
+ExtMonitors   -[ARROW_FLEET]-> RenderOrchestrator     : on_job_running
+ExtAuditSweep -[ARROW_MONITOR]-> RenderOrchestrator   : reconcile /\nrelease_terminal_group_resources
+ExtRouters    --> RenderOrchestrator                  : submit / cancel /\nmanual retry / cost
+ExtBootstrap  ..> RenderOrchestrator                  : constructs (DI wiring)
+
+' ===========================================================
+' INTERNAL wiring
+' ===========================================================
+RenderOrchestrator --> RenderLifecycle : delegates everything
+
+RenderLifecycle --> AllocationClient                 : submit / park retry / drain / cost
+RenderLifecycle --> JobTerminator                    : FAILURE / CANCEL pipeline
+RenderLifecycle --> RenderCanceler                   : cancel_render (group)
+RenderLifecycle --> TerminalGroupResourceReleaser    : after every reconcile
+RenderLifecycle --> RetryExecutor                    : MANUAL_RETRY_PIPELINE
+RenderLifecycle --> AntiAffinityFacade               : exclusions_for_chunk
+RenderLifecycle --> PendingAllocationRepository      : has_pending_for_group
+RenderLifecycle --> DispatchAllocationRepository     : has_dispatch_queued_for_group
+
+TermSteps  ..> RetryExecutor      : try_retry -> AUTO_RETRY_PIPELINE
+TermSteps  ..> AllocationClient   : (drain handled by releaser)
+
+' ===========================================================
+' OUTBOUND wiring (orchestrator -> siblings) — colored by source (orch=red)
+' ===========================================================
+AllocationClient                  -[ARROW_ORCH]-> ExtAllocFacade  : ONLY importer
+RenderLifecycle                   -[ARROW_ORCH]..> ExtFleetRegistry : get(fleet).cancel()\n(eager provider cleanup)
+TermSteps                         -[ARROW_ORCH]..> ExtFleetStrategy : cancel_provider /\nstop_monitor steps
+RenderLifecycle                   -[ARROW_ORCH]..> ExtModalHooks   : on_terminal (Modal only)
+RenderLifecycle                   -[ARROW_ORCH]..> ExtRepos        : job/group/machine/\nin_progress/telemetry
+TerminalGroupResourceReleaser     -[ARROW_ORCH]..> ExtAllocFacade  : drain dispatch + pending\n(via AllocationClient)
+RenderLifecycle                   -[ARROW_ORCH]..> ExtAggregator   : compute_group_status (pure)
+
+' ===========================================================
+' Hidden layout hints — keep the graph from sprawling
+' ===========================================================
+"<<inbound siblings>>" -[hidden]down- "serverV2/orchestrator"
+"serverV2/orchestrator" -[hidden]down- "<<allocation>>"
+"<<allocation>>" -[hidden]right- "<<fleets>>"
+"<<fleets>>" -[hidden]right- "<<shared repositories>>"
+
+@enduml

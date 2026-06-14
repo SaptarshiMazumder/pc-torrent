@@ -6,8 +6,8 @@ hiddenimports += collect_submodules('worker_core')
 
 
 a = Analysis(
-    ['C:\\Users\\sapma\\OneDrive\\Desktop\\Projects\\PC_Rent\\pc-torrent\\agent\\sidecar_main.py'],
-    pathex=['C:\\Users\\sapma\\OneDrive\\Desktop\\Projects\\PC_Rent\\pc-torrent'],
+    ['C:\\Users\\googler\\OneDrive\\Desktop\\Projects\\pc-torrent\\pc-torrent\\agent\\sidecar_main.py'],
+    pathex=['C:\\Users\\googler\\OneDrive\\Desktop\\Projects\\pc-torrent\\pc-torrent'],
     binaries=[],
     datas=[],
     hiddenimports=hiddenimports,

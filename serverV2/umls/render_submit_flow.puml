@@ -1,0 +1,340 @@
+@startuml render_flow_layers
+allowmixing
+'
+' "Click Render" — end-to-end flow across layers & siblings (component map).
+'
+' This is the bird's-eye view: which layer hands off to which, and which
+' sibling module owns each step.  The two sequence diagrams below
+' (render_flow_submit, render_flow_dispatch) trace the exact ordered steps.
+'
+' The click triggers a SYNCHRONOUS path that only PARKS the work, returns
+' 200, and the UI starts polling.  An ASYNCHRONOUS daemon tick (~10s,
+' lock-gated) later plans + dispatches to a fleet.  Two phases, two diagrams.
+'
+' Cross-layer arrows colored by SOURCE layer (same convention as
+' runtime_topology.puml / orchestrator_module.puml).
+'
+
+skinparam shadowing false
+skinparam backgroundColor #FAFAFA
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+skinparam ArrowFontSize 11
+
+!define ARROW_FE     #2E7D32
+!define ARROW_API    #1565C0
+!define ARROW_SVC    #00838F
+!define ARROW_ORCH   #C04040
+!define ARROW_ALLOC  #2860B0
+!define ARROW_DAEMON #8E24AA
+!define ARROW_FLEET  #A040A0
+
+title "Click Render" — layer & sibling map (see sequence diagrams for exact steps)
+
+' ===================== DELIVERY =====================
+package "frontend (React)" #E8F5E9 {
+    class "SubmitJobPage\nApp.jsx" as UI {
+        + handleStartRendering()
+        .. then polls every 3s ..
+        GET /render-groups/{id}
+        GET /render-groups/{id}/outputs
+    }
+}
+
+' ===================== API =====================
+package "serverV2/api" #E3F2FD {
+    class "render_groups router\napi/routers/render_groups.py" as Router {
+        + POST /render-groups/{id}/confirm-upload
+        + GET  /render-groups/{id}
+        + GET  /render-groups/{id}/outputs
+    }
+}
+
+' ===================== SERVICES (use case) =====================
+package "serverV2/services" #E0F7FA {
+    class "RenderGroupService\nrender_groups/service.py" as Svc {
+        + confirm_upload(group_id, payload)
+        -- pre-submit prep --
+        scene resolve / frame range /
+        full_update(render_groups, status='pending')
+    }
+}
+
+' ===================== ORCHESTRATION (sibling) =====================
+package "serverV2/orchestrator" #FFDDDD {
+    class "RenderOrchestrator → RenderLifecycle" as Orch <<facade + workhorse>> {
+        + submit_initial(...)
+        builds DispatchContext
+    }
+    class "AllocationClient\n(gateway — sole Facade importer)" as AllocClient
+    Orch --> AllocClient
+}
+
+' ===================== ALLOCATION (sibling) =====================
+package "serverV2/allocation" #DDEEFF {
+    class "AllocationFacade" as Facade <<entry>> {
+        + submit_initial(...) -> park
+    }
+    class "AllocationPendingQueueRepository\n(+ Redis mirror)" as PendRepo <<repo>>
+    class "AllocationDispatchQueueDaemon\n(~10s, lock-gated)" as Daemon <<background, singleton>>
+    class "Pending/Dispatch TickProcessors\n+ PlanningService + Planner" as Plan
+    class "AllocationDispatcher" as Dispatcher
+    class "FleetAvailabilitySnapshotCache\n(Redis ~60s TTL)" as Snap
+    Facade --> PendRepo
+    Daemon --> Snap
+    Daemon --> Plan
+    Plan --> Dispatcher
+}
+
+' ===================== FLEETS (sibling) =====================
+package "serverV2/fleets" #FFE4FF {
+    class "FleetRegistry → IFleetStrategy\nVast / Modal / Community" as Strategy <<strategy>>
+    class "Fleet client\nVast PUT /asks · Modal POST endpoint" as Client <<adapter>>
+    Strategy --> Client
+}
+
+' ===================== INFRA / SHARED =====================
+package "infra & shared repos" #FFF3E0 {
+    class "JobRepository · InProgressChunkRepository\nRenderGroupRepository · MachineRepository" as Repos <<repo>>
+    database "Postgres" as PG
+    database "Redis" as RD
+    class "MonitorLockRepository\n(Redis lock primitive)" as Lock
+}
+
+' ===================== Provider / Worker =====================
+package "provider / worker (external)" #ECEFF1 {
+    class "Vast instance · Modal fn · Community agent" as Worker
+}
+
+' ---------- SYNCHRONOUS path (click -> parked) ----------
+UI       -[ARROW_FE]->    Router  : 1. POST confirm-upload\n{machine_ids, frame_start/end/step}
+Router   -[ARROW_API]->   Svc     : 2. confirm_upload(...)
+Svc      -[ARROW_SVC]->   Repos   : 3. UPDATE render_groups\n(total_frames, status='pending')
+Svc      -[ARROW_SVC]->   Orch    : 4. submit_initial(...)
+AllocClient -[ARROW_ORCH]-> Facade : 5. submit_initial(...)
+Facade   -[ARROW_ALLOC]-> PendRepo : 6. enqueue(AllocationPendingItem)
+PendRepo -[ARROW_ALLOC]-> PG       : 7a. INSERT pending_allocation_queue
+PendRepo -[ARROW_ALLOC]-> RD       : 7b. HSET pending_queue:group:{id}
+Router   -[ARROW_API]..>  UI       : 8. 200 OK (ack) -> UI starts polling
+
+' ---------- ASYNCHRONOUS path (daemon tick) ----------
+Daemon     -[ARROW_DAEMON]..> Lock     : tick gate (allocation:dispatch:daemon)
+Daemon     -[ARROW_DAEMON]-> Snap      : get_or_build snapshot
+Plan       -[ARROW_ALLOC]->  PG        : read pending -> plan -> write dispatch queue
+Dispatcher -[ARROW_ALLOC]->  Strategy  : dispatch_one(task, ctx, job_id)
+Strategy   -[ARROW_FLEET]->  Repos     : JobRepository.create (status='pending')
+Client     -[ARROW_FLEET]->  Worker    : provider API call / agent claim
+
+@enduml
+
+
+' ##########################################################################
+' SEQUENCE 1 — SYNCHRONOUS submit path (button click -> parked -> 200)
+' ##########################################################################
+
+@startuml render_flow_submit
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+title Render click — **synchronous** path (parks work, returns 200, UI polls)
+
+actor User
+participant "SubmitJobPage\nfrontend/App.jsx" as UI
+participant "render_groups router\napi/routers/render_groups.py" as Router
+participant "RenderGroupService\nservices/render_groups/service.py" as Svc
+participant "SceneResolver /\nresolve_frame_range" as Scene
+participant "RenderOrchestrator\norchestrator/orchestrator.py" as Orch
+participant "RenderLifecycle\norchestrator/lifecycle.py" as Life
+participant "AllocationClient\norchestrator/allocation_client.py" as AC
+participant "AllocationFacade\nallocation/allocation_facade.py" as Facade
+participant "AllocationPendingQueueRepository\n+ PendingQueueRedisMirror" as Pend
+database "Postgres" as PG
+database "Redis" as RD
+
+note over User, UI
+  PRECONDITION: the .blend was already uploaded to R2 in an earlier
+  step (create render-group + presigned upload).  "Start Rendering"
+  fires the **confirm-upload** call, which is the real submit trigger.
+end note
+
+User ->> UI : click **Start Rendering**\n(handleStartRendering)
+UI ->> Router : **POST /render-groups/{id}/confirm-upload**\n{machine_ids, frame_start, frame_end, frame_step}
+activate Router
+Router -> Svc : confirm_upload(group_id, payload)
+activate Svc
+
+== pre-submit preparation (all in the request thread) ==
+Svc -> PG : cancel any active jobs for this group
+Svc -> PG : read r2_input_size_bytes (heaviness signal)
+Svc -> Scene : resolve(engine, overrides) -> resolved_scene
+Svc -> Scene : resolve_frame_range(...) ->\n(frame_start/end/step, total_frames)
+Svc -> PG : **UPDATE render_groups**\nset total_frames, frames, resolved_scene_json,\ntier, status=**'pending'**
+Svc -> Svc : validate machine_ids,\njson.dumps(render_overrides)
+
+== hand off to orchestrator (sibling) ==
+Svc -> Orch : submit_initial(group_id, frames, tier,\nheaviness, machine_ids, input_filename, overrides)
+Orch -> Life : submit_initial(...)
+activate Life
+Life -> Life : tiers.normalize(tier)\nbuild **DispatchContext**\n(blend_url="", max_retries=get_max_retries())
+Life -> AC : submit_initial(..., dispatch_context)
+AC -> Facade : submit_initial(...)   ' pure pass-through
+activate Facade
+Facade -> Facade : build **AllocationPendingItem**\n(type='initial_group')
+Facade -> Pend : enqueue(item)
+activate Pend
+Pend -> PG  : **INSERT pending_allocation_queue**\n... RETURNING id
+Pend -> RD  : **HSET** pending_queue:group:{id}\nfield=id, value=JSON(item)
+note right of Pend
+  Redis is a synchronous write-through mirror
+  of the PG queue (phase2_pending_queue_redis_mirror).
+  No job is dispatched yet — only parked.
+end note
+Pend --> Facade
+deactivate Pend
+Facade --> AC
+deactivate Facade
+AC --> Life
+Life --> Orch
+deactivate Life
+Orch --> Svc
+Svc --> Router : {group_id, ...}
+deactivate Svc
+Router -->> UI : **200 OK** (submission acked)
+deactivate Router
+
+== UI now polls live state (every 3s) ==
+loop every 3000ms until status in {done, failed}
+  UI ->> Router : GET /render-groups/{id}
+  UI ->> Router : GET /render-groups/{id}/outputs
+end
+
+note over UI, RD
+  Nothing has rendered yet.  The work sits in
+  pending_allocation_queue waiting for the
+  AllocationDispatchQueueDaemon's next tick.
+  -> continues in **render_flow_dispatch**
+end note
+
+@enduml
+
+
+' ##########################################################################
+' SEQUENCE 2 — ASYNCHRONOUS dispatch path (daemon tick -> provider -> worker)
+' ##########################################################################
+
+@startuml render_flow_dispatch
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+title Render dispatch — **asynchronous** daemon tick (~10s, lock-gated)
+
+participant "AllocationDispatchQueueDaemon\nallocation_dispatch_queue_daemon.py" as Daemon
+participant "MonitorLockRepository\n(Redis lock)" as Lock
+participant "FleetAvailabilitySnapshotCache\n(Redis ~60s TTL)" as Snap
+participant "AllocationDispatchTickProcessor" as Disp
+participant "AllocationPendingTickProcessor" as PendP
+participant "AllocationPlanningService\n+ AllocationPlanner (pure)" as Planner
+participant "Dispatch/Pending queue repos" as Queues
+participant "AllocationDispatcher" as Dispatcher
+participant "FleetRegistry → IFleetStrategy\n(Vast/Modal/Community)" as Strat
+participant "Fleet client\n(Vast/Modal API)" as Client
+participant "JobRepository /\nInProgressChunkRepository" as Repos
+database "Postgres" as PG
+database "Redis" as RD
+participant "Provider / Worker" as Worker
+
+== tick gate ==
+Daemon -> Lock : try_acquire / refresh\n("allocation:dispatch:daemon")
+note right of Lock: only one replica's\ntick fires per ~10s
+alt lock not held
+  Lock --> Daemon : skip this tick
+end
+
+== Phase 0 — idle guard ==
+Daemon -> Queues : has_any dispatch? / has_any pending?
+note right: both empty -> return early\n(no snapshot rebuild)
+
+== Phase 1 — fleet availability snapshot ==
+Daemon -> Snap : get_or_build()
+alt cache miss / expired
+  Snap -> RD   : read allocation:fleet:availability
+  Snap ->> Worker : (rebuild) Vast HTTPS / Modal SCARD /\ncommunity DB COUNT
+end
+Snap --> Daemon : snapshot
+Daemon -> Daemon : mutable = snapshot.to_mutable()
+
+== Phase 1A — drain DISPATCH queue (per fleet) ==
+loop for each enabled fleet
+  Daemon -> Disp : process(fleet)
+  activate Disp
+  Disp -> Repos : count_active_by_fleet(fleet) vs cap\n(max_parallel)
+  loop while active < cap and queue not empty
+    Disp -> Queues : dequeue_for_fleet(fleet)\n(dispatch_allocation_queue)
+    Disp -> PG : group status guard\n(skip if not pending/running)
+    Disp -> Disp : decode task,\nresolve **blend_url**, build DispatchContext
+    Disp -> Repos : in_progress.claim_or_replace\n(group, chunk, job_id, attempt)
+    note right of Repos: claim BEFORE dispatch\nso a sync failure dedups
+    Disp -> Dispatcher : dispatch_one(task, ctx, job_id)
+    Dispatcher -> Strat : FleetRegistry.get_or_raise(fleet).dispatch(task, ctx)
+    activate Strat
+    Strat -> Repos : **JobRepository.create**\n(status=**'pending'**, estimates, allowed_stall_times)
+    alt Vast
+      Strat -> Client : VastInstanceManager.create(offer, env...)
+      Client ->> Worker : **PUT /asks/{offer}** (rent instance,\nenv: JOB_ID, BLEND_URL, FRAME_*, OVERRIDES_B64)
+      Worker --> Client : instance_id
+      Strat -> Repos : save_provider_job_id(vast_job_id)
+    else Modal
+      Strat -> RD : ModalActiveJobsHooks.on_dispatch\n(live-count index)
+      Strat -> Client : ModalClient.dispatch_job(...)
+      Client ->> Worker : **POST modal endpoint**\n(job params JSON)
+      Worker --> Client : function_call_id
+      Strat -> Repos : save_provider_job_id(modal_function_call_id)
+    else Community
+      Strat -> Repos : MachineRepository.update_status(\nmachine_id, 'processing')
+      note right: agent claims via\nGET /jobs/next-for-machine
+    end
+    Strat --> Dispatcher : DispatchResult(status='pending')
+    deactivate Strat
+  end
+  deactivate Disp
+end
+
+== Phase 2 — plan PENDING queue -> dispatch queue ==
+Daemon -> PendP : process(mutable)
+activate PendP
+loop for each pending row
+  PendP -> PG : read pending_allocation_queue row
+  PendP -> PG : load heaviness\n(render_groups.resolved_scene_json)
+  PendP -> PendP : adapt AvailableResources\nfrom mutable snapshot
+  PendP -> Planner : plan_initial(weights, heaviness, targets, ...)
+  activate Planner
+  Planner -> Planner : 1. VRAM eligibility filter\n2. K-decision (amortize startup)\n3. score every target\n4. select top-N + diversify\n5. time-balanced frame split\n6. build PlannedTask[] + estimates
+  Planner --> PendP : list[PlannedTask]
+  deactivate Planner
+  loop per PlannedTask
+    PendP -> Repos : current_job_for(group, chunk)?\n(skip duplicates)
+    PendP -> Queues : **INSERT dispatch_allocation_queue**\n(job_id=uuid4(), fleet, gpu/machine, frames, estimates)
+    PendP -> PendP : mark_planned_dispatched(mutable, task)\n**(commit — prevents intra-tick dogpile)**
+  end
+  PendP -> PG : DELETE pending row
+end
+deactivate PendP
+note over Disp, PendP
+  Phase 1A runs BEFORE Phase 2, so chunks planned
+  this tick are dispatched on the **next** tick.
+end note
+
+== Phase 3 — persist snapshot ==
+Daemon -> Snap : persist(mutable.to_frozen())\n(Redis SET KEEPTTL XX)
+
+== worker runs ==
+Worker ->> Worker : pull blend, render frames
+note over Worker
+  Worker reports PROGRESS / register-outputs /
+  status back to the API.  Monitors flip the job
+  to 'running'/'done'/'failed'.  The completion +
+  group-rollup flow is in **chunk_completion_flow.puml**;
+  failure/retry routing in **orchestrator_module.puml**.
+end note
+
+@enduml

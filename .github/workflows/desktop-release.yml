@@ -63,6 +63,24 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: agent/requirements.txt
+
+      - name: Build agent sidecar (PyInstaller)
+        # Produces desktop/src-tauri/pcrent-agent-x86_64-pc-windows-msvc.exe,
+        # which Tauri picks up via the ``externalBin`` config and bundles
+        # into the installer.  The binary is gitignored, so it has to be
+        # built here on every run.
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r agent/requirements.txt
+          python agent/build_sidecar.py
+
       - name: Build Tauri installer
         working-directory: desktop
         run: npm run tauri build

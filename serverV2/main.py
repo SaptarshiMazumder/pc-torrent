@@ -103,6 +103,7 @@ def _wire_routers(c: Container) -> None:
     from serverV2.api import dependencies
     from serverV2.api.routers import (
         admin_config,
+        app_meta,
         assets,
         debug,
         docker,
@@ -135,6 +136,7 @@ def _wire_routers(c: Container) -> None:
         job_repo=c.job_repo,
     )
     admin_config.init(c.allocation_client)
+    app_meta.init(c.allocation_config_repo)
 
     app.include_router(health.router)
     app.include_router(machines.router)
@@ -148,5 +150,6 @@ def _wire_routers(c: Container) -> None:
     app.include_router(debug.router)
     app.include_router(internal.router)
     app.include_router(admin_config.router)
+    app.include_router(app_meta.router)
 
 

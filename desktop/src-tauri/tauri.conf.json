@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicbarker/tauri/tauri-v2/crates/tauri-config-schema/schema.json",
-  "productName": "PC Rent",
+  "productName": "Forge",
   "version": "1.0.1",
   "identifier": "com.pcrent.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "PC Rent",
+        "title": "Forge",
         "width": 960,
         "height": 680,
         "minWidth": 800,
@@ -32,7 +32,7 @@
     "trayIcon": {
       "iconPath": "icons/icon.png",
       "iconAsTemplate": false,
-      "tooltip": "PC Rent Agent"
+      "tooltip": "Forge Agent"
     }
   },
   "bundle": {

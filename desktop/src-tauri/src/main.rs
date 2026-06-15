@@ -89,7 +89,7 @@ fn main() {
 
             let _tray = TrayIconBuilder::new()
                 .menu(&menu)
-                .tooltip("PC Rent Agent")
+                .tooltip("Forge Agent")
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
                         "show" => {

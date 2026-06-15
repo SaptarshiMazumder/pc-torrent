@@ -142,6 +142,16 @@ function NavIconDashboard() {
   );
 }
 
+function NavIconAbout() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="11" x2="12" y2="17" />
+      <circle cx="12" cy="7.5" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
 function SignOutIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -154,6 +164,7 @@ function SignOutIcon() {
 const RENTER_PAGES = [
   { id: "dashboard", label: "Dashboard", Icon: NavIconDashboard },
   { id: "logs", label: "Logs", Icon: NavIconLogs },
+  { id: "about", label: "About", Icon: NavIconAbout },
 ];
 
 const RENTEE_PAGES = [
@@ -163,6 +174,7 @@ const RENTEE_PAGES = [
   { id: "available", label: "Available Machines", Icon: NavIconMachines },
   { id: "configuration", label: "Configuration", Icon: NavIconConfiguration },
   { id: "logs", label: "Logs", Icon: NavIconLogs },
+  { id: "about", label: "About", Icon: NavIconAbout },
 ];
 
 function useClickOutside(ref, handler, enabled) {

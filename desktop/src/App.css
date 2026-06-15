@@ -2442,6 +2442,35 @@ body {
   border-top: 1px solid rgba(180, 185, 200, 0.12);
 }
 
+/* About page */
+.about-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+}
+
+.about-card {
+  max-width: 480px;
+  width: 100%;
+  background: rgba(20, 24, 32, 0.72);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 36px 32px;
+  text-align: center;
+}
+
+.about-title {
+  margin: 0 0 8px;
+  font-size: 28px;
+}
+
+.about-version {
+  font-size: 16px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
 /* Update Required modal -- full-screen force-update blocker */
 .update-required-overlay {
   position: fixed;
@@ -2492,14 +2521,6 @@ body {
 
 .update-required-btn {
   min-width: 220px;
-}
-
-.update-required-url {
-  margin-top: 16px;
-  font-size: 11px;
-  color: var(--text-muted);
-  word-break: break-all;
-  font-family: "Consolas", "Monaco", monospace;
 }
 
 .prep-result-action-note {

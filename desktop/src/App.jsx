@@ -7,6 +7,7 @@ import MyJobsPage from "./pages/MyJobsPage";
 import DownloadsPage from "./pages/DownloadsPage";
 import AvailableMachinesPage from "./pages/AvailableMachinesPage";
 import ConfigurationPage from "./pages/ConfigurationPage";
+import AboutPage from "./pages/AboutPage";
 import LoginPage from "./components/common/LoginPage";
 import UpdateRequiredModal from "./components/common/UpdateRequiredModal";
 import ToastViewport from "./components/common/ToastViewport";
@@ -140,6 +141,9 @@ export default function App() {
         {/* Shared pages */}
         {page === "configuration" && isAdmin && (
           <ConfigurationPage backendUrl={backendUrl} />
+        )}
+        {page === "about" && (
+          <AboutPage />
         )}
       </main>
     </div>

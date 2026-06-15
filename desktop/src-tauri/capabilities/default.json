@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for PC Rent",
+  "description": "Default capabilities for Forge",
   "windows": ["main"],
   "permissions": [
     "core:default",

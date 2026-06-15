@@ -1,5 +1,5 @@
 """
-PC Rent blend file preparation script.
+Forge blend file preparation script.
 Runs inside Blender (headless) before upload.
 
 Usage:

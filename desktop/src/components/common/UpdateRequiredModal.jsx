@@ -46,9 +46,6 @@ export default function UpdateRequiredModal({ currentVersion, minVersion, latest
         >
           Download v{minVersion || "Latest"}
         </button>
-        {latestUrl && (
-          <div className="update-required-url">{latestUrl}</div>
-        )}
       </div>
     </div>
   );

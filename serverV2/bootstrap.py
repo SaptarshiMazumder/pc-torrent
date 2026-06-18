@@ -11,6 +11,7 @@ the community fleet has DB-backed machine rows.
 
 from __future__ import annotations
 
+import os
 import uuid
 
 from serverV2.callbacks.failure_handler import FailureHandler
@@ -50,6 +51,10 @@ from serverV2.fleets.vast.strategy import VastFleetStrategy
 from serverV2.infrastructure import storage
 from serverV2.infrastructure.auth.firebase_app import init_firebase
 from serverV2.infrastructure.redis_client import RedisClient
+from serverV2.llm import LLMFacade
+from serverV2.llm.llm_provider_registry import LLMProviderRegistry
+from serverV2.llm.providers.anthropic_provider import AnthropicProvider
+from serverV2.llm.providers.openai_provider import OpenAIProvider
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
@@ -85,6 +90,7 @@ from serverV2.orchestrator.repositories import (
 from serverV2.orchestrator.task_actual_cost import TaskActualCost
 from serverV2.orchestrator.users_client import UsersClient
 from serverV2.allocation import AllocationDispatchQueueDaemon, AllocationFacade
+from serverV2.allocation.allocation_llm_client import AllocationLLMClient
 from serverV2.allocation.allocation_blend_url_resolver import (
     AllocationBlendUrlResolver,
 )
@@ -101,6 +107,9 @@ from serverV2.allocation.allocation_engine_resolver import (
 from serverV2.allocation.allocation_config_repository import (
     AllocationConfigRepository,
 )
+from serverV2.allocation.allocation_cost_estimation_config_repository import (
+    AllocationCostEstimationConfigRepository,
+)
 from serverV2.allocation.allocation_pending_queue_repository import (
     AllocationPendingQueueRepository,
 )
@@ -115,6 +124,15 @@ from serverV2.allocation.allocation_queue_item_codec import (
 )
 from serverV2.allocation.allocation_snapshot_mutator import (
     AllocationSnapshotMutator,
+)
+from serverV2.allocation.services.allocation_cost_estimation_service import (
+    AllocationCostEstimationService,
+)
+from serverV2.allocation.services.allocation_cost_estimation_service.allocation_cost_file_formula_repository import (
+    AllocationCostFileFormulaRepository,
+)
+from serverV2.allocation.services.allocation_cost_estimation_service.allocation_cost_llm_caller import (
+    AllocationCostLLMCaller,
 )
 from serverV2.allocation.services.allocation_planning_service import (
     AllocationCostAggregator,
@@ -254,6 +272,7 @@ def build(
     # ``RenderConfig`` object.
     cfg = config or AppConfig.from_env()
     allocation_config_repo = AllocationConfigRepository()
+    cost_estimation_config_repo = AllocationCostEstimationConfigRepository()
     redis = redis_client or RedisClient()
 
     # Initialize Firebase Admin SDK once at boot.  Auth-protected
@@ -463,10 +482,40 @@ def build(
     allocation_dispatcher = AllocationDispatcher(registry)
     allocation_blend_resolver = AllocationBlendUrlResolver(cfg)
     allocation_cost_aggregator = AllocationCostAggregator()
+
+    # ------------------------------------------------------------------
+    # LLM module wiring + cost estimation service.  Must be set up
+    # BEFORE AllocationPlanningService -- the planning service's
+    # cost_for_dry_run path injects the cost estimation service's
+    # LLM-derived base seconds into heaviness on the pre-render path.
+    # API keys come from env vars; each provider constructs its own
+    # SDK client.
+    # ------------------------------------------------------------------
+    llm_registry = LLMProviderRegistry()
+    llm_registry.register(
+        AnthropicProvider(api_key=os.environ["ANTHROPIC_API_KEY"]),
+    )
+    llm_registry.register(
+        OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"]),
+    )
+    llm_facade = LLMFacade(registry=llm_registry)
+    allocation_llm_client = AllocationLLMClient(facade=llm_facade)
+    cost_file_formula_repo = AllocationCostFileFormulaRepository()
+    cost_llm_caller = AllocationCostLLMCaller(
+        client=allocation_llm_client,
+        config_repo=cost_estimation_config_repo,
+    )
+    cost_estimation_service = AllocationCostEstimationService(
+        repository=cost_file_formula_repo,
+        llm_caller=cost_llm_caller,
+        config_repo=cost_estimation_config_repo,
+    )
+
     allocation_planning_service = AllocationPlanningService(
         planner=allocation_planner,
         cost_aggregator=allocation_cost_aggregator,
         config_repo=allocation_config_repo,
+        cost_estimation_service=cost_estimation_service,
     )
     _allocation_fleet_caps: dict[str, int] = {
         "modal_serverless": cfg.modal.max_parallel,
@@ -521,6 +570,7 @@ def build(
         pending_repo=pending_queue_repo,
         dispatch_repo=queue_repo,
         job_repository=job_repo,
+        group_repository=group_repo,
         snapshot_cache=fleet_availability_snapshot_cache,
         config_repo=allocation_config_repo,
     )

@@ -46,7 +46,7 @@ const communityProvider = {
       rangeLabel,
       elapsedSec: null,
       cost: task.estimated_cost_credits != null
-        ? `~${formatCredits(Number(task.estimated_cost_credits))} credits est.`
+        ? `~${formatCredits(Number(task.estimated_cost_credits))} tokens est.`
         : null,
       error: task.status === "failed" ? (task.error || "") : "",
       stallRule: task.stall_rule || null,

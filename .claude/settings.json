@@ -49,7 +49,14 @@
       "Bash(git push *)",
       "Bash(git tag *)",
       "Bash(chmod +x release-desktop.sh)",
-      "Bash(bash -n release-desktop.sh)"
+      "Bash(bash -n release-desktop.sh)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(git -C c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent mv serverV2/allocation/llm_client.py serverV2/allocation/allocation_llm_client.py)",
+      "Bash(awk '{n=split\\($0, a, \"=\"\\); if \\(n > 1\\) print a[1]\"=<set>\"; else print $0}' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/serverV2/.env)",
+      "Bash(bash -n migrate-neon.sh)",
+      "Bash(git check-ignore *)",
+      "Bash(git ls-files *)"
     ],
     "additionalDirectories": [
       "\\tmp"

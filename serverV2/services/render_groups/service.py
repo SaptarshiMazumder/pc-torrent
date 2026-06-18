@@ -11,6 +11,7 @@ import logging
 from typing import Any, Callable
 from uuid import uuid4
 
+from serverV2.config import usd_to_credits
 from serverV2.core.value_objects import (
     MAX_UPLOAD_BYTES,
     RENDER_PRIORITY_DEFAULT,
@@ -75,6 +76,10 @@ class RenderGroupService:
         # jobs the user can manually retry (i.e. those whose auto-retry
         # budget is already exhausted).
         self._get_max_retries = get_max_retries
+        # Cached so the group payload can convert the LLM-derived
+        # ``pre_render_cost_estimate_usd`` snapshot into credits using
+        # the same rate the serializer uses for per-task numbers.
+        self._credits_per_usd = float(credits_per_usd)
         self._serializer = RenderGroupSerializer(
             output_frame_repo=output_frame_repo,
             actual_cost_compute=orchestrator.actual_cost_for_row,
@@ -285,6 +290,32 @@ class RenderGroupService:
         # server-side; workers don't need it.
         overrides_json = json.dumps(normalized_overrides)
 
+        # LLM-derived cost snapshot.  Server re-runs the same dry-run
+        # cost the UI just showed (formula cache populated by the
+        # pre-render call moments earlier -- no LLM API call fires
+        # here on the hot path) and stamps the total on the group row.
+        # The post-submit "ESTIMATED COST" surface reads from this
+        # column instead of summing the heuristic-derived per-chunk
+        # stamps on jobs rows, so the user sees the same number
+        # pre-submit AND during render.
+        #
+        # No try/except here on purpose -- LLM flakiness is already
+        # contained inside cost_for_dry_run, so any failure here is
+        # a real bug (DB, planner, shape) and should fail submit
+        # loudly rather than silently leave the snapshot column NULL.
+        snapshot = self._orchestrator.cost_estimate_for_dry_run(
+            frame_start=plan.frame_start,
+            frame_end=plan.frame_end,
+            frame_step=plan.frame_step,
+            total_frames=plan.total_frames,
+            engine=engine,
+            heaviness=heaviness,
+            priority=priority,
+        )
+        self._groups.set_pre_render_cost_estimate_usd(
+            group_id, snapshot.total_cost_usd,
+        )
+
         # Park the group on pending_allocation_queue.  The dispatch
         # daemon plans + dispatches against its tick-local mutable
         # snapshot on the next tick -- the only thread allowed to
@@ -464,6 +495,20 @@ class RenderGroupService:
             (t.get("actual_cost_credits") or 0.0) for t in tasks
         )
 
+        # Group-level ESTIMATED cost.  Prefer the LLM-derived snapshot
+        # captured at submit (matches "what the user was quoted");
+        # fall back to SUM(per-task estimated_cost_credits) for legacy
+        # groups submitted before the snapshot column existed (NULL).
+        snapshot_usd = group.get("pre_render_cost_estimate_usd")
+        if snapshot_usd is not None:
+            total_estimated_cost_credits = usd_to_credits(
+                float(snapshot_usd), self._credits_per_usd,
+            )
+        else:
+            total_estimated_cost_credits = sum(
+                (t.get("estimated_cost_credits") or 0.0) for t in tasks
+            )
+
         return {
             "group_id": group["id"],
             "status": overall_status,
@@ -485,6 +530,7 @@ class RenderGroupService:
             "latest_output_file": latest_output,
             "latest_output_job_id": latest_output_job_id,
             "total_actual_cost_credits": total_actual_cost_credits,
+            "total_estimated_cost_credits": total_estimated_cost_credits,
             "tasks_count": len(tasks),
             "tasks": tasks,
         }

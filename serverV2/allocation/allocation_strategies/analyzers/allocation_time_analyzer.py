@@ -340,6 +340,19 @@ def estimate_seconds_per_frame(
     Returns seconds-per-frame as a float.  Output is a ranking signal,
     not a wall-time prediction — see module docstring.
     """
+    # LLM-derived override (pre-render path only).  When
+    # ``AllocationPlanningService.cost_for_dry_run`` runs and the
+    # Firestore ``config/cost_estimation`` doc has ``cost_estimator_enabled=true``,
+    # it stamps the cost estimation service's per-scene base seconds
+    # onto the heaviness dict.  That value already accounts for tunables
+    # (samples + resolution + denoise), so all this function adds
+    # here is the per-target ``render_speed`` scaling.  Render-flow
+    # paths (plan_initial / plan_retry) never set this field, so the
+    # heuristic below runs unchanged for them.
+    override = heaviness.get("llm_base_seconds_at_anchor")
+    if override is not None:
+        return float(override) / max(MIN_RENDER_SPEED, render_speed)
+
     engine = str(heaviness.get("render_engine") or "")
     if engine in _EEVEE_ENGINES:
         baseline_sec = _calibration.baseline_sec_eevee

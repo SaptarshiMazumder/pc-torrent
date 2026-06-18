@@ -21,7 +21,7 @@ export default function UserCreditsCorner() {
   if (!profile && !loading) return null;
 
   return (
-    <div className="user-credits-corner" role="status" aria-label="Credits balance">
+    <div className="user-credits-corner" role="status" aria-label="Tokens balance">
       {profile ? (
         <>
           <span className="user-credits-corner-tier">{profile.tier || "free"}</span>
@@ -29,7 +29,7 @@ export default function UserCreditsCorner() {
           <span className="user-credits-corner-credits">
             {formatCredits(profile.credits)}
           </span>
-          <span className="user-credits-corner-unit">credits</span>
+          <span className="user-credits-corner-unit">tokens</span>
         </>
       ) : (
         <span className="user-credits-corner-loader">Loading…</span>

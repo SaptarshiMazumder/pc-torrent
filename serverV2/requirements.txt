@@ -11,3 +11,5 @@ pydantic
 zstandard
 redis
 modal
+anthropic
+openai

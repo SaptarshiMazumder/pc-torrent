@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 
+from serverV2.config import usd_to_credits
+
 log = logging.getLogger(__name__)
 
 
@@ -26,7 +28,11 @@ class UserService:
 
         ``actual_cost_usd`` <= 0 or ``None`` returns ``0.0`` -- the
         facade treats that as a no-op.
+
+        Delegates the multiplication to ``usd_to_credits`` so this
+        module shares the single arithmetic source-of-truth with the
+        wire-boundary serializer and the pre-render estimator.
         """
         if not actual_cost_usd or actual_cost_usd <= 0:
             return 0.0
-        return float(actual_cost_usd) * self._credits_per_usd
+        return usd_to_credits(actual_cost_usd, self._credits_per_usd) or 0.0

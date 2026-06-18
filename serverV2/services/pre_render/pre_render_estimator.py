@@ -11,12 +11,7 @@ The orchestrator delegates through allocation_client -> facade ->
 planning_service -> planner; the planner stamps per-chunk estimates
 that the planning service aggregates into a single
 ``GroupCostEstimate``.  This estimator turns the result into the
-``{wall_time_seconds, cost_low/mid/high_usd, machines}`` shape the UI
-consumes.
-
-The low/mid/high cost range is a UI-only widening of the canonical
-``total_cost_usd`` -- a fixed +/- spread so the UI can show "expected
-+/- N%" without the planner having to model variance internally.
+``{wall_time_seconds, cost_credits, machines}`` shape the UI consumes.
 
 No DB reads.  No DB writes.  No render group needs to exist yet.
 Errors raise: ``SceneResolutionError`` and ``FrameRangeResolutionError``
@@ -40,14 +35,6 @@ from serverV2.services.pre_render.frame_range_resolver import resolve_frame_rang
 from serverV2.services.pre_render.scene_resolver import SceneResolver
 
 log = logging.getLogger(__name__)
-
-
-# Fixed UI-only widening band around the canonical ``total_cost_usd``.
-# Planner produces a single deterministic number; the UI displays a +/-
-# spread so users see "expected, optimistic, pessimistic" instead of a
-# false-precision single value.  Tweak if the band feels too narrow/
-# wide; the planner does NOT model variance.
-_COST_WIDENING_BAND: float = 0.25
 
 
 class FrameRangeResolutionError(ValueError):
@@ -94,8 +81,7 @@ class PreRenderEstimator:
         """Returns::
 
             {
-                "estimate":   {wall_time_seconds, cost_low_usd,
-                               cost_mid_usd, cost_high_usd, machines},
+                "estimate":   {wall_time_seconds, cost_credits, machines},
                 "frame_plan": {frame_start, frame_end, frame_step,
                                total_frames},
                 "analysis_warnings": [...],
@@ -159,19 +145,13 @@ class PreRenderEstimator:
 def _to_ui_dto(estimate: GroupCostEstimate, credits_per_usd: float) -> dict[str, Any]:
     """Project a ``GroupCostEstimate`` into the UI's display shape.
 
-    The planner's ``total_cost_usd`` is the canonical mid value; we
-    widen by a fixed +/- band purely for display so the UI can show a
-    plausible-range card instead of a single false-precision number.
-    Variance is NOT modelled in the planner.  Output is in credits --
-    the UI's only currency -- via the wire-boundary conversion.
+    The planner's ``total_cost_usd`` is a single deterministic number
+    -- no variance modelled, no widening applied.  Output is in
+    credits via the wire-boundary conversion.
     """
-    mid_usd = float(estimate.total_cost_usd)
-    band = _COST_WIDENING_BAND
-    mid_credits = usd_to_credits(mid_usd, credits_per_usd) or 0.0
+    cost_credits = usd_to_credits(float(estimate.total_cost_usd), credits_per_usd) or 0.0
     return {
         "wall_time_seconds": int(estimate.wall_time_seconds),
-        "cost_mid_credits": round(mid_credits, 2),
-        "cost_low_credits": round(mid_credits * (1.0 - band), 2),
-        "cost_high_credits": round(mid_credits * (1.0 + band), 2),
+        "cost_credits": round(cost_credits, 2),
         "machines": estimate.chunks,
     }

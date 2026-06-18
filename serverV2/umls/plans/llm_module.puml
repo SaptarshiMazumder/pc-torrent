@@ -1,0 +1,217 @@
+@startuml llm_module
+title LLM module -- generic facade + strategy + allocation client (planned)
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+legend top right
+  | <#fef3c7> | EXISTING (unchanged) |
+  | <#bbf7d0> | PLANNED -- new file/class |
+  | <#bfdbfe> | PLANNED -- modified |
+  | <#fecaca> | External (Anthropic / OpenAI SDKs) |
+endlegend
+
+' ===========================================================
+' MODULE: serverV2/llm  -- generic, provider-agnostic
+' ===========================================================
+package "serverV2/llm" <<Frame>> #e0f2fe {
+
+  package "(value objects -- generic chat shape)" <<Rectangle>> #bbf7d0 {
+    class LLMChatRequest <<new>> {
+      + model : str
+      + system : str | None
+      + messages : list[dict]   << role + content >>
+      + tools : list[dict] | None
+      + tool_choice : dict | None
+      + max_tokens : int
+      + temperature : float | None
+    }
+
+    class LLMChatResponse <<new>> {
+      + content_blocks : list[dict]   << text / tool_use >>
+      + stop_reason : str
+      + input_tokens : int
+      + output_tokens : int
+      --
+      + tool_use(name : str) : dict | None
+      + text() : str
+    }
+
+    class LLMException <<new>> {
+      Provider-agnostic error type.
+      Wraps timeouts, rate limits, bad responses,
+      auth failures.  Each provider maps its SDK
+      errors into this so callers only catch one type.
+    }
+  }
+
+  package "(strategy -- one impl per provider)" <<Rectangle>> #bbf7d0 {
+    interface LLMProvider <<Protocol>> {
+      + name : str
+      + chat(request : LLMChatRequest) : LLMChatResponse
+        ' raises LLMException on any failure
+    }
+
+    class AnthropicProvider {
+      - client : anthropic.Anthropic
+      --
+      + name : str = "anthropic"
+      + chat(request) : LLMChatResponse
+        ' resp = client.messages.create(...)
+        ' return LLMChatResponse.from_anthropic(resp)
+    }
+
+    class OpenAIProvider {
+      - client : openai.OpenAI
+      --
+      + name : str = "openai"
+      + chat(request) : LLMChatResponse
+        ' resp = client.chat.completions.create(...)
+        '    (tool-use shape translated from
+        '     Anthropic-style to OpenAI-style here)
+        ' return LLMChatResponse.from_openai(resp)
+    }
+
+    LLMProvider <|.. AnthropicProvider
+    LLMProvider <|.. OpenAIProvider
+  }
+
+  package "(registry + facade -- module surface)" <<Rectangle>> #bbf7d0 {
+    class LLMProviderRegistry <<new>> {
+      - providers : dict[str, LLMProvider]
+      --
+      + register(provider : LLMProvider)
+      + get(name : str) : LLMProvider
+        ' raises LLMException("unknown provider")
+        ' if name not registered.
+      + names() : list[str]
+    }
+
+    class LLMFacade <<new>> {
+      .. single public entry point ..
+      Constructor: takes LLMProviderRegistry.
+      --
+      + chat(provider_name : str,
+             request : LLMChatRequest) : LLMChatResponse
+        ' provider = registry.get(provider_name)
+        ' return provider.chat(request)
+      --
+      Future surface (planned but NOT in scope here):
+        + chat_stream(...)   -- streaming responses
+        + count_tokens(...)  -- pre-call sizing
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/allocation  -- consumer-side client
+' ===========================================================
+package "serverV2/allocation" <<Frame>> #e0f2fe {
+
+  package "(allocation client -- pure pass-through)" <<Rectangle>> #bbf7d0 {
+    class AllocationLLMClient <<new>> {
+      .. allocation's view into the LLM module ..
+      Constructor: takes LLMFacade.
+      --
+      + chat(provider_name : str,
+             request : LLMChatRequest) : LLMChatResponse
+        ' Pure pass-through.  Lives in allocation so
+        ' the allocation module never imports
+        ' ``serverV2/llm/*`` directly -- only the client.
+        ' Mirrors the AllocationClient -> AllocationFacade
+        ' layering convention already used elsewhere.
+    }
+  }
+
+  note bottom of AllocationLLMClient
+    Future cost-estimator + any other allocation-domain
+    LLM caller goes through THIS client.  Keeps the LLM
+    module's import surface inside allocation small and
+    swappable -- ``AllocationLLMClient`` could become a fake in
+    unit tests without touching the cost estimator code.
+  end note
+}
+
+' ===========================================================
+' MODULE: serverV2/bootstrap.py
+' ===========================================================
+package "serverV2/bootstrap.py" <<Frame>> #e0f2fe {
+  class "build()" as Bootstrap <<modified>> #bfdbfe {
+    Boot wiring additions:
+      llm_registry = LLMProviderRegistry()
+      llm_registry.register(
+          AnthropicProvider(
+              api_key=os.environ["ANTHROPIC_API_KEY"]))
+      llm_registry.register(
+          OpenAIProvider(
+              api_key=os.environ["OPENAI_API_KEY"]))
+      llm_facade = LLMFacade(registry=llm_registry)
+      llm_client = AllocationLLMClient(facade=llm_facade)
+
+      ' llm_client then gets injected into any
+      ' allocation-side consumer (e.g. the planned
+      ' LLMCostEstimator) -- separate puml when we
+      ' plan that.
+  }
+}
+
+' ===========================================================
+' Externals
+' ===========================================================
+package "Anthropic SDK" #fecaca {
+  class "anthropic.Anthropic" as AnthropicSDK {
+    + messages.create(...)
+  }
+}
+package "OpenAI SDK" #fecaca {
+  class "openai.OpenAI" as OpenAISDK {
+    + chat.completions.create(...)
+  }
+}
+
+' ===========================================================
+' Relationships
+' ===========================================================
+LLMFacade --> LLMProviderRegistry : reads
+LLMFacade ..> LLMProvider : delegates chat()
+LLMFacade ..> LLMChatRequest : accepts
+LLMFacade ..> LLMChatResponse : returns
+LLMProviderRegistry o-- LLMProvider : holds many
+
+AnthropicProvider --> AnthropicSDK : messages.create
+OpenAIProvider --> OpenAISDK : chat.completions.create
+
+AllocationLLMClient --> LLMFacade : pass-through
+
+Bootstrap --> LLMProviderRegistry : constructs + registers
+Bootstrap --> LLMFacade : constructs
+Bootstrap --> AllocationLLMClient : constructs + injects to allocation consumers
+
+' ===========================================================
+' Notes
+' ===========================================================
+note bottom of LLMProvider
+  Strategy pattern.  Adding a new model vendor =
+  one new file under llm/providers/ + one line in
+  bootstrap.  Existing callers never change.
+end note
+
+note bottom of LLMChatRequest
+  Anthropic's request shape is the canonical superset
+  (system + messages + tools + tool_choice + max_tokens).
+  OpenAIProvider translates inbound: tool definitions to
+  OpenAI's function-calling shape, system prompt to a
+  system-role message, etc.  All translation lives in
+  the provider impl, never leaks into callers.
+end note
+
+note bottom of LLMFacade
+  Single seam.  Nothing inside serverV2/llm/ leaks out
+  beyond this class.  Callers depend on (LLMFacade,
+  LLMChatRequest, LLMChatResponse, LLMException) only.
+end note
+
+@enduml

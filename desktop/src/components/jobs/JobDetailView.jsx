@@ -110,12 +110,19 @@ function RenderGroupDetail({
   const latestOutputFile =
     job.latest_output_file || getLatestTaskWithOutput(job.tasks)?.latest_output_file || null;
 
-  // Sum of per-task projected costs in credits.  Tasks pre-
-  // AllocationPlanner have null estimates -- treated as 0.
-  const totalEstimatedCost = tasksList.reduce(
-    (sum, t) => sum + (typeof t.estimated_cost_credits === "number" ? t.estimated_cost_credits : 0),
-    0,
-  );
+  // Group-level estimate.  Prefer the LLM-derived snapshot the server
+  // stamped at submit (``total_estimated_cost_credits``); falls back
+  // to summing per-task heuristic stamps for legacy groups submitted
+  // before that field existed.  Without this fallback the headline
+  // would diverge from what the user was quoted pre-render, since the
+  // per-task stamps are heuristic-derived and the snapshot is the
+  // LLM-derived number the user actually saw.
+  const totalEstimatedCost = typeof job.total_estimated_cost_credits === "number"
+    ? job.total_estimated_cost_credits
+    : tasksList.reduce(
+        (sum, t) => sum + (typeof t.estimated_cost_credits === "number" ? t.estimated_cost_credits : 0),
+        0,
+      );
 
   // Actual-cost rollup uses the polled per-task ``actual_cost_credits``
   // directly.  Server computes live values at request time (running
@@ -158,7 +165,7 @@ function RenderGroupDetail({
               {totalEstimatedCost > 0 && (
                 <div className="jd-headline-cost">
                   <span className="jd-headline-cost-label">Estimated cost</span>
-                  <span className="jd-headline-cost-value">~{formatCredits(totalEstimatedCost)} credits</span>
+                  <span className="jd-headline-cost-value">~{formatCredits(totalEstimatedCost)} tokens</span>
                 </div>
               )}
             </div>
@@ -337,13 +344,13 @@ function RenderGroupDetail({
                   <div className="jd-cost-summary-row">
                     <span className="jd-cost-summary-label">Estimated</span>
                     <span className="jd-cost-summary-value">
-                      {tasksLoading ? "…" : totalEstimatedCost > 0 ? `~${formatCredits(totalEstimatedCost)} cr` : "—"}
+                      {tasksLoading ? "…" : totalEstimatedCost > 0 ? `~${formatCredits(totalEstimatedCost)} tokens` : "—"}
                     </span>
                   </div>
                   <div className="jd-cost-summary-row">
                     <span className="jd-cost-summary-label">Actual</span>
                     <span className="jd-cost-summary-value">
-                      {tasksLoading ? "…" : groupActualCost > 0 ? `${formatCredits(groupActualCost)} cr` : "—"}
+                      {tasksLoading ? "…" : groupActualCost > 0 ? `${formatCredits(groupActualCost)} tokens` : "—"}
                     </span>
                   </div>
                 </div>
@@ -362,10 +369,10 @@ function RenderGroupDetail({
                           ? `${t.frame_start}–${t.frame_end}`
                           : "—";
                         const est = typeof t.estimated_cost_credits === "number"
-                          ? `~${formatCredits(t.estimated_cost_credits)} cr`
+                          ? `~${formatCredits(t.estimated_cost_credits)} tokens`
                           : "—";
                         const actual = typeof t.actual_cost_credits === "number"
-                          ? `${formatCredits(t.actual_cost_credits)} cr`
+                          ? `${formatCredits(t.actual_cost_credits)} tokens`
                           : "—";
                         return (
                           <li key={t.job_id} className="jd-cost-item">
@@ -591,10 +598,6 @@ export default function JobDetailView({
             <UserCreditsHeader />
           </div>
         </div>
-        <div className="jd-live-cost" title="Accrued cost for this render">
-          <span className="jd-live-cost-label">{costLabel}</span>
-          <span className="jd-live-cost-value">{formatCredits(liveCost)} cr</span>
-        </div>
 
         <div className="job-detail-hero">
           <div className="job-detail-hero-icon">
@@ -634,6 +637,10 @@ export default function JobDetailView({
                   {new Date(job.submitted_at).toLocaleDateString()} {new Date(job.submitted_at).toLocaleTimeString()}
                 </span>
               )}
+              <span className="jd-live-cost" title="Accrued cost for this render">
+                <span className="jd-live-cost-label">{costLabel}</span>
+                <span className="jd-live-cost-value">{formatCredits(liveCost)} tokens</span>
+              </span>
             </div>
           </div>
         </div>

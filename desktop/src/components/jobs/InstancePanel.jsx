@@ -12,7 +12,7 @@ function formatActualCost(task) {
   const label = (task.status === "running" || task.status === "uploading")
     ? "live"
     : "actual";
-  return `${formatCredits(task.actual_cost_credits)} credits ${label}`;
+  return `${formatCredits(task.actual_cost_credits)} tokens ${label}`;
 }
 
 const MERGED_STATUS_COLORS = {

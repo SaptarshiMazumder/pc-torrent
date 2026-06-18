@@ -44,7 +44,7 @@ const vastProvider = {
       rangeLabel,
       elapsedSec: live?.elapsed_sec ?? null,
       cost: task.estimated_cost_credits != null
-        ? `~${formatCredits(Number(task.estimated_cost_credits))} credits est.`
+        ? `~${formatCredits(Number(task.estimated_cost_credits))} tokens est.`
         : null,
       error: live?.error || (task.status === "failed" ? task.error : "") || "",
       stallRule: task.stall_rule || null,

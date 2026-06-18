@@ -1,0 +1,345 @@
+@startuml allocation_cost_estimation_service
+title Allocation cost estimation service -- LLM is display-only; planner stays heuristic; snapshot at submit (revised)
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+legend top right
+  | <#fef3c7> | EXISTING (shipped, unchanged) |
+  | <#bbf7d0> | PLANNED -- new file/class/column |
+  | <#bfdbfe> | PLANNED -- modified |
+  | <#fecaca> | External (Postgres / Firestore / disk) |
+endlegend
+
+' ============================================================
+' Scope rule (Path B):
+'   * cost_for_dry_run (pre-render preview)
+'       -> calls the LLM on cache miss; stores formula
+'       -> result shown to the user before submit
+'   * confirm-upload (submit boundary)                << NEW >>
+'       -> server re-runs cost_for_dry_run (cache hit
+'          guaranteed since pre-render just ran)
+'       -> stamps the total on render_groups.pre_render_cost_estimate_usd
+'   * plan_initial / plan_retry (render flow)
+'       -> NEVER touch the LLM; allocation decisions stay
+'          on the deterministic heuristic
+'       -> jobs.estimated_cost_usd remains heuristic-derived
+'          (used internally for allocation scoring only)
+'   * UI ESTIMATED COST during render
+'       -> reads the render-group snapshot when present;
+'          falls back to SUM(jobs.estimated_cost_usd) for
+'          legacy groups submitted before this change
+'   * actual bill -> measured telemetry (TaskActualCost), unchanged
+' ============================================================
+
+' ============================================================
+' MODULE: serverV2/allocation/services/allocation_cost_estimation_service
+' (UNCHANGED from current production state -- shown for context)
+' ============================================================
+package "serverV2/allocation/services/allocation_cost_estimation_service" <<Frame>> #e0f2fe {
+
+  package "(value object -- frozen formula + math)" <<Rectangle>> #fef3c7 {
+    class AllocationCostFileFormula <<existing>> {
+      + base_seconds_per_frame_at_anchor : float
+      + samples_exponent : float
+      + resolution_exponent : float
+      + denoise_overhead_seconds : float
+      + engine : str
+      + notes : str
+      + llm_provider : str
+      + llm_model : str
+      --
+      + seconds_per_frame(samples, resolution_pct, denoise) : float
+    }
+  }
+
+  package "(cache + hasher)" <<Rectangle>> #fef3c7 {
+    class AllocationCostFileFormulaRepository <<existing>> {
+      + get(heaviness) : AllocationCostFileFormula | None
+      + put(heaviness, formula)
+    }
+  }
+
+  package "(LLM call)" <<Rectangle>> #fef3c7 {
+    class AllocationCostLLMCaller <<existing>> {
+      + call(heaviness) : AllocationCostFileFormula
+    }
+  }
+
+  package "(orchestrator -- module entry)" <<Rectangle>> #fef3c7 {
+    class AllocationCostEstimationService <<existing>> {
+      + base_seconds_per_frame_at_anchor(heaviness) : float
+        ' Pre-render path -- may call LLM on cache miss.
+        ' Applies safety_multiplier.  NOT called from
+        ' the render flow.
+      + is_enabled() : bool
+        ' config/cost_estimation.cost_estimator_enabled
+    }
+  }
+}
+
+' ============================================================
+' Existing touchpoints (already shipped)
+' ============================================================
+package "serverV2/allocation" <<Frame>> #e0f2fe {
+  class AllocationLLMClient <<existing>> #fef3c7 {
+    + chat(provider_name, request) : LLMChatResponse
+  }
+
+  class AllocationCostEstimationConfigRepository <<existing>> #fef3c7 {
+    Reads ``config/cost_estimation`` doc.
+    Fields: cost_estimator_enabled, provider_name,
+    model, safety_multiplier.
+  }
+
+  class allocation_time_analyzer <<existing>> #fef3c7 {
+    Reads ``heaviness["llm_base_seconds_at_anchor"]``
+    if present; otherwise runs the heuristic.
+    UNCHANGED for Path B -- only the pre-render path
+    populates the override field, so render-flow calls
+    continue running the heuristic.
+  }
+}
+
+package "serverV2/allocation/services/allocation_planning_service" <<Frame>> #e0f2fe {
+  class AllocationPlanningService <<modified>> #bfdbfe {
+    Constructor unchanged (already takes
+    ``cost_estimation_service``).
+    --
+    cost_for_dry_run() -- UNCHANGED:
+      LLM enrichment on this path stays.  Returns the
+      same GroupCostEstimate today's pre-render UI consumes.
+
+    plan_initial() + plan_retry() -- UNCHANGED:
+      No LLM, no cache read.  Pure heuristic allocation.
+      Stamps heuristic-based ``estimated_seconds`` /
+      ``estimated_cost_usd`` on each PlannedTask (used
+      internally for allocation scoring + chunk sizing).
+
+    cost_for_committed_jobs() -- MODIFIED:
+      NEW signature: takes ``snapshot_usd : float | None``
+      and the existing ``rows : list[dict]``.
+      If ``snapshot_usd`` is non-None -> build a
+      GroupCostEstimate whose ``total_cost_usd`` is the
+      snapshot (chunks still come from rows for the
+      per-fleet breakdown the UI shows).
+      Else -> existing behaviour (SUM jobs.estimated_cost_usd).
+  }
+}
+
+' ============================================================
+' NEW touchpoints for Path B
+' ============================================================
+package "serverV2/services/render_groups" <<Frame>> #e0f2fe {
+  class RenderGroupService <<modified>> #bfdbfe {
+    Constructor gains:
+      allocation_client : AllocationClient
+        (already injected today for other calls --
+         just reuse the dry-run cost surface here).
+    --
+    confirm_upload() -- NEW step at the end:
+      1. Resolved scene + frame plan + priority are
+         already in scope (the heuristic-side estimate
+         already runs here).
+      2. Call allocation_client.cost_estimate_for_dry_run(
+             resolved scene, frame plan, priority)
+         -- this hits the LLM-eligible path; the formula
+         cache populated 0.5s ago by the pre-render call
+         means no LLM API call fires.
+      3. Stamp the resulting ``total_cost_usd`` on
+         ``render_groups.pre_render_cost_estimate_usd``
+         via the repository (below).
+      Idempotent: safe to re-run; the value just
+      overwrites.
+  }
+}
+
+package "serverV2/repositories" <<Frame>> #e0f2fe {
+  class RenderGroupRepository <<modified>> #bfdbfe {
+    + set_pre_render_cost_estimate_usd(
+        group_id : str,
+        value : float,
+      )                                                   << new method >>
+    + get_pre_render_cost_estimate_usd(
+        group_id : str,
+      ) : float | None                                     << new method >>
+    ' Plus one read-path tweak: list/detail SELECTs
+    ' include the new column so callers can read it
+    ' without an extra query.
+  }
+}
+
+package "serverV2/allocation" <<Frame>> #e0f2fe {
+  class AllocationFacade <<modified>> #bfdbfe {
+    cost_estimate_for_committed_group() -- MODIFIED:
+      Today: rows = job_repo.list_for_group(group_id);
+             return planning.cost_for_committed_jobs(rows).
+      New:   snapshot = group_repo.get_pre_render_cost_estimate_usd(group_id);
+             rows = job_repo.list_for_group(group_id);
+             return planning.cost_for_committed_jobs(
+                 rows, snapshot_usd=snapshot,
+             ).
+  }
+}
+
+package "serverV2/infrastructure" <<Frame>> #e0f2fe {
+  class "db.init_db()" as DbInit <<modified>> #bfdbfe {
+    Append one idempotent ALTER TABLE:
+      ALTER TABLE render_groups
+        ADD COLUMN IF NOT EXISTS
+          pre_render_cost_estimate_usd DOUBLE PRECISION
+    Legacy groups (pre-this-change) have NULL -- the
+    facade's read-path treats NULL as "no snapshot,
+    fall back to SUM(jobs)".
+  }
+}
+
+' ============================================================
+' Externals
+' ============================================================
+package "Postgres" <<Frame>> #fecaca {
+  class "allocation_cost_file_formulas" as PgFormulas <<existing>> {
+    UNCHANGED.  Formula cache populated by pre-render
+    LLM call; read by the confirm-upload re-run
+    (always a cache hit in the normal flow).
+  }
+
+  class "render_groups (new column)" as PgRenderGroups <<modified>> #bfdbfe {
+    pre_render_cost_estimate_usd
+      DOUBLE PRECISION                          << NEW >>
+    Per group, the LLM-derived projection
+    captured at submit.  Frozen for the life
+    of the group -- retries do NOT update it.
+  }
+
+  class "jobs" as PgJobs <<existing>> #fef3c7 {
+    estimated_cost_usd (heuristic-derived,
+    used internally for allocation scoring;
+    summed only as a fallback for legacy
+    groups without a snapshot)
+  }
+}
+
+package "Firestore: config/global" <<Frame>> #fef3c7 {
+  class "config/cost_estimation doc" as FirestoreLlm <<existing>> {
+    cost_estimator_enabled
+    provider_name
+    model
+    safety_multiplier
+  }
+}
+
+' ============================================================
+' Caller-side flow markers
+' ============================================================
+package "serverV2/services/pre_render" <<Frame>> #e0f2fe {
+  class PreRenderEstimator <<existing>> #fef3c7 {
+    Unchanged.  Calls
+    orchestrator.cost_estimate_for_dry_run(...)
+    -- this is the LLM-eligible path; populates
+    the formula cache as a side-effect.
+  }
+}
+
+package "serverV2/allocation render flow" <<Frame>> #e0f2fe {
+  class AllocationPendingTickProcessor <<existing>> #fef3c7 {
+    Unchanged.  Calls plan_initial -- pure
+    heuristic; NEVER touches the LLM or the
+    formula cache.
+  }
+
+  class RetryExecutor <<existing>> #fef3c7 {
+    Unchanged.  Drives plan_retry -- pure
+    heuristic; NEVER touches the LLM or the
+    formula cache.
+  }
+}
+
+' ============================================================
+' Relationships
+' ============================================================
+AllocationCostEstimationService --> AllocationCostFileFormulaRepository : get / put
+AllocationCostEstimationService --> AllocationCostLLMCaller : call() on miss
+AllocationCostEstimationService --> AllocationCostEstimationConfigRepository : safety_multiplier + enabled
+
+AllocationCostLLMCaller --> AllocationLLMClient : chat()
+
+AllocationCostFileFormulaRepository --> PgFormulas : SELECT / UPSERT
+AllocationCostEstimationConfigRepository --> FirestoreLlm : reads
+
+PreRenderEstimator ..> AllocationPlanningService : cost_for_dry_run (LLM-eligible)
+AllocationPlanningService ..> AllocationCostEstimationService : cost_for_dry_run path only
+allocation_time_analyzer ..> AllocationPlanningService : reads enriched heaviness on the dry-run path
+
+RenderGroupService ..> AllocationPlanningService : cost_for_dry_run at confirm (cache hit)
+RenderGroupService --> RenderGroupRepository : set_pre_render_cost_estimate_usd
+
+AllocationPendingTickProcessor ..> AllocationPlanningService : plan_initial (heuristic only)
+RetryExecutor ..> AllocationPlanningService : plan_retry (heuristic only)
+AllocationPlanningService --> PgJobs : stamps estimated_cost_usd (heuristic)
+
+AllocationFacade --> RenderGroupRepository : get_pre_render_cost_estimate_usd
+AllocationFacade --> AllocationPlanningService : cost_for_committed_jobs(rows, snapshot_usd)
+
+RenderGroupRepository --> PgRenderGroups : SELECT / UPDATE new column
+DbInit --> PgRenderGroups : ALTER TABLE ADD COLUMN
+
+' ============================================================
+' Notes
+' ============================================================
+note bottom of RenderGroupService
+  Why call cost_for_dry_run a SECOND time at confirm
+  instead of trusting whatever the client just saw?
+    1. Server-driven -- no client/server trust gap.
+    2. Cache hit -- the formula already lives in
+       allocation_cost_file_formulas from the
+       pre-render call moments earlier, so this is
+       a DB read + math, not an LLM API call.
+    3. Deterministic -- same heaviness + same
+       safety_multiplier always yields the same
+       number, so what we stamp matches what the
+       UI showed.
+end note
+
+note bottom of AllocationPlanningService
+  ``cost_for_committed_jobs`` is now snapshot-aware.
+  Per-fleet breakdown (the per-chunk machines list the
+  UI displays) still comes from rows -- only the
+  ``total_cost_usd`` is overridden by the snapshot.
+  This keeps the chunk-detail surface working with
+  no changes elsewhere.
+end note
+
+note bottom of PgRenderGroups
+  Frozen at submit.  Retries deliberately do NOT
+  update this column -- the snapshot represents
+  "what the user was quoted", which is the source
+  of truth for billing-fairness comparisons.  Live
+  cost (telemetry-driven) is separate and shown
+  alongside.
+end note
+
+note bottom of allocation_time_analyzer
+  The ``llm_base_seconds_at_anchor`` override field
+  STAYS on the heaviness contract because
+  cost_for_dry_run still uses it on the pre-render
+  path.  The render flow (plan_initial / plan_retry)
+  passes heaviness through without that field, so
+  the analyzer runs the heuristic exactly as before.
+end note
+
+note bottom of AllocationFacade
+  Read-path branch:
+    snapshot != NULL  -> return snapshot value
+                          (LLM-derived, what the
+                          user was quoted)
+    snapshot == NULL  -> SUM(jobs.estimated_cost_usd)
+                          (legacy / heuristic --
+                          covers groups submitted
+                          before this column existed)
+end note
+
+@enduml

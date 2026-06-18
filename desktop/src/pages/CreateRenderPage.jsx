@@ -230,7 +230,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   const abortRef = useRef(null);
 
   // Cost / wall-time estimate, populated after analysis completes.
-  // Shape: { wall_time_seconds, cost_low_credits, cost_mid_credits, cost_high_credits, machines } | null
+  // Shape: { wall_time_seconds, cost_credits, machines } | null
   const [costEstimate, setCostEstimate] = useState(null);
   const [costEstimateLoading, setCostEstimateLoading] = useState(false);
 
@@ -880,9 +880,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
   const formatCost = (entry) => {
     if (!entry) return null;
-    const lo = entry.cost_low_credits ?? 0;
-    const hi = entry.cost_high_credits ?? 0;
-    return `${formatCredits(lo)}-${formatCredits(hi)} credits`;
+    const c = entry.cost_credits ?? 0;
+    return `${formatCredits(c)} tokens`;
   };
   const formatTime = (entry) => {
     if (!entry?.wall_time_seconds) return null;
@@ -1252,45 +1251,6 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                     </button>
                   ))}
                 </div>
-                {queueDepth && (
-                  <div className="cr-queue-depth">
-                    <div className="cr-queue-depth-title">Queue right now</div>
-                    <table className="cr-queue-depth-table">
-                      <thead>
-                        <tr>
-                          <th />
-                          <th>HIGH</th>
-                          <th>NORMAL</th>
-                          <th>LOW</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {["vast", "modal", "community"].map((fleet) => {
-                          const f = queueDepth[fleet] || {};
-                          return (
-                            <tr key={fleet}>
-                              <td className="cr-queue-depth-fleet">{fleet}</td>
-                              {["high", "normal", "low"].map((level) => {
-                                const cell = f[level] || { jobs: 0, frames: 0 };
-                                return (
-                                  <td key={level} className="cr-queue-depth-cell">
-                                    <span className="cr-queue-depth-jobs">{cell.jobs}</span>
-                                    {cell.jobs > 0 && (
-                                      <span className="cr-queue-depth-frames"> ({cell.frames} f)</span>
-                                    )}
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                    <div className="cr-queue-depth-note">
-                      Estimate is render time only — queue wait depends on what's ahead of your priority.
-                    </div>
-                  </div>
-                )}
               </div>
             </section>
             {/* Scene Stats (read-only -- analyzer metadata) -------------- */}
@@ -1325,49 +1285,95 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
             )}
           </div>
 
-          {/* ── Below (full-width): preserved Analysis Report ── */}
-          {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (() => {
-            const allWarnings = [...(prepResult.analysis_warnings || []), ...(prepResult.prepare_warnings || [])];
-            const missingFilePattern = /cannot pack|missing images|missing image|still missing|search budget/i;
-            const hasMissingFileIssue = allWarnings.some((msg) => missingFilePattern.test(String(msg)));
-            return (
-              <div className="cr-card cr-card-warnings">
-                <div className="cr-card-header">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
-                  <span>Analysis Report</span>
-                </div>
-                {[...(prepResult.analysis_errors || []), ...(prepResult.prepare_errors || [])].map((msg, i) => (
-                  <div key={`err-${i}`} className="prep-result-item prep-result-error"><span className="prep-result-tag">[ERROR]</span> {msg}</div>
-                ))}
-                {allWarnings.map((msg, i) => (
-                  <div key={`warn-${i}`} className="prep-result-item prep-result-warning"><span className="prep-result-tag">[WARNING]</span> {msg}</div>
-                ))}
-                {hasMissingFileIssue && (
-                  <div className="prep-result-action">
-                    {prepResult.deep_search_ran ? (
-                      <span className="prep-result-action-note">
-                        Already searched every fixed drive — these files aren't on this machine. Get them from the .blend's source or upload as a .zip with the assets alongside.
-                      </span>
-                    ) : (
-                      <>
-                        <button
-                          className="btn btn-secondary"
-                          type="button"
-                          onClick={() => handleAnalyze(true)}
-                          disabled={isBusy}
-                        >
-                          {stage === STAGE.ANALYZING ? "Searching this machine…" : "Search this machine for missing files"}
-                        </button>
-                        <span className="prep-result-action-note">
-                          Walks every fixed drive looking for the missing files by filename. Up to ~90 seconds.
-                        </span>
-                      </>
-                    )}
+          {/* ── Right column: queue panel + (optional) analysis report ── */}
+          <aside className="cr-aside">
+            {queueDepth && (() => {
+              const FLEETS = ["vast", "modal", "community"];
+              const totals = ["high", "normal", "low"].reduce((acc, level) => {
+                let jobs = 0;
+                let frames = 0;
+                for (const fleet of FLEETS) {
+                  const cell = (queueDepth[fleet] || {})[level] || {};
+                  jobs += cell.jobs || 0;
+                  frames += cell.frames || 0;
+                }
+                acc[level] = { jobs, frames };
+                return acc;
+              }, {});
+              return (
+                <div className="cr-card cr-card-queue">
+                  <div className="cr-card-header">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
+                    <span>Queue right now</span>
                   </div>
-                )}
-              </div>
-            );
-          })()}
+                  <ul className="cr-queue-list">
+                    {[
+                      { key: "high",   label: "HIGH" },
+                      { key: "normal", label: "NORMAL" },
+                      { key: "low",    label: "LOW" },
+                    ].map((row) => {
+                      const t = totals[row.key];
+                      return (
+                        <li key={row.key} className={`cr-queue-row cr-queue-row--${row.key}`}>
+                          <span className="cr-queue-row-label">{row.label}</span>
+                          <span className="cr-queue-row-jobs">{t.jobs}</span>
+                          {t.jobs > 0 && (
+                            <span className="cr-queue-row-frames">{t.frames} frames</span>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <div className="cr-queue-note">
+                    Wait depends on what's ahead of your priority.
+                  </div>
+                </div>
+              );
+            })()}
+
+            {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (() => {
+              const allWarnings = [...(prepResult.analysis_warnings || []), ...(prepResult.prepare_warnings || [])];
+              const missingFilePattern = /cannot pack|missing images|missing image|still missing|search budget/i;
+              const hasMissingFileIssue = allWarnings.some((msg) => missingFilePattern.test(String(msg)));
+              return (
+                <div className="cr-card cr-card-warnings">
+                  <div className="cr-card-header">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+                    <span>Analysis Report</span>
+                  </div>
+                  {[...(prepResult.analysis_errors || []), ...(prepResult.prepare_errors || [])].map((msg, i) => (
+                    <div key={`err-${i}`} className="prep-result-item prep-result-error"><span className="prep-result-tag">[ERROR]</span> {msg}</div>
+                  ))}
+                  {allWarnings.map((msg, i) => (
+                    <div key={`warn-${i}`} className="prep-result-item prep-result-warning"><span className="prep-result-tag">[WARNING]</span> {msg}</div>
+                  ))}
+                  {hasMissingFileIssue && (
+                    <div className="prep-result-action">
+                      {prepResult.deep_search_ran ? (
+                        <span className="prep-result-action-note">
+                          Already searched every fixed drive — these files aren't on this machine. Get them from the .blend's source or upload as a .zip with the assets alongside.
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            className="btn btn-secondary"
+                            type="button"
+                            onClick={() => handleAnalyze(true)}
+                            disabled={isBusy}
+                          >
+                            {stage === STAGE.ANALYZING ? "Searching this machine…" : "Search this machine for missing files"}
+                          </button>
+                          <span className="prep-result-action-note">
+                            Walks every fixed drive looking for the missing files by filename. Up to ~90 seconds.
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </aside>
         </div>
       )}
 

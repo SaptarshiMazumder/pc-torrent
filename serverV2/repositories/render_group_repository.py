@@ -18,6 +18,33 @@ class RenderGroupRepository:
     def get_by_id(self, group_id: str) -> dict[str, Any] | None:
         return query_one("SELECT * FROM render_groups WHERE id = %s", (group_id,))
 
+    def set_pre_render_cost_estimate_usd(
+        self, group_id: str, value: float,
+    ) -> None:
+        """Stamp the LLM-derived cost projection taken at submit time.
+        Frozen for the life of the group -- retries do NOT update.
+        """
+        execute(
+            "UPDATE render_groups SET pre_render_cost_estimate_usd = %s "
+            "WHERE id = %s",
+            (float(value), group_id),
+        )
+
+    def get_pre_render_cost_estimate_usd(self, group_id: str) -> float | None:
+        """Read the LLM-derived projection stamped at submit time.
+        ``None`` for legacy groups submitted before the column existed
+        -- callers fall back to SUM(jobs.estimated_cost_usd) in that case.
+        """
+        row = query_one(
+            "SELECT pre_render_cost_estimate_usd FROM render_groups "
+            "WHERE id = %s",
+            (group_id,),
+        )
+        if row is None:
+            return None
+        raw = row.get("pre_render_cost_estimate_usd")
+        return float(raw) if raw is not None else None
+
     def get_resolved_heaviness(self, group_id: str) -> dict[str, Any]:
         """Return the heaviness sub-dict from the merged scene blob the
         RenderGroupService persisted at confirm-upload time.  This is

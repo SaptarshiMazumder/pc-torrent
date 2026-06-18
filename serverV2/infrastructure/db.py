@@ -497,6 +497,36 @@ def init_db() -> None:
                     """
                 )
 
+                # LLM-derived cost estimate snapshot taken at submit
+                # time.  Frozen for the lifetime of the group; the
+                # UI's "ESTIMATED COST" reads this when present and
+                # falls back to SUM(jobs.estimated_cost_usd) when
+                # NULL (legacy groups submitted before this column
+                # existed).
+                cur.execute(
+                    "ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS "
+                    "pre_render_cost_estimate_usd DOUBLE PRECISION"
+                )
+
+                # Per-scene render-time formulas emitted by the LLM
+                # cost estimator.  Keyed by an sha256 over the
+                # heaviness fields that don't change with render
+                # tunables (poly/material/light counts, heavy-feature
+                # booleans, engine).  Single row per unique .blend;
+                # re-submitting the same scene with different samples
+                # or resolution hits the same row.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS allocation_cost_file_formulas (
+                        scene_hash    TEXT PRIMARY KEY,
+                        formula       JSONB NOT NULL,
+                        llm_provider  TEXT NOT NULL,
+                        llm_model     TEXT NOT NULL,
+                        created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+
                 # Phase 10 -- community commitment window.  When a desktop
                 # connects via the agent it sends a user-chosen duration;
                 # the server stamps ``commitment_end_at = now + duration``.

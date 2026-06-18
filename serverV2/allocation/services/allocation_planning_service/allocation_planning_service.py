@@ -39,6 +39,9 @@ from serverV2.allocation.allocation_strategies.analyzers import (
     allocation_time_analyzer,
 )
 from serverV2.allocation.render_config import RenderConfig
+from serverV2.allocation.services.allocation_cost_estimation_service import (
+    AllocationCostEstimationService,
+)
 from serverV2.allocation.services.allocation_planning_service.allocation_cost_aggregator import (
     AllocationCostAggregator,
 )
@@ -47,6 +50,11 @@ from serverV2.allocation.services.allocation_planning_service.group_cost_estimat
 )
 from serverV2.config import RenderTimeConfig
 from serverV2.core.models import AvailableResources, PlannedTask
+from serverV2.llm.llm_exception import LLMException
+
+import logging
+
+_log = logging.getLogger(__name__)
 
 
 class AllocationPlanningService:
@@ -57,10 +65,12 @@ class AllocationPlanningService:
         planner: AllocationPlanner,
         cost_aggregator: AllocationCostAggregator,
         config_repo: AllocationConfigRepository,
+        cost_estimation_service: AllocationCostEstimationService,
     ) -> None:
         self._planner = planner
         self._cost_aggregator = cost_aggregator
         self._config_repo = config_repo
+        self._cost_estimation_service = cost_estimation_service
 
     # ------------------------------------------------------------------
     # Push the freshly-loaded Firestore RenderConfig into the time
@@ -159,6 +169,33 @@ class AllocationPlanningService:
         # so both halves of dry-run see the SAME snapshot.
         cfg = self._config_repo.get()
         self._apply_analyzer_calibration(cfg)
+        # LLM-based pre-render cost estimation -- ONLY runs on this
+        # path (cost_for_dry_run), never on plan_initial / plan_retry.
+        # Feature-flagged via Firestore; flag off = heuristic only.
+        # The override travels INSIDE the heaviness dict the analyzer
+        # already reads -- no module-level state, no race surface.
+        if (
+            self._cost_estimation_service.is_enabled()
+            and isinstance(heaviness, dict)
+        ):
+            # LLM is a flaky external boundary (rate limits, the model
+            # running out of tokens before emitting the tool call,
+            # transient 500s).  Log the failure loudly so the admin
+            # sees something to fix, then fall through to the
+            # heuristic so the UI still gets an estimate.  Same rollback
+            # semantics as flipping ``cost_estimator_enabled`` off.
+            try:
+                enriched = dict(heaviness)
+                enriched["llm_base_seconds_at_anchor"] = (
+                    self._cost_estimation_service
+                    .base_seconds_per_frame_at_anchor(enriched)
+                )
+                heaviness = enriched
+            except LLMException as exc:
+                _log.warning(
+                    "LLM cost estimator failed; falling back to "
+                    "heuristic for this dry-run: %s", exc,
+                )
         tasks = self._planner.plan_initial(
             frame_start=frame_start,
             frame_end=frame_end,
@@ -179,7 +216,26 @@ class AllocationPlanningService:
         return self._cost_aggregator.aggregate(items)
 
     def cost_for_committed_jobs(
-        self, rows: list[dict[str, Any]],
+        self,
+        rows: list[dict[str, Any]],
+        snapshot_usd: float | None = None,
     ) -> GroupCostEstimate:
+        """Aggregate the heuristic per-chunk estimates stamped on
+        ``jobs`` rows.  When ``snapshot_usd`` is not None, override
+        the aggregated ``total_cost_usd`` with the snapshot the
+        submit boundary captured -- that's "what the user was
+        quoted" (LLM-derived).  Per-chunk breakdown
+        (``chunks`` / ``total_seconds`` / ``wall_time_seconds``)
+        still comes from the rows so the chunk-detail UI surface
+        keeps working.
+        """
         items = self._cost_aggregator.from_jobs_rows(rows)
-        return self._cost_aggregator.aggregate(items)
+        estimate = self._cost_aggregator.aggregate(items)
+        if snapshot_usd is None:
+            return estimate
+        return GroupCostEstimate(
+            chunks=estimate.chunks,
+            total_cost_usd=float(snapshot_usd),
+            total_seconds=estimate.total_seconds,
+            wall_time_seconds=estimate.wall_time_seconds,
+        )

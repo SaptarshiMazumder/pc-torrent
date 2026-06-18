@@ -31,7 +31,7 @@ export default function UserCreditsHeader() {
       <span className="user-credits-header-tier">{profile.tier || "free"}</span>
       <span className="user-credits-header-sep">·</span>
       <span className="user-credits-header-credits">{formatCredits(profile.credits)}</span>
-      <span className="user-credits-header-unit">credits</span>
+      <span className="user-credits-header-unit">tokens</span>
     </div>
   );
 }

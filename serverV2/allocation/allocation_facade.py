@@ -70,6 +70,7 @@ from serverV2.fleets.fleet_availability.fleet_availability_snapshot_cache import
     FleetAvailabilitySnapshotCache,
 )
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 
 class AllocationFacade:
@@ -81,6 +82,7 @@ class AllocationFacade:
         pending_repo: AllocationPendingQueueRepository,
         dispatch_repo: AllocationDispatchQueueRepository,
         job_repository: JobRepository,
+        group_repository: RenderGroupRepository,
         snapshot_cache: FleetAvailabilitySnapshotCache,
         config_repo: AllocationConfigRepository,
     ) -> None:
@@ -88,6 +90,7 @@ class AllocationFacade:
         self._pending_repo = pending_repo
         self._dispatch_repo = dispatch_repo
         self._job_repo = job_repository
+        self._group_repo = group_repository
         self._snapshot_cache = snapshot_cache
         self._config_repo = config_repo
 
@@ -213,13 +216,21 @@ class AllocationFacade:
     # ------------------------------------------------------------------
 
     def cost_estimate_for_group(self, group_id: str) -> GroupCostEstimate:
-        """Sum the per-chunk estimates the planner stamped at planning
-        time onto every ``jobs`` row for this group.  Returns an
+        """LLM-derived snapshot stamped at submit time when present;
+        otherwise the legacy SUM(jobs.estimated_cost_usd) projection
+        the planner stamped per-chunk at planning time.  Returns an
         all-zero estimate if no jobs exist yet (e.g. group still parked
         in ``pending_allocation_queue`` and the daemon hasn't promoted
-        it yet); callers can check ``chunks == 0`` for that case."""
+        it yet); callers can check ``chunks == 0`` for that case.
+        Per-chunk breakdown (chunks / total_seconds / wall_time_seconds)
+        always comes from the jobs rows so the chunk-detail UI surface
+        keeps working regardless of which total source wins.
+        """
         rows = self._job_repo.get_raw_by_group(group_id)
-        return self._planning.cost_for_committed_jobs(rows)
+        snapshot_usd = self._group_repo.get_pre_render_cost_estimate_usd(group_id)
+        return self._planning.cost_for_committed_jobs(
+            rows, snapshot_usd=snapshot_usd,
+        )
 
     def cost_estimate_for_dry_run(
         self,

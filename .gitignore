@@ -45,3 +45,15 @@ Thumbs.db
 server/*-adminsdk-*.json
 server/gen-lang-client-*.json
 server/creds/*.json
+
+# Per-env infra config (templates are committed; real configs gitignored)
+infra/envs/*/desktop.config.json
+infra/envs/*/.env
+infra/.build/
+
+# Terraform local state + plan artefacts (state itself lives in GCS)
+infra/terraform/**/.terraform/
+infra/terraform/**/*.tfstate
+infra/terraform/**/*.tfstate.backup
+infra/terraform/**/.terraform.lock.hcl
+infra/terraform/**/*.tfplan

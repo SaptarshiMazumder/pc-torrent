@@ -56,7 +56,9 @@
       "Bash(awk '{n=split\\($0, a, \"=\"\\); if \\(n > 1\\) print a[1]\"=<set>\"; else print $0}' c:/Users/sapma/OneDrive/Desktop/Projects/PC_Rent/pc-torrent/serverV2/.env)",
       "Bash(bash -n migrate-neon.sh)",
       "Bash(git check-ignore *)",
-      "Bash(git ls-files *)"
+      "Bash(git ls-files *)",
+      "Bash(grep -v \"^d.*\\\\\\(.git\\\\|node_modules\\\\|__pycache__\\\\|target\\\\|server$\\\\|server/\\\\\\)\")",
+      "Bash(grep -v \"^server/$\")"
     ],
     "additionalDirectories": [
       "\\tmp"

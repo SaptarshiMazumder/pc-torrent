@@ -1,0 +1,15 @@
+{
+  "_comment": "Per-env desktop build config.  Copy to desktop.config.json (gitignored) and fill in.  Used by infra/scripts/build-desktop.sh when producing a per-env Forge installer.  Values come from the dev Firebase project's web SDK config + the dev Cloud Run service URL (post-deploy).",
+  "backendUrl": "",
+  "firebaseConfig": {
+    "apiKey": "",
+    "authDomain": "pcrent-dev.firebaseapp.com",
+    "projectId": "pcrent-dev",
+    "storageBucket": "pcrent-dev.firebasestorage.app",
+    "messagingSenderId": "",
+    "appId": ""
+  },
+  "productName": "Forge (dev)",
+  "identifier": "com.pcrent.desktop.dev",
+  "allowLocalStorageBackendOverride": true
+}

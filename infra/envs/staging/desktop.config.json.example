@@ -1,0 +1,15 @@
+{
+  "_comment": "Per-env desktop build config.  See dev/desktop.config.json.example for field meanings.",
+  "backendUrl": "",
+  "firebaseConfig": {
+    "apiKey": "",
+    "authDomain": "pcrent-staging.firebaseapp.com",
+    "projectId": "pcrent-staging",
+    "storageBucket": "pcrent-staging.firebasestorage.app",
+    "messagingSenderId": "",
+    "appId": ""
+  },
+  "productName": "Forge (staging)",
+  "identifier": "com.pcrent.desktop.staging",
+  "allowLocalStorageBackendOverride": true
+}

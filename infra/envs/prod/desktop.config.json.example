@@ -1,0 +1,15 @@
+{
+  "_comment": "Per-env desktop build config.  Prod installer is LOCKED -- allowLocalStorageBackendOverride is false so users cannot redirect to a non-prod backend.",
+  "backendUrl": "",
+  "firebaseConfig": {
+    "apiKey": "",
+    "authDomain": "pcrent-prod.firebaseapp.com",
+    "projectId": "pcrent-prod",
+    "storageBucket": "pcrent-prod.firebasestorage.app",
+    "messagingSenderId": "",
+    "appId": ""
+  },
+  "productName": "Forge",
+  "identifier": "com.pcrent.desktop",
+  "allowLocalStorageBackendOverride": false
+}

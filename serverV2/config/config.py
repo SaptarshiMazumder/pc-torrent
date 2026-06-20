@@ -884,6 +884,13 @@ class AppConfig:
     # Per-hour cost stamped on every CommunityMachine.  Read by cost-aware
     # allocators (Phase 5+).  Loaded from config.json's ``community.price_per_hour``.
     community_price_per_hour: float = 1.0
+    # Per-env Docker image the community agent on a user's PC pulls at
+    # startup.  Loaded from ``COMMUNITY_WORKER_IMAGE`` env var (no default
+    # -- missing var = server boot fails loud).  Returned verbatim by
+    # ``GET /community/worker-image`` so the agent stays env-agnostic --
+    # whichever backend it's pointed at hands it the right image for
+    # that env.  Mirrors VAST_DOCKER_IMAGE / MODAL_WORKER_IMAGE_CYCLES.
+    community_worker_image: str = ""
     # Shared secret expected by ``POST /internal/orphan/{job_id}``.  The
     # backup_monitor service sends this header to identify itself.  Empty
     # string disables the endpoint (returns 503 to all callers).
@@ -905,6 +912,7 @@ class AppConfig:
             community_dispatch_claim_timeout_sec=_require_field_int(
                 community_block, "community", "dispatch_claim_timeout_sec",
             ),
+            community_worker_image=_env_str("COMMUNITY_WORKER_IMAGE"),
             orphan_secret=_env_str("ORPHAN_SECRET", ""),
             stall=StallDetectionConfig.from_env(),
         )

@@ -99,7 +99,35 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 FIREBASE_TOKEN = ""  # set by sidecar on connect
 POLL_INTERVAL = 5  # seconds between job polls
 RENDER_TIMEOUT = 4 * 3600  # 4 hours max per render
-COMMUNITY_IMAGE = "ghcr.io/saptarshimazumder/pcrent-community-worker-cycles:latest"
+
+# Community-worker Docker image is now per-env: the server hands it
+# down via GET /community/worker-image so a single agent binary can
+# run against any backend (dev / staging / prod / test) and always
+# pull the right image for that env.  Cached after first lookup;
+# restart the agent to refresh after the admin changes Firestore.
+# No fallback by design -- if the endpoint is unreachable or the
+# field is missing, the agent crashes loud rather than silently
+# pulling a stale or wrong-env image.
+_COMMUNITY_IMAGE_CACHE: str | None = None
+
+
+def community_image() -> str:
+    global _COMMUNITY_IMAGE_CACHE
+    if _COMMUNITY_IMAGE_CACHE is None:
+        import requests
+        resp = requests.get(
+            f"{BACKEND_URL.rstrip('/')}/community/worker-image",
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        image = payload["image"]
+        if not isinstance(image, str) or not image.strip():
+            raise RuntimeError(
+                f"Server returned malformed community worker image: {image!r}",
+            )
+        _COMMUNITY_IMAGE_CACHE = image
+    return _COMMUNITY_IMAGE_CACHE
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_OUTPUT_ROOT = os.path.join(AGENT_DIR, "output")
@@ -1023,7 +1051,7 @@ def check_image_loaded():
     short name."""
     try:
         result = subprocess.run(
-            ["docker", "images", "-q", COMMUNITY_IMAGE],
+            ["docker", "images", "-q", community_image()],
             capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace",
         )
@@ -1092,7 +1120,7 @@ def remove_docker_image():
     if image_present:
         try:
             subprocess.run(
-                ["docker", "image", "rm", "-f", COMMUNITY_IMAGE],
+                ["docker", "image", "rm", "-f", community_image()],
                 capture_output=True,
                 text=True,
                 encoding="utf-8", errors="replace",
@@ -1125,12 +1153,12 @@ def ensure_docker_image(on_stage=None, on_progress=None):
             on_stage(stage_name, message, **extra)
 
     stage("checking", "Checking render image...")
-    _log(f"[IMAGE] Pulling {COMMUNITY_IMAGE} ...")
+    _log(f"[IMAGE] Pulling {community_image()} ...")
     stage("downloading", "Pulling render image from registry...", progress=0)
 
     try:
         proc = subprocess.Popen(
-            ["docker", "pull", COMMUNITY_IMAGE],
+            ["docker", "pull", community_image()],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1421,9 +1449,9 @@ def execute_job(job):
             if isinstance(device_policy, str) and device_policy.strip():
                 cmd.extend(["-e", f"DEVICE_POLICY={device_policy.strip().upper()}"])
 
-        cmd.append(COMMUNITY_IMAGE)
+        cmd.append(community_image())
 
-        _log(f"[JOB] Starting Docker render container ({COMMUNITY_IMAGE})...")
+        _log(f"[JOB] Starting Docker render container ({community_image()})...")
         _log(f"[JOB] Command: {' '.join(cmd)}")
 
         process = subprocess.Popen(
@@ -1738,7 +1766,7 @@ def main():
                     update_job_status(job["id"], "running")
 
                     if not check_image_loaded():
-                        _log(f"[AGENT] Render image {COMMUNITY_IMAGE} not loaded, downloading...")
+                        _log(f"[AGENT] Render image {community_image()} not loaded, downloading...")
                         if not ensure_docker_image():
                             _log("[AGENT] Cannot load render image, failing job.")
                             notify_orchestrator_failure(job["id"], "Render image not available")

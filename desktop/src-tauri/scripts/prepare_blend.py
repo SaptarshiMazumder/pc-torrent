@@ -37,6 +37,7 @@ import re
 import string
 import sys
 import time
+import traceback
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -51,6 +52,22 @@ def _warn(msg: str):
 
 def _err(msg: str):
     print(f"PREP_ERROR: {msg}", flush=True)
+
+
+def _safe(label: str, fn, *args):
+    """Run one advisory prep step without ever aborting the pipeline.
+
+    The pipeline's only hard contract is pack (step 6) + save (step 13).
+    Every other step is best-effort -- if it throws (e.g. a Blender API
+    removed in a new major version), log it and carry on so the packed
+    file still gets written.  Returns the step's value, or None on failure.
+    """
+    try:
+        return fn(*args)
+    except Exception as e:
+        _warn(f"Step '{label}' failed (non-fatal): {e}")
+        _warn("Trace: " + traceback.format_exc().strip().replace("\n", " | "))
+        return None
 
 
 # ── 2.  Fix FFMPEG output format ─────────────────────────────────────────────
@@ -733,9 +750,18 @@ def _check_compositor() -> list[str]:
     """Check compositor node trees for external file references."""
     issues = []
     for scene in bpy.data.scenes:
-        if not scene.use_nodes or not scene.node_tree:
+        # Blender 5.0+ moved the compositor to a node group
+        # (``scene.compositing_node_group``); 4.x used ``scene.use_nodes``
+        # + ``scene.node_tree`` (the latter is removed in 5.x).  getattr
+        # keeps this working on both without touching removed members.
+        node_tree = getattr(scene, "compositing_node_group", None)
+        if node_tree is None:
+            if not getattr(scene, "use_nodes", False):
+                continue
+            node_tree = getattr(scene, "node_tree", None)
+        if not node_tree:
             continue
-        for node in scene.node_tree.nodes:
+        for node in node_tree.nodes:
             # Movie Clip nodes reference external video files
             if node.type == "MOVIECLIP" and node.clip:
                 fp = node.clip.filepath
@@ -765,7 +791,11 @@ def _check_vse_strips() -> list[str]:
         se = scene.sequence_editor
         if not se:
             continue
-        for strip in se.sequences_all:
+        # Blender 5.0 renamed ``sequences_all`` -> ``strips_all``.
+        strips = getattr(se, "strips_all", None)
+        if strips is None:
+            strips = getattr(se, "sequences_all", [])
+        for strip in strips:
             fp = ""
             if strip.type == "MOVIE":
                 fp = getattr(strip, "filepath", "")
@@ -932,134 +962,10 @@ def _validate_scenes() -> list[str]:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _safe_int(value, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def _minimal_scene_payload(scene, active_name: str) -> dict:
-    frame_start = _safe_int(getattr(scene, "frame_start", 1), 1)
-    frame_end = _safe_int(getattr(scene, "frame_end", frame_start), frame_start)
-    frame_step = max(1, _safe_int(getattr(scene, "frame_step", 1), 1))
-    total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
-    scene_name = getattr(scene, "name", "Scene")
-    camera = getattr(scene, "camera", None)
-    active_camera = getattr(camera, "name", None) if camera else None
-    return {
-        "name": scene_name,
-        "is_active": scene_name == active_name,
-        "frame_start": frame_start,
-        "frame_end": frame_end,
-        "frame_step": frame_step,
-        "total_frames": total_frames,
-        "active_camera": active_camera,
-        "cameras": [active_camera] if active_camera else [],
-        "view_layers": [],
-        "camera_cuts": [],
-    }
-
-
-def _scene_payload(scene, active_name: str) -> dict:
-    payload = _minimal_scene_payload(scene, active_name)
-
-    cameras = list(payload["cameras"])
-    camera_cuts = []
-
-    try:
-        markers = sorted(getattr(scene, "timeline_markers", []), key=lambda marker: _safe_int(getattr(marker, "frame", 0), 0))
-        for marker in markers:
-            marker_camera = None
-            try:
-                marker_camera = marker.camera.name if getattr(marker, "camera", None) else None
-            except Exception:
-                marker_camera = None
-            if marker_camera:
-                cameras.append(marker_camera)
-            camera_cuts.append(
-                {
-                    "frame": _safe_int(getattr(marker, "frame", 0), 0),
-                    "camera_name": marker_camera,
-                }
-            )
-    except Exception:
-        pass
-
-    try:
-        for obj in bpy.data.objects:
-            if getattr(obj, "type", "") == "CAMERA":
-                cameras.append(getattr(obj, "name", "Camera"))
-    except Exception:
-        pass
-
-    deduped_cameras = []
-    for camera_name in cameras:
-        if camera_name and camera_name not in deduped_cameras:
-            deduped_cameras.append(camera_name)
-
-    view_layers = []
-    try:
-        view_layers = [getattr(layer, "name", "") for layer in getattr(scene, "view_layers", []) if getattr(layer, "name", "")]
-    except Exception:
-        view_layers = []
-
-    payload["cameras"] = deduped_cameras
-    payload["view_layers"] = view_layers
-    payload["camera_cuts"] = camera_cuts
-    return payload
-
-
-def _emit_analysis_json():
-    active_scene = bpy.context.scene if bpy.context and bpy.context.scene else None
-    if active_scene:
-        active_name = active_scene.name
-    elif bpy.data.scenes:
-        active_name = bpy.data.scenes[0].name
-    else:
-        raise RuntimeError("No scenes found for analysis")
-
-    scenes = []
-    for scene in bpy.data.scenes:
-        try:
-            scenes.append(_scene_payload(scene, active_name))
-        except Exception:
-            scenes.append(_minimal_scene_payload(scene, active_name))
-    if not scenes:
-        raise RuntimeError("No scenes found for analysis")
-
-    active = None
-    for scene in scenes:
-        if scene.get("is_active"):
-            active = scene
-            break
-    if active is None:
-        active = scenes[0]
-
-    version = bpy.app.version
-    blender_version = int(version[0]) * 100 + int(version[1])
-    payload = {
-        "frame_start": active["frame_start"],
-        "frame_end": active["frame_end"],
-        "frame_step": active["frame_step"],
-        "total_frames": active["total_frames"],
-        "blender_version": blender_version,
-        "active_scene": active["name"],
-        "cameras": active.get("cameras", []),
-        "camera_cuts": active.get("camera_cuts", []),
-        "view_layers": active.get("view_layers", []),
-        "timeline_defaults": {
-            "frame_start": active["frame_start"],
-            "frame_end": active["frame_end"],
-            "frame_step": active["frame_step"],
-        },
-        "output_defaults": None,
-        "render_defaults": {},
-        "scenes": scenes,
-        "unsupported_fields": [],
-    }
-
-    print("PCR_ANALYSIS_JSON:" + json.dumps(payload, separators=(",", ":")), flush=True)
+# Analysis JSON is no longer emitted from the prepare run.  The dedicated
+# heaviness analyzer (ANALYZE_BLEND_PY, run separately by the Tauri host)
+# is the single source of the analysis snapshot -- it carries heaviness +
+# render_engine, which this timeline-only emitter never did.
 
 
 def prepare():
@@ -1072,21 +978,28 @@ def prepare():
     _log(f"Blend file: {filepath}")
     _log(f"Blender: {bpy.app.version_string}")
 
+    # Steps 1-12 are advisory: each runs through ``_safe`` so a failure
+    # (e.g. a Blender API removed in a new major version) logs a warning
+    # and the pipeline carries on to the essential pack + save.  Only the
+    # pack (step 6) and save (step 13) are hard requirements.
+
     # ── 1. Scene report ──────────────────────────────────────────────────
-    for scene in bpy.data.scenes:
-        cam = scene.camera.name if scene.camera else "NONE"
-        fmt = scene.render.image_settings.file_format
-        engine = scene.render.engine
-        _log(
-            f"Scene '{scene.name}': engine={engine}, camera={cam}, "
-            f"frames={scene.frame_start}-{scene.frame_end}, output_format={fmt}"
-        )
+    def _scene_report():
+        for scene in bpy.data.scenes:
+            cam = scene.camera.name if scene.camera else "NONE"
+            fmt = scene.render.image_settings.file_format
+            engine = scene.render.engine
+            _log(
+                f"Scene '{scene.name}': engine={engine}, camera={cam}, "
+                f"frames={scene.frame_start}-{scene.frame_end}, output_format={fmt}"
+            )
+    _safe("scene report", _scene_report)
 
     # ── 2. Fix FFMPEG output ─────────────────────────────────────────────
-    _fix_output_format()
+    _safe("fix output format", _fix_output_format)
 
     # ── 3. Make paths relative ───────────────────────────────────────────
-    _make_paths_relative()
+    _safe("make paths relative", _make_paths_relative)
 
     # ── 3b. Recover missing files via tiered machine-wide search ────────
     # Opt-in via PCR_DEEP_SEARCH=1.  The host enables it only when the
@@ -1095,7 +1008,7 @@ def prepare():
     # off because the tier-4 drive walk costs up to 90s and the common
     # case (assets next to the .blend) doesn't need it.
     if os.environ.get("PCR_DEEP_SEARCH") == "1":
-        _recover_missing_files(blend_dir)
+        _safe("recover missing files", _recover_missing_files, blend_dir)
     else:
         _log("Deep search disabled (default). Re-run with deep search if assets are missing.")
 
@@ -1103,15 +1016,17 @@ def prepare():
     total_libs = len(list(bpy.data.libraries))
     if total_libs:
         _log(f"Found {total_libs} linked library/libraries — checking...")
-        relinked, still_missing = _relink_missing_libraries(blend_dir)
-        _log(f"Libraries: {relinked} relinked, {still_missing} still missing")
+        relink_result = _safe("relink libraries", _relink_missing_libraries, blend_dir)
+        if relink_result:
+            relinked, still_missing = relink_result
+            _log(f"Libraries: {relinked} relinked, {still_missing} still missing")
     else:
         _log("No linked libraries")
 
     # ── 5. Enable addons needed by embedded scripts ──────────────────────
-    _enable_required_addons()
+    _safe("enable addons", _enable_required_addons)
 
-    # ── 6. Pack assets ───────────────────────────────────────────────────
+    # ── 6. Pack assets (essential — each item internally guarded) ────────
     packed_images, missing_images = _pack_images()
     packed_fonts = _pack_fonts()
     packed_sounds = _pack_sounds()
@@ -1124,34 +1039,31 @@ def prepare():
         extra = ", ..." if len(missing_images) > 5 else ""
         _warn(f"Missing images (will render pink/black): {preview}{extra}")
 
-    clip_issues = _check_movieclips()
+    # ── 7-10. External-reference probes (advisory) ───────────────────────
+    clip_issues = _safe("check movie clips", _check_movieclips) or []
     if clip_issues:
         _warn(f"{len(clip_issues)} movie clip(s) cannot be packed — include in zip.")
 
-    # ── 7. VDB volumes ───────────────────────────────────────────────────
-    vdb_issues = _check_volumes()
+    vdb_issues = _safe("check volumes", _check_volumes) or []
     if vdb_issues:
         _warn(f"{len(vdb_issues)} external VDB/volume file(s) — include in zip.")
 
-    # ── 8. Simulation caches ─────────────────────────────────────────────
-    cache_issues = _check_simulation_caches()
+    cache_issues = _safe("check simulation caches", _check_simulation_caches) or []
     if cache_issues:
         _warn(f"{len(cache_issues)} baked simulation cache(s) — include cache folders in zip.")
 
-    # ── 9. Alembic / USD ─────────────────────────────────────────────────
-    abc_issues = _check_alembic_and_usd()
+    abc_issues = _safe("check alembic/usd", _check_alembic_and_usd) or []
     if abc_issues:
         _warn(f"{len(abc_issues)} external Alembic/USD cache file(s) — include in zip.")
 
-    # ── 10. Compositor & VSE ─────────────────────────────────────────────
-    _check_compositor()
-    _check_vse_strips()
+    _safe("check compositor", _check_compositor)
+    _safe("check vse strips", _check_vse_strips)
 
     # ── 11. Bake scripted drivers ────────────────────────────────────────
-    _bake_scripted_drivers()
+    _safe("bake scripted drivers", _bake_scripted_drivers)
 
     # ── 12. Validate ─────────────────────────────────────────────────────
-    _validate_scenes()
+    _safe("validate scenes", _validate_scenes)
 
     # ── 13. Save ─────────────────────────────────────────────────────────
     # ``PCR_PREP_OUTPUT_PATH`` is set by the Tauri host: where the prepared
@@ -1162,11 +1074,6 @@ def prepare():
     output_path = os.environ["PCR_PREP_OUTPUT_PATH"]
     bpy.ops.wm.save_as_mainfile(filepath=output_path)
     _log(f"Saved prepared blend file to {output_path}")
-    try:
-        _emit_analysis_json()
-    except Exception as e:
-        _warn(f"Could not emit analysis metadata: {e}")
-
     print("PREP_DONE", flush=True)
 
 

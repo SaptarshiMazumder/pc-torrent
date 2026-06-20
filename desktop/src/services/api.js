@@ -65,7 +65,10 @@ async function apiFetch(baseUrl, path, options = {}, _retry = false) {
 
   if (!response.ok) {
     const detail = await readErrorDetail(response, `Request failed (${response.status})`);
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = response.status;
+    err.body = detail;
+    throw err;
   }
 
   if (response.status === 204) return null;

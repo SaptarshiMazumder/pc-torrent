@@ -199,6 +199,37 @@ class JobRepository:
         )
         return {r["machine_type"]: int(r["n"]) for r in rows if r.get("machine_type")}
 
+    def count_active_by_priority_and_fleet(self) -> dict[str, dict[str, dict[str, int]]]:
+        """Job + frame counts of ``pending``/``running`` jobs grouped by
+        fleet + priority level.  Mirrors the queue repos' shape so the
+        Create Render queue-depth panel can add chunks already on a
+        machine to the chunks still waiting in the pending/dispatch
+        queues -- i.e. everything ahead of a new submission, not just the
+        backlog.
+
+        Returned shape::
+
+            {fleet: {priority_level: {"jobs": N, "frames": F}}}
+        """
+        rows = query_all(
+            "SELECT machine_type, priority, COUNT(*) AS jobs, "
+            "COALESCE(SUM(total_frames), 0) AS frames FROM jobs "
+            "WHERE status IN ('pending', 'running') "
+            "GROUP BY machine_type, priority",
+        )
+        out: dict[str, dict[str, dict[str, int]]] = {
+            f: {l: {"jobs": 0, "frames": 0} for l in ("low", "normal", "high")}
+            for f in ("vast", "modal", "community")
+        }
+        for r in rows:
+            mt = str(r.get("machine_type") or "")
+            fleet = "vast" if mt.startswith("vast") else "modal" if mt.startswith("modal") else "community"
+            p = int(r.get("priority") or 0)
+            level = "low" if p <= 0 else "high" if p >= 2 else "normal"
+            out[fleet][level]["jobs"] += int(r.get("jobs") or 0)
+            out[fleet][level]["frames"] += int(r.get("frames") or 0)
+        return out
+
     def count_active_by_fleet_and_gpu_type(self) -> dict[tuple[str, str], int]:
         """Per-(fleet, gpu_type) live count of ``pending``/``running`` jobs.
         Used as the PG fallback by ``ModalAvailabilityBuilder`` when its

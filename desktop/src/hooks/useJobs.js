@@ -346,6 +346,10 @@ export function useJobs(backendUrl) {
     try {
       await deleteRenderGroup(url, id);
     } catch (err) {
+      // 404 == the group is already gone on the backend, which is exactly
+      // the end state Remove wants.  Keep the optimistic removal; don't
+      // roll back and don't surface an error.
+      if (err?.status === 404) return;
       if (snapshot) {
         const setter = snapshot.list === "ongoing" ? setOngoingJobs : setPastJobs;
         setter((prev) => {

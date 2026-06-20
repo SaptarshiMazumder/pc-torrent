@@ -1950,10 +1950,11 @@ pub async fn analyze_and_prepare_blend(
         prepare_warnings,
         mut prepare_errors,
         prep_done_from_logs,
-        mut analysis,
-        mut analysis_errors,
+        _prepare_timeline_analysis,
+        _prepare_timeline_analysis_errors,
     ) = _parse_prepare_output(&combined);
-    let mut analysis_warnings: Vec<String> = Vec::new();
+    let analysis_warnings: Vec<String> = Vec::new();
+    let mut analysis_errors: Vec<String> = Vec::new();
 
     if !output.status.success() {
         prepare_errors.push(format!(
@@ -1962,34 +1963,29 @@ pub async fn analyze_and_prepare_blend(
             _tail_lines(&combined, 20)
         ));
     }
-    if analysis.is_none() {
-        // For bare .blend we open the user's ORIGINAL above, but for the
-        // fallback analyzer we want the just-saved prepared output (so
-        // packing has already happened).  Fall back to ``blend_path`` if
-        // the script never wrote the output (prep_done=false path).
-        let fallback_blend_path = if prep_output_path.is_file() {
-            prep_output_path.to_string_lossy().to_string()
-        } else {
-            blend_path.to_string_lossy().to_string()
-        };
-        match analyze_blend_with_blender(fallback_blend_path, blender_bin.clone()).await {
-            Ok(parsed) => {
-                analysis = Some(parsed);
-                if !analysis_errors.is_empty() {
-                    analysis_warnings.extend(
-                        analysis_errors
-                            .drain(..)
-                            .map(|msg| format!("Primary analysis payload issue (recovered by fallback): {msg}")),
-                    );
-                }
-            }
-            Err(err) => {
-                analysis_errors.push(format!(
-                    "Analysis metadata not returned by Blender. Fallback analysis failed: {err}"
-                ));
-            }
+
+    // Single source of truth for the analysis snapshot: ALWAYS run the
+    // dedicated heaviness analyzer.  It emits the scene/timeline payload
+    // AND the heaviness block (incl. render_engine), so it is a superset
+    // of the prepare script's timeline-only payload -- which is
+    // intentionally ignored here (it lacked render_engine and was the
+    // source of the SceneResolver failure).  Run it on the PACKED output
+    // so heaviness reflects the prepared file; fall back to the original
+    // only if packing left no output on disk.
+    let analyze_target = if prep_output_path.is_file() {
+        prep_output_path.to_string_lossy().to_string()
+    } else {
+        blend_path.to_string_lossy().to_string()
+    };
+    let analysis = match analyze_blend_with_blender(analyze_target, blender_bin.clone()).await {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            analysis_errors.push(format!(
+                "Analysis metadata not returned by Blender: {err}"
+            ));
+            None
         }
-    }
+    };
 
     let mut prep_done = output.status.success() && (prep_done_from_logs || prepare_errors.is_empty());
     let prepared_path = if prep_done {

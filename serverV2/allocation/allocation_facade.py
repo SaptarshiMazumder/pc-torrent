@@ -266,11 +266,14 @@ class AllocationFacade:
         )
 
     def get_queue_depth(self) -> dict:
-        """Per-fleet, per-priority counts of items waiting to dispatch.
+        """Per-fleet, per-priority counts of everything ahead of a new
+        submission at each priority level.
 
         Combines ``pending_allocation_queue`` (not yet planned) +
-        ``dispatch_queue`` (planned, waiting for a slot).  Currently-
-        running jobs are NOT counted -- those slots clear naturally.
+        ``dispatch_queue`` (planned, waiting for a slot) + active
+        (``pending``/``running``) job rows already on a machine.  The
+        running rows occupy the slots a new job waits on, so they belong
+        in the "what's ahead of you" count.
 
         Returned shape::
 
@@ -283,6 +286,7 @@ class AllocationFacade:
         """
         pending_counts = self._pending_repo.count_by_priority_and_fleet()
         dispatch_counts = self._dispatch_repo.count_by_priority_and_fleet()
+        running_counts = self._job_repo.count_active_by_priority_and_fleet()
         out: dict[str, dict[str, dict[str, int]]] = {}
         for fleet in ("vast", "modal", "community"):
             out[fleet] = {}
@@ -291,9 +295,11 @@ class AllocationFacade:
                 p_frames = pending_counts.get(fleet, {}).get(level, {}).get("frames", 0)
                 d_jobs = dispatch_counts.get(fleet, {}).get(level, {}).get("jobs", 0)
                 d_frames = dispatch_counts.get(fleet, {}).get(level, {}).get("frames", 0)
+                r_jobs = running_counts.get(fleet, {}).get(level, {}).get("jobs", 0)
+                r_frames = running_counts.get(fleet, {}).get(level, {}).get("frames", 0)
                 out[fleet][level] = {
-                    "jobs": p_jobs + d_jobs,
-                    "frames": p_frames + d_frames,
+                    "jobs": p_jobs + d_jobs + r_jobs,
+                    "frames": p_frames + d_frames + r_frames,
                 }
         return out
 

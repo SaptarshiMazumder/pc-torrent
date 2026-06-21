@@ -316,7 +316,7 @@ class ModalFleetMonitor:
         elapsed: float,
         deadlines: dict[str, Any],
     ) -> StallReason | None:
-        samples = self._heartbeats.get_recent(row["id"], n=30)
+        samples = self._heartbeats.get_recent(row["id"], n=60)
         if not samples:
             return None
         window = HeartbeatWindow.from_raw(samples)

@@ -335,7 +335,7 @@ class CommunityMonitor:
     def _check_pre_render_stall(self, job: RenderJob) -> None:
         if job.status != "running":
             return
-        samples = self._heartbeat_repo.get_recent(job.job_id, n=30)
+        samples = self._heartbeat_repo.get_recent(job.job_id, n=60)
         if not samples:
             return
         window = HeartbeatWindow.from_raw(samples)

@@ -89,28 +89,28 @@ if missing:
 cfg_js = build_dir / "src" / "firebase" / "config.js"
 text = cfg_js.read_text()
 new_literal = "const firebaseConfig = " + json.dumps(firebase, indent=2) + ";"
-patched = re.sub(
+patched, n = re.subn(
     r"const firebaseConfig = \{[\s\S]*?\};",
     new_literal,
     text,
     count=1,
 )
-if patched == text:
-    raise SystemExit(f"ERROR: failed to locate firebaseConfig literal in {cfg_js}")
+if n == 0:
+    raise SystemExit(f"ERROR: firebaseConfig literal not found in {cfg_js}")
 cfg_js.write_text(patched)
 print(f"  [ok] {cfg_js.name} -- firebaseConfig swapped")
 
 # --- src/App.jsx: replace hardcoded backendUrl literal ---
 app_jsx = build_dir / "src" / "App.jsx"
 text = app_jsx.read_text()
-patched = re.sub(
+patched, n = re.subn(
     r'const backendUrl = "https://[^"]+";',
     f'const backendUrl = "{backend_url}";',
     text,
     count=1,
 )
-if patched == text:
-    raise SystemExit(f"ERROR: failed to locate backendUrl literal in {app_jsx}")
+if n == 0:
+    raise SystemExit(f"ERROR: backendUrl literal not found in {app_jsx}")
 app_jsx.write_text(patched)
 print(f"  [ok] {app_jsx.name} -- backendUrl = {backend_url}")
 
@@ -118,14 +118,14 @@ print(f"  [ok] {app_jsx.name} -- backendUrl = {backend_url}")
 ctx = build_dir / "src" / "contexts" / "UserProfileContext.jsx"
 if not allow_override:
     text = ctx.read_text()
-    patched = re.sub(
+    patched, n = re.subn(
         r'\s*localStorage\.getItem\("pcrent_backend_url"\)\s*\|\|\s*',
         " ",
         text,
         count=1,
     )
-    if patched == text:
-        raise SystemExit(f"ERROR: failed to locate localStorage override in {ctx}")
+    if n == 0:
+        raise SystemExit(f"ERROR: localStorage override not found in {ctx}")
     ctx.write_text(patched)
     print(f"  [ok] {ctx.name} -- localStorage override removed (prod)")
 else:

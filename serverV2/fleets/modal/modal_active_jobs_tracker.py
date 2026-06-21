@@ -28,10 +28,10 @@ from __future__ import annotations
 
 import logging
 
-from serverV2.infrastructure.redis_client import RedisClient
+from serverV2.infrastructure.redis_client import RedisClient, namespaced
 
 
-_KEY_PREFIX = "modal:active"
+_KEY_PREFIX = namespaced("modal:active")
 _TTL_SECONDS = 86400  # 1 day
 
 log = logging.getLogger(__name__)

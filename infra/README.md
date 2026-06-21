@@ -1,82 +1,132 @@
-# Forge multi-environment infrastructure
+# Forge multi-env infra
 
-Everything under `infra/` is additive.  The legacy `deploy.sh`,
-`push-worker.sh`, `deploy-modal.sh`, `release-desktop.sh`,
-`serverV2/.env`, and the original `desktop/` source tree are
-untouched and continue to deploy the **test** environment exactly
-as before.
+Test env still runs off root `deploy.sh` / `push-worker.sh` / `serverV2/.env` — untouched. Everything below is for `dev` / `staging` / `prod`.
 
-## Environments
+---
 
-| env       | Where deployed                          | Desktop installer       |
-|-----------|-----------------------------------------|-------------------------|
-| `test`    | current Cloud Run, current Firebase, current Neon -- use root `deploy.sh` | existing Forge build |
-| `dev`     | new Cloud Run `pcrent-server-v2-dev` in same GCP project | per-env build, override allowed |
-| `staging` | new Cloud Run `pcrent-server-v2-staging`                  | per-env build, override allowed |
-| `prod`    | new Cloud Run `pcrent-server-v2-prod`                     | per-env build, **locked** |
+## Cold start a new env
 
-## Layout
-
-```
-infra/
-  envs/{dev,staging,prod}/
-    .env.example                ← template, COPY to .env (gitignored)
-    desktop.config.json.example ← template, COPY to desktop.config.json (gitignored)
-    README.md                   ← per-env notes
-  scripts/                      ← deploy + push + build wrappers (added in Phase 2+)
-  terraform/                    ← per-env composition + shared modules (added in Phase 1)
+**One-time per machine:**
+```bash
+gcloud auth application-default login
+bash infra/terraform/bootstrap.sh
 ```
 
-## Bootstrap order for a brand-new env
+**External accounts to create manually (per env):**
+- Firebase project `pc-rent-<env>` → service account JSON + web SDK config
+- Neon project + DB → pooled connection URL
+- Upstash global Redis DB → `rediss://` URL
+- R2 bucket `pc-rent-<env>-blends` in Cloudflare → reuse account-scoped R2 keys
+- Separate Vast.ai account → API key (recommended; see Gotchas)
 
-1. Create a Firebase project (manual one-time click-through in Firebase Console).
-2. Copy `infra/envs/<env>/.env.example` -> `infra/envs/<env>/.env`.
-3. Paste the values you can only get by hand:
-   * `FIREBASE_SERVICE_ACCOUNT_JSON` -- from Firebase Console (Service accounts -> generate new key)
-   * `OPENAI_API_KEY` -- from platform.openai.com
-   * `ANTHROPIC_API_KEY` -- from console.anthropic.com (or leave PLACEHOLDER if using OpenAI only)
-   * `VAST_API_KEY` -- from vast.ai console
-   * `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` -- run `modal token new` (per env)
-4. Copy `infra/envs/<env>/desktop.config.json.example` -> `desktop.config.json` and fill in the Firebase web SDK config (same Firebase project, Web app section in console).
-5. (Phase 2 onward) `infra/scripts/deploy.sh <env>` creates the rest via Terraform + populates the auto-fillable fields in `.env` from `terraform output`.
+**Fill `infra/envs/<env>/.env`** — copy `.env.example`, paste everything above.
 
-## What lives in each env's Firestore
-
-* `config/global` -- typed mirror of `serverV2/config.json`.  Seeded by `scripts/seed_config_to_firestore.py` per env.
-* `config/cost_estimation` -- LLM cost estimator settings.  Per-env model + safety multiplier.
-* `users/{uid}` -- per-user profile + credits.  Created lazily on first sign-in.
-* `allocation_cost_file_formulas` -- LLM formula cache.  Per-env data.
-
-Worker image tags do NOT live in Firestore -- they live in env vars
-(`VAST_DOCKER_IMAGE`, `MODAL_WORKER_IMAGE_CYCLES`, `COMMUNITY_WORKER_IMAGE`)
-alongside other deployment metadata.  See the worker tags section
-below.
-
-## Worker image tags
-
-Per-env immutable + mutable pointer:
-
+**(Optional) push env-specific worker images** — skip to reuse test's `:5.0.4`:
+```bash
+bash infra/scripts/push-worker.sh <env> 0.0.1 vast-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.1 modal-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.1 community-cycles
 ```
-:dev-v1.2.0      ← immutable snapshot
-:dev             ← mutable pointer (latest pushed dev)
-:staging-v1.2.0
-:staging
-:prod-v1.2.0
-:prod
+Then flip each new `pc-rent-*-worker-*` GHCR package to **public**, and bump `VAST_DOCKER_IMAGE` / `MODAL_WORKER_IMAGE_CYCLES` / `COMMUNITY_WORKER_IMAGE` in `.env` to `:<env>-v0.0.1`.
+
+**Deploy chain (run in this order):**
+```bash
+bash infra/scripts/tf-apply.sh <env>
+bash infra/scripts/migrate-db.sh <env>
+bash infra/scripts/seed-firestore.sh <env>
+bash infra/scripts/deploy-modal.sh <env>
+bash infra/scripts/deploy-server.sh <env>
+bash infra/scripts/deploy-backup-monitor.sh <env>
 ```
 
-Each env's `.env` references the **immutable** version-suffixed tag so a re-push doesn't silently change what's running.  Rollback = bump the tag in `.env` back to the previous version, redeploy.
+**(Optional) per-env desktop** — copy `desktop.config.json.example` to `desktop.config.json`, fill in `backendUrl` + `firebaseConfig`, then run dev mode or build:
+```bash
+bash infra/scripts/desktop-dev.sh <env>     # hot reload against env
+bash infra/scripts/desktop-build.sh <env>   # produce installer
+```
 
-Three env vars per env's `.env` -- one per fleet:
+---
 
-* `VAST_DOCKER_IMAGE` / `VAST_DOCKER_IMAGE_EEVEE` -- read at instance-create time, injected into each Vast container.
-* `MODAL_WORKER_IMAGE_CYCLES` -- read at `modal deploy` time, baked into the Modal function image.
-* `COMMUNITY_WORKER_IMAGE` -- served by `GET /community/worker-image` so the agent on each user's PC can ask the backend what to pull.  One agent binary works against any env this way.
+## Common workflows
 
-`infra/scripts/push-worker.sh <env> <version> <variant>` (added in Phase 2) builds + pushes both tags in one call.
+**Server code change**
+```bash
+bash infra/scripts/deploy-server.sh <env>
+```
 
-## Gitignore
+**Worker code change** — push, bump tag in `.env`, redeploy the fleet that uses it:
+```bash
+bash infra/scripts/push-worker.sh <env> <X.Y.Z> <variant>
+bash infra/scripts/deploy-server.sh <env>     # vast / community
+bash infra/scripts/deploy-modal.sh <env>      # modal
+```
 
-`.env` and `desktop.config.json` under each env folder must be
-gitignored.  `.env.example` and `desktop.config.json.example` are
-checked in as templates.
+**Modal code change**
+```bash
+bash infra/scripts/deploy-modal.sh <env>
+```
+
+**Backup monitor code change**
+```bash
+bash infra/scripts/deploy-backup-monitor.sh <env>
+```
+
+**Desktop dev (hot reload)**
+```bash
+bash infra/scripts/desktop-dev.sh <env>
+```
+
+**Desktop release (installer)**
+```bash
+bash infra/scripts/desktop-build.sh <env>
+```
+
+**Rollback serverV2**
+```bash
+bash infra/scripts/rollback.sh <env>                # list revisions
+bash infra/scripts/rollback.sh <env> <revision>     # shift 100% traffic
+```
+
+**Nuke env**
+```bash
+bash infra/scripts/destroy.sh <env>                 # prod needs --i-know
+```
+
+---
+
+## Script reference
+
+| Script | Does |
+|---|---|
+| `tf-apply.sh <env>` | Creates Cloud Run, Artifact Registry, backup_monitor Job + Scheduler. Patches `.env` with output URLs. |
+| `deploy-server.sh <env>` | Builds serverV2 image, deploys to Cloud Run with `.env` as env-vars. |
+| `deploy-modal.sh <env>` | Deploys Modal app `pc-rent-render-<env>`. |
+| `deploy-backup-monitor.sh <env>` | Builds + swaps backup_monitor image on the Job. |
+| `push-worker.sh <env> <ver> <variant>` | Builds + pushes GHCR worker image (`:<env>-v<ver>` + `:<env>`). |
+| `desktop-dev.sh <env>` | Patches desktop/ source for env, runs `tauri dev`, restores on exit. |
+| `desktop-build.sh <env>` | Builds env-specific installer to `infra/dist/forge-<env>-setup.exe`. |
+| `seed-firestore.sh <env>` | Copies `config/*` from test Firestore to `<env>` Firestore. |
+| `migrate-db.sh <env>` | Schema-only `pg_dump` from test → env's Neon. Required on first cold-start; idempotent. |
+| `rollback.sh <env> [revision]` | Shifts Cloud Run traffic to a prior revision. |
+| `destroy.sh <env>` | `terraform destroy` for the env. |
+
+Variants for `push-worker.sh`: `base-cycles`, `base-eevee`, `vast-cycles`, `vast-eevee`, `modal-cycles`, `community-cycles`.
+
+---
+
+## Gotchas
+
+- **Vast accounts must be per-env.** Backup monitor's ghost scanner lists every Vast instance on the account; shared account = one env's monitor can kill another env's renders.
+- **First GHCR push creates a private package.** Modal/Vast/community workers can't pull private images — flip each new `pc-rent-*-worker-*` package to **public** in GitHub Packages settings.
+- **Modal deploys before server.** serverV2 boot validates every `modal_instances` endpoint URL exists.
+- **`deploy-server.sh` re-injects the entire `.env` as Cloud Run env vars on every run.** Edit `.env` then re-deploy to push config changes.
+- **`tf-apply.sh` only manages GCP.** Neon, Upstash, R2, Firebase are all manual-create-then-paste-into-`.env`.
+
+---
+
+## Firestore per env
+
+- `config/global` — config mirror; seeded from test by `seed-firestore.sh`. Editable via desktop ConfigurationPage.
+- `config/cost_estimation` — LLM cost estimator settings.
+- `users/{uid}` — created lazily on first sign-in.
+- `allocation_cost_file_formulas` — LLM formula cache, built on demand.

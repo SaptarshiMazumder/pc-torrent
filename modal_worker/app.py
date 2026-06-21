@@ -11,18 +11,30 @@ Dockerfile alone.
 Deploy:
     pip install modal
     modal setup           # one-time auth
+    set MODAL_APP_NAME=pcrent-render-dev
     set MODAL_WORKER_IMAGE_CYCLES=ghcr.io/.../pcrent-modal-worker-cycles:<tag>
     modal deploy modal_worker/app.py
 
 Each function gets a stable URL like:
-    https://{workspace}--pcrent-render-render-l4.modal.run
+    https://{workspace}--{MODAL_APP_NAME}-render-l4.modal.run
+
+``MODAL_APP_NAME`` routes the deploy to a named Modal app, so dev /
+staging / prod (and the legacy ``test`` env) live as separate apps
+in the same workspace.  Required -- the script fails loud if missing
+so we never silently clobber the wrong app.
 """
 
 import os
 
 import modal
 
-app = modal.App("pcrent-render")
+_APP_NAME = os.environ.get("MODAL_APP_NAME", "").strip()
+if not _APP_NAME:
+    raise RuntimeError(
+        "MODAL_APP_NAME must be set (e.g. pcrent-render-dev).\n"
+        "  set MODAL_APP_NAME=pcrent-render-<env>"
+    )
+app = modal.App(_APP_NAME)
 _WEB_ENDPOINT = modal.fastapi_endpoint if hasattr(modal, "fastapi_endpoint") else modal.web_endpoint
 
 # Cycles image: prebuilt by ./push-worker.sh modal-cycles, pushed to GHCR.
@@ -49,7 +61,12 @@ cycles_image = (
     # definitions) doesn't trip on the deploy-time env-var-required
     # check above.  Without this the check fires inside every spawned
     # container.
-    .env({"MODAL_WORKER_IMAGE_CYCLES": _CYCLES_IMAGE_REF})
+    .env({
+        "MODAL_WORKER_IMAGE_CYCLES": _CYCLES_IMAGE_REF,
+        # Same reason as above: the runtime container re-imports app.py
+        # and would otherwise hit the env-var-required check at line 33.
+        "MODAL_APP_NAME": _APP_NAME,
+    })
 )
 
 

@@ -3,9 +3,9 @@
   "backendUrl": "",
   "firebaseConfig": {
     "apiKey": "",
-    "authDomain": "pcrent-staging.firebaseapp.com",
-    "projectId": "pcrent-staging",
-    "storageBucket": "pcrent-staging.firebasestorage.app",
+    "authDomain": "pc-rent-staging.firebaseapp.com",
+    "projectId": "pc-rent-staging",
+    "storageBucket": "pc-rent-staging.firebasestorage.app",
     "messagingSenderId": "",
     "appId": ""
   },

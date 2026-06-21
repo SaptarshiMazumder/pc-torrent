@@ -29,7 +29,7 @@ export default function App() {
     () => localStorage.getItem("pcrent_mode") || "rentee"
   );
   const [page, setPage] = useState(() => DEFAULT_PAGES[localStorage.getItem("pcrent_mode") || "rentee"] || "create");
-  const backendUrl = "https://pc-rent-server-v2-dev-930713698987.asia-northeast1.run.app";
+  const backendUrl = "https://pcrent-server-v2-930713698987.asia-northeast1.run.app";
 
   // Boot-time force-update gate.  Runs BEFORE auth so an out-of-date
   // client can't even reach the login screen.  Network/backend errors

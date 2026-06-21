@@ -3,12 +3,12 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  "apiKey": "AIzaSyC_HmwQZPbCWLVtQVRG2_q7WRcFi9IhRBI",
-  "authDomain": "pc-rent-dev.firebaseapp.com",
-  "projectId": "pc-rent-dev",
-  "storageBucket": "pc-rent-dev.firebasestorage.app",
-  "messagingSenderId": "43506276264",
-  "appId": "1:43506276264:web:07c32322c7a9c64c336f9d"
+  apiKey: "AIzaSyBnIRWjCDnmOnOhoCEg1rgbdxVyT0W_WDg",
+  authDomain: "gen-lang-client-0545494042.firebaseapp.com",
+  projectId: "gen-lang-client-0545494042",
+  storageBucket: "gen-lang-client-0545494042.firebasestorage.app",
+  messagingSenderId: "930713698987",
+  appId: "1:930713698987:web:fef33a4dd4717bde892dee",
 };
 
 const app = initializeApp(firebaseConfig);

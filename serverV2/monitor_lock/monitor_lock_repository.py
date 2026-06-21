@@ -32,7 +32,7 @@ import logging
 
 import redis
 
-from serverV2.infrastructure.redis_client import RedisClient
+from serverV2.infrastructure.redis_client import RedisClient, namespaced
 
 log = logging.getLogger(__name__)
 
@@ -117,12 +117,12 @@ class MonitorLockRepository:
 
     @staticmethod
     def vast_key() -> str:
-        return "monitor:vast"
+        return namespaced("monitor:vast")
 
     @staticmethod
     def modal_key() -> str:
-        return "monitor:modal"
+        return namespaced("monitor:modal")
 
     @staticmethod
     def community_key() -> str:
-        return "monitor:community"
+        return namespaced("monitor:community")

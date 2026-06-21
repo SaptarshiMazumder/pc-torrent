@@ -49,9 +49,9 @@ from serverV2.fleets.fleet_availability.fleet_availability_builder_factory impor
 from serverV2.fleets.fleet_availability.fleet_availability_snapshot import (
     FleetAvailabilitySnapshot,
 )
-from serverV2.infrastructure.redis_client import RedisClient
+from serverV2.infrastructure.redis_client import RedisClient, namespaced
 
-_KEY = "fleet:availability:snapshot"
+_KEY = namespaced("fleet:availability:snapshot")
 _TTL_S = 60
 
 log = logging.getLogger(__name__)

@@ -1,0 +1,20 @@
+# Template showing the variable shape.  DO NOT put real values here
+# -- they go in ``infra/envs/dev/.env`` (gitignored) and are exported
+# as TF_VAR_* by Phase 2's deploy.sh wrapper.
+#
+# Example wrapper logic:
+#   set -a; . infra/envs/dev/.env; set +a
+#   export TF_VAR_gcp_project_id="$GCP_PROJECT"
+#   export TF_VAR_cloudflare_account_id="$CLOUDFLARE_ACCOUNT_ID"
+#   cd infra/terraform/envs/dev && terraform apply
+#
+# Provisioner-only secrets (not in this file -- exported by deploy.sh
+# from .env so providers can authenticate):
+#   NEON_API_KEY         (-> neon provider)
+#   UPSTASH_EMAIL        (-> upstash provider)
+#   UPSTASH_API_KEY      (-> upstash provider)
+#   CLOUDFLARE_API_TOKEN (-> cloudflare provider)
+#   GOOGLE_APPLICATION_CREDENTIALS (-> google provider, OR `gcloud auth ...`)
+
+gcp_project_id        = "gen-lang-client-0545494042"
+cloudflare_account_id = "<paste-from-Cloudflare-dashboard>"

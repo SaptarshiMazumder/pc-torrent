@@ -15,6 +15,22 @@ import redis
 log = logging.getLogger(__name__)
 
 
+# Per-env prefix for FIXED (non-id) Redis keys so multiple envs sharing
+# one Redis cannot collide on singleton locks / aggregate keys.
+# - dev sets REDIS_KEY_PREFIX=dev:
+# - staging sets REDIS_KEY_PREFIX=staging:
+# - prod / test leave it unset (empty string) -- existing keys unchanged.
+# id-keyed keys like job:{job_id}:hb are NOT prefixed -- the backup
+# monitor reads them directly and would stop seeing heartbeats.
+REDIS_KEY_PREFIX = os.environ.get("REDIS_KEY_PREFIX", "")
+
+
+def namespaced(key: str) -> str:
+    """Prefix ``key`` with ``REDIS_KEY_PREFIX``.  Only call on fixed
+    (non-id) keys; id-keyed keys are inherently env-safe via their UUID."""
+    return f"{REDIS_KEY_PREFIX}{key}"
+
+
 class RedisClient:
 
     def __init__(self, url: str | None = None) -> None:

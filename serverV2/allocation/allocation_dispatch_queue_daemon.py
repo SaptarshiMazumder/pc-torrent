@@ -48,10 +48,11 @@ from serverV2.fleets.fleet_availability.fleet_availability_snapshot_cache import
     FleetAvailabilitySnapshotCache,
 )
 from serverV2.monitor_lock.monitor_lock_repository import MonitorLockRepository
+from serverV2.infrastructure.redis_client import namespaced
 
 log = logging.getLogger(__name__)
 
-_LOCK_KEY = "allocation:dispatch:daemon"
+_LOCK_KEY = namespaced("allocation:dispatch:daemon")
 
 
 class AllocationDispatchQueueDaemon:

@@ -1,0 +1,5 @@
+# Template; real values come from infra/envs/prod/.env via TF_VAR_*.
+# See ../dev/terraform.tfvars.example for the full annotation.
+
+gcp_project_id        = "gen-lang-client-0545494042"
+cloudflare_account_id = "<paste-from-Cloudflare-dashboard>"

@@ -37,12 +37,12 @@ import time
 
 import redis
 
-from serverV2.infrastructure.redis_client import RedisClient
+from serverV2.infrastructure.redis_client import RedisClient, namespaced
 
 log = logging.getLogger(__name__)
 
-_SET_KEY = "machines:alive"
-_STATUS_KEY = "machines:status"
+_SET_KEY = namespaced("machines:alive")
+_STATUS_KEY = namespaced("machines:status")
 # 24-hour expiry on the alive set.  Individual entries get pruned by
 # the CommunityMonitor's periodic prune call; this TTL is just a safety
 # net so a forgotten Redis instance doesn't accumulate forever.

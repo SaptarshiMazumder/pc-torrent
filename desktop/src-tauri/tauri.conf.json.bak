@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicbarker/tauri/tauri-v2/crates/tauri-config-schema/schema.json",
-  "productName": "Forge (dev)",
+  "productName": "Forge",
   "version": "1.0.1",
-  "identifier": "com.pcrent.desktop.dev",
+  "identifier": "com.pcrent.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -26,9 +26,7 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "**"
-        ]
+        "scope": ["**"]
       }
     },
     "trayIcon": {
@@ -40,15 +38,8 @@
   "bundle": {
     "active": true,
     "targets": "nsis",
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.ico"
-    ],
-    "externalBin": [
-      "pcrent-agent"
-    ]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "externalBin": ["pcrent-agent"]
   },
   "plugins": {
     "shell": {

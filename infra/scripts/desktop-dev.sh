@@ -78,17 +78,17 @@ if not backend:
 p = desktop / "src" / "firebase" / "config.js"
 text = p.read_text()
 new = "const firebaseConfig = " + json.dumps(fb, indent=2) + ";"
-patched = re.sub(r"const firebaseConfig = \{[\s\S]*?\};", new, text, count=1)
-if patched == text:
-    raise SystemExit(f"failed to patch {p}")
+patched, n = re.subn(r"const firebaseConfig = \{[\s\S]*?\};", new, text, count=1)
+if n == 0:
+    raise SystemExit(f"failed to patch {p}: firebaseConfig literal not found")
 p.write_text(patched)
 
 # backendUrl
 p = desktop / "src" / "App.jsx"
 text = p.read_text()
-patched = re.sub(r'const backendUrl = "https://[^"]+";', f'const backendUrl = "{backend}";', text, count=1)
-if patched == text:
-    raise SystemExit(f"failed to patch {p}")
+patched, n = re.subn(r'const backendUrl = "https://[^"]+";', f'const backendUrl = "{backend}";', text, count=1)
+if n == 0:
+    raise SystemExit(f"failed to patch {p}: backendUrl literal not found")
 p.write_text(patched)
 
 # localStorage override (strip for prod)

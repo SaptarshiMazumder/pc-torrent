@@ -13,6 +13,9 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
+# desktop-dev.sh backups (created when patching source in-place for tauri dev)
+desktop/**/*.bak
+
 # Python
 __pycache__/
 *.py[cod]
@@ -57,3 +60,5 @@ infra/terraform/**/*.tfstate
 infra/terraform/**/*.tfstate.backup
 infra/terraform/**/.terraform.lock.hcl
 infra/terraform/**/*.tfplan
+
+**/firebase/config.js

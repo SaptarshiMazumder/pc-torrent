@@ -17,17 +17,18 @@ bash infra/terraform/bootstrap.sh
 - Neon project + DB → pooled connection URL
 - Upstash global Redis DB → `rediss://` URL
 - R2 bucket `pc-rent-<env>-blends` in Cloudflare → reuse account-scoped R2 keys
-- Separate Vast.ai account → API key (recommended; see Gotchas)
+- ⚠️ **Separate Vast.ai account per env** — without this, this env's backup monitor will see other envs' Vast instances and destroy them. Shared Vast key = cross-env render kills.
 
-**Fill `infra/envs/<env>/.env`** — copy `.env.example`, paste everything above.
+**Fill `infra/envs/<env>/.env`** — copy `.env.example`. The `*_IMAGE` lines default to the existing test tags (`pcrent-*:5.0.4`), so the env works out of the box. Push env-specific tags later (see below) only when you want isolation.
 
-**(Optional) push env-specific worker images** — skip to reuse test's `:5.0.4`:
+**(Optional) push env-specific worker images** — to get `:<env>-vX.Y.Z` tags:
 ```bash
 bash infra/scripts/push-worker.sh <env> 0.0.1 vast-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.1 vast-eevee
 bash infra/scripts/push-worker.sh <env> 0.0.1 modal-cycles
 bash infra/scripts/push-worker.sh <env> 0.0.1 community-cycles
 ```
-Then flip each new `pc-rent-*-worker-*` GHCR package to **public**, and bump `VAST_DOCKER_IMAGE` / `MODAL_WORKER_IMAGE_CYCLES` / `COMMUNITY_WORKER_IMAGE` in `.env` to `:<env>-v0.0.1`.
+Then on GHCR, flip each new `pc-rent-*-worker-*` package from private → **public** (Modal/Vast can't pull private images). Finally bump the four `*_IMAGE` lines in `.env` to `:<env>-v0.0.1`.
 
 **Deploy chain (run in this order):**
 ```bash
@@ -54,12 +55,26 @@ bash infra/scripts/desktop-build.sh <env>   # produce installer
 bash infra/scripts/deploy-server.sh <env>
 ```
 
-**Worker code change** — push, bump tag in `.env`, redeploy the fleet that uses it:
-```bash
-bash infra/scripts/push-worker.sh <env> <X.Y.Z> <variant>
-bash infra/scripts/deploy-server.sh <env>     # vast / community
-bash infra/scripts/deploy-modal.sh <env>      # modal
-```
+**Worker code change** — for EACH variant the fleet uses:
+
+1. Push:
+   ```bash
+   bash infra/scripts/push-worker.sh <env> <X.Y.Z> vast-cycles
+   bash infra/scripts/push-worker.sh <env> <X.Y.Z> vast-eevee
+   bash infra/scripts/push-worker.sh <env> <X.Y.Z> modal-cycles
+   bash infra/scripts/push-worker.sh <env> <X.Y.Z> community-cycles
+   ```
+2. **First push only**: flip each new `pc-rent-*-worker-*` package on GHCR from private → public (Modal/Vast/community can't pull private images).
+3. Bump the matching `*_IMAGE` keys in `infra/envs/<env>/.env`:
+   - `VAST_DOCKER_IMAGE` ← `vast-cycles` tag
+   - `VAST_DOCKER_IMAGE_EEVEE` ← `vast-eevee` tag
+   - `MODAL_WORKER_IMAGE_CYCLES` ← `modal-cycles` tag
+   - `COMMUNITY_WORKER_IMAGE` ← `community-cycles` tag
+4. Re-deploy:
+   ```bash
+   bash infra/scripts/deploy-server.sh <env>     # vast + community read VAST_DOCKER_IMAGE / COMMUNITY_WORKER_IMAGE from Cloud Run env
+   bash infra/scripts/deploy-modal.sh <env>      # modal reads MODAL_WORKER_IMAGE_CYCLES at modal deploy time
+   ```
 
 **Modal code change**
 ```bash

@@ -1,10 +1,9 @@
 """ChunkProgressService — single source of truth for "is this chunk
 done?" / "what frames are still missing?"
 
-Composes one DB read (``OutputFrameRepository.unique_filenames_for_chunk``)
-with a pure in-process computation.  No new SQL — the chunk-level
-filenames query already lives on ``OutputFrameRepository`` and stays
-there; the service just calls it.
+Composes one DB read (``OutputFrameRepository.frame_numbers_for_chunk``)
+with a pure in-process computation.  The chunk-level frame-number query
+lives on ``OutputFrameRepository``; the service just calls it.
 
 Algorithm (verbatim transplant of the legacy
 ``ComputeRemainingFramesStep._compute``):
@@ -14,10 +13,10 @@ Algorithm (verbatim transplant of the legacy
 3. Read the chunk's expected ``(frame_start, frame_end, frame_step)``
    from the canonical row (the original chunk's range, before any
    sub-range retries narrowed it).
-4. Parse frame numbers from the rendered filenames using the
-   ``frame####.<ext>`` filename convention.  Filenames that don't
-   match are silently dropped (no production renderer produces those;
-   defensive against accidental uploads).
+4. Read the rendered frame numbers straight from the generated
+   ``frame_number`` column (parsed from each filename's ``frame####``
+   token at write time).  Rows without a frame token are NULL and never
+   reach this set.
 5. Set difference: ``expected_frames - rendered_frames``.
 6. Empty difference → ``(is_complete=True, remaining_range=None)``.
 7. Non-empty → ``(is_complete=False,
@@ -32,14 +31,10 @@ scope — forcing the service to re-query would just add a redundant
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from serverV2.orchestrator.chunk_progress.chunk_progress import ChunkProgress
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
-
-
-_FRAME_FILENAME_RE = re.compile(r"frame(\d+)\.")
 
 
 class ChunkProgressService:
@@ -53,10 +48,10 @@ class ChunkProgressService:
         chunk_index: int,
         siblings: list[dict[str, Any]],
     ) -> ChunkProgress:
-        rendered_filenames = self._output_frames.unique_filenames_for_chunk(
+        rendered_frames = self._output_frames.frame_numbers_for_chunk(
             group_id, chunk_index,
         )
-        return self._compute(siblings, rendered_filenames)
+        return self._compute(siblings, rendered_frames)
 
     def progress_for_group(
         self,
@@ -79,22 +74,26 @@ class ChunkProgressService:
             ci = j.get("chunk_index") or 0
             siblings_by_chunk.setdefault(ci, []).append(j)
 
-        filenames_by_chunk = self._output_frames.unique_filenames_per_chunk_for_group(
+        frames_by_chunk = self._output_frames.frame_numbers_per_chunk_for_group(
             group_id,
         )
         return {
-            ci: self._compute(siblings, filenames_by_chunk.get(ci, set()))
+            ci: self._compute(siblings, frames_by_chunk.get(ci, set()))
             for ci, siblings in siblings_by_chunk.items()
         }
 
     @staticmethod
     def _compute(
         siblings: list[dict[str, Any]],
-        rendered_filenames: set[str],
+        rendered_frames: set[int],
     ) -> ChunkProgress:
         """Pure in-process computation shared by ``progress_for_chunk``
         (singular, used by the retry pipeline) and ``progress_for_group``
         (bulk, used by the detail page).  No I/O.
+
+        ``rendered_frames`` is the set of frame indices already in
+        ``output_frames`` for this chunk, read from the generated
+        ``frame_number`` column upstream — no filename parsing here.
         """
         if not siblings:
             return ChunkProgress(is_complete=False, remaining_range=None)
@@ -104,14 +103,8 @@ class ChunkProgressService:
         chunk_end = int(original.get("frame_end") or 0)
         step = int(original.get("frame_step") or 1)
 
-        rendered: set[int] = set()
-        for fname in rendered_filenames:
-            match = _FRAME_FILENAME_RE.match(fname)
-            if match:
-                rendered.add(int(match.group(1)))
-
         all_chunk_frames = set(range(chunk_start, chunk_end + 1, step))
-        missing = sorted(all_chunk_frames - rendered)
+        missing = sorted(all_chunk_frames - rendered_frames)
         if not missing:
             return ChunkProgress(is_complete=True, remaining_range=None)
         return ChunkProgress(

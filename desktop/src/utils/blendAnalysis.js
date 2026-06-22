@@ -116,9 +116,19 @@ export function validateCameraRanges(rows, frameRange) {
     if (!r.camera_name) return { ok: false, error: "Each enabled camera range needs a camera." };
   }
   if (!frameRange) return { ok: false, error: "Enter a valid frame range first." };
+  // Every rendered frame must be claimed by exactly one enabled range:
+  // 0 → coverage gap; >1 → overlap (the frame would map to two cameras,
+  // making its {camera}_frame#### output filename ambiguous). Step-aware
+  // via rowMatchesFrame, so ranges whose bounds touch but render disjoint
+  // frames (different step phase) are not flagged.
   for (let f = frameRange.frame_start; f <= frameRange.frame_end; f += frameRange.frame_step) {
-    if (!enabled.find((r) => rowMatchesFrame(r, f))) {
+    const matches = enabled.filter((r) => rowMatchesFrame(r, f));
+    if (matches.length === 0) {
       return { ok: false, error: `Camera ranges do not cover frame ${f}. Adjust ranges or switch to Auto mode.` };
+    }
+    if (matches.length > 1) {
+      const names = [...new Set(matches.map((r) => r.camera_name))].join(", ");
+      return { ok: false, error: `Frame ${f} is in more than one camera range (${names}). Ranges must not overlap.` };
     }
   }
   return { ok: true, error: "", rows: enabled };

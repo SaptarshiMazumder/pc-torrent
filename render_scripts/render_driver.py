@@ -521,34 +521,78 @@ def _save_render_result_as_png(path: str) -> bool:
                 pass
 
 
-def _render_frames_with_png_fallback(scene, selected_layer, base_path):
+def _sanitize_camera_name(name) -> str:
+    """Filesystem/R2-safe camera token.  Restricted to the charset the
+    backend's ``sanitize_filename`` preserves (``[A-Za-z0-9._-]``) so the
+    uploaded filename, the registered filename, and the ``output_frames``
+    dedup key are byte-identical.
     """
-    Frame-by-frame animation render that saves every frame as PNG regardless
-    of the scene output format.  Used when the scene is locked to FFMPEG output.
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(name or "").strip())
+    return safe or "camera"
+
+
+def _camera_prefixed_base(base_path: str, camera_name) -> str:
+    """Inject ``{camera}_`` in front of the filename token of the output
+    path so each frame lands as ``{camera}_frame####``.  The ``frame####``
+    token is preserved verbatim — the backend derives ``frame_number``
+    from it.
     """
-    frames = list(range(int(scene.frame_start), int(scene.frame_end) + 1, max(1, int(scene.frame_step))))
+    safe = _sanitize_camera_name(camera_name)
+    head, tail = os.path.split(base_path)
+    tail = f"{safe}_{tail}" if tail else f"{safe}_frame####"
+    return os.path.join(head, tail) if head else tail
+
+
+def _marker_camera_for_frame(scene, frame: int, fallback):
+    """Active timeline-marker camera at ``frame`` — the binding Blender's
+    native marker-driven render would use: the latest marker at or before
+    the frame that carries a camera.  Falls back to the scene camera."""
+    chosen = fallback
+    best_frame = None
+    for marker in scene.timeline_markers:
+        cam = getattr(marker, "camera", None)
+        if cam is None or getattr(cam, "type", None) != "CAMERA":
+            continue
+        mf = int(getattr(marker, "frame", 0))
+        if mf <= frame and (best_frame is None or mf > best_frame):
+            best_frame = mf
+            chosen = cam
+    return chosen
+
+
+def _build_camera_assignments(scene, overrides: dict, camera_mode: str):
+    """Resolve the camera for every frame in the timeline as a list of
+    ``(frame, camera_obj)``.  Frame-grouping-by-camera is always on, so the
+    per-frame camera drives both which camera renders the frame and the
+    output filename prefix."""
+    frames = list(
+        range(int(scene.frame_start), int(scene.frame_end) + 1, max(1, int(scene.frame_step)))
+    )
     if not frames:
         raise RuntimeError("No renderable frames in timeline")
+    fallback = scene.camera
 
-    _disable_default_progress_handlers()
-    _emit_progress("meta", frames[0], 0, len(frames))
+    if camera_mode == "camera_ranges":
+        ranges = _normalize_camera_ranges(overrides)
+        if not ranges:
+            raise RuntimeError(
+                "camera_mode='camera_ranges' requires at least one enabled camera range"
+            )
+        resolve = lambda f: _camera_for_frame(f, ranges, fallback)
+    elif camera_mode == "force_camera":
+        name = overrides.get("camera_name")
+        forced = _find_camera_object(name if isinstance(name, str) else "")
+        resolve = lambda f: forced or fallback
+    else:  # auto_markers
+        resolve = lambda f: _marker_camera_for_frame(scene, f, fallback)
 
-    kwargs = {
-        "animation": False,
-        "write_still": False,
-        "use_viewport": False,
-        "scene": scene.name,
-    }
-    if selected_layer:
-        kwargs["layer"] = selected_layer
-
-    for index, frame in enumerate(frames, start=1):
-        scene.frame_set(frame)
-        bpy.ops.render.render(**kwargs)
-        frame_path = _filepath_for_frame(base_path, frame) + ".png"
-        if not _save_render_result_as_png(frame_path):
-            raise RuntimeError(f"Failed to save frame {frame} as PNG")
-        _emit_progress("frame", frame, index, len(frames))
+    assignments = []
+    for f in frames:
+        cam = resolve(f)
+        if cam is None or getattr(cam, "type", None) != "CAMERA":
+            raise RuntimeError(f"No camera resolved for frame {f}")
+        assignments.append((f, cam))
+    return assignments
 
 
 def _render_animation(scene, selected_layer):
@@ -563,29 +607,36 @@ def _render_animation(scene, selected_layer):
     bpy.ops.render.render(**kwargs)
 
 
-def _render_with_camera_ranges(scene, selected_layer, camera_ranges):
-    if not camera_ranges:
-        raise RuntimeError("camera_mode='camera_ranges' requires at least one enabled camera range")
+def _render_grouped(scene, selected_layer, assignments, base_path, ffmpeg_locked):
+    """Render every frame to a ``{camera}_frame####`` path.
 
-    frames = list(range(int(scene.frame_start), int(scene.frame_end) + 1, max(1, int(scene.frame_step))))
-    if not frames:
+    Fast path: when a single camera covers the whole chunk and the scene
+    output isn't locked to a video container, Blender's native animation
+    render writes the entire range in one operator call with the camera-
+    prefixed output path.  Otherwise we render frame-by-frame so each
+    frame can carry its own camera and prefixed filename (and, when the
+    scene format is FFMPEG, its own PNG-fallback save).
+    """
+    if not assignments:
         raise RuntimeError("No renderable frames in timeline")
 
-    fallback_camera = scene.camera
-    assignments = []
-    for frame in frames:
-        camera_obj = _camera_for_frame(frame, camera_ranges, fallback_camera)
-        if camera_obj is None:
-            raise RuntimeError(f"No camera resolved for frame {frame}")
-        assignments.append((frame, camera_obj))
+    distinct = {cam.name for _, cam in assignments}
+
+    if not ffmpeg_locked and len(distinct) == 1:
+        cam = assignments[0][1]
+        scene.camera = cam
+        scene.render.filepath = _camera_prefixed_base(base_path, cam.name)
+        _render_animation(scene, selected_layer)
+        return
 
     _disable_default_progress_handlers()
     _emit_progress("meta", assignments[0][0], 0, len(assignments))
 
     kwargs = {
-        "write_still": True,
-        "scene": scene.name,
+        "animation": False,
+        "write_still": not ffmpeg_locked,
         "use_viewport": False,
+        "scene": scene.name,
     }
     if selected_layer:
         kwargs["layer"] = selected_layer
@@ -595,8 +646,15 @@ def _render_with_camera_ranges(scene, selected_layer, camera_ranges):
         for index, (frame, camera_obj) in enumerate(assignments, start=1):
             scene.camera = camera_obj
             scene.frame_set(frame)
-            scene.render.filepath = _filepath_for_frame(original_path, frame)
-            bpy.ops.render.render(**kwargs)
+            prefixed = _camera_prefixed_base(base_path, camera_obj.name)
+            if ffmpeg_locked:
+                bpy.ops.render.render(**kwargs)
+                out_path = _filepath_for_frame(prefixed, frame) + ".png"
+                if not _save_render_result_as_png(out_path):
+                    raise RuntimeError(f"Failed to save frame {frame} as PNG")
+            else:
+                scene.render.filepath = _filepath_for_frame(prefixed, frame)
+                bpy.ops.render.render(**kwargs)
             _emit_progress("frame", frame, index, len(assignments))
     finally:
         scene.render.filepath = original_path
@@ -630,26 +688,24 @@ def main():
 
     ffmpeg_locked = scene.render.image_settings.file_format == "FFMPEG"
     if ffmpeg_locked:
-        log("[RENDER_DRIVER] Output format locked to FFMPEG — switching to frame-by-frame PNG rendering")
+        log("[RENDER_DRIVER] Output format locked to FFMPEG — saving frames as PNG")
 
-    if camera_mode == "camera_ranges":
-        camera_ranges = _normalize_camera_ranges(overrides)
-        log(f"[RENDER_DRIVER] Camera ranges: {len(camera_ranges)}")
-        _render_with_camera_ranges(scene, selected_layer, camera_ranges)
-    elif ffmpeg_locked:
-        if not _ensure_scene_camera(scene):
-            raise RuntimeError(
-                "No camera found in the scene. Add a camera, set one as active, "
-                "or use camera_ranges with valid camera names."
-            )
-        _render_frames_with_png_fallback(scene, selected_layer, scene.render.filepath)
-    else:
-        if not _ensure_scene_camera(scene):
-            raise RuntimeError(
-                "No camera found in the scene. Add a camera, set one as active, "
-                "or use camera_ranges with valid camera names."
-            )
-        _render_animation(scene, selected_layer)
+    # camera_ranges resolves its own per-frame cameras; the other modes
+    # need a valid active camera as the fallback for frame resolution.
+    if camera_mode != "camera_ranges" and not _ensure_scene_camera(scene):
+        raise RuntimeError(
+            "No camera found in the scene. Add a camera, set one as active, "
+            "or use camera_ranges with valid camera names."
+        )
+
+    base_path = scene.render.filepath
+    assignments = _build_camera_assignments(scene, overrides, camera_mode)
+    distinct = sorted({cam.name for _, cam in assignments})
+    log(
+        f"[RENDER_DRIVER] Grouping by camera: {len(distinct)} camera(s) "
+        f"over {len(assignments)} frames -> {distinct}"
+    )
+    _render_grouped(scene, selected_layer, assignments, base_path, ffmpeg_locked)
 
 
 if __name__ == "__main__":

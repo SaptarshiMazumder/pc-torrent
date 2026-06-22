@@ -300,6 +300,29 @@ def init_db() -> None:
                     "CREATE INDEX IF NOT EXISTS output_frames_job_idx "
                     "ON output_frames (job_id)"
                 )
+                # Camera-grouped outputs.  Worker frame files are named
+                # ``{camera}_frame####.<ext>`` (always-on grouping), so the
+                # frame's identity can no longer be the exact filename.
+                # ``frame_number`` is the frame index parsed out of the
+                # filename's ``frame####`` token -- a STORED GENERATED
+                # column, so it's a DB-enforced projection of the filename
+                # (cannot diverge, auto-backfills old ``frame0045.png`` rows
+                # to 45).  Completion + retry math read this instead of
+                # reconstructing/parsing filenames.  NULL for any filename
+                # without a frame token (excluded from range counts, which
+                # matches the old "silently drop non-matching" behaviour).
+                # Pattern requires the trailing ``.`` (the extension
+                # boundary) so a camera literally named ``frameNN`` can't be
+                # mistaken for the frame token -- the real token is always
+                # ``frame####`` immediately followed by the file extension.
+                cur.execute(
+                    "ALTER TABLE output_frames ADD COLUMN IF NOT EXISTS frame_number INT "
+                    "GENERATED ALWAYS AS ((substring(filename from 'frame(\\d+)\\.'))::int) STORED"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS output_frames_group_frame_idx "
+                    "ON output_frames (group_id, frame_number)"
+                )
                 # Pending allocation queue — chunks/groups that couldn't
                 # be allocated to a fleet because nothing eligible existed
                 # at allocation time.  Dispatch daemon's per-tick re-eval

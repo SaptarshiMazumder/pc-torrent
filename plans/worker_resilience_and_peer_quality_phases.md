@@ -2,8 +2,8 @@
 
 Replaces the prior "Worker Resilience + Peer Quality" plan. The OPTIX→CUDA
 fallback (formerly Stage A) was already implemented in shell — see the
-`log_should_fallback_device` predicates in `vast_worker/scripts/render.sh`,
-`render.eevee.sh`, and `community_worker/render.sh`. The OS / CUDA peer-quality
+`log_should_fallback_device` predicates in `render_scripts/render.sh`,
+`render_scripts/render.eevee.sh`, and `community_worker/render.sh`. The OS / CUDA peer-quality
 concept (formerly Stage D) is now broader: a full allocation pipeline rewrite.
 
 The original Stage B (410 Gone on terminal jobs) and Stage C (worker

@@ -75,27 +75,27 @@ class OutputFrameRepository:
     ) -> int:
         """Count distinct frames in ``[frame_start, frame_end]`` (stepped
         by ``frame_step``) that exist in ``output_frames`` for this group,
-        regardless of which job_id uploaded them.
+        regardless of which job_id uploaded them or what the filename's
+        camera prefix is.
+
+        Matches on ``frame_number`` (the DB-generated frame index parsed
+        from the filename) rather than reconstructing exact filenames, so
+        camera-grouped names like ``Camera-A_frame0045.png`` still count.
+        ``COUNT(DISTINCT frame_number)`` is the no-double-count guarantee:
+        the same frame under two different filenames (e.g. an un-prefixed
+        legacy row + a prefixed retry) counts once.
 
         Used for chunk-level completion checks that need to see frames
-        contributed by sibling retries.  ``count_for_job`` only sees
-        rows under one job_id; when ``add_many``'s ON CONFLICT path
-        deduped frames a sibling already uploaded, those frames are
-        invisible to ``count_for_job(this_job)`` even though they exist
-        in the table under ``count_for_job(sibling_job)``.
+        contributed by sibling retries.  ``count_for_job`` only sees rows
+        under one job_id; this is group-wide and prefix-agnostic.
         """
         if frame_end < frame_start or frame_step <= 0:
             return 0
-        expected = [
-            f"frame{i:04d}.png"
-            for i in range(frame_start, frame_end + 1, frame_step)
-        ]
-        if not expected:
-            return 0
         rows = query_all(
-            "SELECT COUNT(*) AS n FROM output_frames "
-            "WHERE group_id = %s AND filename = ANY(%s)",
-            (group_id, expected),
+            "SELECT COUNT(DISTINCT frame_number) AS n FROM output_frames "
+            "WHERE group_id = %s AND frame_number BETWEEN %s AND %s "
+            "AND (frame_number - %s) %% %s = 0",
+            (group_id, frame_start, frame_end, frame_start, frame_step),
         )
         return int(rows[0]["n"]) if rows else 0
 
@@ -137,53 +137,54 @@ class OutputFrameRepository:
             out.setdefault(r["job_id"], []).append(r["filename"])
         return out
 
-    def unique_filenames_for_chunk(
+    def frame_numbers_for_chunk(
         self, group_id: str, chunk_index: int,
-    ) -> set[str]:
-        """Distinct filenames uploaded by ANY job that worked on this
+    ) -> set[int]:
+        """Distinct frame numbers uploaded by ANY job that worked on this
         chunk_index in this group.  Joins through ``jobs`` so callers
         don't have to enumerate sibling job_ids themselves.
 
-        Used by the retry path to compute "what frames are still
-        missing for this chunk" — set-difference between expected
-        frames and this set.
+        Used by the retry path to compute "what frames are still missing
+        for this chunk" — set-difference between expected frames and this
+        set.  Reads the generated ``frame_number`` column, so it's
+        agnostic to the filename's camera prefix.  Rows without a frame
+        token (``frame_number IS NULL``) are skipped.
         """
         rows = query_all(
             """
-            SELECT DISTINCT of.filename
+            SELECT DISTINCT of.frame_number
               FROM output_frames of
               JOIN jobs j ON j.id = of.job_id
-             WHERE of.group_id    = %s
-               AND j.chunk_index  = %s
+             WHERE of.group_id     = %s
+               AND j.chunk_index   = %s
+               AND of.frame_number IS NOT NULL
             """,
             (group_id, chunk_index),
         )
-        return {r["filename"] for r in rows}
+        return {int(r["frame_number"]) for r in rows}
 
-    def unique_filenames_per_chunk_for_group(
+    def frame_numbers_per_chunk_for_group(
         self, group_id: str,
-    ) -> dict[int, set[str]]:
-        """Bulk equivalent of ``{ci: unique_filenames_for_chunk(group_id, ci)
+    ) -> dict[int, set[int]]:
+        """Bulk equivalent of ``{ci: frame_numbers_for_chunk(group_id, ci)
         for ...}`` covering every chunk_index in the group.  One query
         instead of N -- used by the render-groups detail page so it can
         compute per-chunk progress for every chunk in a single round-trip.
 
-        Same JOIN through ``jobs`` as ``unique_filenames_for_chunk`` but
-        without the per-chunk filter.  PK ``(group_id, filename)`` on
-        ``output_frames`` already dedupes; the JOIN can't introduce
-        duplicates within one group.
+        Same JOIN through ``jobs`` as ``frame_numbers_for_chunk`` but
+        without the per-chunk filter.
         """
         rows = query_all(
-            "SELECT j.chunk_index, of.filename "
+            "SELECT j.chunk_index, of.frame_number "
             "FROM output_frames of "
             "JOIN jobs j ON j.id = of.job_id "
-            "WHERE of.group_id = %s",
+            "WHERE of.group_id = %s AND of.frame_number IS NOT NULL",
             (group_id,),
         )
-        out: dict[int, set[str]] = {}
+        out: dict[int, set[int]] = {}
         for r in rows:
             ci = r["chunk_index"] or 0
-            out.setdefault(ci, set()).add(r["filename"])
+            out.setdefault(ci, set()).add(int(r["frame_number"]))
         return out
 
     def latest_for_group(self, group_id: str) -> tuple[str, str] | None:

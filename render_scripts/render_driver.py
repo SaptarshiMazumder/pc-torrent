@@ -159,12 +159,9 @@ def _apply_output(scene, overrides: dict):
         path_pattern = default_path
     scene.render.filepath = path_pattern
 
-    file_format = output.get("file_format")
-    if isinstance(file_format, str) and file_format:
-        _set_attr_safe(image_settings, "file_format", file_format)
-    else:
-        # Default to PNG for distributed rendering — video formats cannot be split across workers
-        _set_attr_safe(image_settings, "file_format", "PNG")
+    # file_format is applied via Blender's -F CLI flag in render.sh, not here:
+    # the headless file_format enum rejects render-only formats
+    # (OPEN_EXR_MULTILAYER, FFMPEG) when assigned from Python.
 
     color_mode = output.get("color_mode")
     if isinstance(color_mode, str) and color_mode:
@@ -185,6 +182,71 @@ def _apply_output(scene, overrides: dict):
     exr_codec = output.get("exr_codec")
     if isinstance(exr_codec, str) and exr_codec:
         _set_attr_safe(image_settings, "exr_codec", exr_codec)
+
+    film_transparent = _coerce_bool(output.get("film_transparent"))
+    if film_transparent is not None:
+        # Alpha / transparent background lives on scene.render, not image_settings.
+        _set_attr_safe(scene.render, "film_transparent", film_transparent)
+
+
+# Override pass-key -> Blender view-layer attribute.  Mostly 1:1 with
+# use_pass_<key>; emission maps to use_pass_emit.  Resolved with hasattr at
+# apply time so engine-specific gaps (Cycles vs EEVEE) are skipped, not fatal.
+_PASS_ATTR = {
+    "z": "use_pass_z",
+    "mist": "use_pass_mist",
+    "normal": "use_pass_normal",
+    "position": "use_pass_position",
+    "vector": "use_pass_vector",
+    "uv": "use_pass_uv",
+    "diffuse_direct": "use_pass_diffuse_direct",
+    "diffuse_indirect": "use_pass_diffuse_indirect",
+    "diffuse_color": "use_pass_diffuse_color",
+    "glossy_direct": "use_pass_glossy_direct",
+    "glossy_indirect": "use_pass_glossy_indirect",
+    "glossy_color": "use_pass_glossy_color",
+    "transmission_direct": "use_pass_transmission_direct",
+    "transmission_indirect": "use_pass_transmission_indirect",
+    "transmission_color": "use_pass_transmission_color",
+    "emission": "use_pass_emit",
+    "environment": "use_pass_environment",
+    "ambient_occlusion": "use_pass_ambient_occlusion",
+    "shadow": "use_pass_shadow",
+    "cryptomatte_object": "use_pass_cryptomatte_object",
+    "cryptomatte_material": "use_pass_cryptomatte_material",
+    "cryptomatte_asset": "use_pass_cryptomatte_asset",
+}
+
+
+def _apply_render_passes(scene, overrides: dict, selected_layer):
+    """Enable render passes on the target view layer(s) for multilayer EXR.
+
+    ``passes.use_file_settings`` true (the default) means respect whatever
+    the .blend already enables -- no-op here.  Otherwise each known flag is
+    written via setattr, hasattr-guarded so passes that don't exist for the
+    active engine are silently skipped instead of raising.
+    """
+    passes = overrides.get("passes") if isinstance(overrides.get("passes"), dict) else None
+    if not passes or passes.get("use_file_settings") is not False:
+        return
+
+    if selected_layer:
+        targets = [vl for vl in scene.view_layers if vl.name == selected_layer]
+    else:
+        targets = list(scene.view_layers)
+
+    applied = []
+    for vl in targets:
+        for key, attr in _PASS_ATTR.items():
+            if key not in passes or not hasattr(vl, attr):
+                continue
+            try:
+                setattr(vl, attr, bool(passes[key]))
+                if passes[key]:
+                    applied.append(f"{vl.name}.{key}")
+            except Exception:
+                continue
+    log(f"[RENDER_DRIVER] Render passes set: {applied or 'none'}")
 
 
 def _activate_gpu_devices(compute_type: str) -> bool:
@@ -671,6 +733,7 @@ def main():
     _apply_output(scene, overrides)
     _apply_render(scene, overrides)
     selected_layer = _resolve_view_layer(scene, overrides)
+    _apply_render_passes(scene, overrides, selected_layer)
 
     total_frames = _compute_total_frames(scene)
     log(f"[RENDER_DRIVER] Scene: {scene.name}")

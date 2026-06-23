@@ -1,0 +1,210 @@
+@startuml exr_render_passes_classes
+
+skinparam shadowing false
+skinparam classFontSize 12
+skinparam ArrowFontSize 10
+skinparam packageStyle rectangle
+skinparam packageBorderColor #666666
+skinparam classBorderColor #555555
+skinparam linetype ortho
+
+title Multilayer-EXR render passes — detect in .blend, override in UI, one .exr per frame (frame-accounting untouched)
+
+legend top right
+|= fill |= class state |   |= tint |= module (folder) |
+|<#bbf7d0> NEW file/fn | |<#FAE3CC> desktop src-tauri/ |
+|<#bfdbfe> EDITED file | |<#EAD9F2> desktop pages/ |
+|<#e5e7eb> unchanged (context) | |<#D9EFE5> desktop utils/ |
+|<#fde68a> override JSON (contract) | |<#D9E4F5> desktop components/jobs/ |
+| | |<#E6D9F2> serverV2 core/ |
+| | |<#EEF2F7> serverV2 (pass-through) |
+| | |<#FBF0C4> render_scripts/ + community_worker/ |
+endlegend
+
+note as N_scope
+  SCOPE (locked):
+  - Delivery = OpenEXR MultiLayer: ONE .exr per frame, all passes inside.
+  - Passes: DETECT what the .blend already enables, prefill UI, allow override.
+  - Defaults: 16-bit half + DWAA codec (overridable).  Combined always on.
+  - One file per frame -> frame_number / completion / camera-grouping UNCHANGED.
+  - EXR preview = client-side placeholder tile (no server EXR decode in v1).
+  - OUT of scope: separate-file-per-pass, server tonemap thumbnails, new AOVs.
+end note
+
+' arrow colors
+!define A_DETECT   #228866
+!define A_OVERRIDE #2860B0
+!define A_WORKER   #B07020
+!define A_PREVIEW  #A040A0
+
+' =====================================================================
+' DESKTOP — analyzer (embedded Blender Python)
+' =====================================================================
+package "desktop/src-tauri/" #FAE3CC {
+  class "commands.rs : ANALYZE_BLEND_PY" as analyzer #bfdbfe {
+    emits scenes + heaviness   [existing]
+    -- NEW: per view-layer pass detection --
+    z, mist, normal, position, vector, uv
+    diffuse / glossy / transmission (dir+ind+col)
+    emission, environment, ao, shadow
+    cryptomatte (obj / mat / asset), aovs (names)
+    (every read getattr-guarded)
+    -> emits scenes[].view_layer_passes
+  }
+}
+
+' =====================================================================
+' DESKTOP — Create Render UI
+' =====================================================================
+package "desktop/src/pages/" #EAD9F2 {
+  class "CreateRenderPage.jsx" as createpage #bfdbfe {
+    -- NEW state --
+    outputFormat: PNG or OPEN_EXR_MULTILAYER
+    exrColorDepth = 16    exrCodec = DWAA
+    filmTransparent : bool
+    passesUseFile : bool (default true)
+    renderPasses : map(name to bool)
+    -- prefill from analyzer detection --
+    -- builds override.output + override.passes --
+  }
+}
+
+package "desktop/src/components/jobs/" #D9E4F5 {
+  class "RenderPassesPanel.jsx" as passpanel #bbf7d0 {
+    output-format select
+    bit-depth + codec
+    transparent background (alpha) toggle
+    "Use .blend pass setup" (default on)
+    per-pass checkboxes (engine-aware)
+  }
+  class "FrameThumb.jsx" as framethumb #bfdbfe {
+    if ext == .exr ->
+    render EXR placeholder tile
+    SKIP preview fetch (no 415, no blank)
+  }
+}
+
+package "desktop/src/utils/" #D9EFE5 {
+  class "blendAnalysis.js" as blendanalysis #bfdbfe {
+    parse detected passes ->
+    prefill renderPasses + passesUseFile
+  }
+  class "jobUtils.js" as jobutils #bfdbfe {
+    isPreviewableExtension(name) : bool
+    (false for .exr)
+  }
+}
+
+' =====================================================================
+' OVERRIDE JSON (the contract that flows desktop -> worker)
+' =====================================================================
+package "render_overrides JSON" #FBE9A8 {
+  class "overrides" as overrides #fde68a {
+    scene_name, camera_*, timeline, render   [existing]
+    -- output block (already whitelisted) --
+    file_format = OPEN_EXR_MULTILAYER
+    color_depth = 16      exr_codec = DWAA
+    film_transparent : bool   [NEW key]
+    -- passes block (NEW) --
+    use_file_settings : bool
+    per-pass flags : bool ...
+  }
+}
+
+' =====================================================================
+' BACKEND — only the whitelist changes; everything else passes through
+' =====================================================================
+package "serverV2/core/" #E6D9F2 {
+  class "value_objects.py : normalize_render_overrides" as normalize #bfdbfe {
+    WHITELISTS keys (drops unknowns)
+    -- ADD to whitelist --
+    keep passes block
+    keep output.film_transparent
+    allow file_format = OPEN_EXR_MULTILAYER
+  }
+}
+
+package "serverV2/ (pass-through, unchanged)" #EEF2F7 {
+  class "SceneResolver / render_groups.service / vast+modal client" as passthrough #e5e7eb {
+    resolved_scene -> render_overrides_json
+    -> RENDER_OVERRIDES_B64
+    UNCHANGED (carries new keys verbatim)
+  }
+  class "output_frame_repository.py + frame_number" as completion #e5e7eb {
+    one .exr per frame ->
+    frame#### token still matches
+    completion / dedup / retry UNCHANGED
+  }
+}
+
+' =====================================================================
+' WORKERS — both render drivers (cloud + community)
+' =====================================================================
+package "render_scripts/ + community_worker/" #FBF0C4 {
+  class "render_driver.py : _apply_output" as applyoutput #bfdbfe {
+    sets file_format / color_depth /
+    exr_codec    [existing]
+    -- NEW --
+    set render.film_transparent
+  }
+  class "render_driver.py : _apply_render_passes" as applypasses #bbf7d0 {
+    if passes.use_file_settings: NO-OP
+      (respect the .blend)
+    else: setattr use_pass_* on
+      target view layer(s),
+      each hasattr-guarded
+      (Cycles / EEVEE safe)
+    called in main() after
+    view-layer resolution
+  }
+  note bottom of applypasses
+    output names {camera}_frame####.exr
+    -> one file per frame
+  end note
+}
+
+' =====================================================================
+' DETECT FLOW — analyzer prefills the UI
+' =====================================================================
+analyzer -[A_DETECT]-> blendanalysis : detected passes
+blendanalysis -[A_DETECT]-> createpage : prefill renderPasses + passesUseFile
+createpage -[A_DETECT]-> passpanel : render (engine-aware)
+passpanel -[A_DETECT]-> createpage : user ticks / overrides
+
+' =====================================================================
+' OVERRIDE FLOW — UI builds contract -> backend whitelist -> worker
+' =====================================================================
+createpage -[A_OVERRIDE]-> overrides : build output + passes
+overrides -[A_OVERRIDE]-> normalize : POST estimate / confirm-upload
+normalize -[A_OVERRIDE]-> passthrough : whitelisted overrides
+passthrough -[A_OVERRIDE]-> applyoutput : RENDER_OVERRIDES_B64
+
+' =====================================================================
+' WORKER FLOW — apply + write
+' =====================================================================
+applyoutput -[A_WORKER]-> applypasses : same driver main()
+applypasses -[A_WORKER]-> completion : writes {camera}_frame####.exr
+
+' =====================================================================
+' PREVIEW FLOW — EXR gets a placeholder, never a broken tile
+' =====================================================================
+framethumb -[A_PREVIEW]-> jobutils : isPreviewableExtension(.exr) = false
+jobutils -[A_PREVIEW]-> framethumb : -> placeholder tile (no fetch)
+
+' =====================================================================
+' layout hints
+' =====================================================================
+analyzer -[hidden]down- createpage
+createpage -[hidden]down- overrides
+overrides -[hidden]down- normalize
+normalize -[hidden]down- passthrough
+passthrough -[hidden]down- applyoutput
+
+note bottom of completion
+  KEY: multilayer EXR = one .exr per frame, so the
+  camera-grouping work (frame_number, COUNT DISTINCT,
+  chunk_progress) needs ZERO changes.  Separate-file-
+  per-pass WOULD break this — that's why it's out of scope.
+end note
+
+@enduml

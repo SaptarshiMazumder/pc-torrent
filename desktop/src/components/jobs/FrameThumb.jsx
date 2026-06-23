@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { getFirebaseToken } from "../../services/api";
 import { getCachedFramePreview } from "../../services/frameCache";
+import { isPreviewableExtension } from "../../utils/jobUtils";
+
+function fileExtLabel(name) {
+  const dot = typeof name === "string" ? name.lastIndexOf(".") : -1;
+  return dot >= 0 ? name.slice(dot + 1).toUpperCase() : "FILE";
+}
 
 export default function FrameThumb({ file, backendUrl, className }) {
   const [src, setSrc] = useState("");
   const mountedRef = useRef(true);
+  const previewable = isPreviewableExtension(file?.filename);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -12,7 +19,7 @@ export default function FrameThumb({ file, backendUrl, className }) {
   }, []);
 
   useEffect(() => {
-    if (!file?.preview_path || !backendUrl || !file?.filename) return;
+    if (!previewable || !file?.preview_path || !backendUrl || !file?.filename) return;
 
     let cancelled = false;
 
@@ -50,7 +57,21 @@ export default function FrameThumb({ file, backendUrl, className }) {
 
     void load();
     return () => { cancelled = true; };
-  }, [file?.preview_path, file?.job_id, file?.filename, file?.size_bytes, backendUrl]);
+  }, [previewable, file?.preview_path, file?.job_id, file?.filename, file?.size_bytes, backendUrl]);
+
+  // Non-previewable formats (e.g. multilayer .exr) can't be browser-
+  // thumbnailed; show a format badge instead of a broken/blank tile.
+  if (!previewable) {
+    return (
+      <div
+        className={className}
+        title={file?.filename}
+        style={{ background: "var(--bg-secondary, #1a1a1a)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-secondary, #888)", fontSize: "0.7rem", fontWeight: 600, letterSpacing: "0.05em" }}
+      >
+        {fileExtLabel(file?.filename)}
+      </div>
+    );
+  }
 
   if (!src) {
     return <div className={className} style={{ background: "var(--bg-secondary, #1a1a1a)" }} />;

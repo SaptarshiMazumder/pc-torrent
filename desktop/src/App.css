@@ -1748,6 +1748,37 @@ body {
   gap: 12px;
 }
 
+/* EXR render-passes panel */
+.cr-field-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.cr-field-check input {
+  width: auto;
+}
+.cr-pass-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 6px 12px;
+  margin-top: 8px;
+}
+.cr-pass-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-secondary, #ccc);
+}
+.cr-pass-item.is-disabled {
+  opacity: 0.5;
+}
+.cr-pass-empty {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
 .cr-input {
   width: 100%;
   padding: 9px 12px;

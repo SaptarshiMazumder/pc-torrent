@@ -10,12 +10,13 @@ PRE_LOAD_SCRIPT="${PRE_LOAD_SCRIPT:-/scripts/pre_load.py}"
 DEVICE_POLICY="${DEVICE_POLICY:-AUTO}"
 FRAME_STEP="${FRAME_STEP:-1}"
 BLEND_FILE="${BLEND_FILE:-}"
+RENDER_FORMAT="${RENDER_FORMAT:-PNG}"
 
 DEVICE_POLICY="$(echo "$DEVICE_POLICY" | tr '[:lower:]' '[:upper:]')"
 if ! [[ "$FRAME_STEP" =~ ^[0-9]+$ ]] || [ "$FRAME_STEP" -lt 1 ]; then
     FRAME_STEP=1
 fi
-export OUTPUT_DIR INPUT_DIR FRAME_STEP DEVICE_POLICY
+export OUTPUT_DIR INPUT_DIR FRAME_STEP DEVICE_POLICY RENDER_FORMAT
 
 # Start a virtual X11 display for EEVEE (which uses OpenGL/EGL, not CUDA).
 # Without this, Blender falls back to CPU Mesa software rendering on headless
@@ -77,6 +78,16 @@ run_render() {
         --enable-autoexec
         --python "$PRE_LOAD_SCRIPT"
         -b "$BLEND_FILE"
+    )
+
+    # Force the output format in Blender's core (-F) AFTER the .blend loads
+    # and BEFORE the -P render scripts.  Headless Python can't set render-only
+    # formats like OPEN_EXR_MULTILAYER on the file_format enum; -F bypasses it.
+    if [ -n "${RENDER_FORMAT:-}" ]; then
+        cmd+=(-F "$RENDER_FORMAT")
+    fi
+
+    cmd+=(
         -P "$PROGRESS_SCRIPT"
         -P "$RENDER_DRIVER_SCRIPT"
     )

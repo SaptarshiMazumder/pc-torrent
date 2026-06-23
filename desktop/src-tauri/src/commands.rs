@@ -28,6 +28,44 @@ def _safe_int(value, default=0):
     except Exception:
         return default
 
+_PASS_ATTRS = {
+    "z": "use_pass_z",
+    "mist": "use_pass_mist",
+    "normal": "use_pass_normal",
+    "position": "use_pass_position",
+    "vector": "use_pass_vector",
+    "uv": "use_pass_uv",
+    "diffuse_direct": "use_pass_diffuse_direct",
+    "diffuse_indirect": "use_pass_diffuse_indirect",
+    "diffuse_color": "use_pass_diffuse_color",
+    "glossy_direct": "use_pass_glossy_direct",
+    "glossy_indirect": "use_pass_glossy_indirect",
+    "glossy_color": "use_pass_glossy_color",
+    "transmission_direct": "use_pass_transmission_direct",
+    "transmission_indirect": "use_pass_transmission_indirect",
+    "transmission_color": "use_pass_transmission_color",
+    "emission": "use_pass_emit",
+    "environment": "use_pass_environment",
+    "ambient_occlusion": "use_pass_ambient_occlusion",
+    "shadow": "use_pass_shadow",
+    "cryptomatte_object": "use_pass_cryptomatte_object",
+    "cryptomatte_material": "use_pass_cryptomatte_material",
+    "cryptomatte_asset": "use_pass_cryptomatte_asset",
+}
+
+def _layer_passes(layer):
+    # Report only the passes the active engine actually exposes (hasattr),
+    # so the UI shows an engine-correct set.  Keys mirror the worker's
+    # _PASS_ATTR map so the detect -> override round-trips 1:1.
+    out = {}
+    for key, attr in _PASS_ATTRS.items():
+        if hasattr(layer, attr):
+            try:
+                out[key] = bool(getattr(layer, attr, False))
+            except Exception:
+                pass
+    return out
+
 def _minimal_scene_payload(scene, active_name):
     frame_start = _safe_int(getattr(scene, "frame_start", 1), 1)
     frame_end = _safe_int(getattr(scene, "frame_end", frame_start), frame_start)
@@ -46,6 +84,7 @@ def _minimal_scene_payload(scene, active_name):
         "active_camera": active_camera,
         "cameras": [active_camera] if active_camera else [],
         "view_layers": [],
+        "view_layer_passes": {},
         "camera_cuts": [],
     }
 
@@ -90,8 +129,18 @@ def _scene_payload(scene, active_name):
     except Exception:
         view_layers = []
 
+    view_layer_passes = {}
+    try:
+        for layer in getattr(scene, "view_layers", []):
+            name = getattr(layer, "name", "")
+            if name:
+                view_layer_passes[name] = _layer_passes(layer)
+    except Exception:
+        view_layer_passes = {}
+
     payload["cameras"] = unique_cameras
     payload["view_layers"] = view_layers
+    payload["view_layer_passes"] = view_layer_passes
     payload["camera_cuts"] = camera_cuts
     return payload
 
@@ -127,6 +176,7 @@ payload = {
     "cameras": active.get("cameras", []),
     "camera_cuts": active.get("camera_cuts", []),
     "view_layers": active.get("view_layers", []),
+    "view_layer_passes": active.get("view_layer_passes", {}),
     "timeline_defaults": {
         "frame_start": active["frame_start"],
         "frame_end": active["frame_end"],

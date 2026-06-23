@@ -373,6 +373,12 @@ def main() -> int:
                 render_overrides.get("render", {}).get("device_policy", "AUTO").upper()
             )
 
+            # Output format is applied via Blender's -F CLI flag in render.sh.
+            # Setting render-only formats (OPEN_EXR_MULTILAYER, FFMPEG) on the
+            # file_format enum from Python is blocked in headless -b; -F sets
+            # it in Blender's core before scripts run.  Default PNG.
+            render_format = (render_overrides.get("output") or {}).get("file_format") or "PNG"
+
             # 4. Run render.sh
             env = {
                 **os.environ,
@@ -384,6 +390,7 @@ def main() -> int:
                 "FRAME_END": str(frame_end),
                 "FRAME_STEP": str(frame_step),
                 "DEVICE_POLICY": device_policy,
+                "RENDER_FORMAT": render_format,
                 "RENDER_OVERRIDES_B64": render_overrides_b64,
                 "PROGRESS_SCRIPT": PROGRESS_SCRIPT,
                 "RENDER_DRIVER_SCRIPT": RENDER_DRIVER_SCRIPT,

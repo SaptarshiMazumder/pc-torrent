@@ -306,7 +306,8 @@ def init_db() -> None:
                 # ``frame_number`` is the frame index parsed out of the
                 # filename's ``frame####`` token -- a STORED GENERATED
                 # column, so it's a DB-enforced projection of the filename
-                # (cannot diverge, auto-backfills old ``frame0045.png`` rows
+                # (cannot diverge; auto-backfills existing rows of any
+                # extension -- ``frame0045.png``, ``Camera_frame0045.exr`` --
                 # to 45).  Completion + retry math read this instead of
                 # reconstructing/parsing filenames.  NULL for any filename
                 # without a frame token (excluded from range counts, which

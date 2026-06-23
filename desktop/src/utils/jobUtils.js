@@ -13,6 +13,18 @@ export function isTerminalStatus(status) {
   return TERMINAL_STATUSES.has(status);
 }
 
+// Extensions the gallery can thumbnail (server PIL-decodes -> webp, browser
+// renders).  Multilayer .exr (and other non-raster outputs) are NOT in this
+// set, so the gallery shows a format badge instead of a broken/blank tile.
+const PREVIEWABLE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+
+export function isPreviewableExtension(filename) {
+  if (typeof filename !== "string") return false;
+  const dot = filename.lastIndexOf(".");
+  if (dot < 0) return false;
+  return PREVIEWABLE_EXTS.has(filename.slice(dot + 1).toLowerCase());
+}
+
 export function terminalFallbackPct(status) {
   if (status === "done") return 100;
   if (status === "cancelled" || status === "failed") return 0;

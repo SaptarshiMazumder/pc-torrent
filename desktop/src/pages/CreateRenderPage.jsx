@@ -20,6 +20,8 @@ import {
   parseCameraRangeRows,
   countRowFramesInRange,
   validateCameraRanges,
+  RENDER_PASS_CATALOG,
+  prefillRenderPasses,
   formatSizeMb,
   fileKindFromName,
   formatTimestamp,
@@ -119,6 +121,16 @@ const INITIAL_STATE = {
   resolutionY: null,
   resolutionPercentage: null,
   cyclesSamples: null,
+  // Output format + render passes (multilayer EXR).  Default PNG keeps
+  // existing behaviour; EXR enables the passes panel.  passesUseFile=true
+  // means respect the .blend's own pass setup; renderPasses is the
+  // detected/overridden { passKey: bool } map.
+  outputFormat: "PNG",
+  exrColorDepth: "16",
+  exrCodec: "DWAA",
+  filmTransparent: false,
+  passesUseFile: true,
+  renderPasses: {},
   // Upload / submission
   groupId: "",
   uploadProgress: 0,
@@ -206,6 +218,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     sceneName, cameraMode, forceCameraName, viewLayerName, cameraRanges, renderEngine,
     resolutionX, resolutionY, resolutionPercentage,
     cyclesSamples,
+    outputFormat, exrColorDepth, exrCodec, filmTransparent, passesUseFile, renderPasses,
     groupId, uploadProgress,
     error, analysisNote,
   } = state;
@@ -309,7 +322,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       resolution_percentage: resolutionPercentage,
       cycles_samples: cyclesSamples,
     },
-  }), [sceneName, cameraMode, forceCameraName, viewLayerName, cameraValidation, frameRange, resolvedEngine, resolutionX, resolutionY, resolutionPercentage, cyclesSamples]);
+    output: outputFormat === "OPEN_EXR_MULTILAYER"
+      ? { file_format: "OPEN_EXR_MULTILAYER", color_depth: exrColorDepth, exr_codec: exrCodec, film_transparent: filmTransparent }
+      : { file_format: "PNG" },
+    passes: outputFormat === "OPEN_EXR_MULTILAYER" && !passesUseFile
+      ? { use_file_settings: false, ...renderPasses }
+      : { use_file_settings: true },
+  }), [sceneName, cameraMode, forceCameraName, viewLayerName, cameraValidation, frameRange, resolvedEngine, resolutionX, resolutionY, resolutionPercentage, cyclesSamples, outputFormat, exrColorDepth, exrCodec, filmTransparent, passesUseFile, renderPasses]);
   const rangeCounts = useMemo(() => {
     const m = new Map();
     if (!frameRange) return m;
@@ -437,6 +456,11 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       resolutionY: Number.isFinite(h.resolution_y) && h.resolution_y > 0 ? h.resolution_y : null,
       resolutionPercentage: Number.isFinite(h.resolution_percentage) && h.resolution_percentage > 0 ? h.resolution_percentage : null,
       cyclesSamples: Number.isFinite(h.samples) && h.samples > 0 ? h.samples : null,
+      // Detected render passes for the active view layer -> prefill the
+      // EXR panel.  passesUseFile stays true so we respect the .blend
+      // unless the user explicitly overrides.
+      passesUseFile: true,
+      renderPasses: prefillRenderPasses(parsed, active?.view_layers?.[0] || ""),
     };
   }
 
@@ -766,6 +790,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         resolution_percentage: resolutionPercentage,
         cycles_samples: cyclesSamples,
       },
+      output: outputFormat === "OPEN_EXR_MULTILAYER"
+        ? { file_format: "OPEN_EXR_MULTILAYER", color_depth: exrColorDepth, exr_codec: exrCodec, film_transparent: filmTransparent }
+        : { file_format: "PNG" },
+      passes: outputFormat === "OPEN_EXR_MULTILAYER" && !passesUseFile
+        ? { use_file_settings: false, ...renderPasses }
+        : { use_file_settings: true },
     };
 
     try {
@@ -1129,6 +1159,85 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                     {effMpPreview && <span className="cr-resolution-mp">{effMpPreview} MP effective</span>}
                   </div>
                 </div>
+                <div className="cr-field-row">
+                  <label className="cr-field">
+                    <span className="cr-field-label">Output format</span>
+                    <select
+                      value={outputFormat}
+                      onChange={(e) => dispatch({ type: "SET_FIELD", field: "outputFormat", value: e.target.value })}
+                      className="cr-input"
+                    >
+                      <option value="PNG">PNG (single image)</option>
+                      <option value="OPEN_EXR_MULTILAYER">OpenEXR MultiLayer (render passes)</option>
+                    </select>
+                  </label>
+                  {outputFormat === "OPEN_EXR_MULTILAYER" && (
+                    <label className="cr-field">
+                      <span className="cr-field-label">Bit depth</span>
+                      <select
+                        value={exrColorDepth}
+                        onChange={(e) => dispatch({ type: "SET_FIELD", field: "exrColorDepth", value: e.target.value })}
+                        className="cr-input"
+                      >
+                        <option value="16">16-bit half (smaller)</option>
+                        <option value="32">32-bit full (max precision)</option>
+                      </select>
+                    </label>
+                  )}
+                </div>
+                {outputFormat === "OPEN_EXR_MULTILAYER" && (
+                  <>
+                    <div className="cr-field-row">
+                      <label className="cr-field">
+                        <span className="cr-field-label">EXR codec</span>
+                        <select
+                          value={exrCodec}
+                          onChange={(e) => dispatch({ type: "SET_FIELD", field: "exrCodec", value: e.target.value })}
+                          className="cr-input"
+                        >
+                          <option value="DWAA">DWAA (lossy, smallest)</option>
+                          <option value="ZIP">ZIP (lossless)</option>
+                          <option value="PIZ">PIZ (lossless)</option>
+                          <option value="NONE">None (uncompressed)</option>
+                        </select>
+                      </label>
+                      <label className="cr-field cr-field-check">
+                        <input
+                          type="checkbox"
+                          checked={filmTransparent}
+                          onChange={(e) => dispatch({ type: "SET_FIELD", field: "filmTransparent", value: e.target.checked })}
+                        />
+                        <span className="cr-field-label">Transparent background (alpha)</span>
+                      </label>
+                    </div>
+                    <div className="cr-field">
+                      <label className="cr-field-check">
+                        <input
+                          type="checkbox"
+                          checked={passesUseFile}
+                          onChange={(e) => dispatch({ type: "SET_FIELD", field: "passesUseFile", value: e.target.checked })}
+                        />
+                        <span className="cr-field-label">Use the .blend's own pass setup</span>
+                      </label>
+                      <div className="cr-pass-grid">
+                        {RENDER_PASS_CATALOG.filter((p) => p.key in renderPasses).map((p) => (
+                          <label key={p.key} className={`cr-pass-item ${passesUseFile ? "is-disabled" : ""}`}>
+                            <input
+                              type="checkbox"
+                              disabled={passesUseFile}
+                              checked={!!renderPasses[p.key]}
+                              onChange={() => dispatch({ type: "SET_FIELD", field: "renderPasses", value: { ...renderPasses, [p.key]: !renderPasses[p.key] } })}
+                            />
+                            <span>{p.label}</span>
+                          </label>
+                        ))}
+                        {Object.keys(renderPasses).length === 0 && (
+                          <span className="cr-pass-empty">No passes detected — the .blend's view-layer passes are used as-is.</span>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             </section>
 

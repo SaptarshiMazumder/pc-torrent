@@ -1448,6 +1448,13 @@ def execute_job(job):
             )
             if isinstance(device_policy, str) and device_policy.strip():
                 cmd.extend(["-e", f"DEVICE_POLICY={device_policy.strip().upper()}"])
+            # Output format is applied via Blender's -F flag in render.sh
+            # (headless Python can't set render-only formats like
+            # OPEN_EXR_MULTILAYER).  Omitted -> render.sh defaults to PNG.
+            output_cfg = render_overrides.get("output")
+            render_format = output_cfg.get("file_format") if isinstance(output_cfg, dict) else None
+            if isinstance(render_format, str) and render_format.strip():
+                cmd.extend(["-e", f"RENDER_FORMAT={render_format.strip()}"])
 
         cmd.append(community_image())
 

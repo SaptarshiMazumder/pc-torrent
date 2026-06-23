@@ -134,6 +134,50 @@ export function validateCameraRanges(rows, frameRange) {
   return { ok: true, error: "", rows: enabled };
 }
 
+// ── Render passes (multilayer EXR) ──────────────────────────
+// Catalog of passes the UI can expose.  Keys mirror the worker's
+// _PASS_ATTR map and the analyzer's detection, so detect -> override
+// round-trips 1:1.  The UI only shows keys the analyzer actually
+// detected (engine-correct: Cycles exposes the full set, EEVEE a subset).
+export const RENDER_PASS_CATALOG = [
+  { key: "z", label: "Depth (Z)" },
+  { key: "mist", label: "Mist" },
+  { key: "normal", label: "Normal" },
+  { key: "position", label: "Position" },
+  { key: "vector", label: "Vector (motion)" },
+  { key: "uv", label: "UV" },
+  { key: "diffuse_direct", label: "Diffuse Direct" },
+  { key: "diffuse_indirect", label: "Diffuse Indirect" },
+  { key: "diffuse_color", label: "Diffuse Color" },
+  { key: "glossy_direct", label: "Glossy Direct" },
+  { key: "glossy_indirect", label: "Glossy Indirect" },
+  { key: "glossy_color", label: "Glossy Color" },
+  { key: "transmission_direct", label: "Transmission Direct" },
+  { key: "transmission_indirect", label: "Transmission Indirect" },
+  { key: "transmission_color", label: "Transmission Color" },
+  { key: "emission", label: "Emission" },
+  { key: "environment", label: "Environment" },
+  { key: "ambient_occlusion", label: "Ambient Occlusion" },
+  { key: "shadow", label: "Shadow" },
+  { key: "cryptomatte_object", label: "Cryptomatte Object" },
+  { key: "cryptomatte_material", label: "Cryptomatte Material" },
+  { key: "cryptomatte_asset", label: "Cryptomatte Asset" },
+];
+
+// Pull the passes the .blend already enables for a given view layer out
+// of the analyzer payload.  Returns a { passKey: bool } map limited to
+// passes the active engine exposes (the analyzer only reports those).
+export function prefillRenderPasses(parsed, viewLayerName) {
+  const vlp = parsed?.view_layer_passes && typeof parsed.view_layer_passes === "object"
+    ? parsed.view_layer_passes : {};
+  const detected = vlp[viewLayerName] || vlp[Object.keys(vlp)[0]] || {};
+  const out = {};
+  for (const { key } of RENDER_PASS_CATALOG) {
+    if (key in detected) out[key] = Boolean(detected[key]);
+  }
+  return out;
+}
+
 // ── Display helpers ─────────────────────────────────────────
 
 export function formatSizeMb(bytes) {

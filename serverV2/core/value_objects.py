@@ -167,6 +167,35 @@ def latest_output_filename(files: list[str]) -> str | None:
 # Render overrides normalization
 # ---------------------------------------------------------------------------
 
+# Render passes the UI and worker agree on.  Keys map to Blender
+# view-layer ``use_pass_*`` attributes in the worker (emission ->
+# use_pass_emit, cryptomatte_* -> use_pass_cryptomatte_*, the rest 1:1).
+ALLOWED_RENDER_PASSES = frozenset({
+    "z", "mist", "normal", "position", "vector", "uv",
+    "diffuse_direct", "diffuse_indirect", "diffuse_color",
+    "glossy_direct", "glossy_indirect", "glossy_color",
+    "transmission_direct", "transmission_indirect", "transmission_color",
+    "emission", "environment", "ambient_occlusion", "shadow",
+    "cryptomatte_object", "cryptomatte_material", "cryptomatte_asset",
+})
+
+
+def _normalize_render_passes(raw: Any) -> dict[str, Any]:
+    """Whitelist the render-pass override.  ``use_file_settings`` (default
+    True) tells the worker to respect whatever passes the .blend already
+    enables; when False, the per-pass booleans drive the view layer.
+    Unknown keys are dropped.
+    """
+    src = raw if isinstance(raw, dict) else {}
+    use_file = _coerce_bool(src.get("use_file_settings"))
+    out: dict[str, Any] = {"use_file_settings": True if use_file is None else use_file}
+    for key in ALLOWED_RENDER_PASSES:
+        val = _coerce_bool(src.get(key))
+        if val is not None:
+            out[key] = val
+    return out
+
+
 def normalize_render_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
     src = raw if isinstance(raw, dict) else {}
     timeline = src.get("timeline") if isinstance(src.get("timeline"), dict) else {}
@@ -225,7 +254,9 @@ def normalize_render_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
             "compression": _coerce_int(output.get("compression"), minimum=0, maximum=100),
             "quality": _coerce_int(output.get("quality"), minimum=0, maximum=100),
             "exr_codec": output.get("exr_codec") if isinstance(output.get("exr_codec"), str) else None,
+            "film_transparent": _coerce_bool(output.get("film_transparent")),
         },
+        "passes": _normalize_render_passes(src.get("passes")),
         "render": {
             "engine": render.get("engine") if isinstance(render.get("engine"), str) else None,
             "resolution_x": _coerce_int(render.get("resolution_x"), minimum=1),

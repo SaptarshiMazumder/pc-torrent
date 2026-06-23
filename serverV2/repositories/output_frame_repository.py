@@ -80,7 +80,8 @@ class OutputFrameRepository:
 
         Matches on ``frame_number`` (the DB-generated frame index parsed
         from the filename) rather than reconstructing exact filenames, so
-        camera-grouped names like ``Camera-A_frame0045.png`` still count.
+        camera-grouped names of any extension (``Camera-A_frame0045.png``,
+        ``Camera-A_frame0045.exr``) still count.
         ``COUNT(DISTINCT frame_number)`` is the no-double-count guarantee:
         the same frame under two different filenames (e.g. an un-prefixed
         legacy row + a prefixed retry) counts once.

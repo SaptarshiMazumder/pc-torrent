@@ -198,8 +198,6 @@ function FrameAllocationSection({ draft, update }) {
             onChange={(v) => setIn("weights", "max_targets", v)} />
           <NumberField label="min_frames_per_chunk" value={w.min_frames_per_chunk} step={1}
             onChange={(v) => setIn("weights", "min_frames_per_chunk", v)} />
-          <RatioSlider label="fleet_diversification_cap" value={w.fleet_diversification_cap}
-            onChange={(v) => setIn("weights", "fleet_diversification_cap", v)} />
           <RatioSlider label="gpu_type_diversification_cap" value={w.gpu_type_diversification_cap}
             onChange={(v) => setIn("weights", "gpu_type_diversification_cap", v)} />
           <RatioSlider label="vram_safety_factor" value={w.vram_safety_factor}
@@ -217,6 +215,15 @@ function FrameAllocationSection({ draft, update }) {
             min={0} max={2.0} step={0.05} precision={2}
             onChange={(v) => setIn("weights", "time_headroom_falloff", v)} />
         </div>
+        <SectionCard title="Fleet target share"
+          subtitle="per-fleet share of the serverless slots; renormalized over the fleets that have supply">
+          <div className="cfg-grid">
+            {Object.keys(w.fleet_target_share || {}).map((fleet) => (
+              <RatioSlider key={fleet} label={fleet} value={(w.fleet_target_share || {})[fleet]}
+                onChange={(v) => update(["frame_allocation", "weights", "fleet_target_share", fleet], v)} />
+            ))}
+          </div>
+        </SectionCard>
       </SectionCard>
 
       <SectionCard title="VRAM fleet boost" subtitle="multiplier on machine VRAM during eligibility">

@@ -25,6 +25,16 @@ class AllocationChunkRequest:
     excluded_serverless_capabilities: tuple[tuple[str, str], ...] = field(
         default_factory=tuple
     )
+    # Affinity on retry.  Strategies PREFER these outright (they rendered this
+    # group before) -- EXCEPT a combo that failed THIS chunk, which stays in
+    # ``excluded_*`` above and is filtered first (anti-affinity is per-chunk;
+    # affinity is group-wide).  Resolved fresh by the daemon at plan time.
+    #   * ``preferred_machine_ids``            — community fleet
+    #   * ``preferred_serverless_capabilities`` — pairs of (fleet, gpu_type)
+    preferred_machine_ids: tuple[str, ...] = field(default_factory=tuple)
+    preferred_serverless_capabilities: tuple[tuple[str, str], ...] = field(
+        default_factory=tuple
+    )
     # Render engine ("BLENDER_EEVEE", "CYCLES", ...) — fed into the validator
     # context so EngineCompatibilityValidator can keep retries off fleets
     # that can't run the engine.

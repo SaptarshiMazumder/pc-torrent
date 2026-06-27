@@ -3,23 +3,21 @@
 # build-desktop.sh ENV
 # ------------------------------------------------------------
 # Builds a per-env Forge desktop installer.  Temp-copies
-# desktop/ to infra/.build/desktop-$ENV/, swaps in the env's
-# desktop.config.json values, runs the existing Tauri build,
-# copies the NSIS installer to infra/dist/, then cleans up.
+# desktop/ to infra/.build/desktop-$ENV/, writes the env's Vite
+# vars into that copy's .env.local, sets the per-env installer
+# identity in its tauri.conf.json, runs the Tauri build, copies
+# the NSIS installer to infra/dist/, then cleans up.
 #
-# desktop/ source tree is read-only -- this script never edits
-# files in place.
+# desktop/ source tree is read-only -- this script only touches
+# the temp copy.  No source patching, no .bak.
 #
-# Patched files (in the temp tree only):
-#   src/firebase/config.js          -- swap firebaseConfig literal
-#   src/App.jsx                     -- swap hardcoded backendUrl
-#   src/contexts/UserProfileContext.jsx (prod only)
-#                                    -- strip localStorage override
-#   src-tauri/tauri.conf.json       -- swap productName + identifier
+# Per-env config (in the TEMP copy only):
+#   .env.local                  -- VITE_* (backend URL, firebase, override)
+#   src-tauri/tauri.conf.json   -- productName + identifier (installer id)
 #
 # Pre-reqs:
 #   * infra/envs/$ENV/desktop.config.json filled in
-#   * npm + cargo + Tauri prereqs installed (same as legacy build)
+#   * npm + cargo + Tauri prereqs installed
 #   * Python 3 on PATH
 #
 # Usage:
@@ -62,82 +60,47 @@ echo "==> Temp-copying desktop/ -> $BUILD_DIR"
 cp -r "$PROJECT_ROOT/desktop" "$BUILD_DIR"
 rm -rf "$BUILD_DIR/node_modules" "$BUILD_DIR/src-tauri/target" "$BUILD_DIR/dist"
 
-echo "==> Patching $BUILD_DIR with $ENV config"
-python - "$CONFIG_FILE" "$BUILD_DIR" "$ENV" <<'PY'
-import json, re, sys, pathlib
-config_file = pathlib.Path(sys.argv[1])
+echo "==> Writing $ENV config into $BUILD_DIR"
+python - "$CONFIG_FILE" "$BUILD_DIR" <<'PY'
+import json, sys, pathlib
+cfg = json.load(open(sys.argv[1]))
 build_dir = pathlib.Path(sys.argv[2])
-env = sys.argv[3]
 
-with config_file.open() as f:
-    cfg = json.load(f)
+backend = cfg["backendUrl"]
+fb = cfg["firebaseConfig"]
+allow = cfg.get("allowLocalStorageBackendOverride", True)
 
-backend_url = cfg["backendUrl"]
-firebase = cfg["firebaseConfig"]
-product_name = cfg["productName"]
-identifier = cfg["identifier"]
-allow_override = cfg.get("allowLocalStorageBackendOverride", True)
-
-if not backend_url:
-    raise SystemExit(f"ERROR: {config_file} -> 'backendUrl' must be set")
-required_fb = ("apiKey", "authDomain", "projectId", "storageBucket", "messagingSenderId", "appId")
-missing = [k for k in required_fb if not firebase.get(k)]
+if not backend:
+    raise SystemExit("ERROR: backendUrl must be set")
+required = ("apiKey", "authDomain", "projectId", "storageBucket", "messagingSenderId", "appId")
+missing = [k for k in required if not fb.get(k)]
 if missing:
-    raise SystemExit(f"ERROR: {config_file} -> firebaseConfig missing: {missing}")
+    raise SystemExit(f"ERROR: firebaseConfig missing: {missing}")
 
-# --- src/firebase/config.js: replace the firebaseConfig literal ---
-cfg_js = build_dir / "src" / "firebase" / "config.js"
-text = cfg_js.read_text()
-new_literal = "const firebaseConfig = " + json.dumps(firebase, indent=2) + ";"
-patched, n = re.subn(
-    r"const firebaseConfig = \{[\s\S]*?\};",
-    new_literal,
-    text,
-    count=1,
-)
-if n == 0:
-    raise SystemExit(f"ERROR: firebaseConfig literal not found in {cfg_js}")
-cfg_js.write_text(patched)
-print(f"  [ok] {cfg_js.name} -- firebaseConfig swapped")
+# Per-env Vite vars (override the committed desktop/.env defaults; .env.local
+# beats .env in Vite's precedence).  Replaces the old JS source patching.
+lines = [
+    f"VITE_BACKEND_URL={backend}",
+    f"VITE_FIREBASE_API_KEY={fb['apiKey']}",
+    f"VITE_FIREBASE_AUTH_DOMAIN={fb['authDomain']}",
+    f"VITE_FIREBASE_PROJECT_ID={fb['projectId']}",
+    f"VITE_FIREBASE_STORAGE_BUCKET={fb['storageBucket']}",
+    f"VITE_FIREBASE_MESSAGING_SENDER_ID={fb['messagingSenderId']}",
+    f"VITE_FIREBASE_APP_ID={fb['appId']}",
+    f"VITE_ALLOW_BACKEND_OVERRIDE={'true' if allow else 'false'}",
+]
+(build_dir / ".env.local").write_text("\n".join(lines) + "\n")
+print(f"  [ok] .env.local -- backend={backend}, override={allow}")
 
-# --- src/App.jsx: replace hardcoded backendUrl literal ---
-app_jsx = build_dir / "src" / "App.jsx"
-text = app_jsx.read_text()
-patched, n = re.subn(
-    r'const backendUrl = "https://[^"]+";',
-    f'const backendUrl = "{backend_url}";',
-    text,
-    count=1,
-)
-if n == 0:
-    raise SystemExit(f"ERROR: backendUrl literal not found in {app_jsx}")
-app_jsx.write_text(patched)
-print(f"  [ok] {app_jsx.name} -- backendUrl = {backend_url}")
-
-# --- src/contexts/UserProfileContext.jsx (prod only): strip override ---
-ctx = build_dir / "src" / "contexts" / "UserProfileContext.jsx"
-if not allow_override:
-    text = ctx.read_text()
-    patched, n = re.subn(
-        r'\s*localStorage\.getItem\("pcrent_backend_url"\)\s*\|\|\s*',
-        " ",
-        text,
-        count=1,
-    )
-    if n == 0:
-        raise SystemExit(f"ERROR: localStorage override not found in {ctx}")
-    ctx.write_text(patched)
-    print(f"  [ok] {ctx.name} -- localStorage override removed (prod)")
-else:
-    print(f"  [skip] {ctx.name} -- override left in (allowLocalStorageBackendOverride=true)")
-
-# --- src-tauri/tauri.conf.json: swap productName + identifier ---
+# Per-env installer identity (window title + app id) so dev/staging/prod
+# installers don't collide on a user's machine.  Patched in the TEMP copy
+# only -- the real source tree is never touched.
 tauri_conf = build_dir / "src-tauri" / "tauri.conf.json"
 conf = json.loads(tauri_conf.read_text())
-conf["productName"] = product_name
-conf["identifier"] = identifier
+conf["productName"] = cfg["productName"]
+conf["identifier"] = cfg["identifier"]
 tauri_conf.write_text(json.dumps(conf, indent=2) + "\n")
-print(f"  [ok] tauri.conf.json -- productName={product_name!r}, identifier={identifier!r}")
+print(f"  [ok] tauri.conf.json -- productName={cfg['productName']!r}, identifier={cfg['identifier']!r}")
 PY
 
 echo ""

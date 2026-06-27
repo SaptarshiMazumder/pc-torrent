@@ -766,7 +766,7 @@ def _load_allocation_weights() -> "AllocationWeights":
         os_weight=_require_field_float(block, ctx, "os_weight"),
         max_targets=_require_field_int(block, ctx, "max_targets"),
         min_frames_per_chunk=_require_field_int(block, ctx, "min_frames_per_chunk"),
-        fleet_diversification_cap=_require_field_float(block, ctx, "fleet_diversification_cap"),
+        fleet_target_share=_load_fleet_target_share(block, ctx),
         gpu_type_diversification_cap=_require_field_float(block, ctx, "gpu_type_diversification_cap"),
         vram_safety_factor=_require_field_float(block, ctx, "vram_safety_factor"),
         startup_amortization_ratio=_require_field_float(block, ctx, "startup_amortization_ratio"),
@@ -805,6 +805,26 @@ def _load_priority_cost_multipliers(block: dict, ctx: str) -> dict[str, float]:
                     f"{sub[key]!r}",
                 ) from exc
         out[key] = fallback
+    return out
+
+
+def _load_fleet_target_share(block: dict, ctx: str) -> dict[str, float]:
+    """Load the per-fleet target share of serverless slots.  Defaults to
+    70 modal / 30 vast when absent so existing Firestore docs that pre-date
+    the field keep loading (the old ``fleet_diversification_cap`` it
+    replaces is simply ignored if still present)."""
+    sub = block.get("fleet_target_share")
+    if not isinstance(sub, dict) or not sub:
+        return {"modal_serverless": 0.70, "vast_serverless": 0.30}
+    out: dict[str, float] = {}
+    for key, val in sub.items():
+        try:
+            out[str(key)] = float(val)
+        except (TypeError, ValueError) as exc:
+            raise FleetException(
+                f"config.json {ctx}.fleet_target_share.{key} is not a "
+                f"valid number: {val!r}",
+            ) from exc
     return out
 
 

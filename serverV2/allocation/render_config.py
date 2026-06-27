@@ -406,13 +406,21 @@ def _weights(b: dict) -> AllocationWeights:
         }
     else:
         priority_cost_multipliers = {"low": 1.0, "normal": 1.1, "high": 1.2}
+    # Per-fleet target share of the serverless slots (replaces the old
+    # symmetric ``fleet_diversification_cap``).  Backwards-compatible: old
+    # docs missing the key fall back to the dataclass default (70/30).
+    raw_share = b.get("fleet_target_share")
+    if isinstance(raw_share, dict) and raw_share:
+        fleet_target_share = {str(k): float(v) for k, v in raw_share.items()}
+    else:
+        fleet_target_share = {"modal_serverless": 0.70, "vast_serverless": 0.30}
     return AllocationWeights(
         speed_weight=_float(b, ctx, "speed_weight"),
         cuda_weight=_float(b, ctx, "cuda_weight"),
         os_weight=_float(b, ctx, "os_weight"),
         max_targets=_int(b, ctx, "max_targets"),
         min_frames_per_chunk=_int(b, ctx, "min_frames_per_chunk"),
-        fleet_diversification_cap=_float(b, ctx, "fleet_diversification_cap"),
+        fleet_target_share=fleet_target_share,
         gpu_type_diversification_cap=_float(b, ctx, "gpu_type_diversification_cap"),
         vram_safety_factor=_float(b, ctx, "vram_safety_factor"),
         startup_amortization_ratio=_float(b, ctx, "startup_amortization_ratio"),

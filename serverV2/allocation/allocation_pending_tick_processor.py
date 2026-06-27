@@ -40,6 +40,7 @@ here.  Nothing was "previously planned" -- so no "re" anywhere.
 from __future__ import annotations
 
 import logging
+from typing import Any, Callable
 from uuid import uuid4
 
 from serverV2.allocation.allocation_dispatch_queue_repository import (
@@ -89,6 +90,7 @@ class AllocationPendingTickProcessor:
         planning_service: AllocationPlanningService,
         codec: AllocationQueueItemCodec,
         snapshot_mutator: AllocationSnapshotMutator,
+        affinity_for_group: Callable[[str], Any] | None = None,
     ) -> None:
         self._pending_repo = pending_repo
         self._dispatch_repo = dispatch_repo
@@ -97,6 +99,11 @@ class AllocationPendingTickProcessor:
         self._planning = planning_service
         self._codec = codec
         self._snapshot_mutator = snapshot_mutator
+        # Injected orchestrator AffinityFacade.affinity_for_group (a callable
+        # so this layer never imports orchestrator).  Resolves a group's
+        # preferred placements fresh at plan time.  None -> no affinity
+        # (tests / not wired); retries fall back to the normal selection.
+        self._affinity_for_group = affinity_for_group
 
     def has_any(self) -> bool:
         """Idle-tick guard: returns True iff at least one row is parked
@@ -192,6 +199,16 @@ class AllocationPendingTickProcessor:
         row: AllocationPendingItem,
         snapshot: MutableFleetAvailabilitySnapshot,
     ) -> list[PlannedTask]:
+        # Affinity is resolved FRESH here (not persisted on the parked row):
+        # the daemon is the one and only place a retry is planned, so this is
+        # the latest "which combos have started/rendered this group" signal.
+        # Empty when nothing has started yet, or when no resolver is wired.
+        preferred_caps: tuple = ()
+        preferred_ids: tuple = ()
+        if self._affinity_for_group is not None:
+            aff = self._affinity_for_group(row.group_id)
+            preferred_caps = tuple(aff.preferred_serverless_capabilities)
+            preferred_ids = tuple(aff.preferred_machine_ids)
         chunk_request = AllocationChunkRequest(
             group_id=row.group_id,
             chunk_index=row.chunk_index or 0,
@@ -202,6 +219,8 @@ class AllocationPendingTickProcessor:
             attempt=row.attempt or 0,
             excluded_machine_ids=row.excluded_machine_ids,
             excluded_serverless_capabilities=row.excluded_serverless_capabilities,
+            preferred_serverless_capabilities=preferred_caps,
+            preferred_machine_ids=preferred_ids,
             engine=row.engine,
         )
         resources = _adapt_resources(snapshot, machine_ids=None)

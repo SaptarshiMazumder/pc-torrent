@@ -188,9 +188,18 @@ class AllocationFacade:
     # ------------------------------------------------------------------
 
     def admin_get_config(self) -> dict:
-        """Return the raw config dict from Firestore for the admin UI
-        to render its editor.  Same shape as the bundled config.json."""
-        return self._config_repo.admin_get()
+        """Return the DEFAULTS-FILLED config dict for the admin UI editor.
+
+        Loads the raw Firestore doc, runs it through ``RenderConfig.from_dict``
+        (which fills any field an older doc is missing with its dataclass
+        default), and returns ``asdict`` of that.  So a knob newly added to
+        the schema shows in the UI with its default even before it exists in
+        Firestore -- the admin tweaks it and the next PUT writes the full doc
+        back, seeding the field with no manual Firestore edit.  Also
+        normalizes the doc (drops unknown legacy keys, exactly as the planner
+        already ignores them)."""
+        from dataclasses import asdict
+        return asdict(RenderConfig.from_dict(self._config_repo.admin_get()))
 
     def admin_put_config(self, d: dict) -> None:
         """Validate the incoming config dict via ``RenderConfig.from_dict``

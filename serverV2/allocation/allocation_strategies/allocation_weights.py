@@ -51,10 +51,15 @@ class AllocationWeights:
     # Floor on frames-per-chunk -- below this, per-chunk startup tax
     # dominates total compute time.
     min_frames_per_chunk: int = 4
-    # Fleet-level diversification cap (community / vast / modal cannot
-    # exceed this fraction of picks).  Keeps a single fleet from
-    # owning the entire mix.
-    fleet_diversification_cap: float = 0.85
+    # Per-fleet target share of the SERVERLESS slots (community is taken
+    # first, separately).  Generic over N fleets: shares are normalized
+    # over the fleets that actually have supply (= spill), then slots are
+    # apportioned by largest-remainder.  Adding a fleet later = add a key
+    # here; no code change in the planner.
+    fleet_target_share: dict = field(default_factory=lambda: {
+        "modal_serverless": 0.70,
+        "vast_serverless": 0.30,
+    })
     # Per-(fleet, gpu_type) cap.  Two reasons:
     #   1. Vast supply per gpu_type is finite -- concentrating risks
     #      not actually being able to dispatch all picks.

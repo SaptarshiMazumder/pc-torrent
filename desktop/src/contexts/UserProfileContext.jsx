@@ -7,10 +7,11 @@ import { useAuth } from "./AuthContext";
 const UserProfileContext = createContext(null);
 
 function getBackendUrl() {
-  return (
-    localStorage.getItem("pcrent_backend_url") ||
-    "https://pcrent-server-v2-930713698987.asia-northeast1.run.app"
-  );
+  // VITE_ALLOW_BACKEND_OVERRIDE is set to "false" by prod builds to disable
+  // the localStorage backend swap (replaces the old build-time source strip).
+  const allowOverride = import.meta.env.VITE_ALLOW_BACKEND_OVERRIDE !== "false";
+  const override = allowOverride ? localStorage.getItem("pcrent_backend_url") : null;
+  return override || import.meta.env.VITE_BACKEND_URL;
 }
 
 /**

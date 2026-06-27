@@ -70,6 +70,11 @@ from serverV2.orchestrator.anti_affinity import (
     AntiAffinityRepository,
     AntiAffinityService,
 )
+from serverV2.orchestrator.affinity import (
+    AffinityFacade,
+    AffinityRepository,
+    AffinityService,
+)
 from serverV2.orchestrator.chunk_progress import ChunkProgressService
 from serverV2.orchestrator.allocation_client import AllocationClient
 from serverV2.orchestrator.lifecycle import RenderLifecycle
@@ -546,6 +551,13 @@ def build(
         codec=allocation_codec,
         engine_resolver=allocation_engine_resolver,
     )
+    # Affinity facade: resolves a group's preferred placements (combos that
+    # started/rendered any chunk) from job history.  Injected into the daemon
+    # as a callable so the allocation layer never imports orchestrator.
+    affinity_facade = AffinityFacade(
+        repository=AffinityRepository(),
+        service=AffinityService(),
+    )
     pending_tick_processor = AllocationPendingTickProcessor(
         pending_repo=pending_queue_repo,
         dispatch_repo=queue_repo,
@@ -554,6 +566,7 @@ def build(
         planning_service=allocation_planning_service,
         codec=allocation_codec,
         snapshot_mutator=allocation_snapshot_mutator,
+        affinity_for_group=affinity_facade.affinity_for_group,
     )
 
     fleet_availability_snapshot_cache = FleetAvailabilitySnapshotCache(

@@ -1,0 +1,230 @@
+@startuml allocation_fleet_skew_and_affinity_classes
+
+skinparam shadowing false
+skinparam classFontSize 12
+skinparam ArrowFontSize 10
+skinparam packageStyle rectangle
+skinparam packageBorderColor #666666
+skinparam classBorderColor #555555
+skinparam linetype ortho
+
+title Allocation — 70/30 Modal fleet skew + group affinity (mirror of anti-affinity)
+
+legend top right
+|= fill |= class state |   |= tint |= module (folder) |
+|<#bbf7d0> NEW file | |<#FBF0C4> config/ |
+|<#bfdbfe> EDITED file | |<#FFE4FF> allocation/ planner + helpers |
+|<#e5e7eb> unchanged (context) | |<#DDEEFF> allocation/ queue |
+|<#fde68a> config / PG data | |<#E6D9F2> orchestrator/ anti_affinity (context) |
+| | |<#D9EFE5> orchestrator/ affinity (NEW) |
+| | |<#F8D9E4> orchestrator/ lifecycle + bootstrap |
+endlegend
+
+note as N_scope
+  SCOPE (locked):
+  A) Fleet skew: split the serverless slots by a config dict of per-fleet
+     target shares.  GENERIC over N fleets -- shares normalized over the
+     fleets that actually have supply (= spill), largest-remainder
+     apportionment.  No fleet names hardcoded in code.  Default 70 modal /
+     30 vast.  Community still taken first.
+     Config UX: admin_get_config returns DEFAULTS-FILLED config so new
+     knobs show in the UI before they exist in Firestore; the page renders
+     fleet_target_share dynamically (per-fleet), so first save in the UI
+     creates the field in Firestore -- no manual seeding.
+  B) Affinity: a (fleet,gpu_type) / machine that STARTED or RENDERED any
+     chunk of a group is preferred for that group's RETRIES.
+     - Group-wide; signal = jobs.started_at IS NOT NULL.
+     - Affinity WINS over the 70/30 split and over OTHER chunks' failures.
+     - EXCEPTION (ii): a combo that failed THIS exact chunk stays excluded
+       for THIS chunk's retries (anti-affinity is per-chunk; kept).
+  Initial plan has no history -> 70/30 governs.  Affinity bites on retry.
+end note
+
+' arrow colors
+!define A_SKEW     #2860B0
+!define A_AFFIN    #228866
+!define A_RETRY    #B07020
+
+' =====================================================================
+' A) 70/30 FLEET SKEW
+' =====================================================================
+package "config/" #FBF0C4 {
+  class "config.json : frame_allocation.weights" as cfgjson #bfdbfe {
+    + fleet_target_share   [NEW knob]
+      modal_serverless: 0.70
+      vast_serverless:  0.30
+    (Firestore config/global; UI-editable)
+  }
+  class "AllocationWeights" as weights #bfdbfe {
+    fleet_diversification_cap  [superseded for serverless]
+    gpu_type_diversification_cap (kept, 0.40)
+    -- NEW --
+    + fleet_target_share : dict
+  }
+  class "AllocationFacade.admin_get_config" as adminget #bfdbfe {
+    -- CHANGE --
+    return asdict(RenderConfig.from_dict(raw))
+    i.e. DEFAULTS-FILLED, not raw Firestore
+    -> new knobs visible before they exist
+       in Firestore (helps every future knob)
+  }
+  class "desktop ConfigurationPage.jsx" as cfgpage #bfdbfe {
+    weights knobs are hardcoded today
+    -- NEW --
+    render fleet_target_share dynamically
+    (per-fleet RatioSlider via Object.keys)
+    PUT writes full dict -> field created
+    in Firestore on first save
+  }
+  cfgpage --> adminget : GET (defaults-filled)
+  cfgpage --> cfgjson  : PUT full config -> Firestore
+  adminget --> weights : asdict shape
+}
+
+' =====================================================================
+' ALLOCATION PLANNER + HELPERS
+' =====================================================================
+package "allocation/ planner + helpers" #FFE4FF {
+  class "AllocationPlanner._select_with_diversification" as sel #bfdbfe {
+    community taken first   [unchanged]
+    -- NEW: generic N-fleet serverless split --
+    shares = fleet_target_share for fleets
+             present, renormalized   [= spill]
+    quotas = largest-remainder
+             apportion(remaining, shares)
+    score-sort within each fleet to quota
+    keep per-gpu-type cap
+    (no fleet names in code)
+  }
+  class "AllocationPlanner.plan_retry" as retry #bfdbfe {
+    1. eligibility (vram / engine / time)
+    2. apply anti-affinity EXCLUDE
+       (this chunk's failures)   [(ii) kept]
+    3. survivors in PREFERRED set?
+       -> pick best-scoring preferred
+          (affinity WINS over 70/30)
+       else -> existing selection
+  }
+  class "AllocationChunkRequest" as req #bfdbfe {
+    excluded_serverless_capabilities  [existing]
+    excluded_machine_ids              [existing]
+    -- NEW (mirror) --
+    + preferred_serverless_capabilities
+    + preferred_machine_ids
+  }
+}
+
+' =====================================================================
+' B) ANTI-AFFINITY (context) + AFFINITY (new mirror)
+' =====================================================================
+package "orchestrator/ anti_affinity (context)" #E6D9F2 {
+  class "AntiAffinityFacade" as aaf #e5e7eb {
+    exclusions_for_chunk(group, chunk)
+    -- per CHUNK, FAILED siblings --
+    -> hard EXCLUDE (filter)
+  }
+}
+
+package "orchestrator/ affinity (NEW)" #D9EFE5 {
+  class "AffinityRepository" as afrepo #bbf7d0 {
+    get_started_siblings(group_id)
+    -- SELECT machine_type, gpu_type,
+       machine_id FROM jobs
+       WHERE group_id = %s
+         AND started_at IS NOT NULL --
+  }
+  class "AffinityService" as afsvc #bbf7d0 {
+    build_affinity(rows) :
+    serverless -> (fleet, gpu_type)
+    community  -> machine_id
+  }
+  class "AffinityFacade" as aff #bbf7d0 {
+    affinity_for_group(group_id)
+    -> GroupAffinity
+    -- group-wide, STARTED/RENDERED --
+  }
+  class "GroupAffinity" as afval #bbf7d0 {
+    preferred_serverless_capabilities
+    preferred_machine_ids
+  }
+  aff --> afrepo
+  aff --> afsvc
+  afsvc ..> afval
+}
+
+' =====================================================================
+' QUEUE PERSISTENCE (preferred_* rides the excluded_* path)
+' =====================================================================
+package "allocation/ queue" #DDEEFF {
+  class "dispatch / pending queue (PG)" as pg #bfdbfe {
+    excluded_* JSONB   [existing]
+    -- NEW columns --
+    + preferred_serverless_capabilities JSONB
+    + preferred_machine_ids JSONB
+  }
+  class "queue codec + repository" as codec #bfdbfe {
+    serialize/deserialize preferred_*
+  }
+  class "AllocationPendingTickProcessor" as ptp #bfdbfe {
+    build AllocationChunkRequest
+    incl. preferred_* from row
+  }
+}
+
+' =====================================================================
+' LIFECYCLE + BOOTSTRAP
+' =====================================================================
+package "orchestrator/ lifecycle + bootstrap" #F8D9E4 {
+  class "RenderLifecycle" as life #bfdbfe {
+    handle_chunk_failed / retry_chunk_manually
+    / reclaim:
+      exclusions = anti_affinity.exclusions_for_chunk
+      -- NEW --
+      affinity   = affinity.affinity_for_group(group)
+      carry preferred_* into retry pipeline
+  }
+  class "bootstrap.build()" as boot #bfdbfe {
+    wire AffinityRepository/Service/Facade
+    inject affinity into RenderLifecycle
+    (beside anti_affinity)
+  }
+}
+
+' =====================================================================
+' FLOW A — 70/30 skew
+' =====================================================================
+cfgjson -[A_SKEW]-> weights : load fleet_target_share
+weights -[A_SKEW]-> sel : split serverless 70/30
+
+' =====================================================================
+' FLOW B — affinity resolve -> persist -> re-plan -> win
+' =====================================================================
+boot -[A_AFFIN]-> aff : construct + inject
+life -[A_AFFIN]-> aff : affinity_for_group(group) on retry
+aff -[A_AFFIN]-> afval : preferred caps / machines
+life -[A_AFFIN]-> pg : persist preferred_* on queue row
+pg -[A_RETRY]-> codec : (de)serialize
+codec -[A_RETRY]-> ptp : row -> request
+ptp -[A_RETRY]-> req : preferred_* on AllocationChunkRequest
+req -[A_RETRY]-> retry : plan_retry(chunk_request)
+aaf -[A_RETRY]-> retry : excluded_* (this chunk's failures)
+sel -[A_RETRY]-> retry : fallback when no preferred survives
+
+' =====================================================================
+' layout hints
+' =====================================================================
+cfgjson -[hidden]down- weights
+weights -[hidden]down- sel
+sel -[hidden]down- retry
+aaf -[hidden]down- aff
+
+note bottom of retry
+  Precedence realized:
+  - excluded_* are PER-CHUNK (only this chunk's failures) -> step 2 keeps
+    a combo that failed THIS chunk out of THIS chunk's retries  [(ii)]
+  - preferred_* are GROUP-wide -> step 3 makes a proven combo beat the
+    70/30 split for every other chunk.
+  Initial plan: no history -> preferred empty -> pure 70/30.
+end note
+
+@enduml

@@ -1,0 +1,140 @@
+@startuml anti_affinity_current_classes
+
+skinparam shadowing false
+skinparam classFontSize 12
+skinparam ArrowFontSize 10
+skinparam packageStyle rectangle
+skinparam packageBorderColor #666666
+skinparam classBorderColor #555555
+skinparam linetype ortho
+
+title CURRENT STATE — where anti-affinity lives & flows (no changes; context for "where should affinity go?")
+
+legend top right
+|= tint |= layer |
+|<#E6D9F2> orchestrator/ (derives hints from job history) |
+|<#FFE4FF> allocation/ (pure planning; CONSUMES hints) |
+|<#fde68a> Postgres |
+endlegend
+
+note as N_layer
+  THE BOUNDARY (why anti-affinity sits in orchestrator/, not allocation/):
+  - It is triggered by a LIFECYCLE event (a chunk went terminal -> retry).
+  - It READS job history (the jobs table) to derive the exclusion set.
+  - allocation/ stays PURE: given resources + a chunk_request that already
+    carries excluded_*, it just plans.  It never reads job rows.
+  So the "read job state + derive an allocation hint at retry time" job is
+  an orchestrator concern; allocation only consumes the hint.
+end note
+
+' =====================================================================
+' ORCHESTRATOR LAYER
+' =====================================================================
+package "orchestrator/ lifecycle" #E6D9F2 {
+  class "RenderLifecycle" as life {
+    handle_chunk_failed
+    retry_chunk_manually
+    reclaim (abandoned machine)
+    --
+    exclusions =
+      anti_affinity.exclusions_for_chunk(
+        group_id, chunk_index)
+    -> terminator.execute(
+        FAILURE_PIPELINE, ..., exclusions)
+  }
+}
+
+package "orchestrator/ anti_affinity" #E6D9F2 {
+  class "AntiAffinityFacade" as aaf {
+    exclusions_for_chunk(group, chunk,
+      including_row) : AntiAffinityExclusions
+  }
+  class "AntiAffinityRepository" as aarepo {
+    get_terminal_siblings(group, chunk)
+    -- SELECT machine_type, gpu_type,
+       machine_id, error FROM jobs
+       WHERE group_id=%s AND chunk_index=%s
+         AND status IN ('failed','cancelled') --
+  }
+  class "AntiAffinityService" as aasvc {
+    build_exclusions(rows)
+    serverless -> (fleet, gpu_type)
+    community  -> machine_id
+    (skips infrastructure-only failures)
+  }
+  class "AntiAffinityExclusions" as aaval {
+    excluded_serverless_capabilities
+    excluded_machine_ids
+  }
+  aaf --> aarepo
+  aaf --> aasvc
+  aasvc ..> aaval
+}
+
+package "orchestrator/ retry pipeline" #E6D9F2 {
+  class "RetryExecutor / FAILURE_PIPELINE" as pipe {
+    retry steps (compute remaining
+    frames, plan/enqueue retry)
+    -- writes excluded_* onto the
+       enqueued retry row --
+  }
+}
+
+' =====================================================================
+' POSTGRES
+' =====================================================================
+package "Postgres" #FFF3C4 {
+  class "jobs" as jobstbl #fde68a {
+    status, machine_type, gpu_type,
+    machine_id, error, group_id, chunk_index
+  }
+  class "dispatch / pending queue" as queue #fde68a {
+    ... chunk fields ...
+    excluded_serverless_capabilities JSONB
+    excluded_machine_ids JSONB
+  }
+}
+
+' =====================================================================
+' ALLOCATION LAYER (pure; consumes the hint)
+' =====================================================================
+package "allocation/ (pure planning)" #FFE4FF {
+  class "AllocationPendingTickProcessor" as ptp {
+    row -> AllocationChunkRequest(
+      ..., excluded_*=row.excluded_*)
+  }
+  class "AllocationChunkRequest" as req {
+    excluded_serverless_capabilities
+    excluded_machine_ids
+  }
+  class "AllocationPlanner.plan_retry" as retry {
+    eligible = filter(vram/engine/time)
+    eligible -= excluded_*   [hard filter]
+    score + pick single target
+  }
+  ptp --> req
+  req --> retry
+}
+
+' =====================================================================
+' FLOW
+' =====================================================================
+life --> aaf            : 1. exclusions_for_chunk (on terminal/retry)
+aarepo --> jobstbl      : 2. read failed/cancelled siblings
+life --> pipe           : 3. terminator.execute(..., exclusions)
+pipe --> queue          : 4. enqueue retry row + excluded_*
+queue --> ptp           : 5. dispatch tick reads the row
+retry ..> queue         : (eligible pool / dispatch elsewhere)
+
+' layout
+life -[hidden]down- aaf
+aaf -[hidden]down- pipe
+jobstbl -[hidden]down- queue
+
+note bottom of retry
+  Anti-affinity is a hard FILTER applied here.
+  The planner never reads jobs -- it only sees
+  excluded_* arriving on the chunk_request.
+end note
+
+@enduml

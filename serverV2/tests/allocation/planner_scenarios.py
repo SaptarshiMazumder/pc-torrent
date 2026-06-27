@@ -154,7 +154,6 @@ def _default_weights() -> AllocationWeights:
         os_weight=0.10,
         max_targets=8,
         min_frames_per_chunk=4,
-        fleet_diversification_cap=0.85,
         gpu_type_diversification_cap=0.40,
         vram_safety_factor=1.10,
         startup_amortization_ratio=0.5,
@@ -398,7 +397,7 @@ def huge_render_hits_max_targets() -> dict[str, Any]:
     weights = AllocationWeights(
         speed_weight=0.70, cuda_weight=0.20, os_weight=0.10,
         max_targets=4, min_frames_per_chunk=4,
-        fleet_diversification_cap=0.85, gpu_type_diversification_cap=0.40,
+        gpu_type_diversification_cap=0.40,
         vram_safety_factor=1.10, startup_amortization_ratio=0.5,
         chunk_count_curve=1.0, distribute_by="time_balanced",
     )
@@ -490,7 +489,7 @@ def time_headroom_score_breaks_tie() -> dict[str, Any]:
     weights = AllocationWeights(
         speed_weight=0.70, cuda_weight=0.20, os_weight=0.10,
         max_targets=1, min_frames_per_chunk=4,
-        fleet_diversification_cap=0.85, gpu_type_diversification_cap=0.40,
+        gpu_type_diversification_cap=0.40,
         vram_safety_factor=1.10, startup_amortization_ratio=0.5,
         chunk_count_curve=1.0, distribute_by="time_balanced",
         time_safety_factor=1.5, time_headroom_falloff=0.5,
@@ -534,7 +533,7 @@ def time_clamp_caps_share() -> dict[str, Any]:
     weights = AllocationWeights(
         speed_weight=0.70, cuda_weight=0.20, os_weight=0.10,
         max_targets=2, min_frames_per_chunk=4,
-        fleet_diversification_cap=0.85, gpu_type_diversification_cap=0.40,
+        gpu_type_diversification_cap=0.40,
         vram_safety_factor=1.10, startup_amortization_ratio=0.5,
         chunk_count_curve=1.0, distribute_by="time_balanced",
         time_safety_factor=1.5, time_headroom_falloff=0.5,

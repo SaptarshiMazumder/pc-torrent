@@ -327,10 +327,29 @@ class AllocationPlanner:
             for t in eligible
         ]
         scored.sort(key=lambda s: -s.score)
-        selected = self._select_with_diversification(scored, 1, weights)
-        if not selected:
-            return None
-        best = selected[0].target
+
+        # Affinity: combos that started/rendered any chunk of this group
+        # (resolved fresh at plan time, carried on the chunk_request) are
+        # PREFERRED outright -- the highest-scoring affine survivor wins over
+        # the fleet-share split and community-first.  ``excluded_*`` was
+        # already applied above, so a combo that failed THIS chunk never
+        # reaches here: anti-affinity is per-chunk and wins, affinity only
+        # reorders the survivors.  Empty affinity -> normal selection.
+        preferred_caps = set(chunk_request.preferred_serverless_capabilities)
+        preferred_ids = set(chunk_request.preferred_machine_ids)
+        preferred = [
+            s for s in scored
+            if (s.target.machine_id is not None and s.target.machine_id in preferred_ids)
+            or (s.target.serverless_capability_key is not None
+                and s.target.serverless_capability_key in preferred_caps)
+        ]
+        if preferred:
+            best = preferred[0].target  # scored is sorted desc -> highest-scoring affine
+        else:
+            selected = self._select_with_diversification(scored, 1, weights)
+            if not selected:
+                return None
+            best = selected[0].target
         return self._target_to_task(
             startup_buffer=startup_buffer,
             target=best,
@@ -475,19 +494,20 @@ class AllocationPlanner:
         from monopolising picks; community machines are individually
         owned with no monopoly concern.
 
-        Diversification on the remaining (serverless) slots:
+        Split of the remaining (serverless) slots:
 
-          * fleet_cap  -- no single serverless fleet (vast / modal) may
-                          hold more than ``fleet_diversification_cap``
-                          fraction of the serverless slots
-          * gpu_cap    -- no single ``(fleet, gpu_type)`` may hold more
-                          than ``gpu_type_diversification_cap`` fraction
-                          of the serverless slots
+          * fleet_target_share -- the serverless slots are apportioned
+            across the fleets that have supply by their configured target
+            share (default 70 modal / 30 vast), normalized over the present
+            fleets (= spill) and rounded by largest-remainder.  Generic
+            over N fleets -- no fleet names appear in the code.
+          * gpu_cap -- within each fleet's quota, no single
+            ``(fleet, gpu_type)`` may exceed ``gpu_type_diversification_cap``
+            of the serverless slots (failure-correlation guard).
 
-        Targets that bust either cap go to the rejected pool and are
-        backfilled in score order if the soft caps left us under the
-        remaining slot count.  Both caps are floors-of-1 so a tiny
-        render that fits in one target still allocates.
+        A fleet that under-fills its quota (too little supply) frees those
+        slots; the highest-scoring leftovers from any fleet backfill up to
+        the remaining slot count.
 
         Used by both ``plan_initial`` (K = ideal_count) and
         ``plan_retry`` (K = 1) so the rule lives in exactly one place.
@@ -515,38 +535,79 @@ class AllocationPlanner:
         if remaining <= 0:
             return community_picks
 
-        # Pass 2: existing diversification logic on the serverless slice.
-        fleet_cap = max(1, int(remaining * weights.fleet_diversification_cap))
-        gpu_cap = max(1, int(remaining * weights.gpu_type_diversification_cap))
+        # Pass 2: apportion the serverless slots across fleets by their
+        # configured target share, then fill each fleet's quota in score
+        # order (honouring the per-gpu-type cap).  serverless_scored is
+        # already score-sorted by the caller, so by_fleet preserves order.
+        by_fleet: dict[str, list[_ScoredTarget]] = defaultdict(list)
+        for s in serverless_scored:
+            by_fleet[s.fleet_key].append(s)
+        quotas = AllocationPlanner._apportion_by_share(
+            remaining, list(by_fleet.keys()), weights.fleet_target_share,
+        )
 
+        gpu_cap = max(1, int(remaining * weights.gpu_type_diversification_cap))
         selected: list[_ScoredTarget] = []
-        rejected: list[_ScoredTarget] = []
-        fleet_counts: dict[str, int] = defaultdict(int)
+        leftovers: list[_ScoredTarget] = []
         gpu_counts: dict[str, int] = defaultdict(int)
 
-        for s in serverless_scored:
+        for fleet, fleet_scored in by_fleet.items():
+            taken = 0
+            quota = quotas.get(fleet, 0)
+            for s in fleet_scored:
+                if taken >= quota:
+                    leftovers.append(s)
+                    continue
+                if s.gpu_type_key and gpu_counts[s.gpu_type_key] >= gpu_cap:
+                    leftovers.append(s)
+                    continue
+                selected.append(s)
+                taken += 1
+                if s.gpu_type_key:
+                    gpu_counts[s.gpu_type_key] += 1
+
+        # Spill: fleets that under-filled (too little supply, or gpu-capped)
+        # freed slots; backfill from the highest-scoring leftovers of any
+        # fleet, ignoring the caps -- the apportioned picks already came first.
+        leftovers.sort(key=lambda s: -s.score)
+        for s in leftovers:
             if len(selected) >= remaining:
                 break
-            if fleet_counts[s.fleet_key] >= fleet_cap:
-                rejected.append(s)
-                continue
-            if s.gpu_type_key and gpu_counts[s.gpu_type_key] >= gpu_cap:
-                rejected.append(s)
-                continue
-            selected.append(s)
-            fleet_counts[s.fleet_key] += 1
-            if s.gpu_type_key:
-                gpu_counts[s.gpu_type_key] += 1
-
-        # Backfill from the rejected pool, score-order preserved.
-        # Backfill ignores both caps -- the picker already preferred
-        # diversified picks; if we're still short, take what's left.
-        for s in rejected:
-            if len(selected) >= remaining:
-                break
             selected.append(s)
 
-        return community_picks + selected
+        return community_picks + selected[:remaining]
+
+    @staticmethod
+    def _apportion_by_share(
+        total: int,
+        fleets: list[str],
+        fleet_target_share: dict[str, float],
+    ) -> dict[str, int]:
+        """Apportion ``total`` slots across ``fleets`` by their configured
+        target shares, normalized over just the fleets present (so absent
+        fleets spill their share to the rest).  Largest-remainder rounding
+        makes the quotas sum to exactly ``total``.  Fleets with no
+        configured share fall back to an equal weight."""
+        if total <= 0 or not fleets:
+            return {}
+        shares: dict[str, float] = {}
+        for f in fleets:
+            try:
+                shares[f] = max(0.0, float(fleet_target_share.get(f, 0.0)))
+            except (TypeError, ValueError):
+                shares[f] = 0.0
+        denom = sum(shares.values())
+        if denom <= 0.0:
+            shares = {f: 1.0 for f in fleets}
+            denom = float(len(fleets))
+        exact = {f: shares[f] / denom * total for f in fleets}
+        quotas = {f: int(exact[f]) for f in fleets}
+        leftover = total - sum(quotas.values())
+        for f in sorted(
+            fleets, key=lambda f: exact[f] - quotas[f], reverse=True,
+        )[:leftover]:
+            quotas[f] += 1
+        return quotas
 
     # ------------------------------------------------------------------
     # frame distribution -- time-balanced (inverse-proportional to spf)

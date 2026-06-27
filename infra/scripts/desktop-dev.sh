@@ -1,8 +1,14 @@
 #!/bin/bash
 # desktop-dev.sh ENV
-# Patches desktop/ source IN-PLACE with the env's desktop.config.json,
-# runs `npm run tauri dev`, then restores the original source on exit
-# (clean or crash).  Hot reload works against the real source tree.
+# Runs `npm run tauri dev` pointed at ENV's backend WITHOUT editing source.
+# Writes a gitignored desktop/.env.local with the env's Vite vars; Vite layers
+# it over the committed desktop/.env defaults.  A leftover .env.local is
+# harmless (gitignored, overwritten next run) -- no in-place patching, no
+# .bak, no "previous run crashed" recovery wall.
+#
+# Note: the window title / app identifier stay at tauri.conf.json's committed
+# default for dev sessions (cosmetic); only desktop-build.sh sets them per-env
+# (installer identity).  The backend the app talks to IS set per-env here.
 
 set -euo pipefail
 
@@ -25,89 +31,39 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 DESKTOP="$PROJECT_ROOT/desktop"
-FILES=(
-    "$DESKTOP/src/firebase/config.js"
-    "$DESKTOP/src/App.jsx"
-    "$DESKTOP/src-tauri/tauri.conf.json"
-    "$DESKTOP/src/contexts/UserProfileContext.jsx"
-)
+ENV_LOCAL="$DESKTOP/.env.local"
 
-# Refuse to start if any .bak file already exists (previous crash) --
-# restore manually or delete .bak first.
-for f in "${FILES[@]}"; do
-    if [ -f "$f.bak" ]; then
-        echo "ERROR: $f.bak exists.  Previous desktop-dev run crashed."
-        echo "       Restore with: mv $f.bak $f"
-        exit 1
-    fi
-done
+cleanup() { rm -f "$ENV_LOCAL"; }
+trap cleanup EXIT
 
-# Back up + patch
-for f in "${FILES[@]}"; do
-    cp "$f" "$f.bak"
-done
-
-restore() {
-    for f in "${FILES[@]}"; do
-        [ -f "$f.bak" ] && mv -f "$f.bak" "$f"
-    done
-    echo "[restored desktop/ source]"
-}
-trap restore EXIT
-
-echo "==> Patching desktop/ for $ENV"
-python - "$CONFIG_FILE" "$DESKTOP" "$ENV" <<'PY'
-import json, re, sys, pathlib
+echo "==> Writing $ENV Vite config -> desktop/.env.local"
+python - "$CONFIG_FILE" "$ENV_LOCAL" <<'PY'
+import json, sys
 cfg = json.load(open(sys.argv[1]))
-desktop = pathlib.Path(sys.argv[2])
-
-backend = cfg["backendUrl"]
 fb = cfg["firebaseConfig"]
-product = cfg["productName"]
-ident = cfg["identifier"]
-allow_override = cfg.get("allowLocalStorageBackendOverride", True)
+backend = cfg["backendUrl"]
+allow = cfg.get("allowLocalStorageBackendOverride", True)
 
-required = ("apiKey","authDomain","projectId","storageBucket","messagingSenderId","appId")
+required = ("apiKey", "authDomain", "projectId", "storageBucket", "messagingSenderId", "appId")
 missing = [k for k in required if not fb.get(k)]
 if missing:
     raise SystemExit(f"firebaseConfig missing: {missing}")
 if not backend:
     raise SystemExit("backendUrl missing")
 
-# firebase config
-p = desktop / "src" / "firebase" / "config.js"
-text = p.read_text()
-new = "const firebaseConfig = " + json.dumps(fb, indent=2) + ";"
-patched, n = re.subn(r"const firebaseConfig = \{[\s\S]*?\};", new, text, count=1)
-if n == 0:
-    raise SystemExit(f"failed to patch {p}: firebaseConfig literal not found")
-p.write_text(patched)
-
-# backendUrl
-p = desktop / "src" / "App.jsx"
-text = p.read_text()
-patched, n = re.subn(r'const backendUrl = "https://[^"]+";', f'const backendUrl = "{backend}";', text, count=1)
-if n == 0:
-    raise SystemExit(f"failed to patch {p}: backendUrl literal not found")
-p.write_text(patched)
-
-# localStorage override (strip for prod)
-p = desktop / "src" / "contexts" / "UserProfileContext.jsx"
-if not allow_override:
-    text = p.read_text()
-    patched = re.sub(r'\s*localStorage\.getItem\("pcrent_backend_url"\)\s*\|\|\s*', " ", text, count=1)
-    if patched == text:
-        raise SystemExit(f"failed to patch {p}")
-    p.write_text(patched)
-
-# tauri.conf.json
-p = desktop / "src-tauri" / "tauri.conf.json"
-conf = json.loads(p.read_text())
-conf["productName"] = product
-conf["identifier"] = ident
-p.write_text(json.dumps(conf, indent=2) + "\n")
-print(f"  patched for env={sys.argv[3]}, backend={backend}")
+lines = [
+    f"VITE_BACKEND_URL={backend}",
+    f"VITE_FIREBASE_API_KEY={fb['apiKey']}",
+    f"VITE_FIREBASE_AUTH_DOMAIN={fb['authDomain']}",
+    f"VITE_FIREBASE_PROJECT_ID={fb['projectId']}",
+    f"VITE_FIREBASE_STORAGE_BUCKET={fb['storageBucket']}",
+    f"VITE_FIREBASE_MESSAGING_SENDER_ID={fb['messagingSenderId']}",
+    f"VITE_FIREBASE_APP_ID={fb['appId']}",
+    f"VITE_ALLOW_BACKEND_OVERRIDE={'true' if allow else 'false'}",
+]
+open(sys.argv[2], "w").write("\n".join(lines) + "\n")
+print(f"  backend={backend}")
 PY
 
-echo "==> Running tauri dev (Ctrl-C to stop; source will be restored)"
+echo "==> Running tauri dev (Ctrl-C to stop; .env.local removed on exit)"
 ( cd "$DESKTOP" && npm run tauri dev )

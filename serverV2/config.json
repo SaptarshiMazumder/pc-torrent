@@ -65,7 +65,10 @@
       "os_weight": 0.1,
       "max_targets": 60,
       "min_frames_per_chunk": 8,
-      "fleet_diversification_cap": 0.85,
+      "fleet_target_share": {
+        "modal_serverless": 0.70,
+        "vast_serverless": 0.30
+      },
       "gpu_type_diversification_cap": 0.25,
       "vram_safety_factor": 1.1,
       "startup_amortization_ratio": 0.5,

@@ -9,7 +9,7 @@ from serverV2.api.schemas.machine import (
     MachineCommitmentPayload,
     RegisterMachinePayload,
 )
-from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.clients.allocation_client import AllocationClient
 from serverV2.services.machines.service import MachineService, MachineServiceError
 
 router = APIRouter(tags=["machines"])

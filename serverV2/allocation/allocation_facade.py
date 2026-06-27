@@ -39,8 +39,8 @@ Constructed once at boot; stateless beyond the injected references.
 
 from __future__ import annotations
 
-from serverV2.allocation.allocation_config_repository import (
-    AllocationConfigRepository,
+from serverV2.config.render_config_repository import (
+    RenderConfigRepository,
 )
 from serverV2.allocation.allocation_dispatch_queue_repository import (
     AllocationDispatchQueueRepository,
@@ -51,7 +51,7 @@ from serverV2.allocation.allocation_pending_queue_repository import (
     TYPE_INITIAL_GROUP,
     TYPE_RETRY_CHUNK,
 )
-from serverV2.allocation.render_config import RenderConfig
+from serverV2.config.render_config import RenderConfig
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
@@ -84,7 +84,7 @@ class AllocationFacade:
         job_repository: JobRepository,
         group_repository: RenderGroupRepository,
         snapshot_cache: FleetAvailabilitySnapshotCache,
-        config_repo: AllocationConfigRepository,
+        config_repo: RenderConfigRepository,
     ) -> None:
         self._planning = planning
         self._pending_repo = pending_repo

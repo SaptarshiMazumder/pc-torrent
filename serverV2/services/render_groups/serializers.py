@@ -40,11 +40,12 @@ class RenderGroupSerializer:
         *,
         output_frame_repo: OutputFrameRepository,
         actual_cost_compute: ActualCostCompute,
-        credits_per_usd: float,
+        get_credits_per_usd: Callable[[], float],
     ) -> None:
         self._output_frames = output_frame_repo
         self._actual_cost = actual_cost_compute
-        self._credits_per_usd = float(credits_per_usd)
+        # Live Firestore knob, read per serialization (matches get_max_retries).
+        self._get_credits_per_usd = get_credits_per_usd
 
     def serialize_task(
         self,
@@ -151,7 +152,7 @@ class RenderGroupSerializer:
             # ``AllocationPlanner``.  Costs projected into credits at
             # the wire boundary -- USD stays internal.
             "estimated_seconds": _maybe_float(job.get("estimated_seconds")),
-            "estimated_cost_credits": usd_to_credits(estimated_cost_usd, self._credits_per_usd),
+            "estimated_cost_credits": usd_to_credits(estimated_cost_usd, self._get_credits_per_usd()),
             "estimated_seconds_per_frame": _maybe_float(job.get("estimated_seconds_per_frame")),
             "estimated_startup_seconds": _maybe_float(job.get("estimated_startup_seconds")),
             # Actual-cost telemetry.  Raw timestamps + rate flow through so
@@ -161,7 +162,7 @@ class RenderGroupSerializer:
             "completed_at": _iso(completed_at_raw),
             "price_per_hour_at_dispatch": price_per_hour,
             "actual_seconds": actual_seconds,
-            "actual_cost_credits": usd_to_credits(actual_cost_usd, self._credits_per_usd),
+            "actual_cost_credits": usd_to_credits(actual_cost_usd, self._get_credits_per_usd()),
         }
 
 

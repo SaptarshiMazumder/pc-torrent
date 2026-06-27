@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from serverV2.allocation.allocation_strategies.allocation_weights import (
+from serverV2.config.allocation_weights import (
     AllocationWeights,
 )
 from serverV2.allocation.allocation_strategies.analyzers.allocation_time_analyzer import (

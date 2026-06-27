@@ -73,28 +73,8 @@ class VastConfig:
             return self.docker_image_eevee or self.docker_image
         return self.docker_image
 
-    @classmethod
-    def from_env(cls, config_json_path: str | None = None) -> VastConfig:
-        # Tunables come from config.json's ``vast`` block; secrets / image
-        # tags / per-environment toggles stay in env vars.
-        block = _require_block("vast", config_json_path)
-        return cls(
-            api_key=_env_str("VAST_API_KEY"),
-            docker_image=_env_str("VAST_DOCKER_IMAGE"),
-            docker_image_eevee=_env_str("VAST_DOCKER_IMAGE_EEVEE") or None,
-            provisioning_enabled=_require_field_bool(block, "vast", "provisioning_enabled"),
-            disk_gb=_require_field_float(block, "vast", "disk_gb"),
-            secure_cloud_only=_require_field_bool(block, "vast", "secure_cloud_only"),
-            poll_interval_sec=_require_field_float(block, "vast", "poll_interval_sec"),
-            startup_timeout_sec=_require_field_float(block, "vast", "startup_timeout_sec"),
-            in_progress_stale_sec=_load_monitor_in_progress_stale_sec(config_json_path),
-            public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
-            heartbeat_interval_sec=10,
-            heartbeat_timeout_sec=_require_field_float(block, "vast", "heartbeat_timeout_sec"),
-            heartbeat_grace_sec=_require_field_float(block, "vast", "heartbeat_grace_sec"),
-            max_parallel=_require_fleet_int("vast", "max_parallel", config_json_path),
-            endpoints=tuple(_parse_vast_endpoints(config_json_path)),
-        )
+    # Boot ``from_env`` retired -- VastConfig is now assembled live from
+    # Firestore knobs + env secrets by ``VastRuntimeConfigProvider``.
 
 
 def _load_config_json(config_json_path: str | None = None) -> dict:
@@ -111,38 +91,6 @@ def _load_config_json(config_json_path: str | None = None) -> dict:
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         log.warning("Could not load %s: %s", path, exc)
         return {}
-
-
-def _require_fleet_int(
-    fleet_key: str, field_key: str, config_json_path: str | None = None,
-) -> int:
-    """Read a required int field from a fleet's config.json block.  Raises
-    ``FleetException`` if the fleet block is missing, the field is missing,
-    or the value isn't a valid positive int.  No defaults -- callers
-    that need a knob set it explicitly in config.json.
-    """
-    cfg = _load_config_json(config_json_path)
-    block = cfg.get(fleet_key)
-    if not isinstance(block, dict):
-        raise FleetException(
-            f"config.json missing required block: {fleet_key!r}"
-        )
-    if field_key not in block:
-        raise FleetException(
-            f"config.json missing required key: {fleet_key}.{field_key}"
-        )
-    try:
-        value = int(block[field_key])
-    except (TypeError, ValueError) as exc:
-        raise FleetException(
-            f"config.json {fleet_key}.{field_key} is not a valid int: "
-            f"{block[field_key]!r}"
-        ) from exc
-    if value < 1:
-        raise FleetException(
-            f"config.json {fleet_key}.{field_key} must be >= 1, got {value}"
-        )
-    return value
 
 
 def _require_block(
@@ -216,17 +164,6 @@ def _require_field_bool(block: dict, block_name: str, key: str) -> bool:
     )
 
 
-def _optional_field_str(block: dict, key: str, default: str = "") -> str:
-    """Read an OPTIONAL string field.  Used for values where 'absent' has
-    a defined fallback semantic (e.g. ``modal.endpoint_url_prefix`` empty
-    means 'derive from workspace + app_name').
-    """
-    value = block.get(key, default)
-    if isinstance(value, str):
-        return value.strip()
-    return default
-
-
 def _load_community_price_per_hour(config_json_path: str | None = None) -> float:
     """Read ``community.price_per_hour`` from config.json.  Default 1.00 if absent.
     Used by the bootstrap wiring so every CommunityMachine carries a price the
@@ -241,70 +178,6 @@ def _load_community_price_per_hour(config_json_path: str | None = None) -> float
     return max(0.0, value)
 
 
-def _load_monitor_in_progress_stale_sec(
-    config_json_path: str | None = None,
-) -> float:
-    """Read ``monitor.in_progress_stale_sec`` from config.json.
-
-    Both Vast and Modal monitors use this — frame-progress hasn't
-    advanced for this many seconds → kill the job.  Single value
-    shared across fleets; per-fleet override would be a future
-    nice-to-have but isn't needed today.
-
-    Required field — fails loud if missing.  Tunables that shape
-    job-failure semantics shouldn't have hidden defaults.
-    """
-    cfg = _load_config_json(config_json_path)
-    block = cfg.get("monitor")
-    if not isinstance(block, dict):
-        raise FleetException("config.json missing required block: 'monitor'")
-    if "in_progress_stale_sec" not in block:
-        raise FleetException(
-            "config.json missing required key: monitor.in_progress_stale_sec"
-        )
-    try:
-        value = float(block["in_progress_stale_sec"])
-    except (TypeError, ValueError) as exc:
-        raise FleetException(
-            f"config.json monitor.in_progress_stale_sec is not a valid number: "
-            f"{block['in_progress_stale_sec']!r}"
-        ) from exc
-    if value <= 0:
-        raise FleetException(
-            f"config.json monitor.in_progress_stale_sec must be > 0, got {value}"
-        )
-    return value
-
-
-def _parse_vast_endpoints(config_json_path: str | None = None) -> list[VastEndpoint]:
-    cfg = _load_config_json(config_json_path)
-    if not cfg:
-        return []
-    results: list[VastEndpoint] = []
-    for entry in cfg.get("vast_instances", []):
-        gpu_name = str(entry.get("gpu_name", "")).strip()
-        if not gpu_name:
-            raise ValueError(
-                f"vast_instances entry has missing gpu_name: {entry!r}"
-            )
-        # ``price_per_hour`` is no longer required in config -- Vast
-        # pricing is per-offer (marketplace).  Tolerate it being absent;
-        # if present (legacy entries) it's loaded for back-compat.
-        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed"):
-            if required not in entry:
-                raise ValueError(
-                    f"vast_instances entry {gpu_name!r} is missing required field {required!r}"
-                )
-        results.append(VastEndpoint(
-            gpu_name=gpu_name,
-            label=str(entry.get("label", "")).strip() or f"Vast {gpu_name}",
-            vram_gb=float(entry["vram_gb"]),
-            cpu_cores=int(entry["cpu_cores"]),
-            ram_gb=float(entry["ram_gb"]),
-            render_speed=float(entry["render_speed"]),
-            price_per_hour=float(entry.get("price_per_hour") or 0.0),
-        ))
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -364,86 +237,9 @@ class ModalConfig:
             return f"https://{self.workspace}--{self.app_name}-render-{gpu_type}.modal.run"
         raise ValueError("Cannot construct Modal endpoint URL: set MODAL_ENDPOINT_URL_PREFIX or MODAL_WORKSPACE")
 
-    @classmethod
-    def from_env(cls) -> ModalConfig:
-        # Tunables come from config.json's ``modal`` block; secrets /
-        # workspace / per-environment toggles stay in env vars.
-        block = _require_block("modal")
-        raw_timeout = _require_field_float(block, "modal", "dispatch_timeout_sec")
-        return cls(
-            token_id=_env_str("MODAL_TOKEN_ID"),
-            token_secret=_env_str("MODAL_TOKEN_SECRET"),
-            app_name=_env_str("MODAL_APP_NAME", "pcrent-render"),
-            provisioning_enabled=_require_field_bool(block, "modal", "provisioning_enabled"),
-            public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
-            heartbeat_interval_sec=10,
-            monitor_interval_sec=30,
-            dispatch_timeout_sec=None if raw_timeout <= 0 else raw_timeout,
-            in_queue_timeout_sec=_require_field_float(block, "modal", "in_queue_timeout_sec"),
-            in_progress_stale_sec=_load_monitor_in_progress_stale_sec(),
-            endpoint_url_prefix=_optional_field_str(block, "endpoint_url_prefix").rstrip("/"),
-            workspace=_env_str("MODAL_WORKSPACE").strip(),
-            availability_sec=_require_field_float(block, "modal", "availability_sec"),
-            max_parallel=_require_fleet_int("modal", "max_parallel"),
-            per_gpu_max_parallel=_require_fleet_int("modal", "per_gpu_max_parallel"),
-            endpoints=tuple(_parse_modal_endpoints()),
-        )
-
-def _normalize_gpu_type(gpu_type: str) -> str | None:
-    """Sanitize the gpu_type string from config.json into a Python-identifier
-    form usable as a Modal function-name suffix (and therefore URL path).
-    Returns None for empty/invalid input — the boot validator will catch
-    any typo by HTTP-404'ing the resulting endpoint URL.
-    """
-    v = gpu_type.strip().lower().replace("-", "_")
-    if not v or not all(c.isalnum() or c == "_" for c in v):
-        return None
-    return v
-
-
-def _parse_modal_endpoints(
-    config_json_path: str | None = None,
-) -> list[ModalEndpoint]:
-    """Read Modal endpoints from ``config.json``.  Single source of truth
-    for the fleet — every required field (``gpu_type``, ``vram_gb``) MUST
-    be present in the JSON entry; missing values raise at boot.
-    """
-    cfg = _load_config_json(config_json_path)
-    if not cfg:
-        return []
-    results: list[ModalEndpoint] = []
-    seen: set[str] = set()
-    for entry in cfg.get("modal_instances", []):
-        raw_type = str(entry.get("gpu_type", "")).strip()
-        gpu_type = _normalize_gpu_type(raw_type)
-        if not gpu_type:
-            raise ValueError(
-                f"modal_instances entry has invalid or missing gpu_type: {entry!r}"
-            )
-        if gpu_type in seen:
-            raise ValueError(
-                f"modal_instances entry duplicates gpu_type={gpu_type!r}"
-            )
-        for required in ("vram_gb", "cpu_cores", "ram_gb", "render_speed", "price_per_hour"):
-            if required not in entry:
-                raise ValueError(
-                    f"modal_instances entry {gpu_type!r} is missing required field {required!r}"
-                )
-        label = (
-            str(entry.get("label", "")).strip()
-            or f"Modal {raw_type.upper()}"
-        )
-        results.append(ModalEndpoint(
-            gpu_type=gpu_type,
-            label=label,
-            vram_gb=float(entry["vram_gb"]),
-            cpu_cores=int(entry["cpu_cores"]),
-            ram_gb=float(entry["ram_gb"]),
-            render_speed=float(entry["render_speed"]),
-            price_per_hour=float(entry["price_per_hour"]),
-        ))
-        seen.add(gpu_type)
-    return results
+    # Boot ``from_env`` retired -- ModalConfig is now assembled live from
+    # Firestore knobs + env secrets by ``ModalRuntimeConfigProvider``
+    # (which also owns the gpu_type normalize+dedup that lived here).
 
 
 # ---------------------------------------------------------------------------
@@ -755,7 +551,7 @@ def _load_allocation_weights() -> "AllocationWeights":
     import (allocation_weights imports nothing from config; config
     imports the dataclass shape only).
     """
-    from serverV2.allocation.allocation_strategies.allocation_weights import (
+    from serverV2.config.allocation_weights import (
         AllocationWeights,
     )
     block = _require_subblock("frame_allocation", "weights")
@@ -873,66 +669,21 @@ class BillingConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
-    vast: VastConfig
-    modal: ModalConfig
-    public_backend_url: str
-    frame_allocation: FrameAllocationConfig
-    billing: BillingConfig
-    min_frames_per_worker: int = 2
-    # Allocator threshold: how recently a community machine must have
-    # heartbeated to be eligible for new dispatches.  Tight (15s) so we
-    # don't dispatch to a dead PC.
-    machine_stale_seconds: int = 15
-    # CommunityMonitor's "machine went offline mid-render" detection.
-    # Wider than allocator so a brief network blip mid-render doesn't
-    # immediately fail the chunk.
-    failover_stale_seconds: int = 30
-    # CommunityMonitor's "demote ghost machines back to idle" threshold.
-    # Wider still: must be >> heartbeat_interval (10s) + first-heartbeat
-    # lag after /available transition (~10s) so a normally-connecting
-    # agent can't be demoted in the race window between declaring
-    # available and its first ZADD landing.  Demote only fires for
-    # machines that have been silent long enough to be considered
-    # genuinely crashed.
-    community_machine_demote_seconds: int = 90
-    # CommunityMonitor's "agent never claimed the pending dispatch" detector.
-    # Mirrors Modal's ``in_queue_timeout_sec`` and Vast's ``startup_timeout_sec``:
-    # if a community ``jobs`` row sits in status='pending' for longer than this
-    # without the agent claiming it, fail the chunk so the retry pipeline can
-    # take over.  Threshold is 4x the agent's max polling interval.
-    community_dispatch_claim_timeout_sec: int = 120
-    # Per-hour cost stamped on every CommunityMachine.  Read by cost-aware
-    # allocators (Phase 5+).  Loaded from config.json's ``community.price_per_hour``.
-    community_price_per_hour: float = 1.0
+    """Env-sourced SECRETS only.  Every tunable knob has moved to Firestore
+    (``RenderConfig``); config.json is no longer read at runtime -- it
+    survives only as the seed for a fresh Firestore doc.
+    """
     # Per-env Docker image the community agent on a user's PC pulls at
-    # startup.  Loaded from ``COMMUNITY_WORKER_IMAGE`` env var (no default
-    # -- missing var = server boot fails loud).  Returned verbatim by
-    # ``GET /community/worker-image`` so the agent stays env-agnostic --
-    # whichever backend it's pointed at hands it the right image for
-    # that env.  Mirrors VAST_DOCKER_IMAGE / MODAL_WORKER_IMAGE_CYCLES.
+    # startup (env ``COMMUNITY_WORKER_IMAGE``).  Served verbatim by
+    # ``GET /community/worker-image`` so the agent stays env-agnostic.
     community_worker_image: str = ""
-    # Shared secret expected by ``POST /internal/orphan/{job_id}``.  The
-    # backup_monitor service sends this header to identify itself.  Empty
-    # string disables the endpoint (returns 503 to all callers).
+    # Shared secret expected by ``POST /internal/orphan/{job_id}`` (env
+    # ``ORPHAN_SECRET``).  Empty string disables the endpoint.
     orphan_secret: str = ""
-    stall: StallDetectionConfig = field(default_factory=StallDetectionConfig)
 
     @classmethod
     def from_env(cls) -> AppConfig:
-        vast = VastConfig.from_env()
-        modal = ModalConfig.from_env()
-        community_block = _require_block("community")
         return cls(
-            vast=vast,
-            modal=modal,
-            public_backend_url=_env_str("PUBLIC_BACKEND_URL", "http://localhost:8000"),
-            frame_allocation=FrameAllocationConfig.from_env(),
-            billing=BillingConfig.from_env(),
-            community_price_per_hour=_load_community_price_per_hour(),
-            community_dispatch_claim_timeout_sec=_require_field_int(
-                community_block, "community", "dispatch_claim_timeout_sec",
-            ),
             community_worker_image=_env_str("COMMUNITY_WORKER_IMAGE"),
             orphan_secret=_env_str("ORPHAN_SECRET", ""),
-            stall=StallDetectionConfig.from_env(),
         )

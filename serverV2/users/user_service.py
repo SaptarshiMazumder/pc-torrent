@@ -8,6 +8,7 @@ with ``UserProfileRepository`` to perform the actual write.
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 from serverV2.config import usd_to_credits
 
@@ -16,12 +17,15 @@ log = logging.getLogger(__name__)
 
 class UserService:
 
-    def __init__(self, credits_per_usd: float) -> None:
-        self._credits_per_usd = float(credits_per_usd)
+    def __init__(self, get_credits_per_usd: Callable[[], float]) -> None:
+        # Live Firestore knob (matches the get_max_retries pattern): read on
+        # every call so admin edits to billing.credits_per_usd take effect
+        # without a redeploy.
+        self._get_credits_per_usd = get_credits_per_usd
 
     @property
     def credits_per_usd(self) -> float:
-        return self._credits_per_usd
+        return float(self._get_credits_per_usd())
 
     def compute_credit_debit(self, actual_cost_usd: float | None) -> float:
         """Return the credit amount to debit for a task's final cost.
@@ -35,4 +39,4 @@ class UserService:
         """
         if not actual_cost_usd or actual_cost_usd <= 0:
             return 0.0
-        return usd_to_credits(actual_cost_usd, self._credits_per_usd) or 0.0
+        return usd_to_credits(actual_cost_usd, self._get_credits_per_usd()) or 0.0

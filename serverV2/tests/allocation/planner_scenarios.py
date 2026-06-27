@@ -19,7 +19,7 @@ from typing import Any, Callable
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
 )
-from serverV2.allocation.allocation_strategies.allocation_weights import (
+from serverV2.config.allocation_weights import (
     AllocationWeights,
 )
 from serverV2.config import StartupBufferConfig, VramFleetBoostConfig

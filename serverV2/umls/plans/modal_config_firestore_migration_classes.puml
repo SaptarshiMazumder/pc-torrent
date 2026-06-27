@@ -1,0 +1,114 @@
+@startuml modal_config_firestore_migration_classes
+title Phase 2 -- Modal fleet config: frozen config.json -> live Firestore (sole truth)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+' =====================================================================
+' NEUTRAL CONFIG MODULE  (config/ owns config types + live assembly)
+' =====================================================================
+package "serverV2/config" #E8F0FF {
+  class RenderConfigRepository {
+    +get() : RenderConfig
+    .. fresh Firestore read ..
+    no cache | fail-loud | no config.json fallback
+  }
+  class RenderConfig {
+    +modal : ModalSection
+    +modal_instances : ModalInstanceEntry[]
+    +monitor : MonitorSection
+  }
+  class ModalSection {
+    +provisioning_enabled  +max_parallel
+    +per_gpu_max_parallel  +dispatch_timeout_sec
+    +in_queue_timeout_sec  +endpoint_url_prefix
+    .. NEW (schema gap -- add) ..
+    +availability_sec   <<add + back&#45;compat default 14400>>
+  }
+  class ModalConfig {
+    == config/config.py -- shape UNCHANGED ==
+    assembled LIVE (not frozen at boot)
+    +dispatch_timeout_sec  +in_queue_timeout_sec
+    +max_parallel  +endpoints  +availability_sec ...
+    +is_enabled()
+    +endpoint_url(gpu_type)
+  }
+  RenderConfigRepository ..> RenderConfig : builds
+  RenderConfig *-- ModalSection
+
+  package "serverV2/config/modal" #DCE8FF {
+    class ModalSecrets <<new>> {
+      +token_id  +token_secret
+      +app_name  +workspace
+      +public_backend_url
+      +heartbeat_interval_sec = 10
+      +monitor_interval_sec = 30
+      +from_env()
+    }
+
+    package "serverV2/config/modal/providers" #CFE0FF {
+      class ModalRuntimeConfigProvider <<new>> {
+        -secrets : ModalSecrets
+        -config_repo : RenderConfigRepository
+        +get() : ModalConfig
+        .. assembles per operation ..
+        secrets(env) + repo.get().modal(knobs)
+        + modal_instances + monitor.in_progress_stale_sec
+        (dispatch_timeout<=0 -> None; gpu_type normalize+dedup)
+      }
+    }
+  }
+
+  ModalRuntimeConfigProvider o--> ModalSecrets
+  ModalRuntimeConfigProvider ..> RenderConfigRepository : reads
+  ModalRuntimeConfigProvider ..> ModalConfig : get() returns
+}
+
+' =====================================================================
+' MODAL FLEET  (consumers depend DOWNWARD on config/)
+' =====================================================================
+package "serverV2/fleets/modal" #EFFFF0 {
+  class ModalHttpDispatcher
+  class ModalClient
+  class ModalFleetStrategy
+  class ModalFleetMonitor
+}
+package "serverV2/fleets/fleet_availability/steps" #EFFFF0 {
+  class ModalAvailabilityBuilder
+}
+
+ModalHttpDispatcher  o--> ModalRuntimeConfigProvider
+ModalClient          o--> ModalRuntimeConfigProvider
+ModalFleetStrategy   o--> ModalRuntimeConfigProvider
+ModalFleetMonitor    o--> ModalRuntimeConfigProvider
+ModalAvailabilityBuilder o--> ModalRuntimeConfigProvider
+
+' =====================================================================
+' CROSS-FLEET -- now retired (both providers exist after this phase)
+' =====================================================================
+package "serverV2 (cross-fleet -- retired this phase)" #FFF8E8 {
+  class MachineService {
+    was: vast_cfg.is_enabled() + modal_cfg.is_enabled()
+    now: takes vast_provider + modal_provider,
+         calls provider.get().is_enabled()
+  }
+  class "_allocation_fleet_caps (bootstrap)" as Caps {
+    was: cfg.vast.max_parallel + cfg.modal.max_parallel (frozen)
+    now: dispatch tick reads max_parallel live from repo
+  }
+}
+MachineService ..> VastRuntimeConfigProvider
+MachineService ..> ModalRuntimeConfigProvider
+Caps ..> RenderConfigRepository
+
+note as N1 #FFEEEE
+  After this phase BOTH serverless fleets (Vast + Modal) are
+  fully off config.json.  ModalConfig.from_env() AND
+  VastConfig.from_env() are retired -- MachineService was
+  their last consumer.
+  STILL on config.json (Phase 3): community fleet, billing,
+  machine-stale.  config.json becomes SEED ONLY after Phase 3.
+  One schema add this phase: modal.availability_sec in
+  ModalSection + the live Firestore doc (back-compat default
+  14400 so old docs keep parsing).
+end note
+@enduml

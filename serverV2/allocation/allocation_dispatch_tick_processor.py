@@ -57,7 +57,7 @@ class AllocationDispatchTickProcessor:
         active_count_by_fleet: Callable[[], dict[str, int]],
         dispatcher: AllocationDispatcher,
         blend_url_resolver: AllocationBlendUrlResolver,
-        fleet_caps: dict[str, int],
+        fleet_caps: Callable[[], dict[str, int]],
         get_group_status: Callable[[str], str | None],
         codec: AllocationQueueItemCodec,
         engine_resolver: AllocationEngineResolver,
@@ -75,13 +75,14 @@ class AllocationDispatchTickProcessor:
     def process(self, fleet: str) -> int:
         """Drain ``dispatch_queue`` for one fleet until cap or empty.
         Returns the number of items actually dispatched."""
-        if fleet not in self._fleet_caps:
+        caps = self._fleet_caps()
+        if fleet not in caps:
             raise KeyError(
                 f"AllocationDispatchTickProcessor: no cap configured for "
                 f"fleet={fleet!r}.  Known fleets: "
-                f"{sorted(self._fleet_caps.keys())}"
+                f"{sorted(caps.keys())}"
             )
-        cap = self._fleet_caps[fleet]
+        cap = caps[fleet]
         dispatched = 0
         popped_count = 0
         while True:

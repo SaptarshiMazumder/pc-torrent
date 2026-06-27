@@ -19,7 +19,7 @@ from serverV2.api.schemas.upload import (
     MultipartPartUrlsPayload,
 )
 from serverV2.allocation.allocation_facade import AllocationFacade
-from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.clients.allocation_client import AllocationClient
 from serverV2.services.render_groups.service import RenderGroupService, RenderGroupServiceError
 from serverV2.services.upload.coordinator import UploadCoordinator
 from serverV2.services.upload.validators import UploadValidationError

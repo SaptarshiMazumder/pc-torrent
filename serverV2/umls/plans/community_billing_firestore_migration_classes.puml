@@ -1,0 +1,100 @@
+@startuml community_billing_firestore_migration_classes
+title Phase 3 -- community / billing / machine-stale -> Firestore; config.json retired
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+' =====================================================================
+' NEUTRAL CONFIG MODULE  (pure-knob consumers read the repo directly --
+' no secrets to weld, so NO provider needed, unlike Vast/Modal)
+' =====================================================================
+package "serverV2/config" #E8F0FF {
+  class RenderConfigRepository {
+    +get() : RenderConfig   ' fresh Firestore read, no cache, fail-loud
+  }
+  class RenderConfig {
+    +community : CommunitySection
+    +billing : BillingSection   <<new field>>
+    ...
+  }
+  class CommunitySection {
+    +price_per_hour
+    +dispatch_claim_timeout_sec
+    .. NEW (schema add, back-compat) ..
+    +machine_stale_seconds   <<default 15>>
+    +machine_demote_seconds  <<default 90>>
+  }
+  class BillingSection <<new>> {
+    +credits_per_usd   <<default 100>>
+  }
+  RenderConfig *-- CommunitySection
+  RenderConfig *-- BillingSection
+  RenderConfigRepository ..> RenderConfig : builds
+}
+
+' =====================================================================
+' BILLING consumers (read credits_per_usd live, once per operation)
+' =====================================================================
+package "serverV2 -- billing" #EFFFF0 {
+  class UserService
+  class PreRenderEstimator
+  class RenderGroupService
+}
+UserService        o--> RenderConfigRepository
+PreRenderEstimator o--> RenderConfigRepository
+RenderGroupService o--> RenderConfigRepository
+
+' =====================================================================
+' COMMUNITY consumers (price / timeouts / stale / demote, live)
+' =====================================================================
+package "serverV2 -- community" #EFFFF0 {
+  class CommunityStrategy
+  class CommunityMonitor
+  class CommunityAvailabilityBuilder
+  class MachineRepository
+}
+CommunityStrategy           o--> RenderConfigRepository
+CommunityMonitor            o--> RenderConfigRepository
+CommunityAvailabilityBuilder o--> RenderConfigRepository
+MachineRepository           o--> RenderConfigRepository
+
+' =====================================================================
+' DEAD -- delete (confirmed no readers)
+' =====================================================================
+package "config.py -- DELETE (dead)" #FFEEEE {
+  class "AppConfig.failover_stale_seconds" as D1
+  class "AppConfig.frame_allocation\n+ FrameAllocationConfig.from_env" as D2
+  class "AppConfig.min_frames_per_worker" as D3
+  class "AppConfig.stall\n+ StallDetectionConfig.from_env" as D4
+  class "AppConfig.public_backend_url" as D5
+  class "BillingConfig.from_env\n_load_community_price_per_hour" as D6
+}
+
+note as N1 #FFEEEE
+  The boot StallDetectionConfig is vestigial: the stall detector
+  factory uses NO config (deadlines come from jobs.allowed_stall_times,
+  set by AllowedStallTimesResolver which already reads stall from
+  Firestore).  frame_allocation / min_frames_per_worker / public_backend_url
+  / failover_stale_seconds have zero readers.  All deleted.
+end note
+
+' =====================================================================
+' AFTER  --  AppConfig is just secrets; config.json runtime-dead
+' =====================================================================
+package "AFTER" #EEEEEE {
+  class AppConfig {
+    only env SECRETS remain:
+    +community_worker_image
+    +orphan_secret
+    (no config.json reads)
+  }
+}
+
+note as N2 #FFEEEE
+  After this phase NOTHING reads config.json at runtime.
+  It survives only as the seed for a fresh Firestore doc
+  (seed_config_to_firestore.py) -- deletable if you don't
+  need re-seeding.  Schema adds (billing, community.machine_*)
+  use back-compat defaults so your CURRENT Firestore doc keeps
+  working; I'll hand you an updated doc to make them UI-tunable.
+end note
+@enduml

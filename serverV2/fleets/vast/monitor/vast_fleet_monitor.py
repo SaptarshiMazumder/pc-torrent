@@ -26,6 +26,9 @@ import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from serverV2.config import VastConfig
+from serverV2.config.vast.providers.vast_runtime_config_provider import (
+    VastRuntimeConfigProvider,
+)
 from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.shared.job_counts import JobCounts
 from serverV2.fleets.shared.liveness_check import LivenessCheck
@@ -70,7 +73,7 @@ class VastFleetMonitor:
     def __init__(
         self,
         *,
-        config: VastConfig,
+        config_provider: VastRuntimeConfigProvider,
         client: VastClient,
         group_repo: RenderGroupRepository,
         heartbeat_repo: HeartbeatRepository,
@@ -86,7 +89,7 @@ class VastFleetMonitor:
         registry: InstanceRegistry | None = None,
         interval_sec: int = _DEFAULT_INTERVAL_SEC,
     ) -> None:
-        self._cfg = config
+        self._config_provider = config_provider
         self._client = client
         self._group_repo = group_repo
         self._heartbeats = heartbeat_repo
@@ -120,7 +123,7 @@ class VastFleetMonitor:
         """Acquire the singleton ``monitor:vast`` lock and spawn the scan
         thread on win.  Returns True iff this instance now owns the
         monitor (or already did).  Idempotent within a process."""
-        if not self._cfg.is_enabled():
+        if not self._config_provider.get().is_enabled():
             return False
         with self._thread_lock:
             if self._thread is not None and self._thread.is_alive():
@@ -197,6 +200,10 @@ class VastFleetMonitor:
             except (KeyError, ValueError, TypeError):
                 continue
 
+        # One live config read per tick (assembled from Firestore knobs +
+        # env secrets); threaded into _inspect for the legacy-row fallbacks.
+        cfg = self._config_provider.get()
+
         active_job_ids: set[str] = set()
         for row in rows:
             job_id = row["id"]
@@ -215,7 +222,7 @@ class VastFleetMonitor:
                 continue
             inst = fleet_dict.get(provider_id)
             try:
-                self._inspect(row, inst)
+                self._inspect(row, inst, cfg)
             except Exception:
                 log.exception("VastFleetMonitor inspect failed for %s", job_id)
 
@@ -232,7 +239,9 @@ class VastFleetMonitor:
     # Per-row inspection — ports VastInstanceMonitor._tick
     # ------------------------------------------------------------------
 
-    def _inspect(self, row: dict[str, Any], inst: dict[str, Any] | None) -> None:
+    def _inspect(
+        self, row: dict[str, Any], inst: dict[str, Any] | None, cfg: VastConfig,
+    ) -> None:
         job_id: str = row["id"]
         group_id: str = row.get("group_id") or ""
         local_status: str = str(row.get("status") or "")
@@ -247,17 +256,17 @@ class VastFleetMonitor:
         startup_timeout_sec = float(
             deadlines.get("startup_timeout_sec")
             if deadlines.get("startup_timeout_sec") is not None
-            else self._cfg.startup_timeout_sec
+            else cfg.startup_timeout_sec
         )
         heartbeat_grace_sec = float(
             deadlines.get("heartbeat_grace_sec")
             if deadlines.get("heartbeat_grace_sec") is not None
-            else self._cfg.heartbeat_grace_sec
+            else cfg.heartbeat_grace_sec
         )
         frame_progress_stale_sec = float(
             deadlines.get("frame_progress_stale_sec")
             if deadlines.get("frame_progress_stale_sec") is not None
-            else self._cfg.in_progress_stale_sec
+            else cfg.in_progress_stale_sec
         )
 
         # Lazy per-job state.

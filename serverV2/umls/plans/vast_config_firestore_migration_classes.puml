@@ -1,0 +1,115 @@
+@startuml vast_config_firestore_migration_classes
+title Phase 1 -- Vast fleet config: frozen config.json -> live Firestore (sole truth)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+' =====================================================================
+' NEUTRAL CONFIG MODULE  (config/ owns config types + live assembly)
+' =====================================================================
+package "serverV2/config" #E8F0FF {
+  class RenderConfigRepository {
+    +get() : RenderConfig
+    .. fresh Firestore read ..
+    no cache | fail-loud | no config.json fallback
+  }
+  class RenderConfig {
+    +vast : VastSection
+    +vast_instances : VastInstanceEntry[]
+    +monitor : MonitorSection
+  }
+  class VastSection {
+    +provisioning_enabled  +secure_cloud_only
+    +disk_gb  +poll_interval_sec
+    +startup_timeout_sec  +max_parallel
+    +heartbeat_timeout_sec  +heartbeat_grace_sec
+  }
+  class VastConfig {
+    == config/config.py -- shape UNCHANGED ==
+    assembled LIVE (not frozen at boot)
+    +secure_cloud_only  +disk_gb  +endpoints ...
+    +is_enabled()  +image_for_engine()
+  }
+  RenderConfigRepository ..> RenderConfig : builds
+  RenderConfig *-- VastSection
+
+  package "serverV2/config/vast" #DCE8FF {
+    class VastSecrets <<new>> {
+      +api_key  +api_base
+      +docker_image  +docker_image_eevee
+      +public_backend_url
+      +heartbeat_interval_sec = 10
+      +from_env()
+    }
+
+    package "serverV2/config/vast/providers" #CFE0FF {
+      class VastRuntimeConfigProvider <<new>> {
+        -secrets : VastSecrets
+        -config_repo : RenderConfigRepository
+        +get() : VastConfig
+        .. assembles per operation ..
+        secrets(env) + repo.get().vast(knobs)
+        + vast_instances + monitor.in_progress_stale_sec
+      }
+    }
+  }
+
+  VastRuntimeConfigProvider o--> VastSecrets
+  VastRuntimeConfigProvider ..> RenderConfigRepository : reads
+  VastRuntimeConfigProvider ..> VastConfig : get() returns
+}
+
+' =====================================================================
+' VAST FLEET  (consumers depend DOWNWARD on config/)
+' =====================================================================
+package "serverV2/fleets/vast" #EFFFF0 {
+  class VastOfferSearcher
+  class VastInstanceManager
+  class VastClient
+  class VastFleetStrategy
+  class VastFleetMonitor
+}
+package "serverV2/fleets/fleet_availability/steps" #EFFFF0 {
+  class VastAvailabilityBuilder
+}
+
+VastOfferSearcher    o--> VastRuntimeConfigProvider
+VastInstanceManager  o--> VastRuntimeConfigProvider
+VastClient           o--> VastRuntimeConfigProvider
+VastFleetStrategy    o--> VastRuntimeConfigProvider
+VastFleetMonitor     o--> VastRuntimeConfigProvider
+VastAvailabilityBuilder o--> VastRuntimeConfigProvider
+
+' =====================================================================
+' ALLOCATION -- folded in (already holds the repo)
+' =====================================================================
+package "serverV2/allocation" #FFF8E8 {
+  class AllowedStallTimesResolver {
+    -config_repo : RenderConfigRepository  (already held)
+    == drop vast_cfg / modal_cfg / in_progress_stale_sec params ==
+    read startup_timeout_sec, heartbeat_grace_sec,
+    in_queue_timeout_sec, in_progress_stale_sec from repo
+  }
+  AllowedStallTimesResolver ..> RenderConfigRepository : reads knobs
+}
+
+' =====================================================================
+' DEFERRED -- cross-fleet, needs the Modal provider (Phase 2)
+' =====================================================================
+package "DEFERRED to Modal phase" #EEEEEE {
+  class MachineService {
+    still holds boot VastConfig + ModalConfig
+    vast_cfg.is_enabled() + modal_cfg.is_enabled()
+  }
+}
+
+note as N1 #FFEEEE
+  REMOVED from the Vast hot path:
+  the frozen VastConfig built by VastConfig.from_env()
+  (env + config.json) is no longer injected into the
+  fleet consumers.  config.json vast block = SEED ONLY;
+  Firestore is the sole source of truth (fail-loud on a
+  missing field -- no fallback).
+  VastConfig.from_env() survives ONLY to feed MachineService
+  until the Modal phase retires it.
+end note
+@enduml

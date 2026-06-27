@@ -28,7 +28,7 @@ from serverV2.core.models import (
     PlannedTask,
     RenderJob,
 )
-from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.clients.allocation_client import AllocationClient
 from serverV2.orchestrator.anti_affinity import AntiAffinityExclusions
 from serverV2.orchestrator.chunk_progress import ChunkProgressService
 from serverV2.repositories.in_progress_chunk_repository import (
@@ -55,7 +55,7 @@ class RetryDeps:
     reconcile_group: Callable[[str], None]
     # Reads orchestrator.max_retries fresh from the live Firestore-backed
     # config on every retry attempt.  Bootstrap wires this to
-    # ``AllocationConfigRepository.get().orchestrator.max_retries`` so a
+    # ``RenderConfigRepository.get().orchestrator.max_retries`` so a
     # mid-flight UI edit takes effect on the next failure rather than
     # being frozen at server-startup.
     get_max_retries: Callable[[], int]

@@ -23,12 +23,12 @@ bash infra/terraform/bootstrap.sh
 
 **(Optional) push env-specific worker images** — to get `:<env>-vX.Y.Z` tags:
 ```bash
-bash infra/scripts/push-worker.sh <env> 0.0.10 vast-cycles
-bash infra/scripts/push-worker.sh <env> 0.0.10 vast-eevee
-bash infra/scripts/push-worker.sh <env> 0.0.10 modal-cycles
-bash infra/scripts/push-worker.sh <env> 0.0.10 community-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.11 vast-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.11 vast-eevee
+bash infra/scripts/push-worker.sh <env> 0.0.11 modal-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.11 community-cycles
 ```
-Then on GHCR, flip each new `pc-rent-*-worker-*` package from private → **public** (Modal/Vast can't pull private images). Finally bump the four `*_IMAGE` lines in `.env` to `:<env>-v0.0.10`.
+Then on GHCR, flip each new `pc-rent-*-worker-*` package from private → **public** (Modal/Vast can't pull private images). Finally bump the four `*_IMAGE` lines in `.env` to `:<env>-v0.0.11`.
 
 **Deploy chain (run in this order):**
 ```bash

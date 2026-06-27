@@ -35,14 +35,19 @@ class AllocationWeights:
     doesn't matter, only relative ordering across a single scoring pass.
     """
 
-    # --- Composite scoring (drops cost; adds CUDA + OS) ---------------
-    # Speed dominates because it directly drives wall time and we no
-    # longer balance against cost.  CUDA + OS act as tiebreakers among
-    # otherwise-similar offers (the 'two RTX 4090 offers, one with old
-    # drivers' case).
+    # --- Composite scoring (speed + CUDA + OS, optional cost) ---------
+    # Speed dominates because it directly drives wall time.  CUDA + OS act
+    # as tiebreakers among otherwise-similar offers (the 'two RTX 4090
+    # offers, one with old drivers' case).
     speed_weight: float = 0.70
     cuda_weight: float = 0.20
     os_weight: float = 0.10
+    # Cost-efficiency weight.  Rewards LOW cost-to-render-the-chunk
+    # (chunk_seconds * price_per_hour), so a slow-cheap card (e.g. a 4090)
+    # can outrank a fast-pricey one (e.g. an H200).  0.0 = cost-blind
+    # (default; unchanged behaviour).  Raise it to pull the mix toward
+    # $/frame -- tune via the ConfigurationPage like every other weight.
+    cost_weight: float = 0.0
 
     # --- Mix selection -----------------------------------------------
     # Upper bound on parallel containers per render -- NOT a goal.

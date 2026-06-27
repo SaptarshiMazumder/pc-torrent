@@ -435,6 +435,11 @@ def _weights(b: dict) -> AllocationWeights:
         _float(b, ctx, "heavy_multiplier_cap")
         if "heavy_multiplier_cap" in b else 5.0
     )
+    # Cost-efficiency weight -- back-compat default 0.0 (cost-blind) so old
+    # docs keep today's behaviour until the knob is set.
+    cost_weight = (
+        _float(b, ctx, "cost_weight") if "cost_weight" in b else 0.0
+    )
     # Per-priority cost multipliers.  Backwards-compatible with old
     # Firestore docs: any missing key falls back to (1.0, 1.1, 1.2).
     raw_pcm = b.get("priority_cost_multipliers")
@@ -458,6 +463,7 @@ def _weights(b: dict) -> AllocationWeights:
         speed_weight=_float(b, ctx, "speed_weight"),
         cuda_weight=_float(b, ctx, "cuda_weight"),
         os_weight=_float(b, ctx, "os_weight"),
+        cost_weight=cost_weight,
         max_targets=_int(b, ctx, "max_targets"),
         min_frames_per_chunk=_int(b, ctx, "min_frames_per_chunk"),
         fleet_target_share=fleet_target_share,

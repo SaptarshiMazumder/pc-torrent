@@ -1,0 +1,60 @@
+@startuml allocation_cost_factor_classes
+title Cost factor in target scoring (Firestore-tunable)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+package "serverV2/config" {
+  class AllocationWeights {
+    speed_weight
+    cuda_weight
+    os_weight
+    cost_weight (new, default 0)
+  }
+}
+
+package "serverV2/allocation analyzers" {
+  class CompositeScorer <<module>> {
+    REF_SECONDS = 300
+    REF_COST = 0.10 (new)
+    +score_target(price_per_hour) (new param)
+    +chunk_cost_for() (already exists)
+  }
+}
+
+package "serverV2/allocation strategies" {
+  class AllocationPlanner {
+    +scores each eligible target
+    passes price = target.price_per_hour
+  }
+}
+
+AllocationPlanner --> CompositeScorer : score_target(+price)
+CompositeScorer --> AllocationWeights : reads cost_weight
+
+note bottom of CompositeScorer
+  base = speed*speed_factor + cuda*cuda_factor
+       + os*os_factor + cost*cost_factor   (cost term = new)
+  --
+  speed_factor = REF_SECONDS / chunk_seconds
+  cost_factor  = REF_COST / chunk_cost
+  chunk_cost   = chunk_seconds / 3600 * price_per_hour
+  --
+  rewards LOW cost-to-render-the-chunk:
+  4090 (slow, cheap/frame) -> high cost_factor
+  H200 (fast, pricey/frame) -> low cost_factor
+end note
+
+note bottom of AllocationWeights
+  cost_weight default 0 = today's cost-blind behaviour.
+  _weights() parses it with a back-compat default so old
+  Firestore docs keep working.  Raise it (start ~0.3-0.5)
+  via the config page to pull the mix toward cheaper cards.
+end note
+
+note bottom of AllocationPlanner
+  Two call sites (lines 209, 312).  price_per_hour is already
+  on each FleetCapability, so only the arg is added.
+  community stays community-first; if its price is ever set
+  near 0 we cap cost_factor (flagged, not built).
+end note
+@enduml

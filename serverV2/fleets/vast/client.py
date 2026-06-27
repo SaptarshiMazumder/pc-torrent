@@ -1,6 +1,11 @@
 """VastClient — HTTP-only adapter for the Vast.ai REST API.
 
 Responsibilities: HTTP calls.  No DB, no threads, no business logic.
+
+Config is read live: each public method calls ``config_provider.get()``
+once to get a ``VastConfig`` assembled from env secrets + the current
+Firestore knobs.  So a Firestore edit (e.g. ``secure_cloud_only``,
+``disk_gb``) takes effect on the next call -- no redeploy.
 """
 
 from __future__ import annotations
@@ -13,6 +18,9 @@ from typing import Any
 import httpx
 
 from serverV2.config import VastConfig
+from serverV2.config.vast.providers.vast_runtime_config_provider import (
+    VastRuntimeConfigProvider,
+)
 from serverV2.fleets.vast.vast_offer import VastOffer
 
 log = logging.getLogger(__name__)
@@ -21,26 +29,27 @@ log = logging.getLogger(__name__)
 class VastOfferSearcher:
     """Finds rentable GPU offers on Vast.ai."""
 
-    def __init__(self, config: VastConfig) -> None:
-        self._cfg = config
+    def __init__(self, config_provider: VastRuntimeConfigProvider) -> None:
+        self._config_provider = config_provider
 
     def search(self, gpu_name: str) -> list[VastOffer]:
+        cfg = self._config_provider.get()
         filters: dict = {
             "gpu_name": {"eq": gpu_name},
             "num_gpus": {"eq": 1},
             "rentable": {"eq": True},
             "reliability2": {"gte": 0.90},
             "cuda_max_good": {"gte": 12.3},
-            "disk_space": {"gte": self._cfg.disk_gb},
+            "disk_space": {"gte": cfg.disk_gb},
             "order": [["dph_total", "asc"], ["reliability2", "desc"]],
             "limit": 10,
         }
-        if self._cfg.secure_cloud_only:
+        if cfg.secure_cloud_only:
             filters["datacenter"] = {"eq": True}
 
         resp = httpx.get(
-            f"{self._cfg.api_base}/bundles/",
-            headers=_auth_headers(self._cfg),
+            f"{cfg.api_base}/bundles/",
+            headers=_auth_headers(cfg),
             params={"q": json.dumps(filters)},
             timeout=30,
         )
@@ -52,8 +61,8 @@ class VastOfferSearcher:
 class VastInstanceManager:
     """Creates, inspects, and destroys Vast.ai instances."""
 
-    def __init__(self, config: VastConfig) -> None:
-        self._cfg = config
+    def __init__(self, config_provider: VastRuntimeConfigProvider) -> None:
+        self._config_provider = config_provider
 
     def create(
         self,
@@ -66,6 +75,7 @@ class VastInstanceManager:
         render_overrides_json: str,
         image: str | None = None,
     ) -> int:
+        cfg = self._config_provider.get()
         # Wire-format boundary: the worker container reads the override
         # payload from the RENDER_OVERRIDES_B64 env var.  Base64 keeps
         # the value shell-safe across any docker/runtime quoting layer.
@@ -81,16 +91,16 @@ class VastInstanceManager:
             "FRAME_END": str(frame_end),
             "FRAME_STEP": str(frame_step),
             "RENDER_OVERRIDES_B64": render_overrides_b64,
-            "BACKEND_URL": self._cfg.public_backend_url,
+            "BACKEND_URL": cfg.public_backend_url,
         }
         resp = httpx.put(
-            f"{self._cfg.api_base}/asks/{offer_id}/",
-            headers=_auth_headers(self._cfg),
+            f"{cfg.api_base}/asks/{offer_id}/",
+            headers=_auth_headers(cfg),
             json={
                 "client_id": "me",
-                "image": image or self._cfg.docker_image,
+                "image": image or cfg.docker_image,
                 "env": env_vars,
-                "disk": self._cfg.disk_gb,
+                "disk": cfg.disk_gb,
                 "label": f"pcrent-{job_id[:12]}",
                 "runtype": "args",
                 "args": ["python3", "-u", "/handler.py"],
@@ -105,9 +115,10 @@ class VastInstanceManager:
         return instance_id
 
     def get(self, instance_id: int) -> dict[str, Any] | None:
+        cfg = self._config_provider.get()
         resp = httpx.get(
-            f"{self._cfg.api_base}/instances/{instance_id}/",
-            headers=_auth_headers(self._cfg),
+            f"{cfg.api_base}/instances/{instance_id}/",
+            headers=_auth_headers(cfg),
             timeout=15,
         )
         if resp.status_code == 404:
@@ -122,9 +133,10 @@ class VastInstanceManager:
         sweep — the singleton VastFleetMonitor builds an in-memory dict
         keyed by id and looks up each active job's instance from it.
         """
+        cfg = self._config_provider.get()
         resp = httpx.get(
-            f"{self._cfg.api_base}/instances/",
-            headers=_auth_headers(self._cfg),
+            f"{cfg.api_base}/instances/",
+            headers=_auth_headers(cfg),
             params={"owner": "me"},
             timeout=15,
         )
@@ -133,10 +145,11 @@ class VastInstanceManager:
         return list(data.get("instances") or [])
 
     def destroy(self, instance_id: int) -> None:
+        cfg = self._config_provider.get()
         try:
             resp = httpx.delete(
-                f"{self._cfg.api_base}/instances/{instance_id}/",
-                headers=_auth_headers(self._cfg),
+                f"{cfg.api_base}/instances/{instance_id}/",
+                headers=_auth_headers(cfg),
                 timeout=30,
             )
             if resp.status_code not in (200, 204, 404):
@@ -146,10 +159,11 @@ class VastInstanceManager:
             log.warning("Failed to destroy Vast.ai instance %s: %s", instance_id, e)
 
     def get_logs(self, instance_id: int) -> str:
+        cfg = self._config_provider.get()
         try:
             resp = httpx.get(
-                f"{self._cfg.api_base}/instances/request_logs/{instance_id}/",
-                headers=_auth_headers(self._cfg),
+                f"{cfg.api_base}/instances/request_logs/{instance_id}/",
+                headers=_auth_headers(cfg),
                 timeout=10,
             )
             if resp.status_code == 200:
@@ -163,9 +177,9 @@ class VastInstanceManager:
 class VastClient:
     """Composed facade over offer search + instance management."""
 
-    def __init__(self, config: VastConfig) -> None:
-        self.offers = VastOfferSearcher(config)
-        self.instances = VastInstanceManager(config)
+    def __init__(self, config_provider: VastRuntimeConfigProvider) -> None:
+        self.offers = VastOfferSearcher(config_provider)
+        self.instances = VastInstanceManager(config_provider)
 
     def dispatch_job(
         self,

@@ -1,18 +1,17 @@
-"""Resolves the blend file download URL per fleet type."""
+"""Resolves the blend file download URL.
+
+Both serverless fleets call back to the same ``PUBLIC_BACKEND_URL`` (an env
+secret), so the URL is fleet-independent; the ``fleet`` arg is kept for
+interface stability with the dispatch path.
+"""
 
 from __future__ import annotations
-
-from serverV2.config import AppConfig
 
 
 class AllocationBlendUrlResolver:
 
-    def __init__(self, config: AppConfig) -> None:
-        self._cfg = config
+    def __init__(self, public_backend_url: str) -> None:
+        self._public_backend_url = public_backend_url
 
     def resolve(self, fleet: str, group_id: str, input_filename: str) -> str:
-        if fleet == "modal_serverless":
-            base = self._cfg.modal.public_backend_url
-        else:
-            base = self._cfg.vast.public_backend_url
-        return f"{base}/render-groups/{group_id}/input/{input_filename}"
+        return f"{self._public_backend_url}/render-groups/{group_id}/input/{input_filename}"

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 
-from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.clients.allocation_client import AllocationClient
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
 log = logging.getLogger(__name__)

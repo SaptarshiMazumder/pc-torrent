@@ -1,10 +1,13 @@
-"""AllocationClient -- orchestrator-side gateway to the allocation module.
+"""AllocationClient -- the gateway into the allocation module.
 
 The ONLY thing in the entire codebase allowed to import
-``AllocationFacade``.  Inside orchestrator, callers reach this client
-to (a) submit a render group for dispatch, (b) park a retry attempt,
-(c) drain queues on cancel, or (d) ask for cost estimates -- pre-submit
-preview or post-submit live group.
+``AllocationFacade``.  Callers (the orchestrator lifecycle + the API
+routers) reach this client to (a) submit a render group for dispatch,
+(b) park a retry attempt, (c) drain queues on cancel, or (d) ask for
+cost estimates -- pre-submit preview or post-submit live group.
+
+Lives in the neutral ``serverV2.clients`` layer so any caller can depend
+on it without reaching across domains.
 
 Stateless beyond the injected facade reference; safe to share across
 requests.  The facade owns its own snapshot reads and adapter logic

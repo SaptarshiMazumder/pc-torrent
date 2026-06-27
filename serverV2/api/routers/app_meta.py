@@ -21,16 +21,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from serverV2.allocation.allocation_config_repository import (
-    AllocationConfigRepository,
+from serverV2.config.render_config_repository import (
+    RenderConfigRepository,
 )
 
 router = APIRouter(tags=["app_meta"])
 
-_config_repo: AllocationConfigRepository | None = None
+_config_repo: RenderConfigRepository | None = None
 
 
-def init(config_repo: AllocationConfigRepository) -> None:
+def init(config_repo: RenderConfigRepository) -> None:
     global _config_repo
     _config_repo = config_repo
 
@@ -38,7 +38,7 @@ def init(config_repo: AllocationConfigRepository) -> None:
 @router.get("/app/min-version")
 def get_min_version():
     if _config_repo is None:
-        raise HTTPException(500, "AllocationConfigRepository not initialized")
+        raise HTTPException(500, "RenderConfigRepository not initialized")
     cfg = _config_repo.get()
     return {
         "min_version": cfg.desktop.min_version,

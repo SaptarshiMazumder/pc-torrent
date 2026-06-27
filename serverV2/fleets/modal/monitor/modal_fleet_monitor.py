@@ -25,6 +25,9 @@ import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from serverV2.config import ModalConfig
+from serverV2.config.modal.providers.modal_runtime_config_provider import (
+    ModalRuntimeConfigProvider,
+)
 from serverV2.fleets.instance_registry import InstanceRegistry
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.monitor.modal_snapshot_writer import ModalSnapshotWriter
@@ -63,7 +66,7 @@ class ModalFleetMonitor:
     def __init__(
         self,
         *,
-        config: ModalConfig,
+        config_provider: ModalRuntimeConfigProvider,
         client: ModalClient,
         group_repo: RenderGroupRepository,
         heartbeat_repo: HeartbeatRepository,
@@ -78,7 +81,7 @@ class ModalFleetMonitor:
         registry: InstanceRegistry | None = None,
         interval_sec: int = _DEFAULT_INTERVAL_SEC,
     ) -> None:
-        self._cfg = config
+        self._config_provider = config_provider
         self._client = client
         self._group_repo = group_repo
         self._heartbeats = heartbeat_repo
@@ -101,7 +104,7 @@ class ModalFleetMonitor:
         self._thread_lock = threading.Lock()
 
     def try_start(self) -> bool:
-        if not self._cfg.is_enabled():
+        if not self._config_provider.get().is_enabled():
             return False
         with self._thread_lock:
             if self._thread is not None and self._thread.is_alive():
@@ -154,6 +157,10 @@ class ModalFleetMonitor:
             """,
         )
 
+        # One live config read per tick (assembled from Firestore knobs +
+        # env secrets); threaded into _inspect for the legacy-row fallbacks.
+        cfg = self._config_provider.get()
+
         active_job_ids: set[str] = set()
         for row in rows:
             job_id = row["id"]
@@ -164,7 +171,7 @@ class ModalFleetMonitor:
                 # See VastFleetMonitor._tick for the full narrative.
                 self._update_spend_for_chunk(row)
             try:
-                self._inspect(row)
+                self._inspect(row, cfg)
             except Exception:
                 log.exception("ModalFleetMonitor inspect failed for %s", job_id)
 
@@ -181,7 +188,7 @@ class ModalFleetMonitor:
     # Per-row inspection — ports ModalJobMonitor._tick
     # ------------------------------------------------------------------
 
-    def _inspect(self, row: dict[str, Any]) -> None:
+    def _inspect(self, row: dict[str, Any], cfg: ModalConfig) -> None:
         job_id: str = row["id"]
         provider_job_id: str = str(row.get("modal_function_call_id") or "")
         if not provider_job_id:
@@ -197,7 +204,7 @@ class ModalFleetMonitor:
         in_queue_timeout_sec = float(
             deadlines.get("in_queue_timeout_sec")
             if deadlines.get("in_queue_timeout_sec") is not None
-            else self._cfg.in_queue_timeout_sec
+            else cfg.in_queue_timeout_sec
         )
         heartbeat_grace_sec = float(
             deadlines.get("heartbeat_grace_sec")
@@ -207,7 +214,7 @@ class ModalFleetMonitor:
         frame_progress_stale_sec = float(
             deadlines.get("frame_progress_stale_sec")
             if deadlines.get("frame_progress_stale_sec") is not None
-            else self._cfg.in_progress_stale_sec
+            else cfg.in_progress_stale_sec
         )
 
         state = self._per_job.get(job_id)

@@ -26,8 +26,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from serverV2.allocation.allocation_config_repository import (
-    AllocationConfigRepository,
+from serverV2.config.render_config_repository import (
+    RenderConfigRepository,
 )
 from serverV2.allocation.allocation_strategies.allocation_helpers.allocation_chunk_request import (
     AllocationChunkRequest,
@@ -38,7 +38,7 @@ from serverV2.allocation.allocation_strategies.allocation_planner import (
 from serverV2.allocation.allocation_strategies.analyzers import (
     allocation_time_analyzer,
 )
-from serverV2.allocation.render_config import RenderConfig
+from serverV2.config.render_config import RenderConfig
 from serverV2.allocation.services.allocation_cost_estimation_service import (
     AllocationCostEstimationService,
 )
@@ -64,7 +64,7 @@ class AllocationPlanningService:
         *,
         planner: AllocationPlanner,
         cost_aggregator: AllocationCostAggregator,
-        config_repo: AllocationConfigRepository,
+        config_repo: RenderConfigRepository,
         cost_estimation_service: AllocationCostEstimationService,
     ) -> None:
         self._planner = planner

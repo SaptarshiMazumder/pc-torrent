@@ -1,4 +1,4 @@
-"""AllocationConfigRepository — Firestore-backed source of truth for
+"""RenderConfigRepository — Firestore-backed source of truth for
 the runtime config blob used by the allocation planner.
 
 The bundled ``serverV2/config.json`` stays in the repo as the canonical
@@ -23,7 +23,7 @@ import logging
 
 from firebase_admin import firestore
 
-from serverV2.allocation.render_config import RenderConfig
+from serverV2.config.render_config import RenderConfig
 from serverV2.infrastructure.auth.firebase_app import init_firebase
 
 log = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ _DOC_ID = "global"
 _FIELD = "json"
 
 
-class AllocationConfigRepository:
+class RenderConfigRepository:
 
     def get(self) -> RenderConfig:
         """Fetch the Firestore doc, parse the JSON blob, build RenderConfig.

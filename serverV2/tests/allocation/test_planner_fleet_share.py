@@ -17,7 +17,7 @@ from dataclasses import replace
 from serverV2.allocation.allocation_strategies.allocation_planner import (
     AllocationPlanner,
 )
-from serverV2.allocation.allocation_strategies.allocation_weights import (
+from serverV2.config.allocation_weights import (
     AllocationWeights,
 )
 from serverV2.core.models import AvailableResources

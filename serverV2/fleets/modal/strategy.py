@@ -16,7 +16,9 @@ import logging
 from typing import Any, Callable
 
 from serverV2.allocation.allowed_stall_times_resolver import AllowedStallTimesResolver
-from serverV2.config import ModalConfig
+from serverV2.config.modal.providers.modal_runtime_config_provider import (
+    ModalRuntimeConfigProvider,
+)
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.modal.client import ModalClient
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
@@ -31,14 +33,14 @@ class ModalFleetStrategy:
 
     def __init__(
         self,
-        config: ModalConfig,
+        config_provider: ModalRuntimeConfigProvider,
         client: ModalClient,
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None],
         active_jobs_hooks: ModalActiveJobsHooks,
         allowed_stall_times_resolver: AllowedStallTimesResolver,
     ) -> None:
-        self._cfg = config
+        self._config_provider = config_provider
         self._client = client
         self._job_repo = job_repo
         self._on_failure = on_failure
@@ -54,7 +56,7 @@ class ModalFleetStrategy:
         return 5
 
     def is_enabled(self) -> bool:
-        return self._cfg.is_enabled()
+        return self._config_provider.get().is_enabled()
 
     def dispatch(self, task: PlannedTask, context: DispatchContext, job_id: str) -> DispatchResult:
         if not task.gpu_type:
@@ -64,9 +66,11 @@ class ModalFleetStrategy:
         gpu_type = task.gpu_type
 
         # Snapshot price at dispatch time for telemetry — looked up from
-        # config so the row is immune to later config edits.
+        # the live config so the row reflects the price in effect now.
         price_at_dispatch = next(
-            (ep.price_per_hour for ep in self._cfg.endpoints if ep.gpu_type == gpu_type),
+            (ep.price_per_hour
+             for ep in self._config_provider.get().endpoints
+             if ep.gpu_type == gpu_type),
             None,
         )
 

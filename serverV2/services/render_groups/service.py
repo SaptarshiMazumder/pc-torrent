@@ -59,7 +59,7 @@ class RenderGroupService:
         chunk_progress: ChunkProgressService,
         scene_resolver: SceneResolver,
         get_max_retries: Callable[[], int],
-        credits_per_usd: float,
+        get_credits_per_usd: Callable[[], float],
     ) -> None:
         self._groups = group_repo
         self._jobs = job_repo
@@ -76,14 +76,14 @@ class RenderGroupService:
         # jobs the user can manually retry (i.e. those whose auto-retry
         # budget is already exhausted).
         self._get_max_retries = get_max_retries
-        # Cached so the group payload can convert the LLM-derived
-        # ``pre_render_cost_estimate_usd`` snapshot into credits using
-        # the same rate the serializer uses for per-task numbers.
-        self._credits_per_usd = float(credits_per_usd)
+        # Live Firestore knob (matches get_max_retries): read per call so
+        # admin edits to billing.credits_per_usd take effect immediately on
+        # both the group payload and the serializer's per-task numbers.
+        self._get_credits_per_usd = get_credits_per_usd
         self._serializer = RenderGroupSerializer(
             output_frame_repo=output_frame_repo,
             actual_cost_compute=orchestrator.actual_cost_for_row,
-            credits_per_usd=credits_per_usd,
+            get_credits_per_usd=get_credits_per_usd,
         )
 
     # ------------------------------------------------------------------
@@ -502,7 +502,7 @@ class RenderGroupService:
         snapshot_usd = group.get("pre_render_cost_estimate_usd")
         if snapshot_usd is not None:
             total_estimated_cost_credits = usd_to_credits(
-                float(snapshot_usd), self._credits_per_usd,
+                float(snapshot_usd), self._get_credits_per_usd(),
             )
         else:
             total_estimated_cost_credits = sum(

@@ -11,11 +11,13 @@ All values are seconds.  Fleet-specific keys (``startup_timeout_sec``,
 ``in_queue_timeout_sec``) are emitted only for the relevant fleet;
 shared keys are present on every fleet's row.
 
-Configuration flow: reads the entire ``stall`` block fresh from
-Firestore (via AllocationConfigRepository) at the top of every
-``resolve()`` call.  Editing ``stall`` knobs in the admin UI takes
-effect on the NEXT chunk dispatch -- no redeploy.  The Vast/Modal
-constructor configs are still injected (they don't change at runtime).
+Configuration flow: reads its config fresh from Firestore (via
+RenderConfigRepository) at the top of every ``resolve()`` call -- the
+``stall`` block plus the per-fleet timeout knobs
+(``vast.startup_timeout_sec``, ``vast.heartbeat_grace_sec``,
+``modal.in_queue_timeout_sec``, ``monitor.in_progress_stale_sec``).
+Editing any of them in the admin UI takes effect on the NEXT chunk
+dispatch -- no redeploy.  Nothing is injected at boot.
 """
 
 from __future__ import annotations
@@ -23,11 +25,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from serverV2.allocation.allocation_config_repository import (
-    AllocationConfigRepository,
+from serverV2.config.render_config_repository import (
+    RenderConfigRepository,
 )
-from serverV2.allocation.render_config import StallLoadingSafetyConfig
-from serverV2.config import ModalConfig, VastConfig
+from serverV2.config.render_config import StallLoadingSafetyConfig
 from serverV2.core.value_objects import parse_analysis_heaviness
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 
@@ -44,16 +45,10 @@ class AllowedStallTimesResolver:
     def __init__(
         self,
         *,
-        vast_cfg: VastConfig,
-        modal_cfg: ModalConfig,
-        config_repo: AllocationConfigRepository,
-        in_progress_stale_sec: float,
+        config_repo: RenderConfigRepository,
         group_repo: RenderGroupRepository,
     ) -> None:
-        self._vast = vast_cfg
-        self._modal = modal_cfg
         self._config_repo = config_repo
-        self._in_progress_stale_sec = in_progress_stale_sec
         self._group_repo = group_repo
 
     def resolve(
@@ -102,14 +97,14 @@ class AllowedStallTimesResolver:
             "download_phase_max_sec": download_phase_max,
             "download_bytes_stall_sec": stall.download_bytes_stall_sec,
             "hard_ceiling_sec": stall.hard_max_chunk_sec,
-            "frame_progress_stale_sec": self._in_progress_stale_sec,
+            "frame_progress_stale_sec": cfg.monitor.in_progress_stale_sec,
         }
 
         if fleet == "vast_serverless":
-            out["startup_timeout_sec"] = self._vast.startup_timeout_sec
-            out["heartbeat_grace_sec"] = self._vast.heartbeat_grace_sec
+            out["startup_timeout_sec"] = cfg.vast.startup_timeout_sec
+            out["heartbeat_grace_sec"] = cfg.vast.heartbeat_grace_sec
         elif fleet == "modal_serverless":
-            out["in_queue_timeout_sec"] = self._modal.in_queue_timeout_sec
+            out["in_queue_timeout_sec"] = cfg.modal.in_queue_timeout_sec
             out["heartbeat_grace_sec"] = _MODAL_HEARTBEAT_GRACE_SEC
 
         return out

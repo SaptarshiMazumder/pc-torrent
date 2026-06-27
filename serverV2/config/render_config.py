@@ -4,7 +4,7 @@ Storage shape and dataclass shape are identical: ``dataclasses.asdict``
 of a ``RenderConfig`` equals the JSON blob in Firestore (and the bundled
 ``config.json``), and ``RenderConfig.from_dict`` parses that blob back.
 This is the object the allocation planner reads fresh from the
-``AllocationConfigRepository`` at the start of each plan call, and the
+``RenderConfigRepository`` at the start of each plan call, and the
 object the admin endpoint round-trips through Firestore.
 
 Reuses existing leaf dataclasses where their field names already match
@@ -25,10 +25,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from serverV2.allocation.allocation_strategies.allocation_weights import (
+from serverV2.config.allocation_weights import (
     AllocationWeights,
 )
-from serverV2.config import (
+from serverV2.config.config import (
     EngineFactors,
     FailureRateConfig,
     RenderStartupSec,
@@ -51,6 +51,7 @@ class ModalSection:
     in_queue_timeout_sec: int
     endpoint_url_prefix: str
     provisioning_enabled: bool
+    availability_sec: float
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,13 @@ class OrchestratorSection:
 class CommunitySection:
     price_per_hour: float
     dispatch_claim_timeout_sec: int
+    machine_stale_seconds: int
+    machine_demote_seconds: int
+
+
+@dataclass(frozen=True)
+class BillingSection:
+    credits_per_usd: float
 
 
 @dataclass(frozen=True)
@@ -196,6 +204,7 @@ class RenderConfig:
     vast: VastSection
     orchestrator: OrchestratorSection
     community: CommunitySection
+    billing: BillingSection
     monitor: MonitorSection
     stall: StallSection
     frame_allocation: FrameAllocationSection
@@ -210,6 +219,7 @@ class RenderConfig:
             vast=_vast(_block(d, "vast")),
             orchestrator=_orchestrator(_block(d, "orchestrator")),
             community=_community(_block(d, "community")),
+            billing=_billing(d.get("billing") or {}),
             monitor=_monitor(_block(d, "monitor")),
             stall=_stall(_block(d, "stall")),
             frame_allocation=_frame_allocation(_block(d, "frame_allocation")),
@@ -275,6 +285,13 @@ def _float(block: dict, ctx: str, key: str) -> float:
 
 def _modal(b: dict) -> ModalSection:
     ctx = "modal"
+    # ``availability_sec`` was added to the Firestore schema after this block
+    # was already populated in production docs.  Fall back to the boot
+    # default (14400) when absent so old docs keep parsing; the strict
+    # parsers stay strict for every always-present field.
+    availability_sec = (
+        _float(b, ctx, "availability_sec") if "availability_sec" in b else 14400.0
+    )
     return ModalSection(
         max_parallel=_int(b, ctx, "max_parallel"),
         per_gpu_max_parallel=_int(b, ctx, "per_gpu_max_parallel"),
@@ -282,6 +299,7 @@ def _modal(b: dict) -> ModalSection:
         in_queue_timeout_sec=_int(b, ctx, "in_queue_timeout_sec"),
         endpoint_url_prefix=_str(b, ctx, "endpoint_url_prefix"),
         provisioning_enabled=_bool(b, ctx, "provisioning_enabled"),
+        availability_sec=availability_sec,
     )
 
 
@@ -305,10 +323,32 @@ def _orchestrator(b: dict) -> OrchestratorSection:
 
 def _community(b: dict) -> CommunitySection:
     ctx = "community"
+    # ``machine_stale_seconds`` / ``machine_demote_seconds`` were added to the
+    # schema after this block already existed in production docs (they used to
+    # be hardcoded AppConfig defaults).  Fall back to those defaults when
+    # absent so old docs keep parsing.
+    machine_stale_seconds = (
+        _int(b, ctx, "machine_stale_seconds") if "machine_stale_seconds" in b else 15
+    )
+    machine_demote_seconds = (
+        _int(b, ctx, "machine_demote_seconds") if "machine_demote_seconds" in b else 90
+    )
     return CommunitySection(
         price_per_hour=_float(b, ctx, "price_per_hour"),
         dispatch_claim_timeout_sec=_int(b, ctx, "dispatch_claim_timeout_sec"),
+        machine_stale_seconds=machine_stale_seconds,
+        machine_demote_seconds=machine_demote_seconds,
     )
+
+
+def _billing(b: dict) -> BillingSection:
+    ctx = "billing"
+    # Whole ``billing`` block is optional on old docs; default matches the
+    # former config.json value so behaviour is unchanged until re-saved.
+    credits_per_usd = (
+        _float(b, ctx, "credits_per_usd") if "credits_per_usd" in b else 100.0
+    )
+    return BillingSection(credits_per_usd=credits_per_usd)
 
 
 def _monitor(b: dict) -> MonitorSection:

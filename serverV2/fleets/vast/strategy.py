@@ -16,7 +16,9 @@ import logging
 from typing import Any, Callable
 
 from serverV2.allocation.allowed_stall_times_resolver import AllowedStallTimesResolver
-from serverV2.config import VastConfig
+from serverV2.config.vast.providers.vast_runtime_config_provider import (
+    VastRuntimeConfigProvider,
+)
 from serverV2.core.models import CreateJobParams, DispatchContext, DispatchResult, PlannedTask
 from serverV2.fleets.vast.client import VastClient
 from serverV2.repositories.job_repository import JobRepository
@@ -30,13 +32,13 @@ class VastFleetStrategy:
 
     def __init__(
         self,
-        config: VastConfig,
+        config_provider: VastRuntimeConfigProvider,
         client: VastClient,
         job_repo: JobRepository,
         on_failure: Callable[[str, str], None],
         allowed_stall_times_resolver: AllowedStallTimesResolver,
     ) -> None:
-        self._cfg = config
+        self._config_provider = config_provider
         self._client = client
         self._job_repo = job_repo
         self._on_failure = on_failure
@@ -51,7 +53,7 @@ class VastFleetStrategy:
         return 10
 
     def is_enabled(self) -> bool:
-        return self._cfg.is_enabled()
+        return self._config_provider.get().is_enabled()
 
     def dispatch(self, task: PlannedTask, context: DispatchContext, job_id: str) -> DispatchResult:
         if not task.gpu_type:
@@ -98,7 +100,7 @@ class VastFleetStrategy:
         ))
 
         try:
-            image = self._cfg.image_for_engine(context.engine)
+            image = self._config_provider.get().image_for_engine(context.engine)
             log.info(
                 "[ALLOC] dispatching vast offer=%s gpu=%s cuda=%s os=%s price=$%.3f/hr job=%s",
                 task.offer_id, gpu_name, task.cuda_version, task.host_os,

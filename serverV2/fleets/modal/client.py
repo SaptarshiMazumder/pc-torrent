@@ -14,6 +14,9 @@ from typing import Any
 import httpx
 
 from serverV2.config import ModalConfig
+from serverV2.config.modal.providers.modal_runtime_config_provider import (
+    ModalRuntimeConfigProvider,
+)
 
 log = logging.getLogger(__name__)
 _CALL_ID_RE = re.compile(r"\b(fc-[A-Za-z0-9]+)\b")
@@ -48,8 +51,8 @@ class ModalCallIdExtractor:
 class ModalHttpDispatcher:
     """Posts a render job to the Modal web endpoint."""
 
-    def __init__(self, config: ModalConfig) -> None:
-        self._cfg = config
+    def __init__(self, config_provider: ModalRuntimeConfigProvider) -> None:
+        self._config_provider = config_provider
         self._extractor = ModalCallIdExtractor()
 
     def dispatch(
@@ -62,7 +65,8 @@ class ModalHttpDispatcher:
         frame_step: int,
         render_overrides_json: str,
     ) -> str:
-        url = self._cfg.endpoint_url(gpu_type)
+        cfg = self._config_provider.get()
+        url = cfg.endpoint_url(gpu_type)
         # Wire-format boundary: the Modal endpoint's input contract takes
         # render_overrides_b64.  Encoding belongs HERE, not upstream — the
         # rest of the server operates on the JSON form.
@@ -77,7 +81,7 @@ class ModalHttpDispatcher:
                 "frame_end": frame_end,
                 "frame_step": frame_step,
                 "render_overrides_b64": render_overrides_b64,
-                "backend_url": self._cfg.public_backend_url,
+                "backend_url": cfg.public_backend_url,
             }
         }
 
@@ -85,9 +89,9 @@ class ModalHttpDispatcher:
         try:
             resp = httpx.post(
                 url,
-                headers=_auth_headers(self._cfg),
+                headers=_auth_headers(cfg),
                 json=payload,
-                timeout=self._cfg.dispatch_timeout_sec,
+                timeout=cfg.dispatch_timeout_sec,
                 follow_redirects=True,
             )
         except httpx.TimeoutException as exc:
@@ -134,9 +138,8 @@ class ModalHttpDispatcher:
 class ModalClient:
     """Composed facade: dispatch + cancel."""
 
-    def __init__(self, config: ModalConfig) -> None:
-        self._cfg = config
-        self._dispatcher = ModalHttpDispatcher(config)
+    def __init__(self, config_provider: ModalRuntimeConfigProvider) -> None:
+        self._dispatcher = ModalHttpDispatcher(config_provider)
 
     def dispatch_job(
         self,

@@ -20,6 +20,7 @@ historical / informational reads but no longer used as the live signal.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Callable
 
 from serverV2.core.models import CommunityMachine
 from serverV2.infrastructure.db import execute, query_all, query_one
@@ -31,15 +32,14 @@ class MachineRepository:
     def __init__(
         self,
         mirror: MachineRedisMirror,
-        stale_seconds: int = 15,
-        community_price_per_hour: float = 1.0,
+        community_price_per_hour: Callable[[], float],
     ) -> None:
         self._mirror = mirror
-        self._stale_seconds = stale_seconds
-        # Injected once at startup from config.json's ``community.price_per_hour``.
-        # Stamped onto every CommunityMachine this repo returns so cost-aware
-        # allocators have a price to read without re-querying config.
-        self._community_price = community_price_per_hour
+        # Live Firestore knob provider (community.price_per_hour).  This SQL
+        # repo stays config-agnostic -- it just calls the injected function
+        # (once per query) to stamp the current price onto each
+        # CommunityMachine it returns.
+        self._get_community_price = community_price_per_hour
 
     # ------------------------------------------------------------------
     # reads -- PG only (callers wanting the cached path go through the
@@ -61,7 +61,8 @@ class MachineRepository:
             ORDER BY gpu_vram_gb DESC
             """,
         )
-        return [CommunityMachine.from_row(r, price_per_hour=self._community_price) for r in rows]
+        price = self._get_community_price()
+        return [CommunityMachine.from_row(r, price_per_hour=price) for r in rows]
 
     def get_community_by_ids(self, machine_ids: set[str] | list[str]) -> list[CommunityMachine]:
         """Fetch full community-machine rows for the given ids.  Used by
@@ -81,14 +82,16 @@ class MachineRepository:
             """,
             (ids_list,),
         )
-        return [CommunityMachine.from_row(r, price_per_hour=self._community_price) for r in rows]
+        price = self._get_community_price()
+        return [CommunityMachine.from_row(r, price_per_hour=price) for r in rows]
 
     def get_by_id(self, machine_id: str) -> CommunityMachine | None:
         row = query_one(
             "SELECT * FROM machines WHERE id = %s AND machine_type = 'windows'",
             (machine_id,),
         )
-        return CommunityMachine.from_row(row, price_per_hour=self._community_price) if row else None
+        price = self._get_community_price()
+        return CommunityMachine.from_row(row, price_per_hour=price) if row else None
 
     def get_raw_by_ids(self, machine_ids: list[str]) -> dict[str, dict]:
         """Return raw rows keyed by machine id.  Missing ids are omitted.
@@ -119,7 +122,8 @@ class MachineRepository:
             """,
             (exclude_machine_id,),
         )
-        return [CommunityMachine.from_row(r, price_per_hour=self._community_price) for r in rows]
+        price = self._get_community_price()
+        return [CommunityMachine.from_row(r, price_per_hour=price) for r in rows]
 
     # ------------------------------------------------------------------
     # writes -- PG sync, Redis mirror async

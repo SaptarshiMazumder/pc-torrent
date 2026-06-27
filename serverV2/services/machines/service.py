@@ -33,20 +33,20 @@ class MachineService:
         orchestrator: "RenderOrchestrator",
         machine_repo: MachineRepository,
         mirror: MachineRedisMirror,
-        vast_config=None,
-        modal_config=None,
+        vast_provider=None,
+        modal_provider=None,
     ) -> None:
         self._orchestrator = orchestrator
         self._machine_repo = machine_repo
         self._mirror = mirror
-        self._vast_cfg = vast_config
-        self._modal_cfg = modal_config
+        self._vast_provider = vast_provider
+        self._modal_provider = modal_provider
 
     def _excluded_types(self) -> set[str]:
         excluded: set[str] = set()
-        if self._vast_cfg and not self._vast_cfg.is_enabled():
+        if self._vast_provider and not self._vast_provider.get().is_enabled():
             excluded.add("vast_serverless")
-        if self._modal_cfg and not self._modal_cfg.is_enabled():
+        if self._modal_provider and not self._modal_provider.get().is_enabled():
             excluded.add("modal_serverless")
         return excluded
 

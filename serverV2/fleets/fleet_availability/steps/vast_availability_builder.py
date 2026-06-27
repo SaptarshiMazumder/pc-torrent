@@ -21,7 +21,10 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from serverV2.config import VastConfig, VastEndpoint
+from serverV2.config import VastEndpoint
+from serverV2.config.vast.providers.vast_runtime_config_provider import (
+    VastRuntimeConfigProvider,
+)
 from serverV2.core.models import FleetCapability
 from serverV2.fleets.vast.client import VastClient
 from serverV2.fleets.vast.vast_offer import VastOffer
@@ -40,21 +43,22 @@ class VastAvailabilityBuilder:
         self,
         *,
         client: VastClient,
-        config: VastConfig,
+        config_provider: VastRuntimeConfigProvider,
         job_repo: JobRepository,
     ) -> None:
         self._client = client
-        self._config = config
+        self._config_provider = config_provider
         self._jobs = job_repo
 
     def build(self) -> tuple[FleetCapability, ...]:
+        cfg = self._config_provider.get()
         # Fleet-cap short-circuit -- skip the marketplace probe if we're
         # already at our self-imposed concurrency ceiling.
         in_flight = self._jobs.count_active_by_fleet()
-        if in_flight.get(_FLEET, 0) >= self._config.max_parallel:
+        if in_flight.get(_FLEET, 0) >= cfg.max_parallel:
             return ()
 
-        endpoints = list(self._config.endpoints)
+        endpoints = list(cfg.endpoints)
         if not endpoints:
             return ()
 
@@ -74,7 +78,7 @@ class VastAvailabilityBuilder:
                     cpu_cores=ep.cpu_cores,
                     ram_gb=ep.ram_gb,
                     render_speed=ep.render_speed,
-                    fleet_max_parallel=self._config.max_parallel,
+                    fleet_max_parallel=cfg.max_parallel,
                     # Per-offer fields -- the marketplace truth, not config
                     price_per_hour=offer.dph_total,
                     offer_id=offer.offer_id,

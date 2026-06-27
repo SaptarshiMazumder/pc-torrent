@@ -42,7 +42,7 @@ from serverV2.core.value_objects import (
 )
 from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
 from serverV2.fleets.registry import FleetRegistry
-from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.clients.allocation_client import AllocationClient
 from serverV2.orchestrator.anti_affinity import AntiAffinityFacade
 from serverV2.orchestrator.repositories import (
     DispatchAllocationRepository,

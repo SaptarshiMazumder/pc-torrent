@@ -20,7 +20,9 @@ caps.
 
 from __future__ import annotations
 
-from serverV2.config import ModalConfig
+from serverV2.config.modal.providers.modal_runtime_config_provider import (
+    ModalRuntimeConfigProvider,
+)
 from serverV2.core.models import FleetCapability
 from serverV2.fleets.modal.modal_active_jobs_tracker import (
     ModalActiveJobsTracker,
@@ -36,16 +38,17 @@ class ModalAvailabilityBuilder:
     def __init__(
         self,
         *,
-        config: ModalConfig,
+        config_provider: ModalRuntimeConfigProvider,
         job_repo: JobRepository,
         tracker: ModalActiveJobsTracker,
     ) -> None:
-        self._config = config
+        self._config_provider = config_provider
         self._jobs = job_repo
         self._tracker = tracker
 
     def build(self) -> tuple[FleetCapability, ...]:
-        gpu_types = [ep.gpu_type for ep in self._config.endpoints]
+        cfg = self._config_provider.get()
+        gpu_types = [ep.gpu_type for ep in cfg.endpoints]
 
         # Redis-first.  Falls back to PG when Redis is unreachable;
         # when Redis is up, this is one MGET-style round-trip per gpu.
@@ -57,12 +60,12 @@ class ModalAvailabilityBuilder:
             }
 
         total = sum(counts.values())
-        if total >= self._config.max_parallel:
+        if total >= cfg.max_parallel:
             return ()
 
         available: list[FleetCapability] = []
-        for ep in self._config.endpoints:
-            if counts.get(ep.gpu_type, 0) >= self._config.per_gpu_max_parallel:
+        for ep in cfg.endpoints:
+            if counts.get(ep.gpu_type, 0) >= cfg.per_gpu_max_parallel:
                 continue
             available.append(FleetCapability(
                 fleet=_FLEET,
@@ -72,8 +75,8 @@ class ModalAvailabilityBuilder:
                 cpu_cores=ep.cpu_cores,
                 ram_gb=ep.ram_gb,
                 render_speed=ep.render_speed,
-                fleet_max_parallel=self._config.max_parallel,
+                fleet_max_parallel=cfg.max_parallel,
                 price_per_hour=ep.price_per_hour,
-                available_seconds=self._config.availability_sec,
+                available_seconds=cfg.availability_sec,
             ))
         return tuple(available)

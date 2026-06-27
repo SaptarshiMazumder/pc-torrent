@@ -20,7 +20,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from serverV2.api.dependencies import require_admin
 from serverV2.fleets.fleet_exception import FleetException
-from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.clients.allocation_client import AllocationClient
 
 router = APIRouter(tags=["admin_config"])
 

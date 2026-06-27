@@ -76,7 +76,7 @@ from serverV2.orchestrator.affinity import (
     AffinityService,
 )
 from serverV2.orchestrator.chunk_progress import ChunkProgressService
-from serverV2.orchestrator.allocation_client import AllocationClient
+from serverV2.clients.allocation_client import AllocationClient
 from serverV2.orchestrator.lifecycle import RenderLifecycle
 from serverV2.orchestrator.lifecycle_job_retry import RetryDeps, RetryExecutor
 from serverV2.orchestrator.lifecycle_job_termination import (
@@ -109,8 +109,16 @@ from serverV2.allocation.allocation_dispatcher import AllocationDispatcher
 from serverV2.allocation.allocation_engine_resolver import (
     AllocationEngineResolver,
 )
-from serverV2.allocation.allocation_config_repository import (
-    AllocationConfigRepository,
+from serverV2.config.render_config_repository import (
+    RenderConfigRepository,
+)
+from serverV2.config.vast.vast_secrets import VastSecrets
+from serverV2.config.vast.providers.vast_runtime_config_provider import (
+    VastRuntimeConfigProvider,
+)
+from serverV2.config.modal.modal_secrets import ModalSecrets
+from serverV2.config.modal.providers.modal_runtime_config_provider import (
+    ModalRuntimeConfigProvider,
 )
 from serverV2.allocation.allocation_cost_estimation_config_repository import (
     AllocationCostEstimationConfigRepository,
@@ -215,7 +223,7 @@ class Container:
         status_aggregator: InstanceStatusAggregator,
         allocation_facade: AllocationFacade,
         allocation_client: AllocationClient,
-        allocation_config_repo: AllocationConfigRepository,
+        allocation_config_repo: RenderConfigRepository,
         allocation_dispatch_queue_daemon: AllocationDispatchQueueDaemon,
         fleet_availability_snapshot_cache: FleetAvailabilitySnapshotCache,
         pre_render_estimator: PreRenderEstimator,
@@ -276,8 +284,42 @@ def build(
     # ``allocation_config_repo`` -- a separate flow returning the new
     # ``RenderConfig`` object.
     cfg = config or AppConfig.from_env()
-    allocation_config_repo = AllocationConfigRepository()
+    allocation_config_repo = RenderConfigRepository()
     cost_estimation_config_repo = AllocationCostEstimationConfigRepository()
+    # Vast fleet config: env secrets injected once; tunable knobs read live
+    # from Firestore (allocation_config_repo) per operation.  Replaces the
+    # frozen ``cfg.vast`` for every Vast fleet consumer -- config.json is no
+    # longer the Vast source of truth.
+    vast_secrets = VastSecrets.from_env()
+    vast_runtime_config_provider = VastRuntimeConfigProvider(
+        secrets=vast_secrets,
+        config_repo=allocation_config_repo,
+    )
+    # Modal fleet config: same split -- env secrets injected once, knobs read
+    # live from Firestore per operation.  Replaces the frozen ``cfg.modal``.
+    modal_secrets = ModalSecrets.from_env()
+    modal_runtime_config_provider = ModalRuntimeConfigProvider(
+        secrets=modal_secrets,
+        config_repo=allocation_config_repo,
+    )
+
+    # Live Firestore knob readers (same pattern as _get_max_retries below):
+    # each reads its value fresh per call so admin edits take effect without a
+    # redeploy.  Injected as callables so consumers stay config-repo-agnostic.
+    def _get_credits_per_usd() -> float:
+        return allocation_config_repo.get().billing.credits_per_usd
+
+    def _get_community_price_per_hour() -> float:
+        return allocation_config_repo.get().community.price_per_hour
+
+    def _get_machine_stale_seconds() -> int:
+        return allocation_config_repo.get().community.machine_stale_seconds
+
+    def _get_machine_demote_seconds() -> int:
+        return allocation_config_repo.get().community.machine_demote_seconds
+
+    def _get_dispatch_claim_timeout_sec() -> int:
+        return allocation_config_repo.get().community.dispatch_claim_timeout_sec
     redis = redis_client or RedisClient()
 
     # Initialize Firebase Admin SDK once at boot.  Auth-protected
@@ -294,9 +336,9 @@ def build(
     instance_id = str(uuid.uuid4())
 
     # -- Modal endpoint drift check --
-    # Fail loud at boot if config.json declares a Modal GPU that is not
-    # deployed on Modal.  Prevents silent 404s at dispatch time.
-    validate_modal_endpoints(cfg.modal)
+    # Fail loud at boot if the Firestore config declares a Modal GPU that is
+    # not deployed on Modal.  Prevents silent 404s at dispatch time.
+    validate_modal_endpoints(modal_runtime_config_provider.get())
 
     # -- repositories --
     # Redis-backed terminal-status cache so heartbeats don't hit Postgres
@@ -311,8 +353,7 @@ def build(
     machine_redis_mirror = MachineRedisMirror(redis)
     machine_repo = MachineRepository(
         mirror=machine_redis_mirror,
-        stale_seconds=cfg.machine_stale_seconds,
-        community_price_per_hour=cfg.community_price_per_hour,
+        community_price_per_hour=_get_community_price_per_hour,
     )
     group_repo = RenderGroupRepository()
     # Pre-submit / submit boundary helper.  RenderGroupService.confirm_upload
@@ -383,10 +424,7 @@ def build(
     # onto ``jobs.allowed_stall_times``.  Read at runtime by the
     # singletons + the new ``GET /jobs/{id}/allowed-stall-times`` route.
     allowed_stall_times_resolver = AllowedStallTimesResolver(
-        vast_cfg=cfg.vast,
-        modal_cfg=cfg.modal,
         config_repo=allocation_config_repo,
-        in_progress_stale_sec=cfg.vast.in_progress_stale_sec,
         group_repo=group_repo,
     )
 
@@ -394,9 +432,9 @@ def build(
     # No machine registrar — Vast capabilities live in config.json.
     # Strategy reads task.gpu_type at dispatch time.  Singleton fleet
     # monitor is constructed below; strategy doesn't reference it.
-    vast_client = VastClient(cfg.vast)
+    vast_client = VastClient(vast_runtime_config_provider)
     vast_strategy = VastFleetStrategy(
-        config=cfg.vast, client=vast_client,
+        config_provider=vast_runtime_config_provider, client=vast_client,
         job_repo=job_repo,
         on_failure=_on_failure,
         allowed_stall_times_resolver=allowed_stall_times_resolver,
@@ -405,13 +443,13 @@ def build(
 
     # -- modal fleet --
     # No machine registrar — Modal capabilities live in config.json.
-    modal_client = ModalClient(cfg.modal)
+    modal_client = ModalClient(modal_runtime_config_provider)
     modal_active_jobs_tracker = ModalActiveJobsTracker(redis_client=redis)
     modal_active_jobs_hooks = ModalActiveJobsHooks(
         tracker=modal_active_jobs_tracker,
     )
     modal_strategy = ModalFleetStrategy(
-        config=cfg.modal, client=modal_client,
+        config_provider=modal_runtime_config_provider, client=modal_client,
         job_repo=job_repo,
         on_failure=_on_failure,
         active_jobs_hooks=modal_active_jobs_hooks,
@@ -423,7 +461,7 @@ def build(
     community_strategy = CommunityStrategy(
         job_repo=job_repo,
         machine_repo=machine_repo,
-        price_per_hour=cfg.community_price_per_hour,
+        get_price_per_hour=_get_community_price_per_hour,
         allowed_stall_times_resolver=allowed_stall_times_resolver,
     )
     registry.register(community_strategy)
@@ -462,17 +500,19 @@ def build(
     # fetch + AvailableResources adapter internally.
     fleet_availability_factory = FleetAvailabilityBuilderFactory(
         vast=VastAvailabilityBuilder(
-            client=vast_client, config=cfg.vast, job_repo=job_repo,
+            client=vast_client,
+            config_provider=vast_runtime_config_provider,
+            job_repo=job_repo,
         ),
         modal=ModalAvailabilityBuilder(
-            config=cfg.modal,
+            config_provider=modal_runtime_config_provider,
             job_repo=job_repo,
             tracker=modal_active_jobs_tracker,
         ),
         community=CommunityAvailabilityBuilder(
             machine_repo=machine_repo,
             machine_redis_mirror=machine_redis_mirror,
-            stale_seconds=cfg.machine_stale_seconds,
+            get_stale_seconds=_get_machine_stale_seconds,
         ),
         in_progress_serverless_fleet=InProgressServerlessFleetBuilder(
             job_repo=job_repo,
@@ -485,7 +525,9 @@ def build(
     # under a Redis singleton lock.
     # ------------------------------------------------------------------
     allocation_dispatcher = AllocationDispatcher(registry)
-    allocation_blend_resolver = AllocationBlendUrlResolver(cfg)
+    allocation_blend_resolver = AllocationBlendUrlResolver(
+        public_backend_url=vast_secrets.public_backend_url,
+    )
     allocation_cost_aggregator = AllocationCostAggregator()
 
     # ------------------------------------------------------------------
@@ -522,11 +564,15 @@ def build(
         config_repo=allocation_config_repo,
         cost_estimation_service=cost_estimation_service,
     )
-    _allocation_fleet_caps: dict[str, int] = {
-        "modal_serverless": cfg.modal.max_parallel,
-        "vast_serverless": cfg.vast.max_parallel,
-        "community": 10_000,  # per-machine queue, no fleet-wide cap
-    }
+    def _allocation_fleet_caps() -> dict[str, int]:
+        # Read live from Firestore each dispatch tick so max_parallel edits
+        # take effect without a redeploy.  community has no fleet-wide cap.
+        rc = allocation_config_repo.get()
+        return {
+            "modal_serverless": rc.modal.max_parallel,
+            "vast_serverless": rc.vast.max_parallel,
+            "community": 10_000,
+        }
     def _get_group_status(group_id: str) -> str | None:
         grp = group_repo.get_by_id(group_id)
         if grp is None:
@@ -595,7 +641,7 @@ def build(
         snapshot_cache=fleet_availability_snapshot_cache,
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
-        enabled_fleets=list(_allocation_fleet_caps.keys()),
+        enabled_fleets=list(_allocation_fleet_caps().keys()),
     )
     allocation_client = AllocationClient(facade=allocation_facade)
 
@@ -714,7 +760,7 @@ def build(
     # ``RenderOrchestrator`` facade needs the client at construction
     # time so terminal callbacks debit the user atomically.
     user_profile_repo = UserProfileRepository()
-    user_service = UserService(credits_per_usd=cfg.billing.credits_per_usd)
+    user_service = UserService(get_credits_per_usd=_get_credits_per_usd)
     user_facade = UserFacade(
         repository=user_profile_repo,
         service=user_service,
@@ -761,7 +807,7 @@ def build(
     # (~30s) the singleton iterates active rows of its fleet and runs
     # the same decision blocks the per-job monitors used to run.
     vast_fleet_monitor = VastFleetMonitor(
-        config=cfg.vast,
+        config_provider=vast_runtime_config_provider,
         client=vast_client,
         group_repo=group_repo,
         heartbeat_repo=heartbeat_repo,
@@ -777,7 +823,7 @@ def build(
         registry=vast_instance_registry,
     )
     modal_fleet_monitor = ModalFleetMonitor(
-        config=cfg.modal,
+        config_provider=modal_runtime_config_provider,
         client=modal_client,
         group_repo=group_repo,
         heartbeat_repo=heartbeat_repo,
@@ -808,8 +854,8 @@ def build(
         stall_detector=_make_pre_render_stall_detector(),
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
-        demote_seconds=cfg.community_machine_demote_seconds,
-        dispatch_claim_timeout_sec=cfg.community_dispatch_claim_timeout_sec,
+        get_demote_seconds=_get_machine_demote_seconds,
+        get_dispatch_claim_timeout_sec=_get_dispatch_claim_timeout_sec,
     )
 
     # -- monitor lock facade --
@@ -853,7 +899,7 @@ def build(
         chunk_progress=chunk_progress_service,
         scene_resolver=scene_resolver,
         get_max_retries=_get_max_retries,
-        credits_per_usd=cfg.billing.credits_per_usd,
+        get_credits_per_usd=_get_credits_per_usd,
     )
 
     job_service = JobService(
@@ -879,8 +925,8 @@ def build(
         orchestrator=orchestrator,
         machine_repo=machine_repo,
         mirror=machine_redis_mirror,
-        vast_config=cfg.vast,
-        modal_config=cfg.modal,
+        vast_provider=vast_runtime_config_provider,
+        modal_provider=modal_runtime_config_provider,
     )
 
     asset_service = AssetService(asset_repo=asset_repo)
@@ -892,7 +938,7 @@ def build(
     pre_render_estimator = PreRenderEstimator(
         orchestrator=orchestrator,
         scene_resolver=scene_resolver,
-        credits_per_usd=cfg.billing.credits_per_usd,
+        get_credits_per_usd=_get_credits_per_usd,
     )
 
     return Container(

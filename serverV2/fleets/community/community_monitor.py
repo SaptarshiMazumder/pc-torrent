@@ -72,8 +72,8 @@ class CommunityMonitor:
         stall_detector: IPreRenderStallDetector,
         lock_repo: MonitorLockRepository,
         instance_id: str,
-        dispatch_claim_timeout_sec: int,
-        demote_seconds: int = 90,
+        get_dispatch_claim_timeout_sec: Callable[[], int],
+        get_demote_seconds: Callable[[], int],
         interval_sec: int = 10,
     ) -> None:
         self._job_repo = job_repo
@@ -92,18 +92,15 @@ class CommunityMonitor:
         self._stall_detector = stall_detector
         self._lock_repo = lock_repo
         self._instance_id = instance_id
-        # ``demote_seconds`` (~90s): how long without an idle-phase
-        # heartbeat (machines:alive ZADD) before we flip a status=
-        # 'available' machine to 'idle'.  Wider than the agent's poll
-        # interval so a normally-polling agent can't be demoted in a
-        # race window.  Render-phase liveness goes through the per-job
-        # heartbeat directly, not this threshold.
-        self._demote_sec = demote_seconds
-        # Mirrors Modal/Vast: a community job stuck in status='pending'
-        # past this threshold means the agent never claimed it (most
-        # likely crashed between dispatch and next poll).  Failing it
-        # routes through the standard CallbackRouter -> retry pipeline.
-        self._dispatch_claim_timeout = dispatch_claim_timeout_sec
+        # Live Firestore knobs, read fresh each tick:
+        #  * machine_demote_seconds (~90s): how long without an idle-phase
+        #    heartbeat (machines:alive ZADD) before flipping a status=
+        #    'available' machine to 'idle'.  Wider than the agent's poll
+        #    interval so a normally-polling agent can't be demoted in a race.
+        #  * dispatch_claim_timeout_sec: a community job stuck in 'pending'
+        #    past this means the agent never claimed it -> fail + retry.
+        self._get_demote_seconds = get_demote_seconds
+        self._get_dispatch_claim_timeout_sec = get_dispatch_claim_timeout_sec
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
@@ -130,8 +127,7 @@ class CommunityMonitor:
             )
             self._thread.start()
         log.info(
-            "CommunityMonitor started (interval=%ds, demote=%ds)",
-            self._interval, self._demote_sec,
+            "CommunityMonitor started (interval=%ds)", self._interval,
         )
         return True
 
@@ -159,7 +155,8 @@ class CommunityMonitor:
         # liveness signal in _check_machine_offline AND for the
         # demote-ghosts pass at the bottom -- no reason to query it
         # twice per tick.
-        machine_alive_ids = self._mirror.alive_ids(self._demote_sec)
+        demote_sec = self._get_demote_seconds()
+        machine_alive_ids = self._mirror.alive_ids(demote_sec)
 
         for group in self._group_repo.get_active_groups():
             try:
@@ -200,7 +197,7 @@ class CommunityMonitor:
         # claimed the dispatch.  One query for the whole fleet rather
         # than re-checking every active group's job list.
         try:
-            self._check_pending_dispatch_timeout()
+            self._check_pending_dispatch_timeout(self._get_dispatch_claim_timeout_sec())
         except Exception:
             log.exception("CommunityMonitor pending-dispatch sweep failed")
 
@@ -215,11 +212,11 @@ class CommunityMonitor:
                 demoted = self._machine_repo.demote_ghosts(machine_alive_ids)
                 if demoted:
                     log.info("Demoted %d ghost machine(s) to idle", demoted)
-                self._mirror.prune_stale(self._demote_sec)
+                self._mirror.prune_stale(demote_sec)
             except Exception:
                 log.exception("Ghost demote / prune failed")
 
-    def _check_pending_dispatch_timeout(self) -> None:
+    def _check_pending_dispatch_timeout(self, claim_timeout: int) -> None:
         """Fail community jobs stuck in 'pending' past the claim timeout.
         Mirrors ``VastFleetMonitor`` startup-timeout and
         ``ModalFleetMonitor`` in-queue-timeout: dispatch happened, agent
@@ -227,17 +224,15 @@ class CommunityMonitor:
         release_machine_step (flips machine back to 'available') ->
         retry pipeline.
         """
-        rows = self._job_repo.get_stale_pending_community(
-            self._dispatch_claim_timeout,
-        )
+        rows = self._job_repo.get_stale_pending_community(claim_timeout)
         for row in rows:
             log.warning(
                 "Community job %s stuck pending > %ds on machine %s -- failing",
-                row["id"], self._dispatch_claim_timeout, row.get("machine_id"),
+                row["id"], claim_timeout, row.get("machine_id"),
             )
             self._on_failure(
                 row["id"],
-                f"Agent did not claim within {self._dispatch_claim_timeout}s",
+                f"Agent did not claim within {claim_timeout}s",
             )
 
     def _check_is_complete(self, job: RenderJob) -> bool:

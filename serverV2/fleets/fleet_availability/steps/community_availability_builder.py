@@ -26,6 +26,8 @@ slightly stale, acceptable per the existing picker's docstring).
 
 from __future__ import annotations
 
+from typing import Callable
+
 from serverV2.core.models import CommunityMachine
 from serverV2.services.machines.machine_redis_mirror import MachineRedisMirror
 from serverV2.services.machines.machine_repository import MachineRepository
@@ -38,11 +40,12 @@ class CommunityAvailabilityBuilder:
         *,
         machine_repo: MachineRepository,
         machine_redis_mirror: MachineRedisMirror,
-        stale_seconds: int,
+        get_stale_seconds: Callable[[], int],
     ) -> None:
         self._machines = machine_repo
         self._mirror = machine_redis_mirror
-        self._stale_seconds = stale_seconds
+        # Live Firestore knob (community.machine_stale_seconds).
+        self._get_stale_seconds = get_stale_seconds
 
     def build(self) -> tuple[CommunityMachine, ...]:
         # Step 1 -- status=available cohort, Redis-first with PG fallback.
@@ -54,7 +57,7 @@ class CommunityAvailabilityBuilder:
         # Step 2 -- intersect with the alive set (Redis-only; if Redis
         # is down we keep the broader status=available list for this
         # tick rather than mass-failing every dispatch).
-        alive_ids = self._mirror.alive_ids(self._stale_seconds)
+        alive_ids = self._mirror.alive_ids(self._get_stale_seconds())
         if alive_ids is not None:
             community = [m for m in community if m.id in alive_ids]
         return tuple(community)

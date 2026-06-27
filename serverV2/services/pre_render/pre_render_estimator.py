@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from serverV2.allocation.services.allocation_planning_service import (
     GroupCostEstimate,
@@ -69,11 +69,13 @@ class PreRenderEstimator:
         *,
         orchestrator: RenderOrchestrator,
         scene_resolver: SceneResolver,
-        credits_per_usd: float,
+        get_credits_per_usd: Callable[[], float],
     ) -> None:
         self._orchestrator = orchestrator
         self._resolver = scene_resolver
-        self._credits_per_usd = float(credits_per_usd)
+        # Live Firestore knob; read per estimate so admin edits to
+        # billing.credits_per_usd take effect without a redeploy.
+        self._get_credits_per_usd = get_credits_per_usd
 
     def estimate(
         self, request: PreRenderEstimateRequest,
@@ -129,7 +131,7 @@ class PreRenderEstimator:
         queue_depth = self._orchestrator.get_queue_depth()
 
         return {
-            "estimate": _to_ui_dto(cost_estimate, self._credits_per_usd),
+            "estimate": _to_ui_dto(cost_estimate, self._get_credits_per_usd()),
             "queue_depth": queue_depth,
             "frame_plan": {
                 "frame_start": plan.frame_start,

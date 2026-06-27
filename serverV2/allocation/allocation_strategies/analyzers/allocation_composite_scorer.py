@@ -13,9 +13,11 @@ Pure module.  Given:
 returns a single float -- higher = better.  The planner sorts the
 eligible pool by this score to pick the mix.
 
-Cost is NOT a scoring axis.  ``chunk_cost_for()`` stays for telemetry
-(per-chunk USD estimate stamped on every PlannedTask) but is not folded
-into the rank.  Cost re-enters at dispatch time as queue priority.
+Cost is an OPTIONAL scoring axis.  When ``weights.cost_weight`` > 0 a
+``cost_factor`` is folded into the rank so the planner prefers
+cost-effective hardware; at the default 0 the score is cost-blind.
+``chunk_cost_for()`` also stays for telemetry (per-chunk USD estimate
+stamped on every PlannedTask).
 
 Composite shape::
 
@@ -23,7 +25,8 @@ Composite shape::
     speed_factor  = REF_SECONDS / max(chunk_seconds, 1.0)
     cuda_factor   = 0..1 from cuda_max_good (None = trust = 1.0)
     os_factor     = 0..1 from host_os + engine (None = trust = 1.0)
-    score         = w.speed * speed_factor + w.cuda * cuda_factor + w.os * os_factor
+    cost_factor   = REF_COST / chunk_cost  (price <= 0 -> 1.0, neutral)
+    score         = w.speed*speed_factor + w.cuda*cuda_factor + w.os*os_factor + w.cost*cost_factor
 
 Speed dominates because its factor scales with chunk wall time (often
 many multiples of 1.0 for fast chunks).  CUDA and OS factors live in
@@ -50,6 +53,11 @@ from serverV2.allocation.allocation_strategies.analyzers.allocation_time_analyze
 # 5 minutes of render = 300s.  A target completing a chunk in 300s
 # yields speed_factor = 1.0; faster -> >1.0.
 REF_SECONDS = 300.0
+
+# Reference chunk cost (USD).  A chunk costing $0.10 yields cost_factor =
+# 1.0; cheaper -> >1.0, pricier -> <1.0.  Parallel to REF_SECONDS; tune
+# the scale here, tune the influence via weights.cost_weight.
+REF_COST = 0.10
 
 # Floors to avoid divide-by-zero / runaway scores on misconfigured inputs.
 _MIN_CHUNK_SECONDS = 1.0
@@ -99,6 +107,22 @@ def os_factor(host_os: str | None, engine: str | None) -> float:
     return 1.0 if is_linux else 0.7
 
 
+def cost_factor(chunk_seconds: float, price_per_hour: float) -> float:
+    """Cost-efficiency score: ``REF_COST / chunk_cost`` where
+    ``chunk_cost = chunk_seconds/3600 * price_per_hour``.  Cheaper-to-render
+    the chunk -> higher score (a slow-cheap card beats a fast-pricey one).
+
+    ``price <= 0`` (unknown / free, e.g. community) -> 1.0 (neutral): a free
+    target isn't given a runaway boost -- it's already handled
+    community-first by the planner, and "None means trust" matches the
+    cuda/os factors.
+    """
+    if not price_per_hour or price_per_hour <= 0:
+        return 1.0
+    chunk_cost = (max(0.0, chunk_seconds) / 3600.0) * float(price_per_hour)
+    return REF_COST / max(chunk_cost, _MIN_CHUNK_COST)
+
+
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
@@ -115,8 +139,9 @@ def score_target(
     fleet: str | None = None,
     fleet_buffer_sec: float = 0.0,
     available_seconds: float | None = None,
+    price_per_hour: float = 0.0,
 ) -> float:
-    """Composite speed+cuda+os score for a single target.  Higher = better.
+    """Composite speed+cuda+os(+cost) score for a single target.  Higher = better.
 
     ``fleet`` and ``fleet_buffer_sec`` together model fleet-specific
     startup latency (Vast provisioning ~180s, Modal cold start ~120s,
@@ -140,6 +165,7 @@ def score_target(
         weights.speed_weight * speed_factor
         + weights.cuda_weight * cuda_factor(cuda_version)
         + weights.os_weight * os_factor(host_os, engine)
+        + weights.cost_weight * cost_factor(seconds, price_per_hour)
     )
     return base * time_headroom_factor(
         available_seconds=available_seconds,

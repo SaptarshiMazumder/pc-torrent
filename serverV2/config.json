@@ -63,6 +63,7 @@
       "speed_weight": 0.7,
       "cuda_weight": 0.2,
       "os_weight": 0.1,
+      "cost_weight": 0,
       "max_targets": 60,
       "min_frames_per_chunk": 8,
       "fleet_target_share": {

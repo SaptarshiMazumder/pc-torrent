@@ -194,6 +194,8 @@ function FrameAllocationSection({ draft, update }) {
             onChange={(v) => setIn("weights", "cuda_weight", v)} />
           <RatioSlider label="os_weight" value={w.os_weight}
             onChange={(v) => setIn("weights", "os_weight", v)} />
+          <RatioSlider label="cost_weight" value={w.cost_weight} min={0} max={3} step={0.05} precision={2}
+            onChange={(v) => setIn("weights", "cost_weight", v)} />
           <NumberField label="max_targets" value={w.max_targets} step={1}
             onChange={(v) => setIn("weights", "max_targets", v)} />
           <NumberField label="min_frames_per_chunk" value={w.min_frames_per_chunk} step={1}

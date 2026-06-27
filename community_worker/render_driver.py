@@ -320,6 +320,14 @@ def _apply_render(scene, overrides: dict):
     _set_attr_safe(cycles, "samples", _coerce_int(render.get("cycles_samples"), minimum=1))
     _set_attr_safe(cycles, "use_adaptive_sampling", _coerce_bool(render.get("cycles_adaptive_sampling")))
     _set_attr_safe(cycles, "use_denoising", _coerce_bool(render.get("cycles_denoise")))
+    # Force OpenImageDenoise on every fleet, always.  The OptiX denoiser
+    # needs the driver's nvoptix.bin weights file, which Modal's minimal
+    # driver injection doesn't ship -> "Failed to create OptiX denoiser",
+    # zero output.  A distributed render also splits frames across fleets,
+    # so one denoiser everywhere avoids cross-fleet flicker.  OIDN is built
+    # into Blender (no driver dependency) and runs on the GPU here.
+    _set_attr_safe(cycles, "denoiser", "OPENIMAGEDENOISE")
+    _set_attr_safe(cycles, "denoising_use_gpu", True)
 
     device_policy = os.environ.get("DEVICE_POLICY", "").strip().upper()
     override_policy = render.get("device_policy")

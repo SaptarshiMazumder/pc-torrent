@@ -1,23 +1,60 @@
-"""TaskActualCost — derive (actual_seconds, actual_cost_usd) from a jobs row.
+"""TaskActualCost — derive (actual_seconds, actual_cost_usd) for a chunk.
 
-Pure stateless helper.  Used by:
-  * the orchestrator facade (UI display path via ``actual_cost_for_row``)
-  * ``UsersClient`` for the post-terminal credit debit
+Single source of truth for the priority-adjusted cost of one chunk
+(jobs row).  Used by:
+  * the orchestrator facade (UI display path) -- ``actual_cost_for_chunk``
+  * ``UsersClient`` -- the post-terminal credit debit
+  * ``RenderLifecycle`` -- the terminal-group cost snapshot
 
-Same formula either way -- single source of truth so the number the
-user saw "live ticking" matches the number that comes off their
-credit balance when the chunk lands.
+All three go through ``actual_cost_for_chunk`` so the number the user
+saw "live ticking", the amount debited from their balance, and the
+value frozen on the terminal group row can never diverge.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 _INFLIGHT_STATUSES = frozenset({"running", "uploading"})
 
 
 class TaskActualCost:
+
+    def __init__(
+        self,
+        *,
+        get_priority_multiplier: Callable[[int], float],
+    ) -> None:
+        # Live Firestore knob, read per call so an admin tuning the
+        # priority multiplier sees it reflected immediately across
+        # display, billing, and the terminal cost snapshot.
+        self._get_priority_multiplier = get_priority_multiplier
+
+    def actual_cost_for_chunk(
+        self,
+        *,
+        started_at: Any,
+        completed_at: Any,
+        price_per_hour: Any,
+        status: str,
+        priority: int,
+    ) -> tuple[float | None, float | None]:
+        """Priority-adjusted ``(actual_seconds, actual_cost_usd)`` for one
+        chunk.  The ONE place the priority multiplier meets the rate-based
+        cost -- UI display, the credit debit, and the terminal snapshot all
+        call this.  Seconds are NOT multiplied (wall time is priority-
+        independent).  A None / non-positive base cost passes through
+        unmultiplied (worker never ran, or no rate stamped)."""
+        seconds, base_cost = self.compute(
+            started_at=started_at,
+            completed_at=completed_at,
+            price_per_hour=price_per_hour,
+            status=status,
+        )
+        if base_cost is None or base_cost <= 0:
+            return seconds, base_cost
+        return seconds, base_cost * self._get_priority_multiplier(priority)
 
     def compute(
         self,

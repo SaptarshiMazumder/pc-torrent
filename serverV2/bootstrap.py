@@ -700,7 +700,7 @@ def build(
     # Live priority cost multiplier -- read from Firestore on each
     # call so admin tunes take effect immediately on both the
     # displayed estimate (planner aggregator) and the billed amount
-    # (UsersClient + actual_cost_for_row).
+    # (UsersClient + actual_cost_for_chunk).
     def _get_priority_multiplier(priority: int) -> float:
         return allocation_config_repo.get().frame_allocation.weights.multiplier_for(priority)
 
@@ -744,6 +744,14 @@ def build(
     pending_allocation_repo = PendingAllocationRepository()
     dispatch_allocation_repo = DispatchAllocationRepository()
 
+    # Single authority for per-chunk actual cost (compute + priority
+    # multiplier).  Built here so the lifecycle can sum it into the
+    # terminal snapshot; the same instance is shared with UsersClient
+    # (billing) and the RenderOrchestrator facade (UI display) below.
+    task_actual_cost = TaskActualCost(
+        get_priority_multiplier=_get_priority_multiplier,
+    )
+
     lifecycle = RenderLifecycle(
         allocation_client=allocation_client,
         job_repo=job_repo,
@@ -761,6 +769,7 @@ def build(
         job_terminator=job_terminator,
         render_canceler=render_canceler,
         terminal_group_resource_releaser=terminal_group_resource_releaser,
+        task_actual_cost=task_actual_cost,
         get_max_retries=_get_max_retries,
     )
 
@@ -774,18 +783,15 @@ def build(
         repository=user_profile_repo,
         service=user_service,
     )
-    task_actual_cost = TaskActualCost()
     orchestrator_users_client = UsersClient(
         facade=user_facade,
         job_repo=job_repo,
         cost=task_actual_cost,
-        get_priority_multiplier=_get_priority_multiplier,
     )
     orchestrator = RenderOrchestrator(
         lifecycle,
         users_client=orchestrator_users_client,
         task_actual_cost=task_actual_cost,
-        get_priority_multiplier=_get_priority_multiplier,
     )
 
     # -- callbacks --

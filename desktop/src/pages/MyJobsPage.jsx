@@ -18,7 +18,10 @@ import {
   setTerminalDetailInCache,
   clearTerminalDetailFromCache,
 } from "../utils/terminalDetailCache";
-import JobGrid from "../components/jobs/JobGrid";
+import JobsListSection from "../components/jobs/JobsListSection";
+import JobSearchBox from "../components/jobs/JobSearchBox";
+import JobsViewToggle from "../components/jobs/JobsViewToggle";
+import { useJobTableView } from "../utils/useJobTableView";
 import JobDetailView from "../components/jobs/JobDetailView";
 import FrameViewerModal from "../components/jobs/FrameViewerModal";
 import Loader from "../components/common/Loader";
@@ -52,6 +55,18 @@ export default function MyJobsPage({
     [ongoingJobs, pastJobs],
   );
   const [selectedJobId, setSelectedJobId] = useState(null);
+  // Shared search (filters both sections); sort is per-section.
+  const [search, setSearch] = useState("");
+  // List vs grid, remembered across visits.
+  const [viewMode, setViewMode] = useState(() => {
+    try { return localStorage.getItem("pcrent_jobs_view") || "table"; } catch { return "table"; }
+  });
+  const handleViewChange = useCallback((mode) => {
+    setViewMode(mode);
+    try { localStorage.setItem("pcrent_jobs_view", mode); } catch { /* storage unavailable */ }
+  }, []);
+  const ongoingView = useJobTableView();
+  const pastView = useJobTableView();
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [cancelingAll, setCancelingAll] = useState(false);
   const [openFrameGalleries, setOpenFrameGalleries] = useState({});
@@ -358,6 +373,8 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
       {!selectedJob && (
         <div className="page-header">
           <h2>My Jobs</h2>
+          <JobSearchBox value={search} onChange={setSearch} />
+          <JobsViewToggle value={viewMode} onChange={handleViewChange} />
           <button
             className="btn btn-danger"
             type="button"
@@ -392,12 +409,15 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
               <Loader size="sm" />
             </div>
           ) : (
-            <JobGrid
+            <JobsListSection
               jobs={ongoingJobs}
-              authToken={authToken}
-              backendUrl={backendUrl}
+              view={ongoingView}
+              viewMode={viewMode}
+              search={search}
               onSelect={handleSelectJob}
               onRemove={removeJob}
+              backendUrl={backendUrl}
+              authToken={authToken}
               hasMore={hasMoreOngoing}
               loadingMore={loadingMoreOngoing}
               onLoadMore={loadMoreOngoing}
@@ -424,12 +444,15 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
               <Loader size="sm" />
             </div>
           ) : (
-            <JobGrid
+            <JobsListSection
               jobs={pastJobs}
-              authToken={authToken}
-              backendUrl={backendUrl}
+              view={pastView}
+              viewMode={viewMode}
+              search={search}
               onSelect={handleSelectJob}
               onRemove={removeJob}
+              backendUrl={backendUrl}
+              authToken={authToken}
               hasMore={hasMorePast}
               loadingMore={loadingMorePast}
               onLoadMore={loadMorePast}

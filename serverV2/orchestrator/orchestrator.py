@@ -12,7 +12,7 @@ render's lifetime, open ``orchestrator/lifecycle.py``.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 from serverV2.allocation.services.allocation_planning_service import (
     GroupCostEstimate,
@@ -31,20 +31,14 @@ class RenderOrchestrator:
         *,
         users_client: UsersClient,
         task_actual_cost: TaskActualCost,
-        get_priority_multiplier: Callable[[int], float],
     ) -> None:
         self._lifecycle = lifecycle
         self._users = users_client
         self._cost = task_actual_cost
-        # Fresh-config lookup so an admin tuning multipliers in
-        # ConfigurationPage takes effect immediately on the next
-        # estimate / display / billing read.  Defaults to NORMAL when
-        # the priority is out of range.
-        self._get_priority_multiplier = get_priority_multiplier
 
-    # ---- per-row actual cost (UI display path) ----
+    # ---- per-chunk actual cost (UI display path) ----
 
-    def actual_cost_for_row(
+    def actual_cost_for_chunk(
         self,
         *,
         started_at: Any,
@@ -53,25 +47,17 @@ class RenderOrchestrator:
         status: str,
         priority: int = RENDER_PRIORITY_DEFAULT,
     ) -> tuple[float | None, float | None]:
-        """Single source of truth for ``(actual_seconds, actual_cost_usd)``.
-        The serializer goes through here so the UI value matches the
-        number ``UsersClient`` debits when the chunk lands terminal.
-
-        The priority cost multiplier is applied here so every consumer
-        of the actual cost (UI display, billing) sees the priced-as-
-        billed number.  Seconds are NOT multiplied -- the chunk takes
-        the same wall time regardless of priority.
-        """
-        seconds, base_cost = self._cost.compute(
+        """Facade pass-through to ``TaskActualCost.actual_cost_for_chunk``
+        (the single authority).  The serializer reaches the per-chunk cost
+        through here so UI display, billing, and the terminal snapshot all
+        resolve to one number."""
+        return self._cost.actual_cost_for_chunk(
             started_at=started_at,
             completed_at=completed_at,
             price_per_hour=price_per_hour,
             status=status,
+            priority=priority,
         )
-        if base_cost is None or base_cost <= 0:
-            return seconds, base_cost
-        multiplier = self._get_priority_multiplier(priority)
-        return seconds, base_cost * multiplier
 
     # ---- cost intelligence ----
 

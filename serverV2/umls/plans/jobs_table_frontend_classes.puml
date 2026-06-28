@@ -1,0 +1,99 @@
+@startuml jobs_table_frontend_classes
+title Phase 1 -- My Jobs table (SRP decomposition; client-side, existing data only)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+' =====================================================================
+' PAGE (orchestrator only -- no sort/search/render logic of its own)
+' =====================================================================
+package "pages" {
+  class MyJobsPage <<page, edit>> {
+    wires data + handlers
+    uses useJobTableView
+    renders JobSearchBox + JobsTable per section
+  }
+}
+
+' =====================================================================
+' LOGIC -- pure, no JSX  (one concern each)
+' =====================================================================
+package "utils (logic)" {
+  class jobTableColumns <<new>> {
+    the column descriptors:
+    {key, label, sortable, sortValue(job), Cell}
+    -- single source of truth for columns
+  }
+  class jobSort <<new>> {
+    +sortRows(rows, sortValue, dir)
+    -- ordering only
+  }
+  class jobSearch <<new>> {
+    +filterByFilename(rows, text)
+    -- filtering only
+  }
+  class useJobTableView <<new, hook>> {
+    owns {search, sort} state
+    returns derived rows + toggleSort + setSearch
+    -- table-view interaction state
+  }
+}
+
+' =====================================================================
+' PRESENTATION -- dumb components (one concern each)
+' =====================================================================
+package "components/jobs (structure)" {
+  class JobSearchBox <<new>> {
+    search input only
+  }
+  class JobsTable <<new>> {
+    thead + tbody shell; iterates columns + rows
+  }
+  class SortableHeaderCell <<new>> {
+    one <th>: label + sort arrow + onClick
+  }
+  class JobTableRow <<new>> {
+    one <tr>: maps columns -> cells; row onClick
+  }
+}
+
+' =====================================================================
+' PRESENTATION ATOMS -- reusable cell renderers (one concern each)
+' =====================================================================
+package "components/jobs (cells)" {
+  class JobNameCell <<new>> {
+    thumb + filename + PNG/EXR tag
+  }
+  class JobStatusBadge <<new>> {
+    status pill
+  }
+  class JobProgressCell <<new>> {
+    bar + done/total + pct
+  }
+  class JobThumbnail <<reused>>
+}
+
+class JobDetailView <<unchanged>>
+
+MyJobsPage --> useJobTableView
+MyJobsPage --> JobSearchBox
+MyJobsPage --> JobsTable
+useJobTableView ..> jobSearch
+useJobTableView ..> jobSort
+jobSort ..> jobTableColumns : sortValue(job)
+JobsTable --> SortableHeaderCell
+JobsTable --> JobTableRow
+JobsTable ..> jobTableColumns : columns
+JobTableRow ..> jobTableColumns : Cell per column
+jobTableColumns ..> JobNameCell
+jobTableColumns ..> JobStatusBadge
+jobTableColumns ..> JobProgressCell
+JobNameCell --> JobThumbnail
+JobTableRow ..> JobDetailView : row click (existing flow)
+
+note bottom of jobTableColumns
+  Every column's sortValue + Cell reads ONLY the existing
+  /render-groups fields (status, total_frames, resolved_render_settings,
+  heaviness.file_size_bytes, submitted_at/completed_at, output format).
+  No backend call.  Cost/Priority columns are added here in Phase 2.
+end note
+@enduml

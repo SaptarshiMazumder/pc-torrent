@@ -112,6 +112,9 @@ from serverV2.allocation.allocation_engine_resolver import (
 from serverV2.config.render_config_repository import (
     RenderConfigRepository,
 )
+from serverV2.config.render_config_redis_mirror import (
+    RenderConfigRedisMirror,
+)
 from serverV2.config.vast.vast_secrets import VastSecrets
 from serverV2.config.vast.providers.vast_runtime_config_provider import (
     VastRuntimeConfigProvider,
@@ -284,7 +287,14 @@ def build(
     # ``allocation_config_repo`` -- a separate flow returning the new
     # ``RenderConfig`` object.
     cfg = config or AppConfig.from_env()
-    allocation_config_repo = RenderConfigRepository()
+    # Build the Redis client first so the config repo's mirror has it.
+    # Without the mirror, monitor ticks blow past Firestore's free-tier
+    # read quota within hours (see RenderConfigRedisMirror docstring).
+    redis = redis_client or RedisClient()
+    render_config_redis_mirror = RenderConfigRedisMirror(redis_client=redis)
+    allocation_config_repo = RenderConfigRepository(
+        redis_mirror=render_config_redis_mirror,
+    )
     cost_estimation_config_repo = AllocationCostEstimationConfigRepository()
     # Vast fleet config: env secrets injected once; tunable knobs read live
     # from Firestore (allocation_config_repo) per operation.  Replaces the
@@ -320,7 +330,6 @@ def build(
 
     def _get_dispatch_claim_timeout_sec() -> int:
         return allocation_config_repo.get().community.dispatch_claim_timeout_sec
-    redis = redis_client or RedisClient()
 
     # Initialize Firebase Admin SDK once at boot.  Auth-protected
     # endpoints depend on this; lazy per-request init was racing across

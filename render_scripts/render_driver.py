@@ -189,16 +189,21 @@ def _apply_output(scene, overrides: dict):
         _set_attr_safe(scene.render, "film_transparent", film_transparent)
 
 
-# Override pass-key -> Blender view-layer attribute.  Mostly 1:1 with
-# use_pass_<key>; emission maps to use_pass_emit.  Resolved with hasattr at
-# apply time so engine-specific gaps (Cycles vs EEVEE) are skipped, not fatal.
+# Override pass-key -> view-layer attribute (top-level, e.g.
+# ``view_layer.use_pass_z``).  Most passes live here.  Resolved with
+# hasattr at apply time so engine-specific gaps (Cycles vs EEVEE)
+# are silently skipped instead of raising.
 _PASS_ATTR = {
+    # data
     "z": "use_pass_z",
     "mist": "use_pass_mist",
     "normal": "use_pass_normal",
     "position": "use_pass_position",
     "vector": "use_pass_vector",
     "uv": "use_pass_uv",
+    "object_index": "use_pass_object_index",
+    "material_index": "use_pass_material_index",
+    # cycles light passes
     "diffuse_direct": "use_pass_diffuse_direct",
     "diffuse_indirect": "use_pass_diffuse_indirect",
     "diffuse_color": "use_pass_diffuse_color",
@@ -212,9 +217,27 @@ _PASS_ATTR = {
     "environment": "use_pass_environment",
     "ambient_occlusion": "use_pass_ambient_occlusion",
     "shadow": "use_pass_shadow",
+    "shadow_catcher": "use_pass_shadow_catcher",
+    # eevee light passes (eevee's combined-style light passes; no-op on Cycles)
+    "diffuse_light": "use_pass_diffuse_light",
+    "specular_light": "use_pass_specular_light",
+    "specular_color": "use_pass_specular_color",
+    "volume_light": "use_pass_volume_light",
+    "transparent": "use_pass_transparent",
+    # cryptomatte
     "cryptomatte_object": "use_pass_cryptomatte_object",
     "cryptomatte_material": "use_pass_cryptomatte_material",
     "cryptomatte_asset": "use_pass_cryptomatte_asset",
+}
+
+# Cycles-only passes whose attribute lives on ``view_layer.cycles``
+# instead of ``view_layer`` directly.  Same hasattr guard semantics.
+# ``denoising_data`` is one bool that internally enables Albedo +
+# Normal + Depth denoising-data passes inside the multilayer EXR.
+_PASS_ATTR_CYCLES_SUB = {
+    "volume_direct": "use_pass_volume_direct",
+    "volume_indirect": "use_pass_volume_indirect",
+    "denoising_data": "denoising_store_passes",
 }
 
 
@@ -246,6 +269,17 @@ def _apply_render_passes(scene, overrides: dict, selected_layer):
                     applied.append(f"{vl.name}.{key}")
             except Exception:
                 continue
+        cycles_sub = getattr(vl, "cycles", None)
+        if cycles_sub is not None:
+            for key, attr in _PASS_ATTR_CYCLES_SUB.items():
+                if key not in passes or not hasattr(cycles_sub, attr):
+                    continue
+                try:
+                    setattr(cycles_sub, attr, bool(passes[key]))
+                    if passes[key]:
+                        applied.append(f"{vl.name}.{key}")
+                except Exception:
+                    continue
     log(f"[RENDER_DRIVER] Render passes set: {applied or 'none'}")
 
 
@@ -730,6 +764,129 @@ def _render_grouped(scene, selected_layer, assignments, base_path, ffmpeg_locked
         scene.render.filepath = original_path
 
 
+def _resolve_compositor_node_tree(scene):
+    """Return the compositor node tree across Blender 4.x and 5.x.
+
+    Blender 5.x: ``scene.compositing_node_group`` is the new canonical
+    handle -- it's a NodeGroup whose ``.nodes`` directly contain the
+    Render Layers + File Output + grading nodes (the old "scene's
+    Composite" tree IS now a node group).  ``scene.use_nodes`` /
+    ``scene.node_tree`` still exist but are deprecated and slated for
+    removal in 6.0.
+
+    Blender 4.x: the old API.  ``scene.use_nodes`` toggles whether the
+    compositor runs; ``scene.node_tree`` is the tree.
+
+    Returns the node tree, or None if the compositor isn't set up.
+    """
+    cng = getattr(scene, "compositing_node_group", None)
+    if cng is not None:
+        return cng
+    if getattr(scene, "use_nodes", False):
+        return getattr(scene, "node_tree", None)
+    return None
+
+
+def _iter_file_output_nodes(node_tree):
+    """Walk a node tree depth-first, yielding every
+    ``CompositorNodeOutputFile`` found at any nesting depth.  Recursing
+    through ``NodeGroup`` instances catches File Output nodes the user
+    tucked inside a sub-group."""
+    if node_tree is None:
+        return
+    for node in node_tree.nodes:
+        bl_idname = getattr(node, "bl_idname", "")
+        if bl_idname == "CompositorNodeOutputFile":
+            yield node
+            continue
+        sub = getattr(node, "node_tree", None)
+        if sub is not None and sub is not node_tree:
+            yield from _iter_file_output_nodes(sub)
+
+
+def _patch_compositor_file_outputs(scene) -> None:
+    """Redirect every ``CompositorNodeOutputFile`` so its files land flat
+    in ``OUTPUT_DIR`` with names matching the worker's ``frame####.<ext>``
+    convention.  Without this:
+
+      * ``base_path`` left as the user set it (often absolute paths from
+        their machine or relative-to-.blend paths that resolve inside
+        the container's input dir) -- files end up in places the worker
+        never uploads from and silently vanish.
+      * Slot filenames have no ``frame####`` token, so even if uploaded
+        the DB's ``frame_number`` generated column parses NULL and the
+        chunk-completion math ignores them.
+
+    Each slot's ``path`` is rewritten to ``"<node_name>_<idx>_frame"`` so
+    Blender appends the zero-padded frame number and the extension,
+    producing ``<node_name>_<idx>_frame0045.<ext>`` -- unique among all
+    File Output node slots (node-name + index), distinguishable from
+    the camera-prefixed main output, and parseable by the existing
+    completion regex.
+
+    Always emits a ``Found N File Output node(s)`` log so missing
+    redirections are debuggable from the worker stdout.
+    """
+    node_tree = _resolve_compositor_node_tree(scene)
+    if node_tree is None:
+        log("[RENDER_DRIVER] No compositor node tree -- skipping File Output redirect")
+        return
+    output_dir = os.environ.get("OUTPUT_DIR", "/output").rstrip("/") + "/"
+    file_output_nodes = list(_iter_file_output_nodes(node_tree))
+    log(f"[RENDER_DRIVER] Found {len(file_output_nodes)} File Output node(s) in compositor")
+    patched = 0
+    for node in file_output_nodes:
+        safe_node_name = re.sub(r"[^\w.\- ]", "_", node.name).strip() or "FileOutput"
+        try:
+            # Blender 5.x: directory + file_name + file_output_items[].name
+            # (replaced 4.x's base_path + file_slots[].path).  Per-item
+            # filename is composed as <directory><file_name><item.name>
+            # <frame_padded>.<ext>; we set file_name="" so it doesn't
+            # insert a prefix between the directory and our regex-
+            # matching item.name.
+            if hasattr(node, "directory"):
+                node.directory = output_dir
+                if hasattr(node, "file_name"):
+                    try:
+                        node.file_name = ""
+                    except Exception:
+                        pass
+                items = getattr(node, "file_output_items", None)
+                if items is None:
+                    log(f"[RENDER_DRIVER] Node '{node.name}': no file_output_items -- skipping")
+                    continue
+                for idx, item in enumerate(items):
+                    try:
+                        item.name = f"{safe_node_name}_{idx}_frame"
+                    except Exception:
+                        continue
+            # Blender 4.x and older: base_path + file_slots[].path.
+            elif hasattr(node, "base_path"):
+                node.base_path = output_dir
+                slots = getattr(node, "file_slots", None) or ()
+                for idx, slot in enumerate(slots):
+                    try:
+                        slot.path = f"{safe_node_name}_{idx}_frame"
+                    except Exception:
+                        continue
+            else:
+                log(
+                    f"[RENDER_DRIVER] Node '{node.name}': neither "
+                    "'directory' (5.x) nor 'base_path' (4.x) attribute "
+                    "available -- File Output API changed again; node skipped"
+                )
+                continue
+        except Exception as exc:
+            log(f"[RENDER_DRIVER] Could not redirect File Output node '{node.name}': {exc}")
+            continue
+        patched += 1
+    if patched:
+        log(
+            f"[RENDER_DRIVER] Redirected {patched} File Output node(s) "
+            f"to {output_dir} with ``<node>_<slot>_frame####.<ext>`` naming"
+        )
+
+
 def main():
     overrides = _read_overrides()
     scene = _scene_from_overrides(overrides)
@@ -742,6 +899,7 @@ def main():
     _apply_render(scene, overrides)
     selected_layer = _resolve_view_layer(scene, overrides)
     _apply_render_passes(scene, overrides, selected_layer)
+    _patch_compositor_file_outputs(scene)
 
     total_frames = _compute_total_frames(scene)
     log(f"[RENDER_DRIVER] Scene: {scene.name}")

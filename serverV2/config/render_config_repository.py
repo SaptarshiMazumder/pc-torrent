@@ -3,17 +3,20 @@ the runtime config blob used by the allocation planner.
 
 The bundled ``serverV2/config.json`` stays in the repo as the canonical
 **default** content used by the seed CLI to populate Firestore on first
-deploy.  At runtime the server reads from Firestore on every ``get``
-call -- never caches.  Failure modes are loud:
+deploy.  Reads go through an optional Redis mirror
+(``RenderConfigRedisMirror``) -- a hit returns the cached dict, a miss
+falls through to Firestore.  Without the mirror the Firebase Spark
+plan's 50K-reads/day per env gets blown by monitor ticks alone.
+
+Failure modes (Firestore path) stay loud:
 
 * Firestore unreachable     -> raises (caller's planning aborts).
 * ``config/global`` missing  -> raises.
 * JSON in the doc malformed  -> raises (json.loads).
 * JSON missing required keys -> raises (RenderConfig.from_dict).
 
-Returns a typed ``RenderConfig`` whose shape mirrors config.json
-exactly, so ``dataclasses.asdict`` round-trips back to the storage
-shape.
+Redis path is silent-fail-open: any Redis problem just causes a
+fall-through to Firestore, never an exception.
 """
 
 from __future__ import annotations
@@ -24,6 +27,9 @@ import logging
 from firebase_admin import firestore
 
 from serverV2.config.render_config import RenderConfig
+from serverV2.config.render_config_redis_mirror import (
+    RenderConfigRedisMirror,
+)
 from serverV2.infrastructure.auth.firebase_app import init_firebase
 
 log = logging.getLogger(__name__)
@@ -36,11 +42,24 @@ _FIELD = "json"
 
 class RenderConfigRepository:
 
+    def __init__(
+        self,
+        *,
+        redis_mirror: RenderConfigRedisMirror | None = None,
+    ) -> None:
+        self._mirror = redis_mirror
+
     def get(self) -> RenderConfig:
-        """Fetch the Firestore doc, parse the JSON blob, build RenderConfig.
-        No caching.  Raises on every failure mode listed in the module
-        docstring."""
-        return RenderConfig.from_dict(self._fetch_dict())
+        """Return the parsed RenderConfig.  Redis mirror first; on
+        miss, fetch from Firestore and warm the mirror for next time."""
+        if self._mirror is not None:
+            cached = self._mirror.get_cached_dict()
+            if cached is not None:
+                return RenderConfig.from_dict(cached)
+        fresh = self._fetch_dict()
+        if self._mirror is not None:
+            self._mirror.set_cached_dict(fresh)
+        return RenderConfig.from_dict(fresh)
 
     # ------------------------------------------------------------------
     # admin surface (Phase 3) -- raw dict in / out for UI editing
@@ -54,13 +73,16 @@ class RenderConfigRepository:
         return self._fetch_dict()
 
     def admin_put(self, d: dict) -> None:
-        """Write a new config dict to Firestore.  Caller is responsible
-        for validation; this method just serializes and stores."""
+        """Write a new config dict to Firestore + invalidate the Redis
+        mirror so the next ``get`` reads the fresh value instead of
+        waiting up to one TTL window."""
         init_firebase()
         client = firestore.client()
         client.collection(_COLLECTION).document(_DOC_ID).set(
             {_FIELD: json.dumps(d)},
         )
+        if self._mirror is not None:
+            self._mirror.invalidate()
 
     # ------------------------------------------------------------------
     # internal

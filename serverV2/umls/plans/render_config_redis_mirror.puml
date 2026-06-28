@@ -1,0 +1,77 @@
+@startuml
+title RenderConfigRepository + RenderConfigRedisMirror
+
+allowmixing
+skinparam classAttributeIconSize 0
+
+package "serverV2/config/" {
+  class RenderConfigRepository {
+    - _mirror : RenderConfigRedisMirror | None
+    + get() : RenderConfig
+    + admin_get() : dict
+    + admin_put(d: dict) : None
+    - _fetch_dict() : dict
+  }
+
+  class RenderConfigRedisMirror {
+    - _redis : RedisClient
+    - _ttl : int = 30
+    + get_cached_dict() : dict | None
+    + set_cached_dict(d: dict) : None
+    + invalidate() : None
+  }
+}
+
+package "serverV2/infrastructure/" {
+  class RedisClient
+}
+
+class RenderConfig <<dataclass>>
+
+cloud "Firestore\n(per-env Firebase project)" as FS {
+  artifact "config/global\n  .json (string)" as DOC
+}
+
+cloud "Upstash Redis\n(per-env REDIS_KEY_PREFIX)" as RD {
+  artifact "<prefix>config:render\n(JSON dict, TTL=30s)" as KEY
+}
+
+RenderConfigRepository o--> RenderConfigRedisMirror : optional, ctor-injected
+RenderConfigRedisMirror o--> RedisClient : ctor-injected
+
+RenderConfigRepository ..> RenderConfig : .from_dict() builds
+RenderConfigRepository ..> DOC : _fetch_dict() reads\n(only on cache miss)
+RenderConfigRepository ..> DOC : admin_put() writes
+
+RenderConfigRedisMirror ..> KEY : get / set / del
+
+note right of RenderConfigRepository
+  **get() flow**
+   1. mirror.get_cached_dict()
+        - hit  -> parse & return
+        - miss -> step 2
+   2. _fetch_dict() (Firestore)
+   3. mirror.set_cached_dict(fresh)
+   4. parse & return
+
+  **admin_put() flow**
+   1. Firestore write
+   2. mirror.invalidate()
+end note
+
+note right of RenderConfigRedisMirror
+  Fail-open: any Redis error
+  (down, timeout, parse) returns
+  None / silently no-ops -> repo
+  falls through to Firestore.
+  Never raises into the caller.
+end note
+
+note bottom of KEY
+  ``namespaced("config:render")``
+  -> dev:config:render
+  -> staging:config:render
+  -> (prod / test: empty prefix = "config:render")
+  Per-env isolation when sharing Redis.
+end note
+@enduml

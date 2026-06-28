@@ -1,0 +1,47 @@
+@startuml
+title Output handling — File Output node support (flat-with-prefix)
+
+skinparam componentStyle rectangle
+
+package "Worker (vast / modal / community)" {
+  [render_driver.py\n_patch_compositor_file_outputs()] as RD
+  [Blender] as BL
+  [IncrementalOutputUploader\n(top-level glob, unchanged)] as UP
+}
+
+package "/output/ filesystem (flat)" {
+  folder "/output" as OUT {
+    [Camera_frame0045.exr\n(main composite output)] as MAIN
+    [<NodeName>_<SlotIdx>_frame0045.exr\n(File Output node files)] as SUB
+  }
+}
+
+package "serverV2" {
+  [POST /jobs/.../register-outputs] as API
+  database "output_frames\n(group_id, filename,\n job_id, frame_number)" as DB
+  [count_in_range()\nCOUNT(DISTINCT frame_number)] as Q
+}
+
+RD --> BL : 1. for each CompositorNodeOutputFile:\n   base_path = OUTPUT_DIR\n   slot.path = "<NodeName>_<idx>_frame"
+BL --> MAIN : 2. main render output
+BL --> SUB : 3. File Output nodes write here\n(unique prefix per node + slot)
+UP --> MAIN : 4. existing top-level glob\n(no recursive walk needed)
+UP --> SUB : 4.
+UP --> API : 5. upload + register every filename
+API --> DB : 6. INSERT (frame_number parses\nfrom "frame0045." in any name)
+Q <-- DB : 7. completion stays filename-based,\nignores prefix differences
+
+note bottom of RD
+  Single change.  No upload, backend
+  or DB schema edits required.
+  Both renamings (base_path + slot.path)
+  ensure every file has "frame####.ext"
+  somewhere in its name so the
+  ``frame(\\d+)\\.`` generated column matches.
+end note
+
+note bottom of UP
+  Stays flat: ``os.listdir(/output)``.
+  No subdir support needed.
+end note
+@enduml

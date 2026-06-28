@@ -1,0 +1,127 @@
+@startuml config_firestore_migration_classes
+title Config to Firestore migration -- Vast + Modal + community/billing (config.json runtime-dead)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+' =====================================================================
+' NEUTRAL CONFIG MODULE  (Firestore-backed; everyone reads from here)
+' =====================================================================
+package "serverV2/config (neutral)" #E8F0FF {
+  class RenderConfigRepository {
+    +get() : RenderConfig
+  }
+  class RenderConfig {
+    +vast : VastSection
+    +modal : ModalSection
+    +community : CommunitySection
+    +billing : BillingSection
+    +monitor : MonitorSection
+    +vast_instances
+    +modal_instances
+  }
+  class VastConfig {
+    +is_enabled()
+    +image_for_engine()
+  }
+  class ModalConfig {
+    +is_enabled()
+    +endpoint_url()
+  }
+  class AppConfig {
+    +community_worker_image
+    +orphan_secret
+  }
+}
+
+package "serverV2/config/vast" #DCE8FF {
+  class VastSecrets {
+    +from_env()
+  }
+  class VastRuntimeConfigProvider {
+    +get() : VastConfig
+  }
+}
+
+package "serverV2/config/modal" #DCE8FF {
+  class ModalSecrets {
+    +from_env()
+  }
+  class ModalRuntimeConfigProvider {
+    +get() : ModalConfig
+  }
+}
+
+RenderConfigRepository ..> RenderConfig : builds (fresh Firestore read)
+VastRuntimeConfigProvider o--> VastSecrets
+VastRuntimeConfigProvider ..> RenderConfigRepository
+VastRuntimeConfigProvider ..> VastConfig : get() assembles
+ModalRuntimeConfigProvider o--> ModalSecrets
+ModalRuntimeConfigProvider ..> RenderConfigRepository
+ModalRuntimeConfigProvider ..> ModalConfig : get() assembles
+
+' =====================================================================
+' WELDED FLEETS -> per-fleet provider (secrets + live knobs)
+' =====================================================================
+package "Vast fleet consumers" #EFFFF0 {
+  class VastClient
+  class VastFleetStrategy
+  class VastFleetMonitor
+  class VastAvailabilityBuilder
+}
+VastClient              o--> VastRuntimeConfigProvider
+VastFleetStrategy       o--> VastRuntimeConfigProvider
+VastFleetMonitor        o--> VastRuntimeConfigProvider
+VastAvailabilityBuilder o--> VastRuntimeConfigProvider
+
+package "Modal fleet consumers" #EFFFF0 {
+  class ModalClient
+  class ModalFleetStrategy
+  class ModalFleetMonitor
+  class ModalAvailabilityBuilder
+}
+ModalClient              o--> ModalRuntimeConfigProvider
+ModalFleetStrategy       o--> ModalRuntimeConfigProvider
+ModalFleetMonitor        o--> ModalRuntimeConfigProvider
+ModalAvailabilityBuilder o--> ModalRuntimeConfigProvider
+
+' =====================================================================
+' PURE-KNOB consumers -> live via callables to the repo
+' =====================================================================
+package "community / billing consumers" #FFF8E8 {
+  class CommunityStrategy
+  class CommunityMonitor
+  class CommunityAvailabilityBuilder
+  class MachineRepository
+  class UserService
+  class RenderGroupService
+  class PreRenderEstimator
+}
+CommunityStrategy            ..> RenderConfigRepository
+CommunityMonitor             ..> RenderConfigRepository
+CommunityAvailabilityBuilder ..> RenderConfigRepository
+MachineRepository            ..> RenderConfigRepository
+UserService                  ..> RenderConfigRepository
+RenderGroupService           ..> RenderConfigRepository
+PreRenderEstimator           ..> RenderConfigRepository
+
+note as N_PROVIDERS
+  WELDED fleet config (Vast/Modal): the old object bundled env secrets +
+  tunable knobs.  Split into <fleet>Secrets (env, injected once) + live
+  knobs read from Firestore, joined by <fleet>RuntimeConfigProvider.
+  Consumers call provider.get() once per operation -> a live <fleet>Config.
+  secure_cloud_only and every other knob now take effect with no redeploy.
+end note
+
+note as N_KNOBS
+  PURE-KNOB consumers (community/billing): no secrets, so injected as
+  Callable[[], T] wired to RenderConfigRepository.get().<section>.<field>
+  -- same pattern as get_max_retries.  Read live, once per operation.
+  (MachineService + the dispatch cap dict read live the same way.)
+end note
+
+note as N_END
+  END STATE: AppConfig holds only env SECRETS; config.json is read by
+  NOTHING at runtime (seed-only).  Every knob is Firestore-tunable,
+  fail-loud, with no config.json fallback.
+end note
+@enduml

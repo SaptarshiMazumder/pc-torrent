@@ -91,7 +91,12 @@ def update_status(
     try:
         result = _get().update_status(job_id, payload.status, payload.error)
         if payload.output_files:
-            _get().register_outputs(job_id, payload.output_files)
+            # Legacy status+outputs path -- these agents don't tag the
+            # primary render, so is_primary defaults False (the preview
+            # selector falls back to naming/latest for them).
+            _get().register_outputs(
+                job_id, [(f, False) for f in payload.output_files],
+            )
         return result
     except JobTerminalError as e:
         # Workers MUST be allowed to update terminal status -- but the
@@ -258,6 +263,24 @@ def download_zip(job_id: str):
         raise HTTPException(e.status, e.message)
 
 
+def _parse_output_files(body: dict) -> list[tuple[str, bool]]:
+    """Normalize the register-outputs payload to ``(filename, is_primary)``.
+
+    New worker shape: ``{"files": [{"filename": str, "is_primary": bool}]}``
+    (the worker tags the main render vs File Output passes).  Legacy shape:
+    ``{"filenames": [str]}`` -> ``is_primary`` defaults False for workers
+    not yet redeployed.
+    """
+    files = body.get("files")
+    if isinstance(files, list) and files and isinstance(files[0], dict):
+        return [
+            (f["filename"], bool(f.get("is_primary")))
+            for f in files
+            if isinstance(f, dict) and f.get("filename")
+        ]
+    return [(f, False) for f in (body.get("filenames") or []) if f]
+
+
 @router.post("/jobs/{job_id}/register-outputs")
 def register_outputs(job_id: str, body: dict):
     """Worker tells us a file is in R2.  We record it and return.
@@ -266,11 +289,11 @@ def register_outputs(job_id: str, body: dict):
     callback router path.  Keeping this route as a pure write avoids
     the layering smudge of HTTP-time business logic.
     """
-    filenames = body.get("filenames", [])
-    if not filenames:
+    files = _parse_output_files(body)
+    if not files:
         raise HTTPException(400, "No filenames provided")
     try:
-        return _get().register_outputs(job_id, filenames)
+        return _get().register_outputs(job_id, files)
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
 

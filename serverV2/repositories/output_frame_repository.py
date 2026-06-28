@@ -14,6 +14,7 @@ SQL — no parsing, no in-memory union.
 from __future__ import annotations
 
 from serverV2.infrastructure.db import execute, query_all
+from serverV2.core.preview_frame_selector import select_preview_frame
 
 
 class OutputFrameRepository:
@@ -23,25 +24,30 @@ class OutputFrameRepository:
     # ------------------------------------------------------------------
 
     def add_many(
-        self, group_id: str, job_id: str, filenames: list[str],
+        self, group_id: str, job_id: str, files: list[tuple[str, bool]],
     ) -> list[str]:
-        """Insert one row per filename.  Returns the filenames that were
-        actually inserted (the ON CONFLICT path returns nothing) — empty
-        list means a sibling already uploaded every frame in this batch.
+        """Insert one row per ``(filename, is_primary)``.
+
+        ``is_primary`` stays monotonic on conflict (``false -> true``,
+        never the reverse): a duplicate or out-of-order register can only
+        promote a frame to primary, never unset one already recorded.
+        (The return value is unused -- chunk completion is the fleet
+        singleton's job -- so the conflict path returning rows is fine.)
         """
-        if not filenames:
+        if not files:
             return []
         # Build one big INSERT … VALUES (...), (...), … with shared
-        # group_id/job_id and per-row filename.  Single round-trip.
-        placeholders = ",".join(["(%s, %s, %s, now())"] * len(filenames))
-        params: list[str] = []
-        for f in filenames:
-            params.extend([group_id, f, job_id])
+        # group_id/job_id and per-row (filename, is_primary).  Single round-trip.
+        placeholders = ",".join(["(%s, %s, %s, %s, now())"] * len(files))
+        params: list = []
+        for filename, is_primary in files:
+            params.extend([group_id, filename, job_id, bool(is_primary)])
         rows = query_all(
             f"""
-            INSERT INTO output_frames (group_id, filename, job_id, created_at)
+            INSERT INTO output_frames (group_id, filename, job_id, is_primary, created_at)
             VALUES {placeholders}
-            ON CONFLICT (group_id, filename) DO NOTHING
+            ON CONFLICT (group_id, filename) DO UPDATE
+              SET is_primary = output_frames.is_primary OR EXCLUDED.is_primary
             RETURNING filename
             """,
             tuple(params),
@@ -188,22 +194,20 @@ class OutputFrameRepository:
             out.setdefault(ci, set()).add(int(r["frame_number"]))
         return out
 
-    def latest_for_group(self, group_id: str) -> tuple[str, str] | None:
-        """Most recently uploaded (filename, job_id) for the group, by
-        ``created_at``.  Used to populate the terminal-snapshot's
-        ``latest_output_file`` / ``latest_output_job_id`` fields.
-        Returns None if the group has no frames yet.
+    def preview_for_group(self, group_id: str) -> tuple[str, str] | None:
+        """The ``(filename, job_id)`` to show as the group's preview: the
+        latest frame's PRIMARY render.  Loads the group's frames (with
+        ``is_primary`` + ``frame_number``) and delegates the choice to
+        ``select_preview_frame`` -- prefers the worker-tagged primary, then
+        latest frame, with a naming fallback for untagged legacy rows.
+
+        Populates ``latest_output_file`` / ``latest_output_job_id`` on both
+        the active DTO and the terminal snapshot.  Returns None if the group
+        has no frames yet.
         """
         rows = query_all(
-            """
-            SELECT filename, job_id
-              FROM output_frames
-             WHERE group_id = %s
-             ORDER BY created_at DESC, filename DESC
-             LIMIT 1
-            """,
+            "SELECT filename, job_id, is_primary, frame_number "
+            "FROM output_frames WHERE group_id = %s",
             (group_id,),
         )
-        if not rows:
-            return None
-        return rows[0]["filename"], rows[0]["job_id"]
+        return select_preview_frame(rows)

@@ -461,10 +461,23 @@ def check_job_cancel_status(job_id):
         return False
 
 
+def _read_primary_manifest(output_dir):
+    """Main-render basenames the render driver wrote to the manifest
+    (``.primary_outputs.json``).  Empty set on any read error -> all
+    is_primary False (the backend falls back to its naming heuristic)."""
+    path = os.path.join(output_dir, ".primary_outputs.json")
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        return set(data) if isinstance(data, list) else set()
+    except (FileNotFoundError, ValueError, OSError):
+        return set()
+
+
 def upload_output_files(job_id, output_dir, filenames=None):
     """Upload rendered frames via the server's presigned-URL flow:
-    request URLs → PUT each file directly to GCS → register filenames.
-    Mirrors vast_worker/scripts/handler.py._upload_outputs.
+    request URLs → PUT each file directly to GCS → register (filename,
+    is_primary) pairs.  Mirrors vast_worker/scripts/handler.py._upload_outputs.
     """
     if filenames is None:
         files_found = [
@@ -506,9 +519,12 @@ def upload_output_files(job_id, output_dir, filenames=None):
             put_resp.raise_for_status()
         uploaded.append(filename)
 
+    primary = _read_primary_manifest(output_dir)
     requests.post(
         f"{BACKEND_URL}/jobs/{job_id}/register-outputs",
-        json={"filenames": uploaded},
+        json={"files": [
+            {"filename": f, "is_primary": f in primary} for f in uploaded
+        ]},
         timeout=30,
     ).raise_for_status()
     return uploaded

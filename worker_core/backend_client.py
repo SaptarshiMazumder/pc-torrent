@@ -244,14 +244,18 @@ class BackendClient:
         )
         return resp.json().get("urls", {}) or {}
 
-    def register_outputs(self, filenames: list[str]) -> None:
-        """Register uploaded filenames with the server.  Retries on
-        transient errors — endpoint is idempotent (merge_output_files
-        dedupes), so a slow-but-successful response classified as a
-        timeout is safe to retry instead of bubbling to mark_failed."""
+    def register_outputs(self, files: list[tuple[str, bool]]) -> None:
+        """Register uploaded ``(filename, is_primary)`` pairs with the server.
+        Retries on transient errors — the endpoint is idempotent (dedupes by
+        (group, filename) and keeps ``is_primary`` monotonic), so a slow-but-
+        successful response classified as a timeout is safe to retry instead
+        of bubbling to mark_failed."""
         self._post_with_retry(
             f"{self._backend_url}/jobs/{self._job_id}/register-outputs",
-            json={"filenames": filenames},
+            json={"files": [
+                {"filename": name, "is_primary": is_primary}
+                for name, is_primary in files
+            ]},
             deadline_sec=self._UPLOAD_RETRY_DEADLINE_SEC,
         )
 

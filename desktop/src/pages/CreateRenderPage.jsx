@@ -21,6 +21,8 @@ import {
   countRowFramesInRange,
   validateCameraRanges,
   RENDER_PASS_CATALOG,
+  PASS_GROUP_ORDER,
+  passSupportsEngine,
   prefillRenderPasses,
   formatSizeMb,
   fileKindFromName,
@@ -1217,23 +1219,36 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                           checked={passesUseFile}
                           onChange={(e) => dispatch({ type: "SET_FIELD", field: "passesUseFile", value: e.target.checked })}
                         />
-                        <span className="cr-field-label">Use the .blend's own pass setup</span>
+                        <span className="cr-field-label">
+                          Use the .blend's own pass setup
+                          {passesUseFile && <span className="cr-pass-locked-note"> (controlled by .blend file)</span>}
+                        </span>
                       </label>
-                      <div className="cr-pass-grid">
-                        {RENDER_PASS_CATALOG.filter((p) => p.key in renderPasses).map((p) => (
-                          <label key={p.key} className={`cr-pass-item ${passesUseFile ? "is-disabled" : ""}`}>
-                            <input
-                              type="checkbox"
-                              disabled={passesUseFile}
-                              checked={!!renderPasses[p.key]}
-                              onChange={() => dispatch({ type: "SET_FIELD", field: "renderPasses", value: { ...renderPasses, [p.key]: !renderPasses[p.key] } })}
-                            />
-                            <span>{p.label}</span>
-                          </label>
-                        ))}
-                        {Object.keys(renderPasses).length === 0 && (
-                          <span className="cr-pass-empty">No passes detected — the .blend's view-layer passes are used as-is.</span>
-                        )}
+                      <div className={`cr-pass-groups ${passesUseFile ? "is-disabled" : ""}`}>
+                        {PASS_GROUP_ORDER.map((group) => {
+                          const groupPasses = RENDER_PASS_CATALOG.filter(
+                            (p) => p.group === group && passSupportsEngine(p, resolvedEngine),
+                          );
+                          if (groupPasses.length === 0) return null;
+                          return (
+                            <div key={group} className="cr-pass-group">
+                              <div className="cr-pass-group-title">{group}</div>
+                              <div className="cr-pass-grid">
+                                {groupPasses.map((p) => (
+                                  <label key={p.key} className={`cr-pass-item ${passesUseFile ? "is-disabled" : ""}`}>
+                                    <input
+                                      type="checkbox"
+                                      disabled={passesUseFile}
+                                      checked={!!renderPasses[p.key]}
+                                      onChange={() => dispatch({ type: "SET_FIELD", field: "renderPasses", value: { ...renderPasses, [p.key]: !renderPasses[p.key] } })}
+                                    />
+                                    <span>{p.label}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   </>

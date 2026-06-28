@@ -168,14 +168,27 @@ def latest_output_filename(files: list[str]) -> str | None:
 # ---------------------------------------------------------------------------
 
 # Render passes the UI and worker agree on.  Keys map to Blender
-# view-layer ``use_pass_*`` attributes in the worker (emission ->
-# use_pass_emit, cryptomatte_* -> use_pass_cryptomatte_*, the rest 1:1).
+# view-layer ``use_pass_*`` attributes in the worker (most 1:1, a few
+# special: emission -> use_pass_emit; volume_* + denoising_data live
+# on view_layer.cycles).  Engine-specific passes (eevee's
+# diffuse_light etc.) are validated here; the worker silently skips
+# any pass whose attribute isn't on the active engine's view-layer.
 ALLOWED_RENDER_PASSES = frozenset({
+    # data
     "z", "mist", "normal", "position", "vector", "uv",
+    "object_index", "material_index",
+    # cycles light
     "diffuse_direct", "diffuse_indirect", "diffuse_color",
     "glossy_direct", "glossy_indirect", "glossy_color",
     "transmission_direct", "transmission_indirect", "transmission_color",
     "emission", "environment", "ambient_occlusion", "shadow",
+    "shadow_catcher",
+    # cycles volume + denoising (view_layer.cycles.*)
+    "volume_direct", "volume_indirect", "denoising_data",
+    # eevee light
+    "diffuse_light", "specular_light", "specular_color",
+    "volume_light", "transparent",
+    # cryptomatte (engine-agnostic)
     "cryptomatte_object", "cryptomatte_material", "cryptomatte_asset",
 })
 

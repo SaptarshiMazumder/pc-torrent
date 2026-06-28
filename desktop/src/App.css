@@ -1778,6 +1778,30 @@ body {
   color: var(--text-muted);
   margin-top: 8px;
 }
+.cr-pass-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 10px;
+}
+.cr-pass-groups.is-disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.cr-pass-group-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted, #888);
+  margin-bottom: 4px;
+}
+.cr-pass-locked-note {
+  font-size: 0.72rem;
+  color: var(--text-muted, #888);
+  font-weight: 400;
+  margin-left: 6px;
+}
 
 .cr-input {
   width: 100%;

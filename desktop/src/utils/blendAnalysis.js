@@ -136,33 +136,63 @@ export function validateCameraRanges(rows, frameRange) {
 
 // ── Render passes (multilayer EXR) ──────────────────────────
 // Catalog of passes the UI can expose.  Keys mirror the worker's
-// _PASS_ATTR map and the analyzer's detection, so detect -> override
-// round-trips 1:1.  The UI only shows keys the analyzer actually
-// detected (engine-correct: Cycles exposes the full set, EEVEE a subset).
+// _PASS_ATTR / _PASS_ATTR_CYCLES_SUB maps so detect -> override
+// round-trips 1:1.  ``group`` drives the UI sectioning; ``engines``
+// drives engine-aware show/hide (the worker silently no-ops anything
+// the active engine doesn't have).
+export const PASS_GROUP_ORDER = ["Data", "Light", "Volume", "Cryptomatte", "Denoising"];
+
 export const RENDER_PASS_CATALOG = [
-  { key: "z", label: "Depth (Z)" },
-  { key: "mist", label: "Mist" },
-  { key: "normal", label: "Normal" },
-  { key: "position", label: "Position" },
-  { key: "vector", label: "Vector (motion)" },
-  { key: "uv", label: "UV" },
-  { key: "diffuse_direct", label: "Diffuse Direct" },
-  { key: "diffuse_indirect", label: "Diffuse Indirect" },
-  { key: "diffuse_color", label: "Diffuse Color" },
-  { key: "glossy_direct", label: "Glossy Direct" },
-  { key: "glossy_indirect", label: "Glossy Indirect" },
-  { key: "glossy_color", label: "Glossy Color" },
-  { key: "transmission_direct", label: "Transmission Direct" },
-  { key: "transmission_indirect", label: "Transmission Indirect" },
-  { key: "transmission_color", label: "Transmission Color" },
-  { key: "emission", label: "Emission" },
-  { key: "environment", label: "Environment" },
-  { key: "ambient_occlusion", label: "Ambient Occlusion" },
-  { key: "shadow", label: "Shadow" },
-  { key: "cryptomatte_object", label: "Cryptomatte Object" },
-  { key: "cryptomatte_material", label: "Cryptomatte Material" },
-  { key: "cryptomatte_asset", label: "Cryptomatte Asset" },
+  // Data
+  { key: "z", label: "Depth (Z)", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "mist", label: "Mist", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "normal", label: "Normal", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "position", label: "Position", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "vector", label: "Vector (motion)", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "uv", label: "UV", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "object_index", label: "Object Index", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "material_index", label: "Material Index", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  // Light (Cycles split direct/indirect/color)
+  { key: "diffuse_direct", label: "Diffuse Direct", group: "Light", engines: ["CYCLES"] },
+  { key: "diffuse_indirect", label: "Diffuse Indirect", group: "Light", engines: ["CYCLES"] },
+  { key: "diffuse_color", label: "Diffuse Color", group: "Light", engines: ["CYCLES"] },
+  { key: "glossy_direct", label: "Glossy Direct", group: "Light", engines: ["CYCLES"] },
+  { key: "glossy_indirect", label: "Glossy Indirect", group: "Light", engines: ["CYCLES"] },
+  { key: "glossy_color", label: "Glossy Color", group: "Light", engines: ["CYCLES"] },
+  { key: "transmission_direct", label: "Transmission Direct", group: "Light", engines: ["CYCLES"] },
+  { key: "transmission_indirect", label: "Transmission Indirect", group: "Light", engines: ["CYCLES"] },
+  { key: "transmission_color", label: "Transmission Color", group: "Light", engines: ["CYCLES"] },
+  { key: "shadow_catcher", label: "Shadow Catcher", group: "Light", engines: ["CYCLES"] },
+  // Light (EEVEE combined-style)
+  { key: "diffuse_light", label: "Diffuse Light", group: "Light", engines: ["EEVEE"] },
+  { key: "specular_light", label: "Specular Light", group: "Light", engines: ["EEVEE"] },
+  { key: "specular_color", label: "Specular Color", group: "Light", engines: ["EEVEE"] },
+  { key: "volume_light", label: "Volume Light", group: "Light", engines: ["EEVEE"] },
+  { key: "transparent", label: "Transparent", group: "Light", engines: ["EEVEE"] },
+  // Light (engine-agnostic)
+  { key: "emission", label: "Emission", group: "Light", engines: ["CYCLES", "EEVEE"] },
+  { key: "environment", label: "Environment", group: "Light", engines: ["CYCLES", "EEVEE"] },
+  { key: "ambient_occlusion", label: "Ambient Occlusion", group: "Light", engines: ["CYCLES", "EEVEE"] },
+  { key: "shadow", label: "Shadow", group: "Light", engines: ["CYCLES", "EEVEE"] },
+  // Volume (Cycles only)
+  { key: "volume_direct", label: "Volume Direct", group: "Volume", engines: ["CYCLES"] },
+  { key: "volume_indirect", label: "Volume Indirect", group: "Volume", engines: ["CYCLES"] },
+  // Cryptomatte
+  { key: "cryptomatte_object", label: "Object", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
+  { key: "cryptomatte_material", label: "Material", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
+  { key: "cryptomatte_asset", label: "Asset", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
+  // Denoising (Cycles only; single bool enables Albedo + Normal + Depth)
+  { key: "denoising_data", label: "Denoising Data (Albedo + Normal + Depth)", group: "Denoising", engines: ["CYCLES"] },
 ];
+
+// True if ``pass`` supports the given engine string from the UI
+// (``CYCLES`` or ``BLENDER_EEVEE``).  Unknown/empty engine shows all.
+export function passSupportsEngine(pass, engine) {
+  if (!engine) return true;
+  const wanted = engine === "BLENDER_EEVEE" ? "EEVEE" : engine === "CYCLES" ? "CYCLES" : null;
+  if (wanted === null) return true;
+  return Array.isArray(pass.engines) && pass.engines.includes(wanted);
+}
 
 // Pull the passes the .blend already enables for a given view layer out
 // of the analyzer payload.  Returns a { passKey: bool } map limited to

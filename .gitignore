@@ -57,6 +57,7 @@ server/creds/*.json
 infra/envs/*/desktop.config.json
 infra/envs/*/.env
 infra/.build/
+desktop/.env
 
 # Terraform local state + plan artefacts (state itself lives in GCS)
 infra/terraform/**/.terraform/
@@ -64,3 +65,4 @@ infra/terraform/**/*.tfstate
 infra/terraform/**/*.tfstate.backup
 infra/terraform/**/.terraform.lock.hcl
 infra/terraform/**/*.tfplan
+

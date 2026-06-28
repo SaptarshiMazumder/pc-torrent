@@ -5,6 +5,7 @@ import {
   terminalFallbackPct,
   resolveJobFilename,
   getLatestTaskWithOutput,
+  countUniqueFrames,
 } from "../../utils/jobUtils";
 import JobThumbnail from "./JobThumbnail";
 import VastInstancePanel from "./VastInstancePanel";
@@ -262,7 +263,7 @@ function RenderGroupDetail({
                   <span>Rendered Frames</span>
                   <span className="jd-frames-count">
                     {availableOutputCount}
-                    {galleryOpen && (galleryState?.files?.length ?? 0) > 0 && ` (${galleryState.files.length})`}
+                    {galleryOpen && countUniqueFrames(galleryState?.files) > 0 && ` (${countUniqueFrames(galleryState?.files)})`}
                   </span>
                   <svg className={`jd-frames-chevron${galleryOpen ? " open" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6" /></svg>
                 </button>
@@ -487,7 +488,7 @@ function SingleJobDetail({
               <span>Rendered Frames</span>
               <span className="jd-frames-count">
                 {availableOutputCount}
-                {galleryOpen && (galleryState?.files?.length ?? 0) > 0 && ` (${galleryState.files.length})`}
+                {galleryOpen && countUniqueFrames(galleryState?.files) > 0 && ` (${countUniqueFrames(galleryState?.files)})`}
               </span>
               <svg className={`jd-frames-chevron${galleryOpen ? " open" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6" /></svg>
             </button>

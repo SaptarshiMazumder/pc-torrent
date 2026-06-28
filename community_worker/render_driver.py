@@ -783,7 +783,10 @@ def _patch_compositor_file_outputs(scene) -> None:
     log(f"[RENDER_DRIVER] Found {len(file_output_nodes)} File Output node(s) in compositor")
     patched = 0
     for node in file_output_nodes:
-        safe_node_name = re.sub(r"[^\w.\- ]", "_", node.name).strip() or "FileOutput"
+        # See render_scripts/render_driver.py: prefer ``node.label``
+        # (the F2-rename target) over the internal ``node.name``.
+        display_name = (node.label or "").strip() or node.name
+        safe_node_name = re.sub(r"[^\w.\- ]", "_", display_name).strip() or "FileOutput"
         try:
             # Blender 5.x: directory + file_name + file_output_items[].name
             # (replaced 4.x's base_path + file_slots[].path).  See

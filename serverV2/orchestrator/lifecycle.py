@@ -44,6 +44,7 @@ from serverV2.fleets.modal.modal_active_jobs_hooks import ModalActiveJobsHooks
 from serverV2.fleets.registry import FleetRegistry
 from serverV2.clients.allocation_client import AllocationClient
 from serverV2.orchestrator.anti_affinity import AntiAffinityFacade
+from serverV2.orchestrator.task_actual_cost import TaskActualCost
 from serverV2.orchestrator.repositories import (
     DispatchAllocationRepository,
     PendingAllocationRepository,
@@ -104,6 +105,7 @@ class RenderLifecycle:
         job_terminator: JobTerminator,
         render_canceler: RenderCanceler,
         terminal_group_resource_releaser: TerminalGroupResourceReleaser,
+        task_actual_cost: TaskActualCost,
         get_max_retries: Callable[[], int],
     ) -> None:
         self._allocation_client = allocation_client
@@ -122,6 +124,7 @@ class RenderLifecycle:
         self._terminator = job_terminator
         self._render_canceler = render_canceler
         self._terminal_group_resource_releaser = terminal_group_resource_releaser
+        self._task_actual_cost = task_actual_cost
         # Reads orchestrator.max_retries fresh from Firestore each call
         # so a desktop ConfigurationPage edit takes effect on the next
         # submission instead of waiting for a server restart.
@@ -635,11 +638,28 @@ class RenderLifecycle:
     ) -> None:
         """Snapshot the per-group fields that the list view needs.  All
         frame-related fields come from the ``output_frames`` table —
-        single SQL query per field, no per-job parsing."""
+        single SQL query per field, no per-job parsing.
+
+        ``total_actual_cost_usd`` is the priority-adjusted actual cost
+        summed across the group's chunks, frozen here so the list
+        endpoint can show a finished group's cost without re-loading its
+        children.  Pure in-memory reduce -- the ``jobs`` already carry
+        every cost input (started_at / completed_at / rate / priority),
+        so no extra read.  Immutable once terminal."""
         latest = self._output_frames.latest_for_group(group_id)
         latest_file = latest[0] if latest else None
         latest_job_id = latest[1] if latest else None
         available = self._output_frames.count_for_group(group_id)
+        total_actual_cost_usd = sum(
+            (self._task_actual_cost.actual_cost_for_chunk(
+                started_at=j.started_at,
+                completed_at=j.completed_at,
+                price_per_hour=j.price_per_hour_at_dispatch,
+                status=j.status,
+                priority=j.priority,
+            )[1] or 0.0)
+            for j in jobs
+        )
         self._group_repo.update_terminal_snapshot(
             group_id,
             tasks_count=len(jobs),
@@ -647,6 +667,7 @@ class RenderLifecycle:
             latest_output_job_id=latest_job_id,
             available_output_files_count=available,
             overall_rendered_frames=total_rendered,
+            total_actual_cost_usd=total_actual_cost_usd,
         )
 
     # ------------------------------------------------------------------

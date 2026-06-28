@@ -82,7 +82,7 @@ class RenderGroupService:
         self._get_credits_per_usd = get_credits_per_usd
         self._serializer = RenderGroupSerializer(
             output_frame_repo=output_frame_repo,
-            actual_cost_compute=orchestrator.actual_cost_for_row,
+            actual_cost_compute=orchestrator.actual_cost_for_chunk,
             get_credits_per_usd=get_credits_per_usd,
         )
 
@@ -667,6 +667,20 @@ class RenderGroupService:
             "available_output_files_count": group.get("available_output_files_count") or 0,
             "latest_output_file": group.get("latest_output_file"),
             "latest_output_job_id": group.get("latest_output_job_id"),
+            # Cost frozen on the row at terminal transition (USD), projected
+            # to credits here -- mirrors the active DTO's two cost fields so
+            # the list view reads the same keys for every group.  Estimated
+            # comes from the submit-time snapshot column.  Legacy terminal
+            # groups (NULL actual) project to 0; the client falls back to
+            # the estimate for those.
+            "total_actual_cost_credits": usd_to_credits(
+                float(group.get("total_actual_cost_usd") or 0.0),
+                self._get_credits_per_usd(),
+            ),
+            "total_estimated_cost_credits": usd_to_credits(
+                float(group.get("pre_render_cost_estimate_usd") or 0.0),
+                self._get_credits_per_usd(),
+            ),
             "tasks_count": group.get("tasks_count") or 0,
             "tasks": [],
         }

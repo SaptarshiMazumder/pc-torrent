@@ -28,7 +28,7 @@ subsequent call charges only the delta since last call.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any
 
 from serverV2.orchestrator.task_actual_cost import TaskActualCost
 from serverV2.repositories.job_repository import JobRepository
@@ -45,15 +45,10 @@ class UsersClient:
         facade: UserFacade,
         job_repo: JobRepository,
         cost: TaskActualCost,
-        get_priority_multiplier: Callable[[int], float],
     ) -> None:
         self._facade = facade
         self._job_repo = job_repo
         self._cost = cost
-        # Fresh-config lookup so admin tunes in ConfigurationPage take
-        # effect on the next debit.  Read once per debit call -- the
-        # config repo is already in-memory cached.
-        self._get_priority_multiplier = get_priority_multiplier
 
     def update_spend_for_chunk(self, row: dict[str, Any]) -> float:
         """Bring the user's recorded spend for this chunk up to its
@@ -72,18 +67,15 @@ class UsersClient:
             job_id = row.get("id")
             if not job_id:
                 return 0.0
-            _, total_cost_usd = self._cost.compute(
+            _, total_cost_usd = self._cost.actual_cost_for_chunk(
                 started_at=row.get("started_at"),
                 completed_at=row.get("completed_at"),
                 price_per_hour=row.get("price_per_hour_at_dispatch"),
                 status=str(row.get("status") or ""),
+                priority=int(row.get("priority") or 1),
             )
             if not total_cost_usd or total_cost_usd <= 0:
                 return 0.0
-            multiplier = self._get_priority_multiplier(
-                int(row.get("priority") or 1),
-            )
-            total_cost_usd = total_cost_usd * multiplier
             total_credits_spent = self._facade.usd_to_credits(total_cost_usd)
             return self._facade.record_spend(
                 str(uid), str(job_id), total_credits_spent,

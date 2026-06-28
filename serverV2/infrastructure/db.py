@@ -223,6 +223,11 @@ def init_db() -> None:
                     "latest_output_job_id TEXT",
                     "available_output_files_count INTEGER",
                     "overall_rendered_frames INTEGER",
+                    # Priority-adjusted actual cost (USD) summed across the
+                    # group's chunks, frozen at terminal transition so the
+                    # list endpoint can show a finished group's cost without
+                    # re-loading its children.  Service projects to credits.
+                    "total_actual_cost_usd NUMERIC(10, 4)",
                 ):
                     cur.execute(
                         f"ALTER TABLE render_groups ADD COLUMN IF NOT EXISTS {column_def}"

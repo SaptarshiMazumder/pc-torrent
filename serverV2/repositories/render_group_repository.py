@@ -91,11 +91,17 @@ class RenderGroupRepository:
         latest_output_job_id: str | None,
         available_output_files_count: int,
         overall_rendered_frames: int,
+        total_actual_cost_usd: float | None,
     ) -> None:
         """Persist the per-group fields that the list view needs but that
         today are recomputed from children on every refresh.  Called once
         per group, when it enters a terminal state — frees the list endpoint
-        from having to re-fetch jobs+machines for finished groups."""
+        from having to re-fetch jobs+machines for finished groups.
+
+        ``total_actual_cost_usd`` is the priority-adjusted actual cost
+        rolled up across the group's chunks (stored in USD; the service
+        projects it to credits at the wire boundary, matching the
+        estimated-cost column)."""
         execute(
             """
             UPDATE render_groups
@@ -103,7 +109,8 @@ class RenderGroupRepository:
                 latest_output_file = %s,
                 latest_output_job_id = %s,
                 available_output_files_count = %s,
-                overall_rendered_frames = %s
+                overall_rendered_frames = %s,
+                total_actual_cost_usd = %s
             WHERE id = %s
             """,
             (
@@ -112,6 +119,7 @@ class RenderGroupRepository:
                 latest_output_job_id,
                 available_output_files_count,
                 overall_rendered_frames,
+                total_actual_cost_usd,
                 group_id,
             ),
         )

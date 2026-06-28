@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getGroupPreviewUrl, getSingleJobPreviewUrl } from "../../utils/jobUtils";
 import { getCachedFramePreview } from "../../services/frameCache";
+import openexrIcon from "../../assets/openexr-icon-color.svg";
 
 function BlenderLogo() {
   return (
@@ -54,11 +55,27 @@ function previewCacheKey(job) {
   return null;
 }
 
+// Latest output filename for a job (group or single).  EXR output can't be
+// browser-thumbnailed, so we show the OpenEXR icon instead of a preview.
+function latestOutputFilename(job) {
+  if (typeof job?.latest_output_file === "string" && job.latest_output_file) {
+    return job.latest_output_file;
+  }
+  const files = Array.isArray(job?.output_files) ? job.output_files : [];
+  return files.length ? files[files.length - 1] : "";
+}
+
+function isExrFilename(name) {
+  return typeof name === "string" && /\.exr$/i.test(name);
+}
+
 export default function JobThumbnail({ job, authToken, backendUrl, className }) {
   const previewUrl = job?.group_id
     ? getGroupPreviewUrl(job, backendUrl, authToken)
     : getSingleJobPreviewUrl(job, backendUrl, authToken);
   const cacheKey = previewCacheKey(job);
+  const outputName = latestOutputFilename(job);
+  const isExr = isExrFilename(outputName);
 
   const [src, setSrc] = useState("");
   const mountedRef = useRef(true);
@@ -68,7 +85,7 @@ export default function JobThumbnail({ job, authToken, backendUrl, className }) 
   }, []);
 
   useEffect(() => {
-    if (!previewUrl || !cacheKey) {
+    if (isExr || !previewUrl || !cacheKey) {
       setSrc("");
       return;
     }
@@ -82,7 +99,15 @@ export default function JobThumbnail({ job, authToken, backendUrl, className }) 
       }
     })();
     return () => { cancelled = true; };
-  }, [previewUrl, cacheKey]);
+  }, [isExr, previewUrl, cacheKey]);
+
+  if (isExr) {
+    return (
+      <div className={`job-thumb-placeholder ${className || ""}`} title={outputName}>
+        <img src={openexrIcon} alt="OpenEXR" className="job-thumb-exr-icon" />
+      </div>
+    );
+  }
 
   if (!previewUrl || !cacheKey || !src) {
     return (

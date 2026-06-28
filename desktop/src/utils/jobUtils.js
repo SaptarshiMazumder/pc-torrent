@@ -174,3 +174,157 @@ export function getSingleJobPreviewUrl(job, backendUrl, authToken) {
     availableCount
   );
 }
+
+// ---------------------------------------------------------------------------
+// Job-table field accessors + labels (Phase 1 list view).
+// All read ONLY fields already present on the /render-groups list DTO --
+// no extra fetch.  Accessors return sortable primitives; *Label() return
+// display strings.  Kept here (job-data helpers) so jobTableColumns stays
+// purely declarative and the row/table components stay field-agnostic.
+// ---------------------------------------------------------------------------
+
+// Sort rank for status (active first, then terminal) -- a stable numeric so
+// the status column sorts sensibly instead of alphabetically.
+const STATUS_RANK = { running: 0, uploading: 1, pending: 2, done: 3, cancelled: 4, failed: 5 };
+export function statusRank(status) {
+  return STATUS_RANK[status] ?? 99;
+}
+
+function renderSettings(job) {
+  return job?.resolved_render_settings?.render || {};
+}
+
+export function jobTotalFrames(job) {
+  return Number(job?.total_frames) || 0;
+}
+
+export function jobRenderedFrames(job) {
+  return Number(job?.overall_rendered_frames) || 0;
+}
+
+export function jobProgressPct(job) {
+  const pct = Number(job?.overall_progress_pct);
+  return Number.isFinite(pct) ? pct : 0;
+}
+
+export function jobPixels(job) {
+  const r = renderSettings(job);
+  const x = Number(r.resolution_x) || 0;
+  const y = Number(r.resolution_y) || 0;
+  const pct = Number(r.resolution_percentage) || 100;
+  return Math.round(x * y * (pct / 100));
+}
+
+export function jobResolutionLabel(job) {
+  const r = renderSettings(job);
+  if (!r.resolution_x || !r.resolution_y) return "—";
+  const pct = Number(r.resolution_percentage);
+  const base = `${r.resolution_x}×${r.resolution_y}`;
+  return pct && pct !== 100 ? `${base} @${pct}%` : base;
+}
+
+export function jobSamples(job) {
+  const s = Number(renderSettings(job).cycles_samples);
+  return Number.isFinite(s) ? s : null;
+}
+
+export function jobEngineLabel(job) {
+  const e = renderSettings(job).engine;
+  if (!e) return "—";
+  if (/EEVEE/i.test(e)) return "EEVEE";
+  if (/CYCLES/i.test(e)) return "Cycles";
+  return e;
+}
+
+export function jobOutputFormat(job) {
+  return job?.resolved_render_settings?.output?.file_format || "";
+}
+
+export function jobOutputLabel(job) {
+  const f = jobOutputFormat(job);
+  if (!f) return "—";
+  if (/EXR/i.test(f)) return /MULTILAYER/i.test(f) ? "EXR (multi)" : "EXR";
+  return f;
+}
+
+export function jobFileSizeBytes(job) {
+  return Number(job?.heaviness?.file_size_bytes) || 0;
+}
+
+export function jobSubmittedMs(job) {
+  const t = Date.parse(job?.submitted_at || "");
+  return Number.isFinite(t) ? t : 0;
+}
+
+// Wall time: submitted -> completed (or now, for in-flight rows).
+export function jobDurationSec(job) {
+  const start = Date.parse(job?.submitted_at || "");
+  if (!Number.isFinite(start)) return 0;
+  const end = job?.completed_at ? Date.parse(job.completed_at) : Date.now();
+  if (!Number.isFinite(end)) return 0;
+  return Math.max(0, Math.floor((end - start) / 1000));
+}
+
+export function formatBytesLabel(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${v.toFixed(i > 0 && v < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+export function formatDurationLabel(totalSec) {
+  const s = Number(totalSec);
+  if (!Number.isFinite(s) || s <= 0) return "—";
+  if (s < 60) return `${s}s`;
+  const mins = Math.floor(s / 60);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  if (hrs < 24) return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  const remHrs = hrs % 24;
+  return remHrs > 0 ? `${days}d ${remHrs}h` : `${days}d`;
+}
+
+export function formatDateTimeLabel(iso) {
+  const t = Date.parse(iso || "");
+  if (!Number.isFinite(t)) return "—";
+  const d = new Date(t);
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+// The REAL (actual) cost in credits, or 0 when there isn't one.  NO estimate
+// fallback -- the Cost column shows the real cost or nothing.  Active renders
+// surface their accrued-so-far actual; pending / legacy / never-charged rows
+// are 0 and render as "—".
+export function jobCostCredits(job) {
+  const actual = Number(job?.total_actual_cost_credits);
+  return Number.isFinite(actual) && actual > 0 ? actual : 0;
+}
+
+// Cost-column ordering.  Three tiers, because cost isn't a flat number:
+//   0  in-progress renders                            -> pinned TOP
+//   1  finished jobs with a real actual cost          -> middle, by cost
+//   2  finished jobs with NO actual cost (none/legacy) -> pinned BOTTOM
+// The top/bottom pins are direction-independent (tierA - tierB is never
+// flipped) -- only the middle tier reverses on asc/desc -- so "in progress"
+// stays up top and "no cost" stays at the bottom however the user toggles.
+function costTier(job) {
+  if (!isTerminalStatus(job?.status)) return 0;       // ongoing -> top
+  return jobCostCredits(job) > 0 ? 1 : 2;             // real cost / none -> bottom
+}
+
+export function compareJobCost(a, b, dir) {
+  const tierA = costTier(a);
+  const tierB = costTier(b);
+  if (tierA !== tierB) return tierA - tierB;           // fixed tier order
+  if (tierA === 2) return 0;                           // no-cost tier: stable
+  // Same orderable tier: sort by the real cost in the chosen direction.
+  const ca = jobCostCredits(a);
+  const cb = jobCostCredits(b);
+  const cmp = ca === cb ? 0 : ca < cb ? -1 : 1;
+  return dir === "desc" ? -cmp : cmp;
+}

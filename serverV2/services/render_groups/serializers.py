@@ -28,7 +28,7 @@ _STALL_RULE_RE = re.compile(r"^Pre-render stall \(([a-z_]+)\)")
 
 
 # Actual-cost callback signature.  Provided by the orchestrator facade
-# (``RenderOrchestrator.actual_cost_for_row``) so the UI value and the
+# (``RenderOrchestrator.actual_cost_for_chunk``) so the UI value and the
 # server-side credit debit derive from one formula.
 ActualCostCompute = Callable[..., tuple[float | None, float | None]]
 

@@ -1,0 +1,120 @@
+@startuml jobs_cost_phase2_classes
+title Phase 2 -- Cost in the jobs list (terminal snapshot, in-memory; + client column)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+' =====================================================================
+' Already correct today -- ACTIVE groups already ship both cost fields.
+' The whole gap is TERMINAL groups (slim DTO reads row snapshot cols).
+' =====================================================================
+
+package "infrastructure" {
+  class "db.py (migration)" as DB <<edit>> {
+    + render_groups.total_actual_cost_usd  NUMERIC(10,4)
+    .. (estimated already exists as pre_render_cost_estimate_usd) ..
+  }
+}
+
+package "core" {
+  class RenderJob <<unchanged, data carrier>> {
+    status
+    priority
+    started_at
+    completed_at
+    price_per_hour_at_dispatch
+    -- already carries every actual-cost input (no extra read)
+  }
+}
+
+package "orchestrator" {
+  class TaskActualCost <<edit>> {
+    - get_priority_multiplier : Callable[int,float]
+    + actual_cost_for_chunk(started, completed, price, status, priority) : (sec, usd)
+    -- the ONE authority that prices a chunk (compute + priority mult)
+  }
+  class RenderOrchestrator <<edit, slim>> {
+    + actual_cost_for_chunk(...)  -> delegates to TaskActualCost
+    -- drops its own get_priority_multiplier (moved into TaskActualCost)
+  }
+  class UsersClient <<edit>> {
+    + update_spend_for_chunk(row)
+    -- billing debit now delegates to actual_cost_for_chunk
+       (was an inlined compute + multiply)
+  }
+  class RenderLifecycle <<edit>> {
+    - task_actual_cost : TaskActualCost
+    + reconcile_group_status(group_id)   -- natural terminals (success / fail-exhausted)
+    + cancel_render(group_id)            -- all cancels
+    .. the single snapshot writer (chokepoint) ..
+    + _write_terminal_snapshot(group_id, jobs, total_rendered)
+  }
+}
+
+package "repositories" {
+  class RenderGroupRepository <<edit>> {
+    + update_terminal_snapshot(..., total_actual_cost_usd)
+    -- one new column in the existing UPDATE; SELECT * already returns it
+  }
+}
+
+package "services/render_groups" {
+  class RenderGroupService <<edit>> {
+    - get_credits_per_usd : Callable[[],float]  (already present)
+    + _build_terminal_status_dto(group)
+    -- emits total_actual_cost_credits + total_estimated_cost_credits
+  }
+}
+
+package "desktop (client)" {
+  class "jobUtils.js" as JU <<edit>> {
+    + jobCostCredits(job)
+    -- Cost cell reuses creditsFormat.formatCredits (no new formatter)
+  }
+  class "jobTableColumns.jsx" as COLS <<edit>> {
+    + Cost column  (sortValue + Cell)
+  }
+  class "JobGridCard.jsx" as CARD <<optional>> {
+    + cost in card meta row
+  }
+}
+
+' --- both terminal transitions funnel into the one snapshot writer ---
+RenderLifecycle ..> RenderLifecycle : reconcile / cancel\nboth call _write_terminal_snapshot
+RenderLifecycle --> RenderJob : jobs already in hand (passed in)
+RenderLifecycle --> TaskActualCost : price each job (in-memory)
+RenderLifecycle --> RenderGroupRepository : update_terminal_snapshot(total_actual_cost_usd)
+RenderOrchestrator --> TaskActualCost : delegate (UI display)
+UsersClient --> TaskActualCost : delegate (billing debit)
+RenderGroupService --> RenderGroupRepository : SELECT * (reads snapshot col)
+COLS --> JU : jobCostCredits
+
+note bottom of RenderLifecycle
+  WRITE path -- ONE chokepoint, reached by every terminal scenario:
+    reconcile_group_status (618) + cancel_render (531)
+    both -> _write_terminal_snapshot(group_id, jobs, ...)
+  jobs : list[RenderJob] are ALREADY loaded by the callers, and each
+  carries started_at / completed_at / price_per_hour_at_dispatch /
+  status / priority.  So the rollup is a pure in-memory sum -- ZERO
+  extra reads:
+    total_actual_cost_usd =
+      sum over jobs of TaskActualCost.actual_cost_for_chunk(...).usd
+  Immutable once terminal -> safe to freeze on the row.
+end note
+
+note bottom of RenderGroupService
+  READ path (terminal DTO, row only -- no children loaded):
+    total_actual_cost_credits =
+      usd_to_credits(total_actual_cost_usd, credits_per_usd)
+    total_estimated_cost_credits =
+      usd_to_credits(pre_render_cost_estimate_usd, credits_per_usd)
+  Active DTO is unchanged (already emits both).
+end note
+
+note bottom of JU
+  jobCostCredits(job):
+    terminal -> total_actual_cost_credits (fallback estimated if legacy NULL)
+    active   -> total_estimated_cost_credits (the quote)
+  Client-side sort orders the LOADED rows only.
+  Global ORDER-BY-cost across all pages = separate later phase.
+end note
+@enduml

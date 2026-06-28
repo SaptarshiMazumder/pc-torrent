@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useRef, useState } from "react";
 import { downloadJobOutputToDownloads } from "../services/sidecar";
-import { buildDownloadFolderName } from "../utils/jobUtils";
+import { buildDownloadFolderName, extractTypeFolder } from "../utils/jobUtils";
 import { useToast } from "./ToastContext";
 
 const DownloadContext = createContext(null);
@@ -51,6 +51,7 @@ export function DownloadProvider({ children }) {
         try {
           const result = await downloadJobOutputToDownloads(fileUrl, {
             jobFolder,
+            typeSubfolder: extractTypeFolder(filename),
             preferredFilename: filename,
             expectedSizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
             overwriteExisting: false,

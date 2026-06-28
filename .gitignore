@@ -12,10 +12,6 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
-# desktop/.env holds committed, non-secret Vite defaults (public firebase web
-# config + backend URL).  desktop/.env.local stays ignored (per-env override
-# written by desktop-dev.sh / desktop-build.sh).
-!desktop/.env
 
 # desktop-dev.sh backups (created when patching source in-place for tauri dev)
 desktop/**/*.bak

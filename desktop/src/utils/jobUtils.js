@@ -58,6 +58,20 @@ export function extractTypeFolder(filename) {
   return dot > 0 ? filename.slice(dot + 1).toUpperCase() : "other";
 }
 
+// Count distinct frame numbers across a set of output files.  Used by
+// the "Rendered Frames N (M)" header to express both counts in
+// frame-units (otherwise N is frames but M ends up being raw file
+// count, which is misleading when bonus File Output nodes inflate M).
+export function countUniqueFrames(files) {
+  if (!Array.isArray(files) || files.length === 0) return 0;
+  const frames = new Set();
+  for (const file of files) {
+    const m = file?.filename?.match?.(/frame(\d+)\./);
+    if (m) frames.add(parseInt(m[1], 10));
+  }
+  return frames.size;
+}
+
 export function frameIndexFromFilename(filename) {
   if (typeof filename !== "string") return -1;
   const match = filename.match(/(\d+)(?=\.[^.]+$)/);

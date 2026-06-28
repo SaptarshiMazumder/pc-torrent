@@ -15,6 +15,7 @@ tracked and skipped.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -88,6 +89,19 @@ class IncrementalOutputUploader:
         except FileNotFoundError:
             return []
 
+    def _primary_basenames(self) -> set[str]:
+        """Main-render basenames the render driver wrote to the manifest
+        (``.primary_outputs.json``).  Empty set on any read error -> every
+        is_primary goes False and the backend falls back to its naming
+        heuristic."""
+        path = os.path.join(self._output_dir, ".primary_outputs.json")
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+            return set(data) if isinstance(data, list) else set()
+        except (FileNotFoundError, ValueError, OSError):
+            return set()
+
     def _scan_once(self, require_stable: bool) -> None:
         ready: list[str] = []
         for fname in self._candidate_files():
@@ -146,7 +160,10 @@ class IncrementalOutputUploader:
         if not uploaded_now:
             return
 
-        self._client.register_outputs(uploaded_now)
+        primary = self._primary_basenames()
+        self._client.register_outputs(
+            [(name, name in primary) for name in uploaded_now]
+        )
 
         for fname in uploaded_now:
             self._uploaded.add(fname)

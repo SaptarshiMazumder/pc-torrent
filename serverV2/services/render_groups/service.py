@@ -481,7 +481,7 @@ class RenderGroupService:
         if overall_status == "done":
             overall_pct = 100.0
 
-        latest = self._output_frames.latest_for_group(group["id"])
+        latest = self._output_frames.preview_for_group(group["id"])
         latest_output = latest[0] if latest else None
         latest_output_job_id = latest[1] if latest else None
 
@@ -667,18 +667,14 @@ class RenderGroupService:
             "available_output_files_count": group.get("available_output_files_count") or 0,
             "latest_output_file": group.get("latest_output_file"),
             "latest_output_job_id": group.get("latest_output_job_id"),
-            # Cost frozen on the row at terminal transition (USD), projected
-            # to credits here -- mirrors the active DTO's two cost fields so
-            # the list view reads the same keys for every group.  Estimated
-            # comes from the submit-time snapshot column.  Legacy terminal
-            # groups (NULL actual) project to 0; the client falls back to
-            # the estimate for those.
+            # Actual cost frozen on the row at terminal transition (USD),
+            # projected to credits here -- mirrors the active DTO's actual-cost
+            # field so the list reads the same key for every group.  Legacy
+            # terminal groups (NULL actual) project to 0; the Cost column then
+            # renders "—" (no estimate fallback -- show the real cost or
+            # nothing).
             "total_actual_cost_credits": usd_to_credits(
                 float(group.get("total_actual_cost_usd") or 0.0),
-                self._get_credits_per_usd(),
-            ),
-            "total_estimated_cost_credits": usd_to_credits(
-                float(group.get("pre_render_cost_estimate_usd") or 0.0),
                 self._get_credits_per_usd(),
             ),
             "tasks_count": group.get("tasks_count") or 0,

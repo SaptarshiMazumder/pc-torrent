@@ -646,7 +646,7 @@ class RenderLifecycle:
         children.  Pure in-memory reduce -- the ``jobs`` already carry
         every cost input (started_at / completed_at / rate / priority),
         so no extra read.  Immutable once terminal."""
-        latest = self._output_frames.latest_for_group(group_id)
+        latest = self._output_frames.preview_for_group(group_id)
         latest_file = latest[0] if latest else None
         latest_job_id = latest[1] if latest else None
         available = self._output_frames.count_for_group(group_id)

@@ -329,6 +329,16 @@ def init_db() -> None:
                     "CREATE INDEX IF NOT EXISTS output_frames_group_frame_idx "
                     "ON output_frames (group_id, frame_number)"
                 )
+                # Primary-output flag.  The worker tags the main render
+                # (scene.render.filepath) true and File Output node passes
+                # false; the preview selector prefers is_primary so the
+                # thumbnail / detail preview show the beauty, not a data
+                # pass.  Defaults false for legacy rows + workers not yet
+                # redeployed (selector falls back to naming/latest there).
+                cur.execute(
+                    "ALTER TABLE output_frames ADD COLUMN IF NOT EXISTS "
+                    "is_primary BOOLEAN NOT NULL DEFAULT FALSE"
+                )
                 # Pending allocation queue — chunks/groups that couldn't
                 # be allocated to a fleet because nothing eligible existed
                 # at allocation time.  Dispatch daemon's per-tick re-eval

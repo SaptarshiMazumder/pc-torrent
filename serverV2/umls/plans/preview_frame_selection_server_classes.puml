@@ -1,0 +1,90 @@
+@startuml preview_frame_selection_server_classes
+title Preview selection -- SERVER changes only (Phase 1: backend first)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+' RECORD path: store is_primary exactly as the worker reports it.
+' SELECT path: latest_output_file resolves to the latest frame's PRIMARY.
+' Ships independently of the worker -- untagged rows default false, so the
+' selector falls back (naming/latest) and there is no regression until the
+' worker images redeploy and start sending is_primary.
+
+package "infrastructure" {
+  class "db.py (migration)" as DB <<edit>> {
+    + output_frames.is_primary  BOOLEAN NOT NULL DEFAULT FALSE
+    -- idempotent ADD COLUMN IF NOT EXISTS at startup
+  }
+}
+
+package "api/routers" {
+  class "jobs.py :: register_outputs" as ROUTER <<edit>> {
+    POST /jobs/{job_id}/register-outputs
+    accepts: { files: [{filename, is_primary}] }
+    back-compat: { filenames: [str] } -> is_primary = false
+  }
+}
+
+package "services/jobs" {
+  class JobService <<edit>> {
+    + register_outputs(job_id, files)
+    -- forwards (filename, is_primary) pairs unchanged
+  }
+}
+
+package "repositories" {
+  class OutputFrameRepository <<edit>> {
+    + add_many(group_id, job_id, files)
+    + preview_for_group(group_id) : (filename, job_id)?
+    -- retires latest_for_group (the alphabetical pick)
+  }
+}
+
+package "core" {
+  class "preview_frame_selector.py" as SEL <<new>> {
+    + select_preview_frame(rows) : (filename, job_id)?
+  }
+}
+
+package "orchestrator" {
+  class RenderLifecycle <<edit>> {
+    _write_terminal_snapshot -> preview_for_group
+  }
+}
+
+package "services/render_groups" {
+  class RenderGroupService <<edit>> {
+    _build_active_status_dto -> preview_for_group
+  }
+  class RenderGroupSerializer <<edit>> {
+    serialize_task -> select_preview_frame (per task)
+  }
+}
+
+' ---- record path (write is_primary) ----
+ROUTER --> JobService
+JobService --> OutputFrameRepository : add_many(files)
+OutputFrameRepository ..> DB : INSERT ... ON CONFLICT\nDO UPDATE is_primary (false->true only)
+
+' ---- select path (read is_primary) ----
+OutputFrameRepository ..> SEL : preview_for_group runs it
+RenderLifecycle --> OutputFrameRepository : preview_for_group (terminal snapshot)
+RenderGroupService --> OutputFrameRepository : preview_for_group (active DTO)
+RenderGroupSerializer ..> SEL : per-task pointer
+
+note bottom of SEL
+  select_preview_frame(rows):  rows = (filename, job_id, is_primary, frame_no)
+    1. prefer is_primary = TRUE
+    2. then latest frame_no
+    3. legacy fallback (no is_primary in the set):
+         prefer filename NOT matching "_<idx>_frame####", then latest frame
+  => group + per-task latest_output_file = latest frame's PRIMARY render
+     (table thumbnail + detail "latest rendered frame" both fixed).
+end note
+
+note bottom of ROUTER
+  The worker (Phase 2, separate deploy) starts sending is_primary after
+  its image redeploys.  Until then the old [filenames] shape stores false
+  and the selector falls back -- backend is safe to deploy on its own.
+  Existing terminal groups keep their old pointer until re-snapshotted.
+end note
+@enduml

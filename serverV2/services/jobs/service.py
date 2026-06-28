@@ -255,14 +255,18 @@ class JobService:
 
     # ---- output management ----
 
-    def register_outputs(self, job_id: str, files: list[str]) -> dict[str, Any]:
-        """Pure DB write: insert into ``output_frames`` and return this
-        job's full filename list.  No completion detection here --
-        chunk completion is the singleton fleet monitor's job, observed
-        on its next tick via ``JobCounts.is_complete``.
+    def register_outputs(
+        self, job_id: str, files: list[tuple[str, bool]],
+    ) -> dict[str, Any]:
+        """Pure DB write: insert ``(filename, is_primary)`` rows into
+        ``output_frames`` and return this job's full filename list.  No
+        completion detection here -- chunk completion is the singleton
+        fleet monitor's job, observed on its next tick via
+        ``JobCounts.is_complete``.
 
-        ON CONFLICT silently dedupes frames a sibling retry already
-        uploaded.  Single round-trip from the worker's POV.
+        ON CONFLICT dedupes frames a sibling retry already uploaded (and
+        keeps ``is_primary`` monotonic).  Single round-trip from the
+        worker's POV.
         """
         job = self._jobs.get_raw_by_id(job_id)
         if not job:

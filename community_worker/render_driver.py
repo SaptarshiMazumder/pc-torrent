@@ -684,6 +684,35 @@ def _render_animation(scene, selected_layer):
     bpy.ops.render.render(**kwargs)
 
 
+def _primary_basenames(scene, assignments, base_path, ffmpeg_locked):
+    """Basenames of the MAIN render outputs (``scene.render.filepath``) -- one
+    per (frame, camera) in the chunk.  These are the primary files; every
+    other file in OUTPUT_DIR is a File Output node pass.  Recorded so the
+    uploader can tag ``is_primary`` authoritatively, even when a camera's
+    name collides with the pass naming convention (e.g. ``Cam_2``)."""
+    ext = ".png" if ffmpeg_locked else (getattr(scene.render, "file_extension", "") or ".png")
+    names = set()
+    for frame, camera_obj in assignments:
+        prefixed = _camera_prefixed_base(base_path, camera_obj.name)
+        names.add(os.path.basename(_filepath_for_frame(prefixed, frame)) + ext)
+    return names
+
+
+def _write_primary_manifest(basenames):
+    """Persist primary (main-render) basenames to a hidden manifest the
+    uploader reads to set ``is_primary``.  Dot-prefixed so the uploader's
+    dotfilter never uploads it.  Best-effort -- on failure the backend falls
+    back to its filename-naming heuristic, so the render itself is unaffected."""
+    output_dir = os.environ.get("OUTPUT_DIR", "/output")
+    path = os.path.join(output_dir, ".primary_outputs.json")
+    try:
+        with open(path, "w") as fh:
+            json.dump(sorted(basenames), fh)
+        log(f"[RENDER_DRIVER] Primary manifest: {len(basenames)} main-render file(s)")
+    except Exception as exc:
+        log(f"[RENDER_DRIVER] Failed to write primary manifest: {exc}")
+
+
 def _render_grouped(scene, selected_layer, assignments, base_path, ffmpeg_locked):
     """Render every frame to a ``{camera}_frame####`` path.
 
@@ -696,6 +725,12 @@ def _render_grouped(scene, selected_layer, assignments, base_path, ffmpeg_locked
     """
     if not assignments:
         raise RuntimeError("No renderable frames in timeline")
+
+    # Record the main-render basenames BEFORE rendering so the incremental
+    # uploader already has the complete manifest while it uploads frames.
+    _write_primary_manifest(
+        _primary_basenames(scene, assignments, base_path, ffmpeg_locked)
+    )
 
     distinct = {cam.name for _, cam in assignments}
 

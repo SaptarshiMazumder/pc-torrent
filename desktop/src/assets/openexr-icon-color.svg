@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 130" width="100" height="130">
+  <!-- File body: rounded rectangle with a folded top-right corner. -->
+  <path d="M 18 6 L 72 6 L 94 28 L 94 116 a 8 8 0 0 1 -8 8 L 14 124 a 8 8 0 0 1 -8 -8 L 6 14 a 8 8 0 0 1 8 -8 z"
+        fill="#f0f1f2" stroke="#1f3744" stroke-width="3"/>
+  <!-- Folded corner triangle. -->
+  <path d="M 72 6 L 72 28 L 94 28 Z" fill="#1f3744"/>
+
+  <!-- Aperture / iris (camera shutter) icon, Lucide-style, centred at 50,52. -->
+  <g transform="translate(50 52)">
+    <circle r="15" fill="#1f3744"/>
+    <g stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" fill="none">
+      <line x1="2.31"  y1="-4" x2="8.05"  y2="5.94"/>
+      <line x1="-2.31" y1="-4" x2="9.17"  y2="-4"/>
+      <line x1="-4.62" y1="0"  x2="1.12"  y2="-9.94"/>
+      <line x1="-2.31" y1="4"  x2="-8.05" y2="-5.94"/>
+      <line x1="2.31"  y1="4"  x2="-9.17" y2="4"/>
+      <line x1="4.62"  y1="0"  x2="-1.12" y2="9.94"/>
+    </g>
+  </g>
+
+  <!-- "EXR" label. -->
+  <text x="50" y="105" text-anchor="middle"
+        font-family="Arial, Helvetica, sans-serif"
+        font-weight="800" font-size="22" letter-spacing="1"
+        fill="#1f3744">EXR</text>
+</svg>

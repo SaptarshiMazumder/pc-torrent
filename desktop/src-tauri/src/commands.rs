@@ -1399,6 +1399,7 @@ pub async fn remove_image(
 pub async fn download_job_output_to_downloads(
     url: String,
     job_folder: Option<String>,
+    type_subfolder: Option<String>,
     preferred_filename: Option<String>,
     expected_size_bytes: Option<u64>,
     overwrite_existing: Option<bool>,
@@ -1417,11 +1418,14 @@ pub async fn download_job_output_to_downloads(
     let mut filename = sanitize_filename(&fallback_filename);
 
     let downloads = downloads_dir()?;
-    let target_dir = if let Some(folder) = job_folder {
+    let mut target_dir = if let Some(folder) = job_folder {
         downloads.join(sanitize_path_component(&folder, "render_job"))
     } else {
         downloads
     };
+    if let Some(sub) = type_subfolder.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        target_dir = target_dir.join(sanitize_path_component(sub, "output"));
+    }
     fs::create_dir_all(&target_dir)
         .map_err(|err| format!("Failed to create destination folder: {err}"))?;
     remove_duplicate_variants(&target_dir, &filename)?;

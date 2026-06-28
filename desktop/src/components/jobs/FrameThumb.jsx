@@ -2,10 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { getFirebaseToken } from "../../services/api";
 import { getCachedFramePreview } from "../../services/frameCache";
 import { isPreviewableExtension } from "../../utils/jobUtils";
+import openexrIcon from "../../assets/openexr-icon-color.svg";
 
 function fileExtLabel(name) {
   const dot = typeof name === "string" ? name.lastIndexOf(".") : -1;
   return dot >= 0 ? name.slice(dot + 1).toUpperCase() : "FILE";
+}
+
+function isExrFilename(name) {
+  return typeof name === "string" && /\.exr$/i.test(name);
 }
 
 export default function FrameThumb({ file, backendUrl, className }) {
@@ -62,6 +67,13 @@ export default function FrameThumb({ file, backendUrl, className }) {
   // Non-previewable formats (e.g. multilayer .exr) can't be browser-
   // thumbnailed; show a format badge instead of a broken/blank tile.
   if (!previewable) {
+    if (isExrFilename(file?.filename)) {
+      return (
+        <div className={`${className} frame-thumb-exr`} title={file?.filename}>
+          <img src={openexrIcon} alt="OpenEXR" className="frame-thumb-exr-icon" />
+        </div>
+      );
+    }
     return (
       <div
         className={className}

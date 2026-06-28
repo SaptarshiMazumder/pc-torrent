@@ -44,6 +44,20 @@ export function buildDownloadFolderName(jobFilename, id) {
   return `render__${baseName}__${suffix}`;
 }
 
+// Derive a "type" sub-folder name from an output filename so the
+// downloader groups same-type files together on disk.  Worker naming
+// convention is ``<Type>_frame####.<ext>`` (main camera render) or
+// ``<NodeName>_<SlotIdx>_frame####.<ext>`` (File Output node slot).
+// Anything before the ``_frame####.<ext>`` suffix becomes the folder.
+// Fallback for names that don't match the pattern: group by extension.
+export function extractTypeFolder(filename) {
+  if (typeof filename !== "string" || !filename) return "other";
+  const m = filename.match(/^(.+?)_?frame\d+\.\w+$/i);
+  if (m && m[1]) return m[1];
+  const dot = filename.lastIndexOf(".");
+  return dot > 0 ? filename.slice(dot + 1).toUpperCase() : "other";
+}
+
 export function frameIndexFromFilename(filename) {
   if (typeof filename !== "string") return -1;
   const match = filename.match(/(\d+)(?=\.[^.]+$)/);

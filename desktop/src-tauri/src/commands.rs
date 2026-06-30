@@ -11,342 +11,26 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader as TokioBufReader, SeekFrom};
 use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 
-// Embed the prepare script at compile time so it ships inside the binary
+// Embed the merged prepare+analyze script.  ONE Blender invocation runs
+// the full prep pipeline AND the analysis in the same in-memory state,
+// so we save a full Blender startup + .blend load compared to the old
+// two-pass design.
+const PREPARE_AND_ANALYZE_PY: &str = include_str!("../scripts/prepare_and_analyze.py");
+// Prepare-only script.  Used by the legacy ``prepare_blend_for_upload``
+// Tauri command (no longer reached by the analyze flow but kept until a
+// separate dead-code pass removes it).
 const PREPARE_BLEND_PY: &str = include_str!("../scripts/prepare_blend.py");
-const ANALYZE_BLEND_PY: &str = r#"
-import json
-import bpy
+// Standalone analyze-only script.  Used by the ``analyze_blend_with_blender``
+// command (a separate Tauri command preserved for future callers and the
+// rare "re-analyze an existing prepared file" path).  The main flow uses
+// PREPARE_AND_ANALYZE_PY instead.
+const ANALYZE_BLEND_PY: &str = include_str!("../scripts/analyze_blend.py");
 
-def _safe_int(value, default=0):
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-_PASS_ATTRS = {
-    "z": "use_pass_z",
-    "mist": "use_pass_mist",
-    "normal": "use_pass_normal",
-    "position": "use_pass_position",
-    "vector": "use_pass_vector",
-    "uv": "use_pass_uv",
-    "diffuse_direct": "use_pass_diffuse_direct",
-    "diffuse_indirect": "use_pass_diffuse_indirect",
-    "diffuse_color": "use_pass_diffuse_color",
-    "glossy_direct": "use_pass_glossy_direct",
-    "glossy_indirect": "use_pass_glossy_indirect",
-    "glossy_color": "use_pass_glossy_color",
-    "transmission_direct": "use_pass_transmission_direct",
-    "transmission_indirect": "use_pass_transmission_indirect",
-    "transmission_color": "use_pass_transmission_color",
-    "emission": "use_pass_emit",
-    "environment": "use_pass_environment",
-    "ambient_occlusion": "use_pass_ambient_occlusion",
-    "shadow": "use_pass_shadow",
-    "cryptomatte_object": "use_pass_cryptomatte_object",
-    "cryptomatte_material": "use_pass_cryptomatte_material",
-    "cryptomatte_asset": "use_pass_cryptomatte_asset",
-}
-
-def _layer_passes(layer):
-    # Report only the passes the active engine actually exposes (hasattr),
-    # so the UI shows an engine-correct set.  Keys mirror the worker's
-    # _PASS_ATTR map so the detect -> override round-trips 1:1.
-    out = {}
-    for key, attr in _PASS_ATTRS.items():
-        if hasattr(layer, attr):
-            try:
-                out[key] = bool(getattr(layer, attr, False))
-            except Exception:
-                pass
-    return out
-
-def _minimal_scene_payload(scene, active_name):
-    frame_start = _safe_int(getattr(scene, "frame_start", 1), 1)
-    frame_end = _safe_int(getattr(scene, "frame_end", frame_start), frame_start)
-    frame_step = max(1, _safe_int(getattr(scene, "frame_step", 1), 1))
-    total_frames = ((frame_end - frame_start) // frame_step) + 1 if frame_end >= frame_start else 0
-    scene_name = getattr(scene, "name", "Scene")
-    camera = getattr(scene, "camera", None)
-    active_camera = getattr(camera, "name", None) if camera else None
-    return {
-        "name": scene_name,
-        "is_active": scene_name == active_name,
-        "frame_start": frame_start,
-        "frame_end": frame_end,
-        "frame_step": frame_step,
-        "total_frames": total_frames,
-        "active_camera": active_camera,
-        "cameras": [active_camera] if active_camera else [],
-        "view_layers": [],
-        "view_layer_passes": {},
-        "camera_cuts": [],
-    }
-
-def _scene_payload(scene, active_name):
-    payload = _minimal_scene_payload(scene, active_name)
-
-    cameras = list(payload["cameras"])
-    camera_cuts = []
-
-    try:
-        markers = sorted(getattr(scene, "timeline_markers", []), key=lambda marker: _safe_int(getattr(marker, "frame", 0), 0))
-        for marker in markers:
-            marker_camera = None
-            try:
-                marker_camera = marker.camera.name if getattr(marker, "camera", None) else None
-            except Exception:
-                marker_camera = None
-            if marker_camera:
-                cameras.append(marker_camera)
-            camera_cuts.append({
-                "frame": _safe_int(getattr(marker, "frame", 0), 0),
-                "camera_name": marker_camera,
-            })
-    except Exception:
-        pass
-
-    try:
-        for obj in bpy.data.objects:
-            if getattr(obj, "type", "") == "CAMERA":
-                cameras.append(getattr(obj, "name", "Camera"))
-    except Exception:
-        pass
-
-    unique_cameras = []
-    for name in cameras:
-        if name and name not in unique_cameras:
-            unique_cameras.append(name)
-
-    view_layers = []
-    try:
-        view_layers = [getattr(layer, "name", "") for layer in getattr(scene, "view_layers", []) if getattr(layer, "name", "")]
-    except Exception:
-        view_layers = []
-
-    view_layer_passes = {}
-    try:
-        for layer in getattr(scene, "view_layers", []):
-            name = getattr(layer, "name", "")
-            if name:
-                view_layer_passes[name] = _layer_passes(layer)
-    except Exception:
-        view_layer_passes = {}
-
-    payload["cameras"] = unique_cameras
-    payload["view_layers"] = view_layers
-    payload["view_layer_passes"] = view_layer_passes
-    payload["camera_cuts"] = camera_cuts
-    return payload
-
-active_scene = bpy.context.scene
-active_name = active_scene.name if active_scene else (bpy.data.scenes[0].name if bpy.data.scenes else "")
-scenes = []
-for scene in bpy.data.scenes:
-    try:
-        scenes.append(_scene_payload(scene, active_name))
-    except Exception:
-        scenes.append(_minimal_scene_payload(scene, active_name))
-if not scenes:
-    raise RuntimeError("No scenes found in file")
-
-active = None
-for scene in scenes:
-    if scene.get("is_active"):
-        active = scene
-        break
-if active is None:
-    active = scenes[0]
-
-v = bpy.app.version
-blender_version = int(v[0]) * 100 + int(v[1])
-
-payload = {
-    "frame_start": active["frame_start"],
-    "frame_end": active["frame_end"],
-    "frame_step": active["frame_step"],
-    "total_frames": active["total_frames"],
-    "blender_version": blender_version,
-    "active_scene": active["name"],
-    "cameras": active.get("cameras", []),
-    "camera_cuts": active.get("camera_cuts", []),
-    "view_layers": active.get("view_layers", []),
-    "view_layer_passes": active.get("view_layer_passes", {}),
-    "timeline_defaults": {
-        "frame_start": active["frame_start"],
-        "frame_end": active["frame_end"],
-        "frame_step": active["frame_step"],
-    },
-    "output_defaults": None,
-    "render_defaults": {},
-    "scenes": scenes,
-    "unsupported_fields": [],
-}
-
-# ---------------------------------------------------------------
-# Heaviness signals — Phase 2 of the tiered_allocation_plan.
-# Read by the cost estimator (server-side) to pick a render tier.
-# Each section is wrapped in try/except so a Blender API mismatch
-# in one area degrades just those fields rather than the whole
-# analysis.  Missing fields default sensibly in
-# value_objects.parse_analysis_heaviness on the server.
-# ---------------------------------------------------------------
-
-heaviness = {}
-
-# Render settings (engine, resolution, samples)
-try:
-    render = active_scene.render
-    engine = getattr(render, "engine", "")
-    res_x = _safe_int(getattr(render, "resolution_x", 1920), 1920)
-    res_y = _safe_int(getattr(render, "resolution_y", 1080), 1080)
-    res_pct = _safe_int(getattr(render, "resolution_percentage", 100), 100)
-    samples = 0
-    if engine == "CYCLES":
-        try:
-            samples = _safe_int(getattr(active_scene.cycles, "samples", 0), 0)
-        except Exception:
-            samples = 0
-    elif engine in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
-        try:
-            samples = _safe_int(getattr(active_scene.eevee, "taa_render_samples", 0), 0)
-        except Exception:
-            samples = 0
-    heaviness["render_engine"] = engine
-    heaviness["resolution_x"] = res_x
-    heaviness["resolution_y"] = res_y
-    heaviness["resolution_percentage"] = res_pct
-    heaviness["effective_pixels"] = int(res_x * res_y * res_pct / 100)
-    heaviness["samples"] = samples
-except Exception:
-    pass
-
-# Geometry heaviness (visible meshes in the active scene)
-visible_objects = []
-try:
-    visible_objects = [obj for obj in active_scene.objects if not obj.hide_render]
-    mesh_objects = [obj for obj in visible_objects if obj.type == "MESH" and obj.data]
-    vert_total = 0
-    for obj in mesh_objects:
-        try:
-            vert_total += len(obj.data.vertices)
-        except Exception:
-            pass
-    heaviness["vertex_count_total"] = vert_total
-    heaviness["object_count"] = len(visible_objects)
-    heaviness["mesh_count"] = len(mesh_objects)
-except Exception:
-    pass
-
-# Asset heaviness (materials, textures, shader complexity)
-active_materials = []
-try:
-    active_materials = [m for m in bpy.data.materials if m.users > 0]
-    active_images = [i for i in bpy.data.images if i.users > 0]
-    tex_bytes = 0
-    for img in active_images:
-        try:
-            w, h = img.size
-            channels = img.channels or 4
-            tex_bytes += int(w) * int(h) * int(channels)
-        except Exception:
-            pass
-    shader_nodes = 0
-    for m in active_materials:
-        try:
-            if m.use_nodes and m.node_tree:
-                shader_nodes += len(m.node_tree.nodes)
-        except Exception:
-            pass
-    heaviness["material_count"] = len(active_materials)
-    heaviness["texture_count"] = len(active_images)
-    heaviness["texture_total_bytes"] = tex_bytes
-    heaviness["shader_node_count_total"] = shader_nodes
-except Exception:
-    pass
-
-# Heavy-feature flags from modifiers
-uses_subdivision = False
-uses_displacement = False
-uses_particles = False
-uses_geometry_nodes = False
-geometry_nodes_complexity = 0
-try:
-    for obj in visible_objects:
-        for mod in getattr(obj, "modifiers", []):
-            mt = getattr(mod, "type", "")
-            if mt == "SUBSURF":
-                uses_subdivision = True
-            elif mt == "DISPLACE":
-                uses_displacement = True
-            elif mt == "PARTICLE_SYSTEM":
-                uses_particles = True
-            elif mt == "NODES":
-                uses_geometry_nodes = True
-                ng = getattr(mod, "node_group", None)
-                if ng and hasattr(ng, "nodes"):
-                    try:
-                        geometry_nodes_complexity += len(ng.nodes)
-                    except Exception:
-                        pass
-        if getattr(obj, "particle_systems", None):
-            try:
-                if len(obj.particle_systems) > 0:
-                    uses_particles = True
-            except Exception:
-                pass
-except Exception:
-    pass
-
-# Heavy-feature flags from shader graph (volumetrics, SSS) — world + materials
-VOLUME_NODE_IDNAMES = (
-    "ShaderNodeVolumeScatter",
-    "ShaderNodeVolumeAbsorption",
-    "ShaderNodeVolumePrincipled",
-)
-uses_volumetrics = False
-uses_subsurface_scattering = False
-try:
-    world = active_scene.world
-    if world and getattr(world, "use_nodes", False) and world.node_tree:
-        for node in world.node_tree.nodes:
-            if getattr(node, "bl_idname", "") in VOLUME_NODE_IDNAMES:
-                uses_volumetrics = True
-                break
-    for mat in active_materials:
-        try:
-            if not (mat.use_nodes and mat.node_tree):
-                continue
-            for node in mat.node_tree.nodes:
-                bid = getattr(node, "bl_idname", "")
-                if bid in VOLUME_NODE_IDNAMES:
-                    uses_volumetrics = True
-                elif bid == "ShaderNodeSubsurfaceScattering":
-                    uses_subsurface_scattering = True
-        except Exception:
-            pass
-        if uses_volumetrics and uses_subsurface_scattering:
-            break
-except Exception:
-    pass
-
-heaviness["uses_subdivision"] = uses_subdivision
-heaviness["uses_displacement"] = uses_displacement
-heaviness["uses_particles"] = uses_particles
-heaviness["uses_geometry_nodes"] = uses_geometry_nodes
-heaviness["geometry_nodes_complexity"] = geometry_nodes_complexity
-heaviness["uses_subsurface_scattering"] = uses_subsurface_scattering
-heaviness["uses_volumetrics"] = uses_volumetrics
-
-payload["heaviness"] = heaviness
-
-print("PCR_ANALYSIS_JSON:" + json.dumps(payload, separators=(",", ":")))
-"#;
 
 use crate::persistence::save_agent_state;
 use crate::sidecar::{SidecarHandle, spawn_sidecar};
@@ -1743,6 +1427,73 @@ fn _tail_lines(text: &str, count: usize) -> String {
         .join("\n")
 }
 
+#[derive(Serialize, Clone, Debug)]
+struct AnalyzeProgressEvent {
+    kind: &'static str,
+    phase: String,
+    elapsed_seconds: Option<f64>,
+    current: Option<u32>,
+    total: Option<u32>,
+    label: Option<String>,
+}
+
+/// Parse one ``PHASE:`` or ``PROGRESS:`` line emitted by
+/// ``prepare_and_analyze.py`` into a Tauri-emit payload.
+///
+/// Recognised shapes:
+///   ``PHASE:<name>:start``
+///   ``PHASE:<name>:end:<elapsed_seconds>``
+///   ``PROGRESS:<phase>:<current>/<total>:<label>``
+fn _parse_progress_line(line: &str) -> Option<AnalyzeProgressEvent> {
+    if let Some(rest) = line.strip_prefix("PHASE:") {
+        let mut parts = rest.splitn(3, ':');
+        let phase = parts.next()?.to_string();
+        let state = parts.next()?;
+        match state {
+            "start" => Some(AnalyzeProgressEvent {
+                kind: "phase_start",
+                phase,
+                elapsed_seconds: None,
+                current: None,
+                total: None,
+                label: None,
+            }),
+            "end" => {
+                let elapsed = parts
+                    .next()
+                    .and_then(|s| s.trim().parse::<f64>().ok());
+                Some(AnalyzeProgressEvent {
+                    kind: "phase_end",
+                    phase,
+                    elapsed_seconds: elapsed,
+                    current: None,
+                    total: None,
+                    label: None,
+                })
+            }
+            _ => None,
+        }
+    } else if let Some(rest) = line.strip_prefix("PROGRESS:") {
+        let mut parts = rest.splitn(3, ':');
+        let phase = parts.next()?.to_string();
+        let counts = parts.next()?;
+        let label = parts.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let mut cn = counts.splitn(2, '/');
+        let current = cn.next()?.trim().parse::<u32>().ok();
+        let total = cn.next()?.trim().parse::<u32>().ok();
+        Some(AnalyzeProgressEvent {
+            kind: "progress",
+            phase,
+            elapsed_seconds: None,
+            current,
+            total,
+            label,
+        })
+    } else {
+        None
+    }
+}
+
 fn _parse_prepare_output(
     combined: &str,
 ) -> (
@@ -1900,6 +1651,7 @@ pub async fn prepare_blend_for_upload(
 
 #[tauri::command]
 pub async fn analyze_and_prepare_blend(
+    app: AppHandle,
     file_path: String,
     blender_bin: String,
     deep_search: bool,
@@ -1927,8 +1679,8 @@ pub async fn analyze_and_prepare_blend(
         .join(format!("job_{ts}"));
     fs::create_dir_all(&work_dir).map_err(|e| format!("Cannot create analyze work dir: {e}"))?;
 
-    let prep_script = work_dir.join("prepare_blend.py");
-    fs::write(&prep_script, PREPARE_BLEND_PY)
+    let prep_script = work_dir.join("prepare_and_analyze.py");
+    fs::write(&prep_script, PREPARE_AND_ANALYZE_PY)
         .map_err(|e| format!("Cannot write analyze/prepare script: {e}"))?;
 
     let is_zip = filename.to_lowercase().ends_with(".zip");
@@ -1981,24 +1733,156 @@ pub async fn analyze_and_prepare_blend(
         extract_dir = None;
     }
 
-    let mut cmd = std::process::Command::new(&blender_bin);
-    cmd.arg("-b")
+    // Stream Blender's stdout line-by-line so we can:
+    //   1. Emit PHASE: / PROGRESS: lines as Tauri events for the UI's
+    //      progress bar + ETA.
+    //   2. Capture the PCR_ANALYSIS_JSON line emitted at the end of the
+    //      analyze phase (same Blender process, no second invocation).
+    //   3. Surface stderr separately from stdout (preserves existing
+    //      error-tail behaviour on non-zero exit).
+    let mut tokio_cmd = tokio::process::Command::new(&blender_bin);
+    tokio_cmd
+        .arg("-b")
         .arg(&blend_path)
         .arg("--python")
         .arg(&prep_script)
-        .env("PCR_PREP_OUTPUT_PATH", &prep_output_path);
+        .env("PCR_PREP_OUTPUT_PATH", &prep_output_path)
+        // Force unbuffered stdout from Blender's embedded Python.  Without
+        // this, Windows pipes block-buffer the script's PHASE/PROGRESS
+        // lines and the UI sees no events until Blender exits.  See the
+        // matching ``sys.stdout.reconfigure`` block at the top of
+        // prepare_and_analyze.py for the in-script half of this fix.
+        .env("PYTHONUNBUFFERED", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     if deep_search {
-        cmd.env("PCR_DEEP_SEARCH", "1");
+        tokio_cmd.env("PCR_DEEP_SEARCH", "1");
     }
-    let output = cmd
-        .output()
+
+    // Synthetic ``loading_blend`` phase: covers spawn + Blender startup
+    // + .blend load.  Nothing inside Blender can report progress until
+    // the Python script starts running (which is after the load).
+    // Emitted from here so the React UI shows "Loading Blender..." with
+    // an indeterminate animation instead of staring at "Starting" for
+    // however long the load takes on a heavy file.
+    let _ = app.emit(
+        "blend-analysis-progress",
+        AnalyzeProgressEvent {
+            kind: "phase_start",
+            phase: "loading_blend".to_string(),
+            elapsed_seconds: None,
+            current: None,
+            total: None,
+            label: None,
+        },
+    );
+
+    let mut child = tokio_cmd
+        .spawn()
         .map_err(|e| format!("Failed to launch Blender: {e}"))?;
 
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stdout = child.stdout.take().ok_or("stdout pipe unavailable")?;
+    let stderr = child.stderr.take().ok_or("stderr pipe unavailable")?;
+
+    let stderr_buf: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
+    let stderr_clone = stderr_buf.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = TokioBufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(mut buf) = stderr_clone.lock() {
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        }
+    });
+
+    let mut stdout_buf = String::new();
+    let mut analysis_json_line: Option<String> = None;
+    let mut stdout_lines = TokioBufReader::new(stdout).lines();
+    while let Ok(Some(line)) = stdout_lines.next_line().await {
+        // Mirror to combined buffer for _parse_prepare_output / _tail_lines
+        stdout_buf.push_str(&line);
+        stdout_buf.push('\n');
+
+        if line.starts_with("PHASE:") || line.starts_with("PROGRESS:") {
+            if let Some(payload) = _parse_progress_line(&line) {
+                let _ = app.emit("blend-analysis-progress", payload);
+            }
+        } else if let Some(rest) = line.strip_prefix("PCR_ANALYSIS_JSON:") {
+            analysis_json_line = Some(rest.trim().to_string());
+            // Got everything we need.  On heavy scenes Blender's wm.quit
+            // cleanup (releasing the multi-GB data graph) can take 1-2
+            // minutes -- there's no point making the UI wait.  Break out
+            // and hand the live process off to a background drain+timeout
+            // task below.
+            break;
+        }
+    }
+
+    let captured_json = analysis_json_line.is_some();
+
+    // Branch: did we get the analysis JSON?
+    //
+    //   YES -> detach Blender to a background task.  The packed .blend
+    //          is already on disk (prepare's save phase ran before
+    //          analyze) and the JSON is captured, so functionally we're
+    //          done.  Background task drains the remaining stdout pipe
+    //          (so Blender doesn't block writing) and force-kills after
+    //          30s if it's still alive -- bounds RAM across rapid
+    //          re-analyzes.
+    //
+    //   NO  -> wait synchronously so we can surface a real exit code
+    //          + error tail.  This is the failure path.
+    let (combined, status_for_errors) = if captured_json {
+        let mut bg_child = child;
+        let mut bg_stdout = stdout_lines;
+        let bg_stderr_buf = stderr_buf.clone();
+        tokio::spawn(async move {
+            let drain = async {
+                while let Ok(Some(line)) = bg_stdout.next_line().await {
+                    // Stash post-JSON warnings/errors in the same stderr
+                    // buffer so a subsequent inspection (if any callsite
+                    // wants it) sees them.  They're not surfaced to the
+                    // user since we've already returned.
+                    if let Ok(mut buf) = bg_stderr_buf.lock() {
+                        buf.push_str(&line);
+                        buf.push('\n');
+                    }
+                }
+                let _ = stderr_task.await;
+                let _ = bg_child.wait().await;
+            };
+            tokio::select! {
+                _ = drain => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                    let _ = bg_child.kill().await;
+                    // Wait once more so the OS reaps the process.
+                    let _ = bg_child.wait().await;
+                }
+            }
+        });
+        let stderr_str = stderr_buf
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let combined = format!("{stdout_buf}\n{stderr_str}");
+        (combined, None)
+    } else {
+        // Failure path: pipe closed without a JSON line.  Wait for the
+        // process so we can include the real exit code in the error.
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("Blender process wait failed: {e}"))?;
+        let _ = stderr_task.await;
+        let stderr_str = stderr_buf
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let combined = format!("{stdout_buf}\n{stderr_str}");
+        (combined, Some(status))
+    };
 
     let (
         prepare_warnings,
@@ -2010,38 +1894,49 @@ pub async fn analyze_and_prepare_blend(
     let analysis_warnings: Vec<String> = Vec::new();
     let mut analysis_errors: Vec<String> = Vec::new();
 
-    if !output.status.success() {
-        prepare_errors.push(format!(
-            "Blender analyze/prepare failed (exit code: {}). Last logs:\n{}",
-            output.status.code().unwrap_or(-1),
-            _tail_lines(&combined, 20)
-        ));
+    if let Some(status) = status_for_errors.as_ref() {
+        if !status.success() {
+            prepare_errors.push(format!(
+                "Blender analyze/prepare failed (exit code: {}). Last logs:\n{}",
+                status.code().unwrap_or(-1),
+                _tail_lines(&combined, 20)
+            ));
+        }
     }
 
-    // Single source of truth for the analysis snapshot: ALWAYS run the
-    // dedicated heaviness analyzer.  It emits the scene/timeline payload
-    // AND the heaviness block (incl. render_engine), so it is a superset
-    // of the prepare script's timeline-only payload -- which is
-    // intentionally ignored here (it lacked render_engine and was the
-    // source of the SceneResolver failure).  Run it on the PACKED output
-    // so heaviness reflects the prepared file; fall back to the original
-    // only if packing left no output on disk.
-    let analyze_target = if prep_output_path.is_file() {
-        prep_output_path.to_string_lossy().to_string()
-    } else {
-        blend_path.to_string_lossy().to_string()
-    };
-    let analysis = match analyze_blend_with_blender(analyze_target, blender_bin.clone()).await {
-        Ok(parsed) => Some(parsed),
-        Err(err) => {
-            analysis_errors.push(format!(
-                "Analysis metadata not returned by Blender: {err}"
-            ));
+    // The analysis payload comes from the SAME Blender invocation as
+    // prepare.  No second process spawn -- prepare() ends with the
+    // packed state in memory and analyze() reads that state directly.
+    let analysis = match analysis_json_line {
+        Some(line) => match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(parsed) => Some(parsed),
+            Err(e) => {
+                analysis_errors.push(format!("Invalid analysis JSON: {e}"));
+                None
+            }
+        },
+        None => {
+            // If prepare aborted before analyze() ran, we'll get no JSON;
+            // surface as a soft error so the caller still gets prep status.
+            analysis_errors.push(
+                "Analysis metadata not emitted by Blender (prepare may have exited early)".to_string(),
+            );
             None
         }
     };
 
-    let mut prep_done = output.status.success() && (prep_done_from_logs || prepare_errors.is_empty());
+    // If we captured the JSON, prepare definitely succeeded (analyze
+    // wouldn't run otherwise).  If we didn't, fall back to the original
+    // exit-code + log-marker heuristic.
+    let prep_succeeded = if captured_json {
+        true
+    } else {
+        status_for_errors
+            .as_ref()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    let mut prep_done = prep_succeeded && (prep_done_from_logs || prepare_errors.is_empty());
     let prepared_path = if prep_done {
         if is_zip {
             let new_zip = work_dir.join(&filename);

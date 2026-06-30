@@ -1508,7 +1508,16 @@ body {
 }
 
 .cr-progress-track.indeterminate .cr-progress-fill {
+  width: 35%;
   animation: indeterminate-slide 1.6s ease-in-out infinite;
+}
+
+.cr-progress-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  max-width: 720px;
 }
 
 @keyframes indeterminate-slide {

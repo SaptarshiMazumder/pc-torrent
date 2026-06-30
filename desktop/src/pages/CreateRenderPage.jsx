@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
+import {
+  computeOverall,
+  formatEta,
+  formatElapsed,
+  recordPhaseDurations,
+} from "../utils/analyzeEta";
 import {
   createDistributedRenderGroup,
   confirmDistributedJob,
@@ -371,6 +378,84 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   }, [filteredSaved]);
 
   const isBusy = stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING;
+
+  // Live analyze-progress state.  Fed by the ``blend-analysis-progress``
+  // event stream from the Tauri host; reset on every START_ANALYZE.
+  const [analyzeProgress, setAnalyzeProgress] = useState({
+    phase: null,
+    phaseStartedAt: null,
+    elapsedInPhase: 0,
+    subProgress: null,
+    durations: {},
+  });
+  // Tick the elapsed-in-phase counter twice a second so the progress
+  // bar advances even when no PROGRESS line arrived (e.g. during save,
+  // loading_blend, finalizing).  Runs as long as we have a start
+  // timestamp -- including the pre-first-PHASE window where phase is
+  // still null but the user is staring at "Loading Blender".
+  useEffect(() => {
+    if (stage !== STAGE.ANALYZING || !analyzeProgress.phaseStartedAt) return;
+    const t = setInterval(() => {
+      setAnalyzeProgress((prev) => {
+        if (!prev.phaseStartedAt) return prev;
+        return { ...prev, elapsedInPhase: (Date.now() - prev.phaseStartedAt) / 1000 };
+      });
+    }, 500);
+    return () => clearInterval(t);
+  }, [stage, analyzeProgress.phaseStartedAt]);
+  // Subscribe to the host's progress stream only while ANALYZING -- the
+  // listener auto-unsubscribes on stage transition.
+  useEffect(() => {
+    if (stage !== STAGE.ANALYZING) return;
+    let unlisten = null;
+    let cancelled = false;
+    listen("blend-analysis-progress", (event) => {
+      const p = event.payload || {};
+      const kind = p.kind;
+      if (kind === "phase_start") {
+        setAnalyzeProgress((prev) => ({
+          ...prev,
+          phase: p.phase,
+          phaseStartedAt: Date.now(),
+          elapsedInPhase: 0,
+          subProgress: null,
+        }));
+      } else if (kind === "phase_end") {
+        setAnalyzeProgress((prev) => {
+          const seconds = Number(p.elapsed_seconds);
+          const nextDurations = Number.isFinite(seconds)
+            ? { ...prev.durations, [p.phase]: seconds }
+            : prev.durations;
+          return { ...prev, durations: nextDurations, subProgress: null };
+        });
+      } else if (kind === "progress") {
+        setAnalyzeProgress((prev) => ({
+          ...prev,
+          subProgress: {
+            current: Number(p.current) || 0,
+            total: Number(p.total) || 0,
+            label: p.label || "",
+          },
+        }));
+      }
+    }).then((un) => {
+      if (cancelled) un();
+      else unlisten = un;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [stage]);
+  const analyzeOverall = useMemo(
+    () => computeOverall({
+      phase: analyzeProgress.phase,
+      elapsedInPhase: analyzeProgress.elapsedInPhase,
+      subProgress: analyzeProgress.subProgress,
+    }),
+    [analyzeProgress.phase, analyzeProgress.elapsedInPhase, analyzeProgress.subProgress],
+  );
+
   const hasSource = Boolean(file) || Boolean(savedInputId);
   const sourceLabel = file ? file.name : resolvedSavedAsset ? (resolvedSavedAsset.display_name || resolvedSavedAsset.input_filename) : "";
   // Saved-input flow: groupId is empty until Start Render mints it.
@@ -602,6 +687,14 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     }
 
     dispatch({ type: "START_ANALYZE" });
+    // ``phaseStartedAt = now`` even though no PHASE event has arrived yet.
+    // Reason: the synthetic ``loading_blend`` event from Rust can race
+    // with the React listener's registration on slow systems, and the
+    // user otherwise sees "Loading Blender · 0s" frozen until the first
+    // Python-side PHASE arrives.  Treating the START_ANALYZE timestamp
+    // as the implicit ``loading_blend`` start makes the elapsed counter
+    // tick from t=0 regardless of whether the event landed.
+    setAnalyzeProgress({ phase: null, phaseStartedAt: Date.now(), elapsedInPhase: 0, subProgress: null, durations: {} });
     const runId = ++runIdRef.current;
 
     if (!blenderBinRef.current) {
@@ -642,6 +735,11 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       if (!deepSearch && file.path) {
         setCachedAnalysis(file.path, file.size, { analysis: analysisPayload, prepResult: prep, note });
       }
+
+      // Persist measured phase durations for the ETA model on the next
+      // run.  Only the durations that arrived as ``PHASE:<name>:end``
+      // events are saved; partial runs leave the history untouched.
+      recordPhaseDurations(analyzeProgress.durations);
 
       dispatch({
         type: "ANALYZE_DONE",
@@ -1083,17 +1181,51 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       )}
 
       {/* ── Progress bar ── */}
-      {(stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING) && (
-        <div className="cr-progress-wrap">
-          <div className={`cr-progress-track ${stage !== STAGE.UPLOADING ? "indeterminate" : ""}`}>
-            <div className="cr-progress-fill" style={{ width: stage === STAGE.UPLOADING ? `${uploadProgress}%` : "40%" }} />
+      {(stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING) && (() => {
+        // Analyzing: phase-aware percent + ETA streamed from the Tauri
+        // host.  Uploading: existing percent.  Confirming: indeterminate.
+        const isAnalyzing = stage === STAGE.ANALYZING;
+        const isUploading = stage === STAGE.UPLOADING;
+        // Indeterminate when (a) Confirming, (b) Analyzing in an
+        // unknown-duration phase (loading_blend / finalizing), or
+        // (c) Analyzing with no phase reported yet.
+        const isIndeterminate = (!isAnalyzing && !isUploading)
+          || (isAnalyzing && analyzeOverall.indeterminate);
+        const fillPct = isUploading ? uploadProgress : isAnalyzing ? analyzeOverall.percent : 40;
+        const phaseLabel = isAnalyzing ? analyzeOverall.label : isUploading ? "Uploading" : "Starting";
+        const sub = analyzeProgress.subProgress;
+        const subText = isAnalyzing && sub && sub.total > 1
+          ? ` · ${sub.current}/${sub.total}${sub.label ? ` (${sub.label})` : ""}`
+          : "";
+        let rightSide;
+        if (isUploading) {
+          rightSide = `${Math.min(100, uploadProgress).toFixed(1)}%`;
+        } else if (isAnalyzing) {
+          if (analyzeOverall.indeterminate) {
+            rightSide = formatElapsed(analyzeOverall.elapsedSeconds || 0);
+          } else {
+            rightSide = `${analyzeOverall.percent.toFixed(0)}% · ${formatEta(analyzeOverall.etaSeconds)}`;
+          }
+        } else {
+          rightSide = "Working...";
+        }
+        const hint = isAnalyzing && analyzeOverall.hint ? analyzeOverall.hint : null;
+        return (
+          <div className="cr-progress-wrap">
+            <div className={`cr-progress-track ${isIndeterminate ? "indeterminate" : ""}`}>
+              <div
+                className="cr-progress-fill"
+                style={isIndeterminate ? undefined : { width: `${Math.max(0, Math.min(100, fillPct))}%` }}
+              />
+            </div>
+            <div className="cr-progress-meta">
+              <span>{phaseLabel}{subText}</span>
+              <span>{rightSide}</span>
+            </div>
+            {hint && <div className="cr-progress-hint">{hint}</div>}
           </div>
-          <div className="cr-progress-meta">
-            <span>{stage === STAGE.ANALYZING ? "Analyzing" : stage === STAGE.UPLOADING ? "Uploading" : "Starting"}</span>
-            <span>{stage === STAGE.UPLOADING ? `${Math.min(100, uploadProgress).toFixed(1)}%` : "Working..."}</span>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── Warnings / notes ── */}
       {analysisNote && !error && <p className="cr-note">{analysisNote}</p>}

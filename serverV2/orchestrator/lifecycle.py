@@ -68,10 +68,69 @@ from serverV2.services.machines.machine_repository import MachineRepository
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
+from serverV2.core.gpu_name_normalizer import GpuNameNormalizer
 
 log = logging.getLogger(__name__)
 
 _TERMINAL_GROUP_STATUSES = frozenset({"done", "failed", "cancelled"})
+
+# Module-level singleton -- pure lookup, no state worth re-allocating.
+_GPU_NAME_NORMALIZER = GpuNameNormalizer()
+
+# Fields the worker may include in its completion payload (Phase 1 of the
+# rollout).  All optional; missing keys become None.  Server-side fields
+# (retry_count, gpu_model_normalized) are derived independently.
+_WORKER_TELEMETRY_FIELDS = (
+    "gpu_model_raw",
+    "device_used",
+    "blender_version",
+    "worker_image_version",
+    "peak_vram_mb",
+    "denoiser_used",
+    "gpu_count",
+    "cpu_cores",
+    "ram_gb",
+    "startup_seconds",
+    "render_seconds",
+    "worker_log_url",
+    "gpu_specs",
+)
+
+
+def _extract_worker_telemetry(post_done: dict[str, Any]) -> dict[str, Any]:
+    """Pull Phase-11 telemetry extras from the job row.
+
+    The worker pushes its collected telemetry via ``PUT /jobs/{id}/telemetry``
+    which lands in ``jobs.worker_telemetry_json``.  The JobRepository
+    surfaces that column under the key ``worker_telemetry_json`` on
+    ``post_done``.  We also accept inline ``telemetry`` and top-level
+    keys for backwards compatibility with any future direct-payload path.
+
+    Missing fields default to None.  Returns a flat dict suitable for
+    ``**spread`` into ``record_chunk``.
+    """
+    extras: dict[str, Any] = {}
+    # Primary source: the stashed worker_telemetry_json column.  Postgres
+    # returns JSONB as a dict already, but if the driver hands back a
+    # JSON string we parse it once.
+    worker_telemetry = post_done.get("worker_telemetry_json")
+    if isinstance(worker_telemetry, str):
+        try:
+            worker_telemetry = json.loads(worker_telemetry)
+        except Exception:
+            worker_telemetry = None
+    sources = (
+        post_done,
+        post_done.get("telemetry") if isinstance(post_done.get("telemetry"), dict) else None,
+        worker_telemetry if isinstance(worker_telemetry, dict) else None,
+    )
+    for source in sources:
+        if not source:
+            continue
+        for key in _WORKER_TELEMETRY_FIELDS:
+            if key in source and extras.get(key) is None:
+                extras[key] = source[key]
+    return extras
 
 
 # ``ManualRetryError`` and ``RETRY_REASON_HTTP_STATUS`` live in the
@@ -701,6 +760,30 @@ class RenderLifecycle:
         heaviness = self._fetch_heaviness(group_id) if group_id else {}
         file_size_bytes = self._fetch_file_size(group_id) if group_id else None
 
+        # ── Phase-11 data-richness fields ──────────────────────────
+        # All collection is best-effort: any failure here MUST NOT
+        # block the telemetry write or the job-completion flow.
+        try:
+            worker_extras = _extract_worker_telemetry(post_done)
+        except Exception as exc:
+            log.warning("Worker telemetry extras parse failed for job %s: %s", job_id, exc)
+            worker_extras = {}
+
+        gpu_model_raw = worker_extras.get("gpu_model_raw") or post_done.get("gpu_type")
+        try:
+            gpu_model_normalized = _GPU_NAME_NORMALIZER.normalize(gpu_model_raw)
+        except Exception as exc:
+            log.warning("GPU name normalize failed (%r): %s", gpu_model_raw, exc)
+            gpu_model_normalized = None
+
+        # ``attempt`` is 1 on first try; retry_count is "how many times
+        # have we already retried" (i.e. attempt - 1).
+        try:
+            attempt = int(post_done.get("attempt") or 1)
+            retry_count = max(0, attempt - 1)
+        except Exception:
+            retry_count = None
+
         self._telemetry.record_chunk(
             job_id=job_id,
             group_id=group_id,
@@ -718,6 +801,22 @@ class RenderLifecycle:
             file_size_bytes=file_size_bytes,
             seconds_estimated=None,
             cost_estimated_usd=None,
+            # Phase-11 fields -- server-derived first, then worker extras.
+            gpu_model_normalized=gpu_model_normalized,
+            retry_count=retry_count,
+            device_used=worker_extras.get("device_used"),
+            blender_version=worker_extras.get("blender_version"),
+            worker_image_version=worker_extras.get("worker_image_version"),
+            peak_vram_mb=worker_extras.get("peak_vram_mb"),
+            denoiser_used=worker_extras.get("denoiser_used"),
+            gpu_count=worker_extras.get("gpu_count"),
+            cpu_cores=worker_extras.get("cpu_cores"),
+            ram_gb=worker_extras.get("ram_gb"),
+            startup_seconds=worker_extras.get("startup_seconds"),
+            render_seconds=worker_extras.get("render_seconds"),
+            failure_reason=None,  # only populated by failure-path telemetry (future)
+            worker_log_url=worker_extras.get("worker_log_url"),
+            gpu_specs=worker_extras.get("gpu_specs"),
         )
 
     def _fetch_heaviness(self, group_id: str) -> dict[str, Any]:

@@ -4,10 +4,18 @@ FROM ghcr.io/saptarshimazumder/pcrent-blender-base-cycles:5.0.1
 # and apt deps; this image adds the protocol library + render scripts
 # + Vast handler.
 
+# Phase-11 telemetry: stamped at build time by push-worker.sh's
+# --build-arg.  Surfaced inside the running container as
+# $PCR_WORKER_IMAGE_VERSION so telemetry_collector.py can report which
+# build a render ran on.
+ARG WORKER_IMAGE_VERSION=unknown
+ENV PCR_WORKER_IMAGE_VERSION=${WORKER_IMAGE_VERSION}
+
 # Render scripts (shared across cloud fleets -- see render_scripts/)
 COPY render_scripts/render.sh /scripts/render.sh
 COPY render_scripts/progress_handler.py /scripts/progress_handler.py
 COPY render_scripts/render_driver.py /scripts/render_driver.py
+COPY render_scripts/telemetry_collector.py /scripts/telemetry_collector.py
 COPY render_scripts/pre_load.py /scripts/pre_load.py
 RUN sed -i 's/\r$//' /scripts/render.sh && chmod +x /scripts/render.sh
 

@@ -916,6 +916,18 @@ def main():
     )
     _render_grouped(scene, selected_layer, assignments, base_path, ffmpeg_locked)
 
+    # ── Phase-11 telemetry emission ──────────────────────────────────────
+    # See render_scripts/render_driver.py for rationale.  Post-render,
+    # self-introspecting, try/except wrapped -- zero risk to rendering.
+    try:
+        _telemetry_dir = os.path.dirname(os.path.abspath(__file__))
+        if _telemetry_dir and _telemetry_dir not in sys.path:
+            sys.path.insert(0, _telemetry_dir)
+        from telemetry_collector import TelemetryCollector
+        TelemetryCollector().emit()
+    except Exception as exc:
+        log(f"[RENDER_DRIVER] telemetry emit failed (non-fatal): {exc}")
+
 
 if __name__ == "__main__":
     try:

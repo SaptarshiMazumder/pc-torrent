@@ -246,6 +246,21 @@ class JobRepository:
             for r in rows if r.get("machine_type") and r.get("gpu_type")
         }
 
+    # ---- telemetry storage ----
+
+    def update_worker_telemetry(self, job_id: str, telemetry: dict) -> None:
+        """Phase-11: persist the worker's data-richness payload on the
+        job row.  Last write wins (we expect exactly one push per chunk).
+        Pure storage -- the orchestrator's ``_record_telemetry`` reads it
+        out at completion time and writes the final ``render_telemetry``
+        row.
+        """
+        import json as _json
+        execute(
+            "UPDATE jobs SET worker_telemetry_json = %s WHERE id = %s",
+            (_json.dumps(telemetry), job_id),
+        )
+
     # ---- status mutations ----
 
     def update_status(self, job_id: str, status: str, *, error: str | None = None) -> None:

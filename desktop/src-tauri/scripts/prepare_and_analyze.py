@@ -1278,7 +1278,11 @@ def analyze():
     # phase frozen at 100% while the process is still very much alive.
     # No phase_end is emitted: the process exit is the implicit terminator.
     _phase_start("finalizing")
-    print("PCR_ANALYSIS_JSON:" + json.dumps(payload, separators=(",", ":")), flush=True)
+    _t = time.monotonic()
+    _json_str = json.dumps(payload, separators=(",", ":"))
+    print(f"[DIAG] json built len={len(_json_str)} t+{time.monotonic() - _t:.3f}s", flush=True)
+    print("PCR_ANALYSIS_JSON:" + _json_str, flush=True)
+    print(f"[DIAG] json printed t+{time.monotonic() - _t:.3f}s", flush=True)
 
 
 prepare()

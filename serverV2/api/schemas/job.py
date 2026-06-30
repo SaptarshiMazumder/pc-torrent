@@ -36,3 +36,15 @@ class JobHeartbeatPayload(BaseModel):
     rss_bytes: int | None = None
     bytes_progressed: int | None = None
     total_bytes: int | None = None
+
+
+class UpdateJobTelemetryPayload(BaseModel):
+    """Phase-11 data-richness payload pushed by the worker right before
+    exit.  Stored on jobs.worker_telemetry_json; read by the orchestrator
+    at completion time when it writes the render_telemetry row.
+
+    Schemaless on purpose -- worker fields evolve faster than the server
+    needs to keep up.  Known keys are documented in
+    ``worker_core/telemetry_parser.py``.
+    """
+    telemetry: dict

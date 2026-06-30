@@ -180,6 +180,14 @@ def init_db() -> None:
                 cur.execute(
                     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS gpu_type TEXT"
                 )
+                # Phase-11 data-richness: workers push their collected
+                # telemetry to PUT /jobs/{id}/telemetry; we stash the
+                # opaque dict here, and the orchestrator's
+                # ``_record_telemetry`` reads it at chunk completion to
+                # populate the final ``render_telemetry`` row.
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS worker_telemetry_json JSONB"
+                )
                 # Serverless jobs (modal/vast) have no machine row, so
                 # machine_id must be NULL on those rows.  Drop the legacy
                 # NOT NULL constraint that pre-dates Phase 1.
@@ -276,6 +284,39 @@ def init_db() -> None:
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS render_telemetry_group_id "
                     "ON render_telemetry (group_id)"
+                )
+                # Phase 11 — data-richness additions for alpha-testing
+                # telemetry collection.  All NULLABLE; the worker payload
+                # is the source for most of these (Phase 1 of the rollout).
+                # Server-side fields (retry_count, gpu_model_normalized)
+                # populate from Phase 0 on; the rest stay NULL until the
+                # new worker image ships.  None of these are read by the
+                # render path -- pure collection for future estimation.
+                _telemetry_alters = (
+                    "gpu_model_normalized   TEXT",
+                    "device_used            TEXT",        # OPTIX/CUDA/HIP/CPU/EEVEE
+                    "blender_version        TEXT",        # e.g. '5.0.1'
+                    "worker_image_version   TEXT",        # e.g. 'dev-v0.0.16'
+                    "peak_vram_mb           INTEGER",     # parsed from Blender's Peak:NNNN
+                    "denoiser_used          TEXT",        # OPTIX/OPENIMAGEDENOISE/none
+                    "gpu_count              INTEGER",     # number of active GPU devices
+                    "cpu_cores              INTEGER",
+                    "ram_gb                 NUMERIC(6,1)",
+                    "startup_seconds        INTEGER",     # before first frame Saved:
+                    "render_seconds         INTEGER",     # first-to-last frame Saved:
+                    "retry_count            INTEGER",     # jobs.attempt - 1
+                    "failure_reason         TEXT",        # oom/timeout/cuda_error/...
+                    "worker_log_url         TEXT",        # tail of Blender stdout in R2
+                    "gpu_specs_json         JSONB",       # free-form catchall
+                )
+                for col_def in _telemetry_alters:
+                    cur.execute(
+                        f"ALTER TABLE render_telemetry "
+                        f"ADD COLUMN IF NOT EXISTS {col_def}"
+                    )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS render_telemetry_gpu_normalized "
+                    "ON render_telemetry (gpu_model_normalized)"
                 )
                 # Phase 8 — tier selection (Economy / Standard / Premium).
                 # Routes a render to the matching allocator and budget.

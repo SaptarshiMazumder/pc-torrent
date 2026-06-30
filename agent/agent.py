@@ -42,6 +42,7 @@ from worker_core import (
     PhaseTracker,
     RangeResumer,
 )
+from worker_core.telemetry_parser import TelemetryParser
 
 # Phase set the agent's heartbeats use.  Smaller than the cloud-worker set
 # because the actual Blender render runs inside a child Docker container,
@@ -436,6 +437,26 @@ def update_job_progress(job_id, rendered_frames, total_frames=None):
         retries=2,
     )
     _ensure_http_success(resp, f"Update job {job_id} progress")
+
+
+def update_job_telemetry(job_id, telemetry):
+    """Phase-11: stash the worker's collected data-richness telemetry on
+    the job row.  Fire-and-forget -- failure here has no impact on
+    rendering or completion (which is decided by registered outputs).
+    """
+    if not telemetry:
+        return
+    try:
+        resp = _request_with_retries(
+            "PUT",
+            f"{BACKEND_URL}/jobs/{job_id}/telemetry",
+            json={"telemetry": telemetry},
+            timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT),
+            retries=1,
+        )
+        _ensure_http_success(resp, f"Update job {job_id} telemetry")
+    except Exception as exc:
+        _log(f"[JOB] Telemetry push failed (non-fatal): {exc}", level="warn")
 
 
 def check_job_cancel_status(job_id):
@@ -1490,10 +1511,16 @@ def execute_job(job):
         # Stream container output
         container_log = []
         render_device = ""
+        # Phase-11 telemetry parser -- consumes every stdout line (cheap
+        # no-op on non-matching lines), accumulates the merged data-
+        # richness payload pushed to backend after render success.
+        # Pure observability; failure cannot affect render or completion.
+        telemetry_parser = TelemetryParser()
         try:
             for line in iter(process.stdout.readline, ""):
                 line = line.rstrip()
                 if line:
+                    telemetry_parser.consume(line)
                     progress_event = parse_progress_event_line(line)
                     if progress_event:
                         apply_progress_event(progress_event)
@@ -1535,6 +1562,11 @@ def execute_job(job):
             _log(f"[JOB] Render device used: {render_device}")
         else:
             _log("[JOB] Render device used: unknown (no device marker in container logs).", level="warn")
+
+        # Phase-11: push collected telemetry to backend.  Fire-and-forget
+        # -- update_job_telemetry swallows network errors so this cannot
+        # affect job completion (which is decided by registered outputs).
+        update_job_telemetry(job_id, telemetry_parser.payload())
 
         # 4. Catch up any files that were not incrementally uploaded
         output_files = output_uploader.uploaded_files

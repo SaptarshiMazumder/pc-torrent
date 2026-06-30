@@ -10,6 +10,7 @@ from serverV2.api.schemas.job import (
     JobHeartbeatPayload,
     UpdateJobProgressPayload,
     UpdateJobStatusPayload,
+    UpdateJobTelemetryPayload,
 )
 from serverV2.callbacks.router import CallbackRouter
 from serverV2.core.enums import CallbackOutcome
@@ -129,6 +130,25 @@ def update_progress(job_id: str, payload: UpdateJobProgressPayload):
         )
     except JobServiceError as e:
         raise HTTPException(e.status, e.message)
+
+
+@router.put("/jobs/{job_id}/telemetry")
+def update_telemetry(job_id: str, payload: UpdateJobTelemetryPayload):
+    """Phase-11 data-richness intake.  Pure storage path -- writes the
+    worker payload to jobs.worker_telemetry_json so the orchestrator
+    can attach it to the render_telemetry row at completion time.
+
+    Swallows JobServiceError into a 200 -- a failed telemetry write
+    should never propagate back to the worker (it's fire-and-forget on
+    the worker side; making it strict here invites useless retries).
+    """
+    try:
+        _get().update_telemetry(job_id, payload.telemetry or {})
+    except JobServiceError:
+        # Already logged inside the service; keep responding 200 so the
+        # worker can move on without retrying observational data.
+        pass
+    return {"ok": True}
 
 
 @router.put("/jobs/{job_id}/heartbeat")

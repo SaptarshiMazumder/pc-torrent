@@ -107,7 +107,16 @@ echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
 echo ""
 echo "==> Build $IMMUTABLE_IMAGE"
-docker build -t "$IMMUTABLE_IMAGE" -f "$DOCKERFILE" "$PROJECT_ROOT"
+# Phase-11 telemetry: the in-image WORKER_IMAGE_VERSION env var lets a
+# completed render report which build it ran on, surfaced in
+# render_telemetry.worker_image_version.  Dockerfiles consume
+# ${WORKER_IMAGE_VERSION} via ARG.  Falls back to the literal tag we
+# already use everywhere else: ``<env>-v<version>``.
+docker build \
+    --build-arg "WORKER_IMAGE_VERSION=${IMMUTABLE_TAG}" \
+    -t "$IMMUTABLE_IMAGE" \
+    -f "$DOCKERFILE" \
+    "$PROJECT_ROOT"
 
 echo ""
 echo "==> Push $IMMUTABLE_IMAGE"

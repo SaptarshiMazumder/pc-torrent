@@ -184,6 +184,16 @@ class JobService:
         self._progress.record(job_id, rendered_frames, total_frames)
         return {"job_id": job_id, "rendered_frames": rendered_frames, "total_frames": total_frames}
 
+    def update_telemetry(self, job_id: str, telemetry: dict[str, Any]) -> None:
+        """Phase-11: store the worker's data-richness payload on the job
+        row.  Read by the orchestrator's ``_record_telemetry`` at chunk-
+        completion time.  Pure storage, no validation -- the worker's
+        schema is allowed to evolve without server churn.
+        """
+        if not telemetry:
+            return
+        self._jobs.update_worker_telemetry(job_id, telemetry)
+
     def heartbeat(
         self,
         job_id: str,

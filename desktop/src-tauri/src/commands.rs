@@ -1811,6 +1811,16 @@ pub async fn analyze_and_prepare_blend(
             }
         } else if let Some(rest) = line.strip_prefix("PCR_ANALYSIS_JSON:") {
             analysis_json_line = Some(rest.trim().to_string());
+            // [DIAG] capture time so we can see if the gap is python-side
+            // (json.dumps slow) or rust-side (pipe drain slow).
+            eprintln!(
+                "[DIAG] captured PCR_ANALYSIS_JSON: line_len={} unix_ms={}",
+                rest.len(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0),
+            );
             // Got everything we need.  On heavy scenes Blender's wm.quit
             // cleanup (releasing the multi-GB data graph) can take 1-2
             // minutes -- there's no point making the UI wait.  Break out
@@ -1941,7 +1951,11 @@ pub async fn analyze_and_prepare_blend(
         if is_zip {
             let new_zip = work_dir.join(&filename);
             if let Some(ex) = extract_dir.as_ref() {
-                match _zip_dir(ex, &new_zip) {
+                let _zip_start = std::time::Instant::now();
+                eprintln!("[DIAG] _zip_dir start (this re-zips the extracted bundle)");
+                let result = _zip_dir(ex, &new_zip);
+                eprintln!("[DIAG] _zip_dir done in {:?}", _zip_start.elapsed());
+                match result {
                     Ok(()) => Some(new_zip.to_string_lossy().to_string()),
                     Err(err) => {
                         prepare_errors.push(format!("Prepared zip packaging failed: {err}"));

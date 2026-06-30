@@ -976,6 +976,23 @@ def main():
     )
     _render_grouped(scene, selected_layer, assignments, base_path, ffmpeg_locked)
 
+    # ── Phase-11 telemetry emission ──────────────────────────────────────
+    # POST-render, POST-output-files-on-disk.  TelemetryCollector
+    # self-introspects bpy + env -- never touches anything that affects
+    # rendering.  Wrapped in try/except so collection failure cannot
+    # fail the render: by the time we reach this line the chunk's
+    # output files are on disk and the worker is about to exit 0.
+    # Blender's ``-P`` doesn't add the script dir to sys.path; insert
+    # it locally so the sibling ``telemetry_collector.py`` import works.
+    try:
+        _telemetry_dir = os.path.dirname(os.path.abspath(__file__))
+        if _telemetry_dir and _telemetry_dir not in sys.path:
+            sys.path.insert(0, _telemetry_dir)
+        from telemetry_collector import TelemetryCollector
+        TelemetryCollector().emit()
+    except Exception as exc:
+        log(f"[RENDER_DRIVER] telemetry emit failed (non-fatal): {exc}")
+
 
 if __name__ == "__main__":
     try:

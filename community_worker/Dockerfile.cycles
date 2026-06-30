@@ -5,12 +5,17 @@ FROM ghcr.io/saptarshimazumder/pcrent-blender-base-cycles:5.0.1
 # orchestration -- HTTP, heartbeats, downloads, uploads.  This image
 # just runs Blender against /input and writes to /output.
 
+# Phase-11 telemetry build stamp -- see vast_worker/Dockerfile.cycles.
+ARG WORKER_IMAGE_VERSION=unknown
+ENV PCR_WORKER_IMAGE_VERSION=${WORKER_IMAGE_VERSION}
+
 # Community-specific render scripts.  Diverge from Vast/Modal scripts
 # because the agent's progress parsing has slightly different
 # expectations from the cloud workers' inline progress handling.
 COPY community_worker/render.sh /render.sh
 COPY community_worker/progress_handler.py /progress_handler.py
 COPY community_worker/render_driver.py /render_driver.py
+COPY community_worker/telemetry_collector.py /telemetry_collector.py
 COPY community_worker/pre_load.py /pre_load.py
 RUN sed -i 's/\r$//' /render.sh && chmod +x /render.sh
 

@@ -58,6 +58,7 @@ from worker_core import (
     PhaseTracker,
     ProcessSampler,
 )
+from worker_core.telemetry_parser import TelemetryParser
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -271,6 +272,9 @@ def handler(job: dict) -> dict:
         total_frames = (frame_end - frame_start) // frame_step + 1
         rendered_frames = 0
         last_push = 0.0
+        # Phase-11 telemetry parser -- see vast_worker/scripts/handler.py
+        # for rationale.  Pure observability, failures cannot affect render.
+        telemetry_parser = TelemetryParser()
 
         for line in proc.stdout:
             # C.1 -- terminal signal from heartbeat / progress.  Orchestrator
@@ -292,6 +296,10 @@ def handler(job: dict) -> dict:
                     if pattern in line:
                         egl_watchdog.note_wedge_pattern(line)
                         break
+
+            # Phase-11: feed every line through the telemetry parser
+            # (cheap no-op on non-matching lines).
+            telemetry_parser.consume(line)
 
             if "PCR_PROGRESS" in line:
                 egl_watchdog.note_progress()
@@ -366,6 +374,14 @@ def handler(job: dict) -> dict:
             client.push_progress(max(rendered_frames, len(uploaded)), total_frames)
         except Exception:
             pass
+
+        # Phase-11: push collected telemetry to the server before exit.
+        # Fire-and-forget; failure does NOT affect job completion (which
+        # is decided by the orchestrator based on registered outputs).
+        try:
+            client.push_telemetry(telemetry_parser.payload())
+        except Exception as exc:
+            log.warning(f"Telemetry push failed (non-fatal): {exc}")
 
         # 7. Finish.  Completion is decided by the orchestrator based on
         # registered output files — we do not self-declare "done".  The

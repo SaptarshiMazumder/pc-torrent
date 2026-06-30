@@ -197,6 +197,27 @@ class BackendClient:
         except Exception as exc:
             log.warning(f"Failed to push progress: {exc}")
 
+    def push_telemetry(self, telemetry: dict) -> None:
+        """Fire-and-forget: stash the worker's collected data-richness
+        telemetry on the job row.  Server reads from there at completion
+        time and writes the final ``render_telemetry`` row.
+
+        Pure observability -- this method failing has no impact on
+        whether the render completes or what output files land.  Swallows
+        all exceptions.  Called ONCE per chunk, right before the worker
+        exits successfully.
+        """
+        if not telemetry:
+            return
+        try:
+            requests.put(
+                f"{self._backend_url}/jobs/{self._job_id}/telemetry",
+                json={"telemetry": telemetry},
+                timeout=30,
+            )
+        except Exception as exc:
+            log.warning(f"Failed to push telemetry: {exc}")
+
     def heartbeat(self, phase: str) -> None:
         """Minimal heartbeat — phase only.  HeartbeatSender uses its own
         full-payload PUT path; this method exists for callers that just

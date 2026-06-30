@@ -42,6 +42,23 @@ class TelemetryRepository:
         file_size_bytes: int | None = None,
         seconds_estimated: int | None = None,
         cost_estimated_usd: float | None = None,
+        # ── Phase 11 data-richness fields (all optional, persisted when
+        # available; NULL when the worker / orchestrator can't supply it).
+        gpu_model_normalized: str | None = None,
+        device_used: str | None = None,
+        blender_version: str | None = None,
+        worker_image_version: str | None = None,
+        peak_vram_mb: int | None = None,
+        denoiser_used: str | None = None,
+        gpu_count: int | None = None,
+        cpu_cores: int | None = None,
+        ram_gb: float | None = None,
+        startup_seconds: int | None = None,
+        render_seconds: int | None = None,
+        retry_count: int | None = None,
+        failure_reason: str | None = None,
+        worker_log_url: str | None = None,
+        gpu_specs: dict[str, Any] | None = None,
     ) -> None:
         """Insert a single telemetry row.
 
@@ -49,6 +66,12 @@ class TelemetryRepository:
         nullable in v1 — they stay None until Phase 6/7 wires the cost
         analyzer into the dispatch path.  Once stamped, calibration can
         compute predicted-vs-actual ratios per (fleet, gpu_type, heaviness).
+
+        Phase 11 fields (gpu_model_normalized through gpu_specs) are
+        collected for future estimation work.  They are NOT used by the
+        render path -- pure observation.  Callers should swallow any
+        upstream parsing errors and pass ``None`` rather than failing
+        the telemetry write.
         """
         execute(
             """
@@ -59,9 +82,19 @@ class TelemetryRepository:
                 started_at, completed_at, seconds_total,
                 price_per_hour, cost_actual_usd,
                 seconds_estimated, cost_estimated_usd,
-                heaviness_json, file_size_bytes
+                heaviness_json, file_size_bytes,
+                gpu_model_normalized, device_used,
+                blender_version, worker_image_version,
+                peak_vram_mb, denoiser_used,
+                gpu_count, cpu_cores, ram_gb,
+                startup_seconds, render_seconds,
+                retry_count, failure_reason,
+                worker_log_url, gpu_specs_json
             )
-            VALUES (%s,%s,%s, %s,%s,%s, %s,%s, %s,%s,%s, %s,%s, %s,%s, %s,%s)
+            VALUES (
+                %s,%s,%s, %s,%s,%s, %s,%s, %s,%s,%s, %s,%s, %s,%s, %s,%s,
+                %s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s, %s,%s, %s,%s
+            )
             """,
             (
                 str(uuid4()), job_id, group_id,
@@ -71,5 +104,13 @@ class TelemetryRepository:
                 price_per_hour, cost_actual_usd,
                 seconds_estimated, cost_estimated_usd,
                 json.dumps(heaviness or {}), file_size_bytes,
+                gpu_model_normalized, device_used,
+                blender_version, worker_image_version,
+                peak_vram_mb, denoiser_used,
+                gpu_count, cpu_cores, ram_gb,
+                startup_seconds, render_seconds,
+                retry_count, failure_reason,
+                worker_log_url,
+                json.dumps(gpu_specs) if gpu_specs else None,
             ),
         )

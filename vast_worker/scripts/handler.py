@@ -41,6 +41,7 @@ from worker_core import (
     PhaseTracker,
     ProcessSampler,
 )
+from worker_core.telemetry_parser import TelemetryParser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -417,6 +418,12 @@ def main() -> int:
             rendered_frames = 0
             last_push = 0.0
             fatal_render_error = ""
+            # Phase-11 telemetry parser.  Consumes every stdout line
+            # (cheap on non-matching lines) and accumulates the merged
+            # data-richness payload.  Pushed to backend after Blender
+            # exits; pure observability -- failures cannot affect render
+            # or upload paths.
+            telemetry_parser = TelemetryParser()
 
             for line in proc.stdout:
                 # C.1 -- terminal signal from heartbeat / progress.
@@ -445,6 +452,11 @@ def main() -> int:
                         if pattern in line:
                             egl_watchdog.note_wedge_pattern(line)
                             break
+
+                # Phase-11: feed every line through the telemetry parser
+                # (cheap no-op on non-matching lines).  Captures both
+                # the PCR_TELEMETRY summary and per-line Cycles Peak: VRAM.
+                telemetry_parser.consume(line)
 
                 if "PCR_PROGRESS" in line:
                     egl_watchdog.note_progress()
@@ -513,6 +525,15 @@ def main() -> int:
                 log.error(err)
                 client.mark_failed(err)
                 return 1
+
+            # Phase-11: push collected telemetry to the server before
+            # exit.  Fire-and-forget -- failure here does NOT affect job
+            # completion (which is decided by the orchestrator based on
+            # registered output files).
+            try:
+                client.push_telemetry(telemetry_parser.payload())
+            except Exception as exc:
+                log.warning(f"Telemetry push failed (non-fatal): {exc}")
 
             # 7. Finish.  Completion is decided by the orchestrator based on
             # registered output files — we do not self-declare "done".  The

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
+import { waitForPreparedPath } from "../services/sidecar";
 import {
   computeOverall,
   formatEta,
@@ -388,6 +389,47 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     subProgress: null,
     durations: {},
   });
+  // Track the background-zip wait during upload.  ``startedAt`` is the
+  // Date.now() of when ``waitForPreparedPath`` was awaited; ``elapsed``
+  // is refreshed by a 500ms tick so the UI can show honest "Packaging
+  // ...  Xs elapsed" instead of a lying "Uploading 0%".
+  const [packagingWait, setPackagingWait] = useState({
+    startedAt: null,   // Date.now() when the background zip started; null when idle/done.
+    elapsed: 0,        // Seconds since ``startedAt`` (500ms tick refresh).
+    done: false,       // True once the background zip has finished successfully.
+    error: null,       // Set to the error string if the background zip failed.
+  });
+  // Hold the SINGLE waitForPreparedPath promise so click-Upload can
+  // await the same one the eager kick-off started -- calling
+  // ``wait_for_prepared_path`` twice would remove-and-lose the handle
+  // on the second call.
+  const packagingPromiseRef = useRef(null);
+  useEffect(() => {
+    if (!packagingWait.startedAt) return;
+    const t = setInterval(() => {
+      setPackagingWait((prev) => (
+        prev.startedAt ? { ...prev, elapsed: (Date.now() - prev.startedAt) / 1000 } : prev
+      ));
+    }, 500);
+    return () => clearInterval(t);
+  }, [packagingWait.startedAt]);
+
+  const beginPackagingWait = useCallback((preparedPath, originalName) => {
+    // Zip-input renders re-zip in the background; loose .blend inputs
+    // don't.  Only start the wait for the former -- otherwise we'd
+    // block on a no-op that returns instantly (harmless but wasteful).
+    if (!preparedPath) return;
+    const wasZip = typeof originalName === "string" && originalName.toLowerCase().endsWith(".zip");
+    if (!wasZip) return;
+    setPackagingWait({ startedAt: Date.now(), elapsed: 0, done: false, error: null });
+    packagingPromiseRef.current = waitForPreparedPath(preparedPath)
+      .then(() => {
+        setPackagingWait({ startedAt: null, elapsed: 0, done: true, error: null });
+      })
+      .catch((err) => {
+        setPackagingWait({ startedAt: null, elapsed: 0, done: false, error: String(err?.message || err) });
+      });
+  }, []);
   // Tick the elapsed-in-phase counter twice a second so the progress
   // bar advances even when no PROGRESS line arrived (e.g. during save,
   // loading_blend, finalizing).  Runs as long as we have a start
@@ -695,6 +737,10 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     // as the implicit ``loading_blend`` start makes the elapsed counter
     // tick from t=0 regardless of whether the event landed.
     setAnalyzeProgress({ phase: null, phaseStartedAt: Date.now(), elapsedInPhase: 0, subProgress: null, durations: {} });
+    // Reset any leftover packaging-wait state from a prior analyze --
+    // the new run will spawn its own background zip on ANALYZE_DONE.
+    setPackagingWait({ startedAt: null, elapsed: 0, done: false, error: null });
+    packagingPromiseRef.current = null;
     const runId = ++runIdRef.current;
 
     if (!blenderBinRef.current) {
@@ -740,6 +786,14 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       // run.  Only the durations that arrived as ``PHASE:<name>:end``
       // events are saved; partial runs leave the history untouched.
       recordPhaseDurations(analyzeProgress.durations);
+
+      // Kick off the eager background-zip wait so the packaging bar is
+      // visible for the ENTIRE duration of Render Setup, and the Upload
+      // button can stay disabled until the zip actually finishes.
+      // No-op for loose .blend inputs (no re-zip queued).
+      if (prep.prep_done && prep.prepared_path) {
+        beginPackagingWait(prep.prepared_path, file.name);
+      }
 
       dispatch({
         type: "ANALYZE_DONE",
@@ -795,6 +849,21 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     let createdGroupId = "";
     let uploadTaskId = "";
     try {
+      // Await the SAME background zip promise ``beginPackagingWait``
+      // fired at ANALYZE_DONE time.  Almost always resolved by now
+      // because the packaging bar is disabled while waiting, so
+      // clicking Upload was blocked until the zip finished -- this
+      // ``await`` is defensive.  Errors propagate as they would have
+      // during the eager call.
+      if (packagingPromiseRef.current) {
+        try {
+          await packagingPromiseRef.current;
+        } catch (err) {
+          dispatch({ type: "ERROR", message: `Preparing upload failed: ${err?.message || err}` });
+          return;
+        }
+      }
+
       const created = await createDistributedRenderGroup(backendUrl, null, uploadFilename, Number.isFinite(file.size) ? file.size : null);
       createdGroupId = created.group_id || "";
 
@@ -1030,7 +1099,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         {showSettings && (
           <div className="cr-header-actions">
             {needsUpload && (
-              <button className="btn btn-primary cr-start-btn" type="button" onClick={handleUpload} disabled={isBusy}>
+              <button
+                className="btn btn-primary cr-start-btn"
+                type="button"
+                onClick={handleUpload}
+                disabled={isBusy || !!packagingWait.startedAt}
+                title={packagingWait.startedAt ? "Waiting for background packaging to finish…" : undefined}
+              >
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
                 Upload
               </button>
@@ -1181,24 +1256,40 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       )}
 
       {/* ── Progress bar ── */}
-      {(stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING) && (() => {
+      {(stage === STAGE.ANALYZING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING
+          || (stage === STAGE.CONFIGURING && !!packagingWait.startedAt)) && (() => {
         // Analyzing: phase-aware percent + ETA streamed from the Tauri
         // host.  Uploading: existing percent.  Confirming: indeterminate.
+        // Configuring + packaging: background zip is still running from
+        // when analyze returned; show honest packaging state at the top
+        // of the Render Setup form (Upload is disabled in that period).
         const isAnalyzing = stage === STAGE.ANALYZING;
         const isUploading = stage === STAGE.UPLOADING;
+        // ``Packaging`` shows in TWO places: (a) still in Configuring
+        // while the eager background zip runs, and (b) if the user
+        // somehow clicked Upload before the zip finished (defensive).
+        const isPackaging = !!packagingWait.startedAt;
         // Indeterminate when (a) Confirming, (b) Analyzing in an
-        // unknown-duration phase (loading_blend / finalizing), or
-        // (c) Analyzing with no phase reported yet.
+        // unknown-duration phase (loading_blend / finalizing),
+        // (c) Analyzing with no phase reported yet, or
+        // (d) Uploading but waiting on background zip.
         const isIndeterminate = (!isAnalyzing && !isUploading)
-          || (isAnalyzing && analyzeOverall.indeterminate);
+          || (isAnalyzing && analyzeOverall.indeterminate)
+          || isPackaging;
         const fillPct = isUploading ? uploadProgress : isAnalyzing ? analyzeOverall.percent : 40;
-        const phaseLabel = isAnalyzing ? analyzeOverall.label : isUploading ? "Uploading" : "Starting";
+        let phaseLabel;
+        if (isPackaging) phaseLabel = "Packaging file for upload";
+        else if (isAnalyzing) phaseLabel = analyzeOverall.label;
+        else if (isUploading) phaseLabel = "Uploading";
+        else phaseLabel = "Starting";
         const sub = analyzeProgress.subProgress;
         const subText = isAnalyzing && sub && sub.total > 1
           ? ` · ${sub.current}/${sub.total}${sub.label ? ` (${sub.label})` : ""}`
           : "";
         let rightSide;
-        if (isUploading) {
+        if (isPackaging) {
+          rightSide = formatElapsed(packagingWait.elapsed || 0);
+        } else if (isUploading) {
           rightSide = `${Math.min(100, uploadProgress).toFixed(1)}%`;
         } else if (isAnalyzing) {
           if (analyzeOverall.indeterminate) {
@@ -1209,7 +1300,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         } else {
           rightSide = "Working...";
         }
-        const hint = isAnalyzing && analyzeOverall.hint ? analyzeOverall.hint : null;
+        let hint = null;
+        if (isPackaging) {
+          hint = "Blender packed your assets while you were configuring; we're now zipping the prepared bundle for upload. Heavy inputs (multi-GB textures + Alembic/VDB caches) can take a couple of minutes.";
+        } else if (isAnalyzing && analyzeOverall.hint) {
+          hint = analyzeOverall.hint;
+        }
         return (
           <div className="cr-progress-wrap">
             <div className={`cr-progress-track ${isIndeterminate ? "indeterminate" : ""}`}>
@@ -1637,7 +1733,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
       {showSourcePicker && (
         <div className="submit-action-row">
           {needsUpload && (
-            <button className="btn btn-primary submit-primary-btn" type="button" onClick={handleUpload} disabled={isBusy}>Upload</button>
+            <button
+              className="btn btn-primary submit-primary-btn"
+              type="button"
+              onClick={handleUpload}
+              disabled={isBusy || !!packagingWait.startedAt}
+              title={packagingWait.startedAt ? "Waiting for background packaging to finish…" : undefined}
+            >Upload</button>
           )}
         </div>
       )}

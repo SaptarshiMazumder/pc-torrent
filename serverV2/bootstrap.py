@@ -175,6 +175,12 @@ from serverV2.services.jobs.service import JobService
 from serverV2.services.machines.service import MachineService
 from serverV2.services.pre_render import PreRenderEstimator, SceneResolver
 from serverV2.services.render_groups.service import RenderGroupService
+from serverV2.services.render_groups.telemetry.render_group_redis_mirror import (
+    RenderGroupRedisMirror,
+)
+from serverV2.services.render_groups.telemetry.render_group_telemetry_service import (
+    RenderGroupTelemetryService,
+)
 from serverV2.services.upload.coordinator import UploadCoordinator
 from serverV2.users import UserFacade, UserProfileRepository, UserService
 
@@ -752,6 +758,26 @@ def build(
         get_priority_multiplier=_get_priority_multiplier,
     )
 
+    # Active render-group DTO mirror.  The 3s frontend poll reads active
+    # groups from Redis instead of rebuilding them from Postgres every time;
+    # the DTO is (re)built at lifecycle events, async and off the render path.
+    # Built here (before lifecycle) so its ``refresh_live`` can be the
+    # lifecycle's on_group_changed hook.  Uses task_actual_cost directly (not
+    # the orchestrator facade) to avoid a bootstrap cycle.
+    render_group_mirror = RenderGroupRedisMirror(redis)
+    render_group_telemetry = RenderGroupTelemetryService(
+        mirror=render_group_mirror,
+        group_repo=group_repo,
+        job_repo=job_repo,
+        machine_repo=machine_repo,
+        output_frame_repo=output_frame_repo,
+        chunk_progress=chunk_progress_service,
+        scene_resolver=scene_resolver,
+        get_max_retries=_get_max_retries,
+        get_credits_per_usd=_get_credits_per_usd,
+        actual_cost_compute=task_actual_cost.actual_cost_for_chunk,
+    )
+
     lifecycle = RenderLifecycle(
         allocation_client=allocation_client,
         job_repo=job_repo,
@@ -771,6 +797,7 @@ def build(
         terminal_group_resource_releaser=terminal_group_resource_releaser,
         task_actual_cost=task_actual_cost,
         get_max_retries=_get_max_retries,
+        on_group_changed=render_group_telemetry.refresh_live,
     )
 
     # ``users`` module + orchestrator-side client.  Constructed here
@@ -911,10 +938,9 @@ def build(
         fleet_registry=registry,
         outputs_resolver=outputs_resolver,
         output_frame_repo=output_frame_repo,
-        chunk_progress=chunk_progress_service,
         scene_resolver=scene_resolver,
-        get_max_retries=_get_max_retries,
         get_credits_per_usd=_get_credits_per_usd,
+        telemetry=render_group_telemetry,
     )
 
     job_service = JobService(
@@ -933,6 +959,7 @@ def build(
             job_id=jid, outcome=CallbackOutcome.FAILURE, error=err,
         ),
         community_idle_notifier=orchestrator.handle_community_machine_idle,
+        group_changed_notifier=render_group_telemetry.refresh_live,
         terminal_cache=job_terminal_cache,
     )
 

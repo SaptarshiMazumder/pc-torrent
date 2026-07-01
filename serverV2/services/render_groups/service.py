@@ -23,13 +23,11 @@ from serverV2.core.value_objects import (
 )
 from serverV2.infrastructure import storage
 from serverV2.allocation.allocation_strategies.allocation_helpers import allocation_tiers as tiers
-from serverV2.orchestrator.chunk_progress import ChunkProgress, ChunkProgressService
 from serverV2.repositories.output_frame_repository import OutputFrameRepository
 from serverV2.services.assets.serializers import serialize_asset
 from serverV2.services.blend_parser.parser import BlendParseError, parse_upload
 from serverV2.services.pre_render import SceneResolver, resolve_frame_range
 from serverV2.services.pre_render.scene_resolver import SceneResolutionError
-from serverV2.services.render_groups.serializers import RenderGroupSerializer
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +54,9 @@ class RenderGroupService:
         fleet_registry,
         outputs_resolver,
         output_frame_repo: OutputFrameRepository,
-        chunk_progress: ChunkProgressService,
         scene_resolver: SceneResolver,
-        get_max_retries: Callable[[], int],
         get_credits_per_usd: Callable[[], float],
+        telemetry,
     ) -> None:
         self._groups = group_repo
         self._jobs = job_repo
@@ -69,22 +66,14 @@ class RenderGroupService:
         self._fleet = fleet_registry
         self._outputs = outputs_resolver
         self._output_frames = output_frame_repo
-        self._chunk_progress = chunk_progress
         self._scene_resolver = scene_resolver
-        # Reads orchestrator.max_retries fresh from Firestore each call.
-        # Used by ``_compute_retryable_job_ids`` to decide which failed
-        # jobs the user can manually retry (i.e. those whose auto-retry
-        # budget is already exhausted).
-        self._get_max_retries = get_max_retries
-        # Live Firestore knob (matches get_max_retries): read per call so
-        # admin edits to billing.credits_per_usd take effect immediately on
-        # both the group payload and the serializer's per-task numbers.
+        # Live Firestore knob: read per call so admin edits to
+        # billing.credits_per_usd take effect immediately on the terminal
+        # DTO's actual-cost projection.
         self._get_credits_per_usd = get_credits_per_usd
-        self._serializer = RenderGroupSerializer(
-            output_frame_repo=output_frame_repo,
-            actual_cost_compute=orchestrator.actual_cost_for_chunk,
-            get_credits_per_usd=get_credits_per_usd,
-        )
+        # Owns the active-group DTO + its Redis mirror.  get_status / list
+        # delegate the ACTIVE path here; RenderGroupService keeps terminal.
+        self._telemetry = telemetry
 
     # ------------------------------------------------------------------
     # create
@@ -370,10 +359,11 @@ class RenderGroupService:
         group = self._groups.get_by_id(group_id)
         if not group:
             raise RenderGroupServiceError(404, "Render group not found")
-        jobs = self._jobs.get_raw_by_group(group_id)
-        machine_ids = [job["machine_id"] for job in jobs if job.get("machine_id")]
-        machines_by_id = self._machines.get_raw_by_ids(machine_ids)
-        return self._build_active_status_dto(group, jobs, machines_by_id)
+        if group.get("status") in _ACTIVE_GROUP_STATUSES:
+            # Active: served from the Redis mirror (Postgres build on miss).
+            return self._telemetry.get_live(group.get("user_id"), group_id, group)
+        # Terminal detail: full DTO with tasks (client caches it); not mirrored.
+        return self._telemetry.build_for_group(group)
 
     def list_with_status_page(
         self, user_id: str, *, limit: int, offset: int,
@@ -400,140 +390,23 @@ class RenderGroupService:
         if not groups:
             return {"groups": [], "has_more": False}
 
-        active_ids = [g["id"] for g in groups if g.get("status") in _ACTIVE_GROUP_STATUSES]
-
-        jobs_by_group: dict[str, list[dict[str, Any]]] = {}
-        machines_by_id: dict[str, dict[str, Any]] = {}
-        if active_ids:
-            jobs_by_group = self._jobs.get_raw_by_groups(active_ids)
-            machine_ids = [
-                j["machine_id"]
-                for jobs in jobs_by_group.values()
-                for j in jobs
-                if j.get("machine_id")
-            ]
-            machines_by_id = self._machines.get_raw_by_ids(machine_ids)
+        has_active = any(
+            g.get("status") in _ACTIVE_GROUP_STATUSES for g in groups
+        )
+        # One HGETALL for the user's mirrored active groups; misses (not yet
+        # mirrored) fall back to a per-group build that also populates the mirror.
+        active_map = self._telemetry.get_active_map(user_id) if has_active else {}
 
         results: list[dict[str, Any]] = []
         for g in groups:
             if g.get("status") in _ACTIVE_GROUP_STATUSES:
-                results.append(self._build_active_status_dto(
-                    g, jobs_by_group.get(g["id"], []), machines_by_id,
-                ))
+                dto = active_map.get(g["id"])
+                if dto is None:
+                    dto = self._telemetry.get_live(user_id, g["id"], g)
+                results.append(dto)
             else:
                 results.append(self._build_terminal_status_dto(g))
         return {"groups": results, "has_more": has_more}
-
-    def _build_active_status_dto(
-        self,
-        group: dict[str, Any],
-        jobs: list[dict[str, Any]],
-        machines_by_id: dict[str, dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Full DTO for an active group — derives progress and per-chunk
-        ``tasks`` from freshly-loaded children.  Used by the detail/status
-        endpoints (single group) and by the list endpoint for the active
-        slice (batched children)."""
-        resolved_scene = self._scene_resolver.deserialize(
-            group.get("resolved_scene_json"),
-        )
-        resolved_render_settings = resolved_scene.get("render_overrides", {})
-        heaviness = resolved_scene.get("heaviness", {})
-        scheduling = parse_json_object(group.get("scheduling_json"), {})
-
-        # Pre-fetch the two N+1 sources in bulk: per-job filenames and
-        # per-chunk progress.  Each replaces N round-trips (one per job
-        # / one per qualifying chunk) with a single query.  Result: the
-        # whole detail-page response goes from ~17-22 queries to ~7.
-        files_by_job = self._output_frames.list_for_group_grouped_by_job(group["id"])
-        chunk_progress_by_index = self._chunk_progress.progress_for_group(
-            group["id"], jobs,
-        )
-        retryable_ids = self._compute_retryable_job_ids(
-            group, jobs, chunk_progress_by_index,
-        )
-        tasks = [
-            self._serializer.serialize_task(
-                job,
-                machines_by_id.get(job.get("machine_id")),
-                is_retryable=(job["id"] in retryable_ids),
-                output_files=files_by_job.get(job["id"], []),
-            )
-            for job in jobs
-        ]
-
-        # Group-level frame counts come from output_frames (already
-        # dedup'd at INSERT time via PK on (group_id, filename)).  Don't
-        # sum task counts -- sibling retries that uploaded the same
-        # frame would inflate the total.
-        total_frames = group.get("total_frames") or 0
-        unique_rendered = self._output_frames.count_for_group(group["id"])
-        total_rendered = min(total_frames, unique_rendered)
-
-        # Group status is owned by write-side callbacks (success/failure
-        # handlers + CallbackRouter on pending→running).  Read endpoints
-        # return the stored value directly — no recompute, no write-back.
-        overall_status = group["status"]
-
-        overall_pct = None
-        if total_frames > 0:
-            overall_pct = round(min(100.0, total_rendered / total_frames * 100), 1)
-        if overall_status == "done":
-            overall_pct = 100.0
-
-        latest = self._output_frames.preview_for_group(group["id"])
-        latest_output = latest[0] if latest else None
-        latest_output_job_id = latest[1] if latest else None
-
-        # Group-level actual-cost rollup -- sum of per-task actuals.
-        # Tasks pre-start contribute None (treated as 0), so the rollup
-        # converges to the real total as chunks complete.  Cheap reduce
-        # over the in-memory ``tasks`` list; no extra SQL.  Each task's
-        # value is already in credits (serializer projected at the wire
-        # boundary), so the rollup stays in credits too.
-        total_actual_cost_credits = sum(
-            (t.get("actual_cost_credits") or 0.0) for t in tasks
-        )
-
-        # Group-level ESTIMATED cost.  Prefer the LLM-derived snapshot
-        # captured at submit (matches "what the user was quoted");
-        # fall back to SUM(per-task estimated_cost_credits) for legacy
-        # groups submitted before the snapshot column existed (NULL).
-        snapshot_usd = group.get("pre_render_cost_estimate_usd")
-        if snapshot_usd is not None:
-            total_estimated_cost_credits = usd_to_credits(
-                float(snapshot_usd), self._get_credits_per_usd(),
-            )
-        else:
-            total_estimated_cost_credits = sum(
-                (t.get("estimated_cost_credits") or 0.0) for t in tasks
-            )
-
-        return {
-            "group_id": group["id"],
-            "status": overall_status,
-            "tier": tiers.normalize(group.get("tier")),
-            "input_filename": group["input_filename"],
-            "total_frames": total_frames,
-            "frame_start": group["frame_start"],
-            "frame_end": group["frame_end"],
-            "frame_step": group["frame_step"],
-            "submitted_at": group.get("submitted_at"),
-            "completed_at": group.get("completed_at"),
-            "error": group.get("error"),
-            "resolved_render_settings": resolved_render_settings,
-            "heaviness": heaviness,
-            "scheduling": scheduling,
-            "overall_rendered_frames": total_rendered,
-            "overall_progress_pct": overall_pct,
-            "available_output_files_count": min(total_frames, unique_rendered),
-            "latest_output_file": latest_output,
-            "latest_output_job_id": latest_output_job_id,
-            "total_actual_cost_credits": total_actual_cost_credits,
-            "total_estimated_cost_credits": total_estimated_cost_credits,
-            "tasks_count": len(tasks),
-            "tasks": tasks,
-        }
 
     def download_all_as_zip(self, group_id: str):
         """Stream every uploaded frame for the group into a single ZIP.
@@ -556,74 +429,6 @@ class RenderGroupService:
                     log.warning("Skipping %s in ZIP for group %s: %s", fname, group_id, exc)
         buf.seek(0)
         return buf
-
-    def _compute_retryable_job_ids(
-        self,
-        group: dict[str, Any],
-        jobs: list[dict[str, Any]],
-        chunk_progress_by_index: dict[int, ChunkProgress],
-    ) -> set[str]:
-        """Identify jobs the user can hit "Retry" on.  A job qualifies when:
-          * status == 'failed'
-          * it's the LATEST attempt for its chunk_index (older attempts have
-            been superseded — only the latest stuck row gets the button)
-          * ``attempt >= MAX_RETRIES`` (auto-retries exhausted, the system
-            won't fire on its own)
-          * no sibling for the same chunk_index is pending or running
-          * the chunk has un-uploaded frames remaining
-          * the parent group isn't cancelled
-
-        With this filter, the frontend gets exactly one retryable row per
-        stuck chunk — no client-side dedupe needed.
-        """
-        if (group.get("status") or "") == "cancelled":
-            return set()
-
-        latest_per_chunk: dict[int, str] = {}
-        latest_submitted: dict[int, str] = {}
-        active_chunks: set[int] = set()
-        for j in jobs:
-            ci = j.get("chunk_index") or 0
-            sub = j.get("submitted_at") or ""
-            if ci not in latest_submitted or sub > latest_submitted[ci]:
-                latest_submitted[ci] = sub
-                latest_per_chunk[ci] = j["id"]
-            if (j.get("status") or "") in ("pending", "running"):
-                active_chunks.add(ci)
-
-        retryable: set[str] = set()
-        for j in jobs:
-            # 'cancelled' qualifies because per-instance cancel
-            # (CANCEL_PIPELINE) auto-retries via TryRetryStep, but that
-            # retry can hit max-retries-exhausted or no-eligible-target
-            # and stop dispatching.  Showing the button on a cancelled
-            # chunk lets the user manually re-fire when auto-retry gave
-            # up.  Group-level cancel still short-circuits at the top
-            # of this method, so a fully aborted render shows no
-            # retry buttons.
-            if (j.get("status") or "") not in ("failed", "cancelled"):
-                continue
-            ci = j.get("chunk_index") or 0
-            if latest_per_chunk.get(ci) != j["id"]:
-                continue
-            if (j.get("attempt") or 0) < self._get_max_retries():
-                continue
-            if ci in active_chunks:
-                continue
-            # Skip if the chunk is already fully rendered.  Source-of-truth
-            # for "is this chunk done?" is ``ChunkProgressService``, pre-
-            # computed in bulk by the caller.  Reads frames uploaded across
-            # ALL siblings (not just this job) so a chunk where the original
-            # sibling rendered everything before being cancelled is
-            # correctly excluded even when the latest sibling's per-job
-            # count is zero.  Same service the retry pipeline uses; UI's
-            # ``is_retryable`` and the backend's ``retry_chunk_manually``
-            # always agree.
-            progress = chunk_progress_by_index.get(ci)
-            if progress is None or progress.is_complete:
-                continue
-            retryable.add(j["id"])
-        return retryable
 
     def _build_terminal_status_dto(self, group: dict[str, Any]) -> dict[str, Any]:
         """Slim DTO for a terminal group — every per-chunk-derived field

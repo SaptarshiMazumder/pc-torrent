@@ -166,6 +166,7 @@ class RenderLifecycle:
         terminal_group_resource_releaser: TerminalGroupResourceReleaser,
         task_actual_cost: TaskActualCost,
         get_max_retries: Callable[[], int],
+        on_group_changed: Callable[[str], None],
     ) -> None:
         self._allocation_client = allocation_client
         self._job_repo = job_repo
@@ -188,6 +189,10 @@ class RenderLifecycle:
         # so a desktop ConfigurationPage edit takes effect on the next
         # submission instead of waiting for a server restart.
         self._get_max_retries = get_max_retries
+        # Fired at the end of every reconcile to refresh the active-group
+        # Redis mirror (async, off the render path).  Injected bound method
+        # of RenderGroupTelemetryService.refresh_live.
+        self._on_group_changed = on_group_changed
 
     # ------------------------------------------------------------------
     # Cost intelligence — pass-through to the allocation module.
@@ -673,11 +678,15 @@ class RenderLifecycle:
             total_rendered=total_rendered,
             has_pending_allocation=has_pending_allocation,
         )
-        if not result.should_persist:
-            return
-        self._group_repo.update_status(group_id, result.status)
-        if result.status in _TERMINAL_GROUP_STATUSES:
-            self._write_terminal_snapshot(group_id, jobs, total_rendered)
+        if result.should_persist:
+            self._group_repo.update_status(group_id, result.status)
+            if result.status in _TERMINAL_GROUP_STATUSES:
+                self._write_terminal_snapshot(group_id, jobs, total_rendered)
+        # Refresh the active-group Redis mirror off the render path (async
+        # fire-and-forget).  Fires on every reconcile -- a chunk changed even
+        # when the rolled-up group status didn't -- so the live UI reflects
+        # per-task changes.  Terminal groups get dropped from the mirror.
+        self._on_group_changed(group_id)
 
     def release_terminal_group_resources(self, group_id: str) -> int:
         """Facade passthrough to ``TerminalGroupResourceReleaser.release``.

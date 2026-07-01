@@ -65,6 +65,7 @@ class JobService:
         success_notifier: Callable[[str], None],
         failure_notifier: Callable[[str, str], None],
         community_idle_notifier: Callable[[str], None],
+        group_changed_notifier: Callable[[str], None] | None = None,
         terminal_cache=None,
     ) -> None:
         self._jobs = job_repo
@@ -100,6 +101,10 @@ class JobService:
         # so any zombie running-job assigned to this machine gets
         # marked failed before we flip the row back to 'available'.
         self._community_idle_notifier = community_idle_notifier
+        # Fired by register_outputs (frame upload) to refresh the active-group
+        # Redis mirror off the caller's path.  Injected bound method of
+        # RenderGroupTelemetryService.refresh_live (async); None in tests.
+        self._group_changed_notifier = group_changed_notifier
 
     # ---- duplicate-start guard for serverless containers ----
 
@@ -283,6 +288,10 @@ class JobService:
             raise JobServiceError(404, "Job not found")
         group_id = job.get("group_id") or job_id
         self._output_frames.add_many(group_id, job_id, files)
+        # Frame progress changed -> refresh the active-group Redis mirror
+        # (async, off this path) so the live UI reflects the new frames.
+        if self._group_changed_notifier is not None:
+            self._group_changed_notifier(group_id)
         return {
             "job_id": job_id,
             "output_files": self._output_frames.list_for_job(job_id),

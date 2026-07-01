@@ -1,0 +1,79 @@
+@startuml render_group_active_mirror_classes
+title Active render-group DTO mirrored to Redis -- RenderGroupTelemetryService (async refresh)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+' PRINCIPLE: owner-of-the-DTO owns the logic.  The active DTO is a
+' render_groups concept -> its mirror + build + refresh/get/remove live in a
+' RenderGroupTelemetryService inside render_groups.  RenderGroupRedisMirror is
+' dumb CRUD; only the telemetry service touches it.
+'
+' CRITICAL: build_active_dto = ~7 Postgres round-trips.  refresh_live is
+' therefore FIRE-AND-FORGET async -- it submits build+write to a background
+' executor and returns immediately, so reconcile_group_status is NOT blocked.
+' remove_live is a single HDEL -> stays sync.  Reads flip to the mirror
+' (Postgres fallback).  Render lifecycle stays byte-similar (appended calls).
+
+package "callers (fire injected callable, non-blocking)" {
+  class RenderLifecycle <<edit -- 1 appended call>> {
+    reconcile_group_status(gid)
+    -- append: terminal ? remove_live(gid) : refresh_live(gid)
+  }
+  class JobService <<edit -- 1 injected notifier>> {
+    register_outputs(...)  -- append: refresh_live(gid)  (frame progress)
+    -- jobs otherwise untouched
+  }
+}
+
+package "services/render_groups" {
+  class RenderGroupService <<edit>> {
+    + get_status(gid)   -- active ? telemetry.get_live(gid) : own terminal DTO
+    + list              -- active via telemetry.get_active_live(uid); terminal own
+    -- create / confirm / terminal / delete stay here
+  }
+
+  package "services/render_groups/telemetry" <<new subdir>> {
+    class RenderGroupTelemetryService <<new>> {
+      + build(gid)             -- the active DTO builder (MOVED here) ~7 PG reads
+      + refresh_live(gid)      -- ASYNC: executor.submit(build then mirror.write)
+      + remove_live(uid, gid)  -- sync HDEL (cheap)
+      + get_live(gid)          -- mirror.read  OR  build (fallback)
+      + get_active_live(uid)   -- mirror.read_active  OR  build
+      - executor : ThreadPool  -- keeps reconcile off the PG round-trips
+    }
+    class RenderGroupRedisMirror <<new -- CRUD only>> {
+      + write(uid, gid, json) -- HSET rgmirror.(env).(uid) field=gid
+      + remove(uid, gid)      -- HDEL
+      + read(uid, gid)        -- HGET
+      + read_active(uid)      -- HGETALL
+      -- ~1h TTL; no logic; only the telemetry service calls it
+    }
+  }
+}
+
+package "infrastructure" {
+  class RedisClient <<reuse>> {
+    rgmirror.(env).(uid) = HASH  gid -> active-DTO json
+  }
+}
+
+RenderLifecycle ..> RenderGroupTelemetryService : refresh_live / remove_live (injected)
+JobService ..> RenderGroupTelemetryService : refresh_live (injected)
+RenderGroupService --> RenderGroupTelemetryService : get_live / get_active_live (read)
+RenderGroupTelemetryService --> RenderGroupRedisMirror : the only caller
+RenderGroupRedisMirror --> RedisClient
+
+note bottom of RenderGroupTelemetryService
+  refresh_live returns immediately (submit to executor).  The ~7-query
+  build + the HSET run on the background thread, so the render path
+  (reconcile / register_outputs) keeps its current latency.  Cost of async:
+  a brief staleness window + last-write-wins on racing events (fine for
+  live data; per-group in-flight coalescing is an easy later refinement).
+end note
+
+note bottom of RenderGroupService
+  Owner-of-the-DTO owns the logic.  build_active_dto MOVED into the
+  telemetry service, so get_status delegates the ACTIVE path there
+  (terminal DTO stays here) -- one-way, no intra-module cycle.
+end note
+@enduml

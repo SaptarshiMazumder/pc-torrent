@@ -4,6 +4,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE};
 use futures_util::StreamExt;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::collections::HashMap;
+use tokio::task::JoinHandle as TokioJoinHandle;
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -42,6 +43,26 @@ pub struct DownloadResult {
     pub filename: String,
     pub action: String,
 }
+
+/// Registry of background re-zip tasks for zip-input analyzes.
+///
+/// ``analyze_and_prepare_blend`` extracts the input zip, has Blender pack
+/// assets into the .blend, then needs to re-zip the whole extracted
+/// bundle (packed .blend + unpackable side files like VDB volumes,
+/// Alembic caches, movie clips) into the ``prepared_path`` that the
+/// upload path will read.  On multi-GB inputs that re-zip step takes
+/// tens of seconds to minutes, which historically blocked the analyze
+/// function from returning.
+///
+/// The new flow spawns the re-zip in ``spawn_blocking`` and registers
+/// the JoinHandle here, keyed by the future prepared_path.  The
+/// analyze function returns immediately to JS; the UI transitions to
+/// Render Setup while the zip finishes in parallel.  Before actually
+/// reading the file, the upload flow calls ``wait_for_prepared_path``
+/// which awaits (and removes) the handle -- almost always instant by
+/// the time the user has clicked Upload, but honest about waiting
+/// when they haven't.
+pub type PendingZipMap = Arc<Mutex<HashMap<String, tokio::task::JoinHandle<Result<(), String>>>>>;
 
 #[derive(Clone, Copy)]
 enum UploadTaskStatus {
@@ -1374,8 +1395,14 @@ fn _choose_target_blend(source_stem: &str, root: &Path, blends: &[PathBuf]) -> P
 fn _zip_dir(src: &Path, dest: &Path) -> Result<(), String> {
     let file = File::create(dest).map_err(|e| format!("Cannot create zip: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
+    // ``Stored`` (no compression) is dramatically faster than Deflated
+    // and produces basically the same output size for our workload --
+    // the bundle is textures (PNG/EXR/JPG are already compressed) + a
+    // packed .blend (Blender applies its own compression when saved).
+    // Deflating already-compressed data spends CPU for a rounding-error
+    // size win.  For mech-scale bundles: ~30min Deflated -> ~2min Stored.
     let opts = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+        .compression_method(zip::CompressionMethod::Stored);
     _zip_dir_recursive(&mut zip, src, src, opts)?;
     zip.finish().map_err(|e| format!("Zip finish failed: {e}"))?;
     Ok(())
@@ -1400,9 +1427,10 @@ fn _zip_dir_recursive(
         } else {
             zip.start_file(&rel, opts).map_err(|e| e.to_string())?;
             let mut f = File::open(&path).map_err(|e| e.to_string())?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-            Write::write_all(zip, &buf).map_err(|e| e.to_string())?;
+            // Stream in chunks instead of reading the whole file into
+            // a Vec then writing.  For multi-GB textures the old path
+            // allocated the entire file in RAM before writing.
+            std::io::copy(&mut f, zip).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -1652,6 +1680,7 @@ pub async fn prepare_blend_for_upload(
 #[tauri::command]
 pub async fn analyze_and_prepare_blend(
     app: AppHandle,
+    pending_zips: State<'_, PendingZipMap>,
     file_path: String,
     blender_bin: String,
     deep_search: bool,
@@ -1811,16 +1840,6 @@ pub async fn analyze_and_prepare_blend(
             }
         } else if let Some(rest) = line.strip_prefix("PCR_ANALYSIS_JSON:") {
             analysis_json_line = Some(rest.trim().to_string());
-            // [DIAG] capture time so we can see if the gap is python-side
-            // (json.dumps slow) or rust-side (pipe drain slow).
-            eprintln!(
-                "[DIAG] captured PCR_ANALYSIS_JSON: line_len={} unix_ms={}",
-                rest.len(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0),
-            );
             // Got everything we need.  On heavy scenes Blender's wm.quit
             // cleanup (releasing the multi-GB data graph) can take 1-2
             // minutes -- there's no point making the UI wait.  Break out
@@ -1946,27 +1965,32 @@ pub async fn analyze_and_prepare_blend(
             .map(|s| s.success())
             .unwrap_or(false)
     };
-    let mut prep_done = prep_succeeded && (prep_done_from_logs || prepare_errors.is_empty());
+    let prep_done = prep_succeeded && (prep_done_from_logs || prepare_errors.is_empty());
     let prepared_path = if prep_done {
         if is_zip {
+            // Re-zip the extracted bundle (packed .blend + any unpackable
+            // side files like VDBs, movie clips, Alembic caches) into the
+            // final upload archive.  Historically this ran synchronously
+            // and blocked the analyze return for tens of seconds to
+            // minutes on multi-GB inputs.  We now spawn it on the
+            // blocking pool and register the JoinHandle in PendingZipMap;
+            // the JS side calls ``wait_for_prepared_path`` before upload
+            // (usually a no-op because the user has been filling in
+            // render settings while the zip ran).
             let new_zip = work_dir.join(&filename);
-            if let Some(ex) = extract_dir.as_ref() {
-                let _zip_start = std::time::Instant::now();
-                eprintln!("[DIAG] _zip_dir start (this re-zips the extracted bundle)");
-                let result = _zip_dir(ex, &new_zip);
-                eprintln!("[DIAG] _zip_dir done in {:?}", _zip_start.elapsed());
-                match result {
-                    Ok(()) => Some(new_zip.to_string_lossy().to_string()),
-                    Err(err) => {
-                        prepare_errors.push(format!("Prepared zip packaging failed: {err}"));
-                        prep_done = false;
-                        None
-                    }
+            match extract_dir.as_ref() {
+                Some(ex) => {
+                    let path_str = new_zip.to_string_lossy().to_string();
+                    let ex_owned = ex.clone();
+                    let new_zip_owned = new_zip.clone();
+                    let handle = tokio::task::spawn_blocking(move || {
+                        _zip_dir(&ex_owned, &new_zip_owned)
+                            .map_err(|e| format!("Prepared zip packaging failed: {e}"))
+                    });
+                    pending_zips.lock().await.insert(path_str.clone(), handle);
+                    Some(path_str)
                 }
-            } else {
-                prep_done = false;
-                prepare_errors.push("Prepared zip packaging failed: extracted bundle missing".to_string());
-                None
+                None => None,
             }
         } else {
             Some(prep_output_path.to_string_lossy().to_string())
@@ -1974,6 +1998,13 @@ pub async fn analyze_and_prepare_blend(
     } else {
         None
     };
+    // If the bundle went missing on the zip branch, surface that as a
+    // prep error and mark not-done (matches the pre-refactor behaviour).
+    let mut prep_done = prep_done;
+    if prep_done && is_zip && prepared_path.is_none() {
+        prep_done = false;
+        prepare_errors.push("Prepared zip packaging failed: extracted bundle missing".to_string());
+    }
 
     let mut warnings = prepare_warnings.clone();
     warnings.extend(analysis_warnings.clone());
@@ -1992,6 +2023,36 @@ pub async fn analyze_and_prepare_blend(
         errors,
         prep_done,
     })
+}
+
+/// Await the background re-zip that ``analyze_and_prepare_blend`` spawned
+/// for zip inputs.  JS calls this right before reading the prepared path.
+///
+/// Returns instantly if:
+///   * The path was never registered (loose .blend input, no re-zip).
+///   * The re-zip already finished (common case -- the user spent
+///     several seconds on the Render Setup form while it ran).
+///
+/// Awaits (with progress-friendly async back-pressure to Tauri) when the
+/// user clicked Upload faster than the re-zip could finish.  Surfaces
+/// zip errors so upload doesn't proceed on a broken file.
+#[tauri::command]
+pub async fn wait_for_prepared_path(
+    pending_zips: State<'_, PendingZipMap>,
+    path: String,
+) -> Result<String, String> {
+    let handle_opt: Option<TokioJoinHandle<Result<(), String>>> = {
+        let mut map = pending_zips.lock().await;
+        map.remove(&path)
+    };
+    match handle_opt {
+        Some(handle) => match handle.await {
+            Ok(Ok(())) => Ok(path),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(format!("Prepared zip task panicked: {e}")),
+        },
+        None => Ok(path),
+    }
 }
 
 #[tauri::command]

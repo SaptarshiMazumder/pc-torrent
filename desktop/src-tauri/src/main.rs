@@ -20,6 +20,9 @@ use state::AgentState;
 fn main() {
     let agent_state = Arc::new(Mutex::new(AgentState::default()));
     let sidecar_handle = Arc::new(Mutex::new(SidecarHandle::new()));
+    // Background re-zip registry -- keyed by prepared_path.  See the
+    // PendingZipMap doc comment in commands.rs for the rationale.
+    let pending_zips: commands::PendingZipMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let startup_state = agent_state.clone();
 
     tauri::Builder::default()
@@ -27,6 +30,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(agent_state.clone())
         .manage(sidecar_handle.clone())
+        .manage(pending_zips)
         .invoke_handler(tauri::generate_handler![
             commands::connect_agent,
             commands::disconnect_agent,
@@ -51,6 +55,7 @@ fn main() {
             commands::find_blender,
             commands::prepare_blend_for_upload,
             commands::analyze_and_prepare_blend,
+            commands::wait_for_prepared_path,
             commands::analyze_blend_with_blender,
             commands::get_frame_cache_path,
             commands::write_frame_cache,

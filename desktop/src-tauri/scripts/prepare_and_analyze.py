@@ -797,7 +797,13 @@ def _bake_scripted_drivers() -> int:
         if not ad.action:
             ad.action = bpy.data.actions.new(name=f"{id_data.name}_baked_drivers")
         try:
-            fc_new = ad.action.fcurves.new(data_path=data_path, index=array_index)
+            fc_new = _fcurve_new_compat(ad, data_path, array_index, id_data)
+            if fc_new is None:
+                _warn(
+                    f"Could not bake driver {id_data.name}.{data_path}[{array_index}]: "
+                    "no compatible fcurve-creation API on this Blender version"
+                )
+                continue
             fc_new.keyframe_points.add(len(values))
             for i, (frame, val) in enumerate(values):
                 kp = fc_new.keyframe_points[i]
@@ -809,6 +815,54 @@ def _bake_scripted_drivers() -> int:
 
     _log(f"Baked {baked}/{total_drivers} scripted drivers to keyframes")
     return baked
+
+
+def _fcurve_new_compat(ad, data_path, array_index, id_data):
+    """Create an FCurve on ``ad.action`` for (data_path, array_index).
+
+    Blender 5.0 removed the legacy ``Action.fcurves`` API when it
+    introduced slotted actions -- fcurves now live under
+    ``action.layers[N].strips[M].channelbag(slot).fcurves``.  This helper
+    tries the 5.x path first, falls back to the 4.x path, and returns
+    ``None`` if neither works (unknown Blender version).
+
+    Returns the created FCurve or None on failure.
+    """
+    action = ad.action
+    # 5.0+ slotted-action path.
+    if hasattr(action, "layers") and hasattr(action, "slots"):
+        try:
+            # Ensure the animation_data has a slot assigned that points
+            # at this ID.  ``id_type`` is Blender's short 2-letter code
+            # (``OB`` object, ``AR`` armature, ...); ``bpy.types.ID.id_type``
+            # exposes it as a string on any ID data.
+            slot = getattr(ad, "action_slot", None)
+            if slot is None:
+                id_type = getattr(id_data, "id_type", "OB")
+                slot = action.slots.new(id_type=id_type, name=id_data.name)
+                ad.action_slot = slot
+            # Layer + strip.
+            layer = action.layers[0] if len(action.layers) else action.layers.new(name="Layer")
+            strip = layer.strips[0] if len(layer.strips) else layer.strips.new(type="KEYFRAME")
+            # Channelbag -- ``ensure=True`` on the ``channelbag()`` method
+            # creates the bag if none exists yet for this slot.
+            channelbag = strip.channelbag(slot, ensure=True) if callable(getattr(strip, "channelbag", None)) else None
+            if channelbag is None:
+                # Some 5.x builds expose ``channelbag_for_slot`` instead.
+                cb_getter = getattr(strip, "channelbag_for_slot", None)
+                if callable(cb_getter):
+                    channelbag = cb_getter(slot)
+            if channelbag is not None:
+                return channelbag.fcurves.new(data_path=data_path, index=array_index)
+        except Exception as e:
+            _warn(f"Slotted-action fcurve create failed for {id_data.name}.{data_path}: {e}")
+    # Legacy 4.x path (also the fallback if 5.x path didn't return).
+    if hasattr(action, "fcurves"):
+        try:
+            return action.fcurves.new(data_path=data_path, index=array_index)
+        except Exception as e:
+            _warn(f"Legacy fcurve create failed for {id_data.name}.{data_path}: {e}")
+    return None
 
 
 # ── 12. Scene validation ──────────────────────────────────────────────────────
@@ -1278,11 +1332,7 @@ def analyze():
     # phase frozen at 100% while the process is still very much alive.
     # No phase_end is emitted: the process exit is the implicit terminator.
     _phase_start("finalizing")
-    _t = time.monotonic()
-    _json_str = json.dumps(payload, separators=(",", ":"))
-    print(f"[DIAG] json built len={len(_json_str)} t+{time.monotonic() - _t:.3f}s", flush=True)
-    print("PCR_ANALYSIS_JSON:" + _json_str, flush=True)
-    print(f"[DIAG] json printed t+{time.monotonic() - _t:.3f}s", flush=True)
+    print("PCR_ANALYSIS_JSON:" + json.dumps(payload, separators=(",", ":")), flush=True)
 
 
 prepare()

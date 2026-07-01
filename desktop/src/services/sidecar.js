@@ -78,3 +78,15 @@ export async function downloadJobOutputToDownloads(url, options = {}) {
 export async function cacheViewerFrame(url, cacheKey, expectedSizeBytes = null) {
   return invoke("cache_viewer_frame", { url, cacheKey, expectedSizeBytes });
 }
+
+/**
+ * Await the background re-zip that ``analyzeAndPrepareBlend`` spawned
+ * for zip inputs.  Returns instantly if the file is loose (no re-zip
+ * was queued) or if the re-zip already finished (common case -- the
+ * user spent seconds/minutes filling in render settings).  Otherwise
+ * back-pressures until the zip finishes so upload doesn't start on
+ * an incomplete file.
+ */
+export async function waitForPreparedPath(path) {
+  return invoke("wait_for_prepared_path", { path });
+}

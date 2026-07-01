@@ -4,19 +4,27 @@ multiple candidates (zip archives, assets directories).
 ``find_blend_files`` walks the tree and returns every valid ``.blend``
 path (filtering out macOS resource forks and the __MACOSX folder).
 ``choose_render_target`` ranks them so the result is deterministic and
-matches what a user would pick manually.
+matches what a user would pick manually -- unless the caller supplied
+an explicit ``override_relative_path`` (from the analyze-side dropdown),
+in which case that specific file is used.
 
-Ranking preference:
+Ranking preference (heuristic used when no explicit user override):
 1. Root-level .blend files only (if any exist).
 2. File stem matches the uploaded filename stem.
 3. Larger file size.
 4. Shorter/lexical relative path.
 5. (fallback) Shallower path when no root-level .blend is available.
+
+Shared by every fleet (Modal, Vast, Community) via ``worker_core`` so
+a change to the picker logic happens in exactly one place.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+
+log = logging.getLogger(__name__)
 
 
 def find_blend_files(root_dir: str) -> list[str]:
@@ -42,13 +50,47 @@ def choose_render_target(
     source_filename: str,
     input_dir: str,
     blend_files: list[str],
+    override_relative_path: str | None = None,
 ) -> tuple[str, bool]:
     """Choose a deterministic render target from ``blend_files``.
 
+    When ``override_relative_path`` is provided (user picked a specific
+    file from the analyze-side dropdown), we look for that exact
+    relative path first.  If it matches a candidate, we return it and
+    skip the heuristic ranking below.  If no candidate matches (typo,
+    renamed zip, out-of-date override), we log a warning and fall back
+    to the heuristic -- the failure mode is IDENTICAL to today's
+    behaviour when no override is passed.  Any exception in the
+    override branch is swallowed to the same safe fallback so a bug
+    here can never break a render.
+
     Returns ``(chosen_path, selected_from_root)``.  ``selected_from_root``
-    is True when at least one root-level .blend exists and we picked one;
-    callers use it to decide how to phrase their log line.
+    is True when at least one root-level .blend exists and we picked
+    one, OR when the override matched a specific user pick (the log
+    line disambiguates so callers can phrase their messages correctly).
     """
+    # ── User override path (only fires when explicitly provided) ─────
+    if override_relative_path:
+        try:
+            for path in blend_files:
+                rel = os.path.relpath(path, input_dir).replace("\\", "/")
+                if rel == override_relative_path:
+                    log.info("[BLEND_SELECT] user override matched: %s", rel)
+                    return path, True
+            log.warning(
+                "[BLEND_SELECT] user override %r not found among %d "
+                "candidate(s); falling back to heuristic",
+                override_relative_path,
+                len(blend_files),
+            )
+        except Exception as exc:
+            log.warning(
+                "[BLEND_SELECT] override lookup failed (%s); falling "
+                "back to heuristic",
+                exc,
+            )
+
+    # ── Heuristic (unchanged from pre-override behaviour) ────────────
     source_stem = os.path.splitext(os.path.basename(source_filename))[0].lower()
 
     entries = []
@@ -82,4 +124,12 @@ def choose_render_target(
             entry["rel"].lower(),
         ),
     )
-    return ranked[0]["path"], bool(root_entries)
+    chosen = ranked[0]
+    log.info(
+        "[BLEND_SELECT] heuristic pick: %s (from_root=%s, size=%d, depth=%d)",
+        chosen["rel"],
+        bool(root_entries),
+        chosen["size"],
+        chosen["depth"],
+    )
+    return chosen["path"], bool(root_entries)

@@ -41,6 +41,10 @@ from worker_core import (
     PhaseTracker,
     ProcessSampler,
 )
+from worker_core.blend_file_discovery import (
+    choose_render_target,
+    find_blend_files,
+)
 from worker_core.telemetry_parser import TelemetryParser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -190,52 +194,10 @@ class EGLWatchdog:
 # Blend-bundle target selection
 # ---------------------------------------------------------------------------
 
-def _find_blend_files(root_dir: str) -> list[str]:
-    blend_files: list[str] = []
-    for current_root, _, files in os.walk(root_dir):
-        for name in files:
-            lower_name = name.lower()
-            if not lower_name.endswith(".blend"):
-                continue
-            if lower_name.startswith("._"):
-                continue
-            full_path = os.path.join(current_root, name)
-            rel = os.path.relpath(full_path, root_dir).replace("\\", "/")
-            if rel.startswith("__MACOSX/") or "/._" in rel:
-                continue
-            blend_files.append(full_path)
-    blend_files.sort()
-    return blend_files
-
-
-def _choose_render_target_blend(
-    source_filename: str,
-    input_dir: str,
-    blend_files: list[str],
-) -> tuple[str, bool]:
-    source_stem = os.path.splitext(os.path.basename(source_filename))[0].lower()
-    entries = []
-    for path in blend_files:
-        rel = os.path.relpath(path, input_dir).replace("\\", "/")
-        stem = os.path.splitext(os.path.basename(path))[0].lower()
-        depth = rel.count("/")
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            size = 0
-        entries.append({
-            "path": path, "rel": rel,
-            "stem_rank": 0 if stem == source_stem else 1,
-            "depth": depth, "size": size,
-        })
-
-    root_entries = [e for e in entries if e["depth"] == 0]
-    pool = root_entries if root_entries else entries
-    ranked = sorted(
-        pool,
-        key=lambda e: (e["stem_rank"], -e["size"], e["depth"], len(e["rel"]), e["rel"].lower()),
-    )
-    return ranked[0]["path"], bool(root_entries)
+# NOTE: ``find_blend_files`` and ``choose_render_target`` were previously
+# inlined here.  They now live in ``worker_core.blend_file_discovery``
+# (shared by Modal + Vast + Community) so a change to the picker logic
+# happens in exactly one place.
 
 
 # ---------------------------------------------------------------------------
@@ -330,15 +292,34 @@ def main() -> int:
             if filename.lower().endswith(".zip"):
                 heartbeat.set_phase("extract")
 
-            blend_files = _find_blend_files(input_dir)
+            blend_files = find_blend_files(input_dir)
             if not blend_files:
                 err = "No .blend file found in uploaded input bundle"
                 log.error(err)
                 client.mark_failed(err)
                 return 1
 
-            blend_path, selected_from_root = _choose_render_target_blend(
+            # Decode render_overrides EARLY so we can honour the user's
+            # ``blend_file_relative_path`` pick (analyze-side dropdown).
+            # Bogus/missing override falls through to today's heuristic
+            # in ``worker_core.blend_file_discovery.choose_render_target``.
+            _render_overrides_early: dict = {}
+            if render_overrides_b64:
+                try:
+                    _render_overrides_early = json.loads(
+                        base64.b64decode(render_overrides_b64).decode()
+                    )
+                except Exception as e:
+                    log.warning(f"Failed to decode render_overrides_b64 (early): {e}")
+            blend_override = (
+                _render_overrides_early.get("blend_file_relative_path")
+                if isinstance(_render_overrides_early, dict)
+                else None
+            )
+
+            blend_path, selected_from_root = choose_render_target(
                 filename, input_dir, blend_files,
+                override_relative_path=blend_override,
             )
             chosen_rel = os.path.relpath(blend_path, input_dir).replace("\\", "/")
             if len(blend_files) > 1:
@@ -349,8 +330,9 @@ def main() -> int:
                 preview = ", ".join(candidates[:4])
                 extra = "" if len(candidates) <= 4 else ", ..."
                 selection_mode = (
-                    "root-level priority" if selected_from_root
-                    else "fallback (no root-level .blend found)"
+                    "user override" if blend_override and blend_override == chosen_rel
+                    else ("root-level priority" if selected_from_root
+                          else "fallback (no root-level .blend found)")
                 )
                 log.warning(
                     f"Found {len(blend_files)} .blend files in bundle. "

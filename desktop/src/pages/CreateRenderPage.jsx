@@ -304,6 +304,53 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   // and submit paths therefore consume it directly.
   const resolvedEngine = renderEngine || null;
 
+  // ``resolvedSavedAsset`` was moved up here (from later in the file)
+  // because the picker block below needs it as a source when the user
+  // re-selects a previously-uploaded input (JS temporal-dead-zone
+  // otherwise trips a ReferenceError in the useEffect deps).
+  const resolvedSavedAsset = useMemo(
+    () => savedInputs.items.find((i) => i.id === savedInputId) || savedInputAsset,
+    [savedInputs.items, savedInputId, savedInputAsset],
+  );
+
+  // ── Blend picker state ─────────────────────────────────────────────
+  // Declared here (before ``renderOverridesForServer``) because that
+  // useMemo consumes ``pickedBlend`` / ``analyzeBaseline`` in its deps
+  // -- JS temporal-dead-zone otherwise trips a ReferenceError.
+  // Populated from ``prepResult.blend_candidates`` when analyze returns.
+  // ``pickedBlend`` is what the user picked in the dropdown (defaults
+  // to whatever analyze's heuristic chose).  When the user picks a
+  // different file than analyze looked at, we surface a warning banner
+  // + a "Re-analyze with this file" button so their frame range /
+  // cameras / cost estimate stay accurate.
+  const [pickedBlend, setPickedBlend] = useState(null);
+  // Sync ``pickedBlend`` from two possible sources:
+  //   1. Fresh analyze -- ``prepResult.selected_blend_relative_path``
+  //      is what Rust picked (or what the user forced via re-analyze).
+  //   2. Saved input -- the previously-submitted render's
+  //      ``render_overrides.blend_file_relative_path`` was persisted;
+  //      re-selecting this saved asset should restore the same pick.
+  // Without this, picking a saved input keeps ``pickedBlend`` null,
+  // the submit logic sends ``blend_file_relative_path: null``, and the
+  // worker's heuristic re-runs -- which historically picked a DIFFERENT
+  // .blend from the multi-candidate zip.  User's explicit choice would
+  // be silently lost between renders.
+  useEffect(() => {
+    const fresh = prepResult?.selected_blend_relative_path;
+    const savedOverride = resolvedSavedAsset?.render_overrides?.blend_file_relative_path;
+    if (fresh) {
+      setPickedBlend(fresh);
+    } else if (typeof savedOverride === "string" && savedOverride) {
+      setPickedBlend(savedOverride);
+    } else if ((prepResult?.blend_candidates?.length || 0) === 0 && !resolvedSavedAsset) {
+      setPickedBlend(null);
+    }
+  }, [prepResult?.selected_blend_relative_path, prepResult?.blend_candidates, resolvedSavedAsset]);
+  const blendCandidates = prepResult?.blend_candidates || [];
+  const showBlendPicker = blendCandidates.length > 1;
+  const analyzeBaseline = prepResult?.selected_blend_relative_path || null;
+  const blendChangedFromAnalyze = !!(pickedBlend && analyzeBaseline && pickedBlend !== analyzeBaseline);
+
   // Single source of truth for the render-overrides body.  Both
   // /pre-render/estimate and confirm-upload consume the same dict — the
   // backend's SceneResolver merges it with the analyzer snapshot at
@@ -338,7 +385,14 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     passes: outputFormat === "OPEN_EXR_MULTILAYER" && !passesUseFile
       ? { use_file_settings: false, ...renderPasses }
       : { use_file_settings: true },
-  }), [sceneName, cameraMode, forceCameraName, viewLayerName, cameraValidation, frameRange, resolvedEngine, resolutionX, resolutionY, resolutionPercentage, cyclesSamples, outputFormat, exrColorDepth, exrCodec, filmTransparent, passesUseFile, renderPasses]);
+    // User's blend-file pick.  Sent unconditionally when set (whether
+    // matched or diverging from analyze's heuristic pick) so re-running
+    // the same saved input preserves the user's original selection --
+    // the worker's ``choose_render_target`` override branch already
+    // falls back safely to the heuristic if the value doesn't match a
+    // candidate, so unconditional-send is zero-risk.
+    blend_file_relative_path: pickedBlend || null,
+  }), [sceneName, cameraMode, forceCameraName, viewLayerName, cameraValidation, frameRange, resolvedEngine, resolutionX, resolutionY, resolutionPercentage, cyclesSamples, outputFormat, exrColorDepth, exrCodec, filmTransparent, passesUseFile, renderPasses, pickedBlend]);
   const rangeCounts = useMemo(() => {
     const m = new Map();
     if (!frameRange) return m;
@@ -346,10 +400,6 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     return m;
   }, [cameraRanges, frameRange]);
 
-  const resolvedSavedAsset = useMemo(
-    () => savedInputs.items.find((i) => i.id === savedInputId) || savedInputAsset,
-    [savedInputs.items, savedInputId, savedInputAsset],
-  );
 
   const filteredSaved = useMemo(() => {
     const q = savedSearch.trim().toLowerCase();
@@ -702,7 +752,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   // through with deepSearch=true; that bypasses the cache, runs Blender
   // with PCR_DEEP_SEARCH=1, and the result deliberately isn't cached
   // (a re-pick should re-run the cheap path, not replay the deep one).
-  const handleAnalyze = async (deepSearch = false) => {
+  const handleAnalyze = async (deepSearch = false, overrideBlendRelativePath = null) => {
     if (savedInputId && !file) {
       await handleUseSavedInput();
       return;
@@ -713,8 +763,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     }
 
     // Check analysis cache first -- but skip when the user explicitly
-    // asked for a deep-search re-analyze.
-    if (!deepSearch) {
+    // asked for a deep-search re-analyze OR when they're forcing a
+    // specific .blend from the picker.  The cache is keyed on
+    // (file.path, file.size) with no knowledge of the override, so a
+    // cache hit would just return the previous analyze's snapshot
+    // (built against a different file) and silently drop the pick --
+    // exactly the "clicked and nothing happened" symptom.
+    if (!deepSearch && !overrideBlendRelativePath) {
       const cached = file.path ? getCachedAnalysis(file.path, file.size) : null;
       if (cached) {
         dispatch({
@@ -753,7 +808,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     }
 
     try {
-      const result = await invoke("analyze_and_prepare_blend", { filePath: file.path, blenderBin: blenderBinRef.current, deepSearch });
+      const result = await invoke("analyze_and_prepare_blend", {
+        filePath: file.path,
+        blenderBin: blenderBinRef.current,
+        deepSearch,
+        overrideBlendRelativePath: overrideBlendRelativePath || null,
+      });
       if (runId !== runIdRef.current) return;
 
       const analysisPayload = result?.analysis && typeof result.analysis === "object" ? result.analysis : null;
@@ -766,6 +826,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         prepare_errors: result?.prepare_errors || result?.errors || [],
         prep_done: Boolean(result?.prep_done),
         deep_search_ran: deepSearch,
+        blend_candidates: Array.isArray(result?.blend_candidates) ? result.blend_candidates : [],
+        selected_blend_relative_path: result?.selected_blend_relative_path || null,
       };
 
       let note = "";
@@ -1488,6 +1550,45 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
             <section className="cr-form-section">
               <div className="cr-form-section-title">Scene &amp; Camera</div>
               <div className="cr-form-section-body">
+                {showBlendPicker && (
+                  <>
+                    <div className="cr-field-row">
+                      <label className="cr-field cr-field--full">
+                        <span className="cr-field-label">Blend file (bundle contains {blendCandidates.length} candidates)</span>
+                        <select
+                          value={pickedBlend || ""}
+                          onChange={(e) => setPickedBlend(e.target.value)}
+                          className="cr-input"
+                          disabled={isBusy}
+                        >
+                          {blendCandidates.map((c) => (
+                            <option key={c.relative_path} value={c.relative_path}>
+                              {c.relative_path}
+                              {c.relative_path === analyzeBaseline ? " · (analyzed)" : ""}
+                              {c.size_bytes ? ` · ${(c.size_bytes / (1024 * 1024)).toFixed(1)} MB` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    {blendChangedFromAnalyze && (
+                      <div className="cr-note cr-note--warn" style={{ marginTop: 6 }}>
+                        <strong>Analysis was based on <code>{analyzeBaseline}</code>.</strong>{" "}
+                        The frame range, cameras, and cost estimate below reflect that file.
+                        If <code>{pickedBlend}</code> has different scene settings, re-analyze so those stay accurate.{" "}
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ marginLeft: 8 }}
+                          onClick={() => handleAnalyze(false, pickedBlend)}
+                          disabled={isBusy}
+                        >
+                          Re-analyze with this file
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
                 <div className="cr-field-row">
                   <label className="cr-field">
                     <span className="cr-field-label">Scene</span>

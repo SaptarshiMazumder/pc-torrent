@@ -1262,6 +1262,15 @@ pub struct PrepareResult {
 }
 
 #[derive(Serialize)]
+pub struct BlendCandidate {
+    /// Path relative to the extracted zip root, using forward slashes.
+    /// Matches what the worker's ``choose_render_target(override_relative_path=...)``
+    /// expects, so the React dropdown selection can pass straight through.
+    pub relative_path: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Serialize)]
 pub struct AnalyzeAndPrepareResult {
     pub analysis: Option<serde_json::Value>,
     pub prepared_path: Option<String>,
@@ -1273,6 +1282,16 @@ pub struct AnalyzeAndPrepareResult {
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub prep_done: bool,
+    /// All ``.blend`` files found in the extracted bundle.  Empty for
+    /// loose ``.blend`` inputs (nothing extracted).  Populated for zip
+    /// inputs so React can render a picker dropdown when there's more
+    /// than one candidate.
+    pub blend_candidates: Vec<BlendCandidate>,
+    /// The candidate ``choose_target_blend`` picked (or the override
+    /// the caller forced).  This is what analyze actually opened, so
+    /// the analysis snapshot (frame range, cameras, heaviness) reflects
+    /// this file specifically.
+    pub selected_blend_relative_path: Option<String>,
 }
 
 /// Search common install locations for the Blender binary.
@@ -1360,6 +1379,15 @@ fn _find_blend_files(dir: &Path) -> Vec<PathBuf> {
     }
     results.sort();
     results
+}
+
+/// Relative path from ``root`` to ``target`` using forward slashes --
+/// the canonical string form the worker + React dropdown both use.
+fn _rel_slash(target: &Path, root: &Path) -> String {
+    target
+        .strip_prefix(root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| target.to_string_lossy().to_string())
 }
 
 fn _choose_target_blend(source_stem: &str, root: &Path, blends: &[PathBuf]) -> PathBuf {
@@ -1684,6 +1712,12 @@ pub async fn analyze_and_prepare_blend(
     file_path: String,
     blender_bin: String,
     deep_search: bool,
+    // Optional zip-relative path (forward-slash-separated, from the
+    // analyze-side dropdown) telling us which .blend inside the bundle
+    // to open.  When None we fall back to the same _choose_target_blend
+    // heuristic that today's analyze uses.  Ignored for loose .blend
+    // inputs (nothing to pick from).
+    override_blend_relative_path: Option<String>,
 ) -> Result<AnalyzeAndPrepareResult, String> {
     let source = Path::new(&file_path);
     if !source.is_file() {
@@ -1722,6 +1756,10 @@ pub async fn analyze_and_prepare_blend(
     let blend_path: PathBuf;
     let prep_output_path: PathBuf;
     let extract_dir: Option<PathBuf>;
+    // Populated for zip inputs; returned to JS so the React dropdown
+    // can show the picker.  Empty for loose ``.blend`` inputs.
+    let mut blend_candidates: Vec<BlendCandidate> = Vec::new();
+    let mut selected_blend_relative_path: Option<String> = None;
 
     if is_zip {
         let ex = work_dir.join("extracted");
@@ -1747,13 +1785,37 @@ pub async fn analyze_and_prepare_blend(
                 warnings,
                 errors,
                 prep_done: false,
+                blend_candidates: Vec::new(),
+                selected_blend_relative_path: None,
             });
         }
+        // Build the candidate list for the UI dropdown before we pick.
+        blend_candidates = blends
+            .iter()
+            .map(|p| BlendCandidate {
+                relative_path: _rel_slash(p, &ex),
+                size_bytes: fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+            })
+            .collect();
+
+        // Prefer a user-supplied override when the caller gave one AND
+        // it matches an actual candidate.  Otherwise fall back to the
+        // heuristic identical to today's behaviour.
+        let picked: Option<PathBuf> = override_blend_relative_path
+            .as_deref()
+            .and_then(|rel| {
+                blends
+                    .iter()
+                    .find(|p| _rel_slash(p, &ex) == rel)
+                    .cloned()
+            });
+
         let source_stem = Path::new(&filename)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("");
-        blend_path = _choose_target_blend(source_stem, &ex, &blends);
+        blend_path = picked.unwrap_or_else(|| _choose_target_blend(source_stem, &ex, &blends));
+        selected_blend_relative_path = Some(_rel_slash(&blend_path, &ex));
         prep_output_path = blend_path.clone();
         extract_dir = Some(ex);
     } else {
@@ -2022,6 +2084,8 @@ pub async fn analyze_and_prepare_blend(
         warnings,
         errors,
         prep_done,
+        blend_candidates,
+        selected_blend_relative_path,
     })
 }
 

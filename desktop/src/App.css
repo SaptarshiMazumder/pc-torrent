@@ -1743,6 +1743,12 @@ body {
   gap: 5px;
 }
 
+/* Full-width variant -- opts out of the 1fr 1fr grid so the child input
+   spans the whole row (e.g. long-path blend picker). */
+.cr-field--full {
+  grid-column: 1 / -1;
+}
+
 .cr-field-label {
   font-size: 11px;
   font-weight: 600;

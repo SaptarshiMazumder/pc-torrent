@@ -42,6 +42,10 @@ from worker_core import (
     PhaseTracker,
     RangeResumer,
 )
+from worker_core.blend_file_discovery import (
+    choose_render_target,
+    find_blend_files,
+)
 from worker_core.telemetry_parser import TelemetryParser
 
 # Phase set the agent's heartbeats use.  Smaller than the cloud-worker set
@@ -671,72 +675,22 @@ def safe_extract_zip(zip_path, dest_dir):
         archive.extractall(dest_dir)
 
 
-def find_blend_files(root_dir):
-    blend_files = []
-    for current_root, _, files in os.walk(root_dir):
-        for name in files:
-            lower_name = name.lower()
-            if not lower_name.endswith(".blend"):
-                continue
-            if lower_name.startswith("._"):
-                continue
-            full_path = os.path.join(current_root, name)
-            rel = os.path.relpath(full_path, root_dir).replace("\\", "/")
-            if rel.startswith("__MACOSX/") or "/._" in rel:
-                continue
-            blend_files.append(full_path)
-    blend_files.sort()
-    return blend_files
+# NOTE: ``find_blend_files`` and the picker were previously inlined here.
+# They now live in ``worker_core.blend_file_discovery`` (shared by Modal
+# + Vast + Community) so a change to the picker logic happens in exactly
+# one place.  The old inline picker was named ``choose_render_target_blend``;
+# the canonical shared version is called ``choose_render_target``.
 
 
-def choose_render_target_blend(downloaded_file, input_dir, blend_files):
+def prepare_job_input(downloaded_file, input_dir, blend_override=None):
+    """Extract the bundle (if a zip) + pick the render target.
+
+    ``blend_override`` is the ``blend_file_relative_path`` value from
+    ``render_overrides`` -- the analyze-side dropdown pick.  When
+    provided, ``choose_render_target`` uses that specific file instead
+    of running the heuristic.  Missing / bogus override falls through
+    to today's heuristic (see worker_core.blend_file_discovery).
     """
-    Choose a render target when a project bundle contains multiple .blend files.
-    Preference order:
-    1) Root-level .blend files only (if any exist)
-    2) File stem matches uploaded archive/file stem
-    3) Larger file size
-    4) Shorter relative path, then lexical order
-    5) (fallback) shallower path for non-root-only bundles
-    """
-    uploaded_stem = os.path.splitext(os.path.basename(downloaded_file))[0].lower()
-
-    entries = []
-    for path in blend_files:
-        rel = os.path.relpath(path, input_dir).replace("\\", "/")
-        stem = os.path.splitext(os.path.basename(path))[0].lower()
-        depth = rel.count("/")
-        size = 0
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            pass
-        entries.append(
-            {
-                "path": path,
-                "rel": rel,
-                "stem_rank": 0 if stem == uploaded_stem else 1,
-                "depth": depth,
-                "size": size,
-            }
-        )
-
-    root_entries = [entry for entry in entries if entry["depth"] == 0]
-    pool = root_entries if root_entries else entries
-    ranked = sorted(
-        pool,
-        key=lambda entry: (
-            entry["stem_rank"],
-            -entry["size"],
-            entry["depth"],
-            len(entry["rel"]),
-            entry["rel"].lower(),
-        ),
-    )
-    return ranked[0]["path"], bool(root_entries)
-
-
-def prepare_job_input(downloaded_file, input_dir):
     validate_input_filename(os.path.basename(downloaded_file))
 
     if downloaded_file.lower().endswith(".zip"):
@@ -752,7 +706,10 @@ def prepare_job_input(downloaded_file, input_dir):
         raise RuntimeError(
             "No .blend file found in the uploaded input. Upload a .blend file or a .zip project bundle."
         )
-    blend_file, selected_from_root = choose_render_target_blend(downloaded_file, input_dir, blend_files)
+    blend_file, selected_from_root = choose_render_target(
+        downloaded_file, input_dir, blend_files,
+        override_relative_path=blend_override,
+    )
     selected_rel = os.path.relpath(blend_file, input_dir).replace("\\", "/")
 
     if len(blend_files) > 1:
@@ -762,7 +719,11 @@ def prepare_job_input(downloaded_file, input_dir):
         )
         preview = ", ".join(sorted_rels[:4])
         extra = "" if len(sorted_rels) <= 4 else ", ..."
-        selection_mode = "root-level priority" if selected_from_root else "fallback (no root-level .blend found)"
+        selection_mode = (
+            "user override" if blend_override and blend_override == selected_rel
+            else ("root-level priority" if selected_from_root
+                  else "fallback (no root-level .blend found)")
+        )
         _log(
             f"[JOB] Found {len(blend_files)} .blend files in bundle. "
             f"Auto-selected '{selected_rel}' as render target ({selection_mode}). "
@@ -1426,7 +1387,18 @@ def execute_job(job):
         _log(f"[JOB] Downloading: {input_filename}")
         job_heartbeat.set_phase("download")
         download_input_file(input_url, blend_file, on_bytes=bytes_progress.add)
-        blend_file = prepare_job_input(blend_file, input_dir)
+        # Parse render_overrides early so ``prepare_job_input`` can
+        # honour the analyze-side ``blend_file_relative_path`` pick.
+        # Empty / non-dict overrides fall through to today's heuristic.
+        _render_overrides_early = parse_job_render_overrides(job)
+        _blend_override = (
+            _render_overrides_early.get("blend_file_relative_path")
+            if isinstance(_render_overrides_early, dict)
+            else None
+        )
+        blend_file = prepare_job_input(
+            blend_file, input_dir, blend_override=_blend_override,
+        )
         # Download phase done -- reset the counter so the "running"
         # phase doesn't carry stale bytes_progressed.
         bytes_progress.reset()

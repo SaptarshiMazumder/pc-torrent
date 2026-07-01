@@ -42,7 +42,7 @@ import tempfile
 import threading
 import time
 
-from modal_worker.blend_file_discovery import (
+from worker_core.blend_file_discovery import (
     choose_render_target,
     find_blend_files,
 )
@@ -195,7 +195,23 @@ def handler(job: dict) -> dict:
             client.mark_failed(err)
             return {"status": "failed", "error": err}
 
-        blend_path, selected_from_root = choose_render_target(filename, input_dir, blend_files)
+        # 3. Decode render overrides FIRST so we can honour the user's
+        # ``blend_file_relative_path`` pick (analyze-side dropdown) when
+        # multiple candidates exist.  Missing / bogus override falls
+        # through to today's heuristic ranking -- see
+        # ``worker_core.blend_file_discovery.choose_render_target``.
+        render_overrides: dict = {}
+        if render_overrides_b64:
+            try:
+                render_overrides = json.loads(base64.b64decode(render_overrides_b64).decode())
+            except Exception as e:
+                log.warning(f"Failed to decode render_overrides_b64: {e}")
+
+        blend_override = render_overrides.get("blend_file_relative_path") if isinstance(render_overrides, dict) else None
+        blend_path, selected_from_root = choose_render_target(
+            filename, input_dir, blend_files,
+            override_relative_path=blend_override,
+        )
         chosen_rel = os.path.relpath(blend_path, input_dir).replace("\\", "/")
         if len(blend_files) > 1:
             candidates = sorted(
@@ -204,21 +220,16 @@ def handler(job: dict) -> dict:
             )
             preview = ", ".join(candidates[:4])
             extra = "" if len(candidates) <= 4 else ", ..."
-            selection_mode = "root-level priority" if selected_from_root else "fallback (no root-level .blend found)"
+            selection_mode = (
+                "user override" if blend_override and blend_override == chosen_rel
+                else ("root-level priority" if selected_from_root else "fallback (no root-level .blend found)")
+            )
             log.warning(
                 f"Found {len(blend_files)} .blend files in bundle. "
                 f"Selected '{chosen_rel}' ({selection_mode}). Candidates: {preview}{extra}"
             )
         else:
             log.info(f"Selected render target: {chosen_rel}")
-
-        # 3. Decode render overrides
-        render_overrides: dict = {}
-        if render_overrides_b64:
-            try:
-                render_overrides = json.loads(base64.b64decode(render_overrides_b64).decode())
-            except Exception as e:
-                log.warning(f"Failed to decode render_overrides_b64: {e}")
 
         device_policy = (
             render_overrides.get("render", {}).get("device_policy", "AUTO").upper()

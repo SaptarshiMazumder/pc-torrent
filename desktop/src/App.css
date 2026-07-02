@@ -3420,6 +3420,45 @@ body {
   cursor: not-allowed;
 }
 
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 1rem 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.btn-google {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  background: #ffffff;
+  color: #1f1f1f;
+  border: 1px solid var(--glass-border);
+}
+
+.btn-google:hover:not(:disabled) {
+  background: #f2f2f2;
+}
+
+.btn-google svg {
+  width: 16px;
+  height: 16px;
+}
+
 /* ============================================================
    Job Grid (My Jobs page)
    ============================================================ */
@@ -6386,4 +6425,262 @@ body:has(.job-detail) .user-credits-corner {
 @keyframes user-credits-corner-spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
+}
+
+
+/* ===========================================================================
+   Stats / Telemetry page — client-derived from the render-group DTOs the app
+   already holds (see utils/telemetryDerive.js).  GPU rows are live-only; the
+   rest is lifetime.  No backend surface.
+   =========================================================================== */
+
+.tele-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --- empty state --- */
+.tele-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 10px;
+  padding: 80px 24px;
+  color: var(--text-secondary);
+}
+.tele-empty-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  color: var(--accent);
+  background: var(--accent-glow);
+  margin-bottom: 6px;
+}
+.tele-empty h3 { margin: 0; color: var(--text-primary); font-size: 18px; }
+.tele-empty p { margin: 0; max-width: 400px; font-size: 13px; line-height: 1.5; }
+
+/* --- live-now strip --- */
+.tele-live {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  border: 1px solid var(--border-glow);
+  background:
+    radial-gradient(120% 160% at 0% 0%, rgba(34, 197, 94, 0.08), transparent 55%),
+    var(--bg-card);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  margin-bottom: 14px;
+}
+.tele-live-head { display: flex; align-items: center; gap: 10px; }
+.tele-live-head h3 { margin: 0; font-size: 14px; color: var(--text-primary); }
+.tele-live-count { font-size: 12px; color: var(--text-muted); }
+.tele-live-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--success);
+  animation: tele-pulse 1.6s infinite;
+}
+@keyframes tele-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5); }
+  70%  { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
+.tele-live-body { display: flex; align-items: center; gap: 26px; margin-left: auto; }
+.tele-live-metric { display: flex; flex-direction: column; gap: 2px; }
+.tele-live-metric-value {
+  font-size: 20px; font-weight: 700; color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.tele-live-metric-total { font-size: 13px; color: var(--text-muted); font-weight: 500; }
+.tele-live-metric-label {
+  font-size: 11px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+
+/* --- overview hero --- */
+.tele-hero {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(90% 130% at 100% 0%, rgba(232, 114, 74, 0.08), transparent 55%),
+    var(--bg-card);
+  border-radius: var(--radius-lg);
+  padding: 20px 24px;
+  margin-bottom: 14px;
+}
+.tele-hero-orbs { display: flex; gap: 20px; flex-wrap: wrap; }
+.tele-hero-side {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.tele-hero-strip {
+  list-style: none; margin: 0; padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 12px 28px;
+}
+.tele-hero-strip li { display: flex; flex-direction: column; gap: 1px; }
+.tele-hero-strip b {
+  font-size: 16px; font-weight: 700; color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.tele-hero-strip span { font-size: 11px; color: var(--text-muted); }
+
+/* --- gauge --- */
+.tele-gauge { position: relative; display: inline-flex; }
+.tele-gauge-center {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.tele-gauge-value {
+  font-size: 19px; font-weight: 700; color: var(--text-primary);
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.tele-gauge-label {
+  font-size: 10px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-top: 2px;
+  max-width: 84px; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* --- token-chart + gpu row --- */
+.tele-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+@media (max-width: 900px) {
+  .tele-row { grid-template-columns: 1fr; }
+}
+.tele-chart-card {
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+}
+.tele-chart-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.tele-chart-title { margin: 0; font-size: 14px; color: var(--text-primary); }
+.tele-chart-sub { font-size: 11px; color: var(--text-muted); }
+.tele-chart-body { width: 100%; }
+.tele-chart-empty {
+  display: flex; align-items: center; justify-content: center;
+  height: 140px; color: var(--text-muted); font-size: 13px;
+}
+
+/* --- gpu panel (live) --- */
+.tele-gpu-panel {
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+}
+.tele-panel-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
+.tele-panel-head h3 { margin: 0; font-size: 14px; color: var(--text-primary); }
+.tele-panel-sub {
+  font-size: 10px; color: var(--success);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 2px 7px; border-radius: 999px;
+  background: rgba(34, 197, 94, 0.12);
+}
+.tele-gpu-empty { font-size: 12px; color: var(--text-muted); line-height: 1.5; padding: 8px 0; }
+.tele-gpu-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.tele-gpu-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.tele-gpu-name { font-size: 13px; color: var(--text-primary); font-weight: 600; }
+.tele-gpu-meta { font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.tele-gpu-bar { height: 7px; border-radius: 999px; background: var(--bg-secondary); overflow: hidden; }
+.tele-gpu-bar > span {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--blue), #7c5cfc);
+}
+.tele-gpu-chunks { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+
+/* --- renders leaderboard --- */
+.tele-board {
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+.tele-board-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
+}
+.tele-board-head h3 { margin: 0; font-size: 14px; color: var(--text-primary); }
+.tele-metric-seg {
+  display: inline-flex; gap: 2px;
+  padding: 3px; border-radius: 999px;
+  background: var(--bg-secondary); border: 1px solid var(--border);
+}
+.tele-metric-opt {
+  border: none; background: transparent; cursor: pointer;
+  padding: 5px 12px; border-radius: 999px;
+  font-size: 12px; color: var(--text-secondary);
+  transition: background 0.15s, color 0.15s;
+}
+.tele-metric-opt:hover { color: var(--text-primary); }
+.tele-metric-opt.active { background: var(--accent); color: #fff; font-weight: 600; }
+.tele-board-empty { font-size: 13px; color: var(--text-muted); padding: 8px 0; }
+.tele-board-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.tele-board-row { display: flex; align-items: center; gap: 12px; }
+.tele-board-rank {
+  flex-shrink: 0; width: 20px; text-align: center;
+  font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.tele-board-name {
+  flex-shrink: 0; width: 150px;
+  font-size: 13px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tele-board-bar { flex: 1; height: 8px; border-radius: 999px; background: var(--bg-secondary); overflow: hidden; }
+.tele-board-bar > span {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--warning));
+}
+.tele-board-val {
+  flex-shrink: 0; width: 96px; text-align: right;
+  font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums;
+}
+@media (max-width: 720px) {
+  .tele-board-name { width: 96px; }
+  .tele-board-val { width: 72px; }
+}
+
+/* --- fun facts --- */
+.tele-facts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+.tele-fact {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.tele-fact-value {
+  font-size: 18px; font-weight: 700; color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.tele-fact-label { font-size: 12px; color: var(--text-secondary); margin-top: 3px; }
+.tele-fact-hint {
+  font-size: 11px; color: var(--text-muted); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }

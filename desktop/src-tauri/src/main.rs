@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod oauth_loopback;
 mod persistence;
 mod sidecar;
 mod state;
@@ -31,6 +32,7 @@ fn main() {
         .manage(agent_state.clone())
         .manage(sidecar_handle.clone())
         .manage(pending_zips)
+        .manage(oauth_loopback::OAuthCancelFlag::default())
         .invoke_handler(tauri::generate_handler![
             commands::connect_agent,
             commands::disconnect_agent,
@@ -60,6 +62,8 @@ fn main() {
             commands::get_frame_cache_path,
             commands::write_frame_cache,
             commands::cache_viewer_frame,
+            oauth_loopback::run_loopback_oauth,
+            oauth_loopback::cancel_loopback_oauth,
         ])
         .setup(move |app| {
             match persistence::load_agent_state(&app.handle()) {

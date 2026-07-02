@@ -9,6 +9,10 @@
     "messagingSenderId": "",
     "appId": ""
   },
+  "googleOAuth": {
+    "clientId": "",
+    "clientSecret": ""
+  },
   "productName": "Forge (staging)",
   "identifier": "com.pcrent.desktop.staging",
   "allowLocalStorageBackendOverride": true

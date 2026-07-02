@@ -1,0 +1,30 @@
+{
+  "subtitle": "分散GPUレンダリング",
+  "signIn": "サインイン",
+  "createAccount": "アカウント作成",
+  "email": "メールアドレス",
+  "password": "パスワード",
+  "passwordPlaceholderSignUp": "6文字以上",
+  "passwordPlaceholderSignIn": "パスワード",
+  "rememberMe": "このデバイスでログイン状態を保持する",
+  "forgotPassword": "パスワードをお忘れですか？",
+  "pleaseWait": "お待ちください...",
+  "or": "または",
+  "continueWithGoogle": "Googleで続行",
+  "googleWaiting": "ブラウザを待機中 — キャンセル",
+  "haveAccount": "すでにアカウントをお持ちですか？",
+  "noAccount": "アカウントをお持ちでないですか？",
+  "signUp": "新規登録",
+  "resetSent": "パスワードリセットのリンクを送信しました。受信トレイと迷惑メールフォルダーをご確認ください。",
+  "enterEmailFirst": "先にメールアドレスを入力してから、「パスワードをお忘れですか？」をクリックしてください。",
+  "errors": {
+    "invalidCredential": "メールアドレスまたはパスワードが正しくありません。",
+    "emailInUse": "このメールアドレスのアカウントはすでに存在します。",
+    "weakPassword": "パスワードは6文字以上で入力してください。",
+    "invalidEmail": "有効なメールアドレスを入力してください。",
+    "tooManyRequests": "試行回数が多すぎます。しばらくしてからもう一度お試しください。",
+    "accountExistsDifferentCredential": "このメールアドレスはパスワードで登録済みです。パスワードでサインインしてください。",
+    "generic": "問題が発生しました。もう一度お試しください。",
+    "googleFailed": "Googleサインインに失敗しました。"
+  }
+}

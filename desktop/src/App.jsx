@@ -4,6 +4,7 @@ import DashboardPage from "./pages/DashboardPage";
 import LogsPage from "./pages/LogsPage";
 import CreateRenderPage from "./pages/CreateRenderPage";
 import MyJobsPage from "./pages/MyJobsPage";
+import TelemetryPage from "./pages/TelemetryPage";
 import DownloadsPage from "./pages/DownloadsPage";
 import AvailableMachinesPage from "./pages/AvailableMachinesPage";
 import ConfigurationPage from "./pages/ConfigurationPage";
@@ -129,6 +130,15 @@ export default function App() {
             updateGroup={jobsHook.updateGroup}
             onRefresh={jobsHook.refresh}
             onNavigate={setPage}
+          />
+        )}
+        {page === "stats" && (
+          <TelemetryPage
+            ongoingJobs={jobsHook.ongoingJobs}
+            pastJobs={jobsHook.pastJobs}
+            hasMorePast={jobsHook.hasMorePast}
+            loadingMorePast={jobsHook.loadingMorePast}
+            loadMorePast={jobsHook.loadMorePast}
           />
         )}
         {page === "downloads" && (

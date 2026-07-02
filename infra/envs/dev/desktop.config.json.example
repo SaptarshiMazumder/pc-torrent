@@ -9,6 +9,11 @@
     "messagingSenderId": "",
     "appId": ""
   },
+  "googleOAuth": {
+    "_comment": "From a 'Desktop app' OAuth client in this env's GCP project (APIs & Services -> Credentials). See README.",
+    "clientId": "",
+    "clientSecret": ""
+  },
   "productName": "Forge (dev)",
   "identifier": "com.pcrent.desktop.dev",
   "allowLocalStorageBackendOverride": true

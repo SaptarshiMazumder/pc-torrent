@@ -40,7 +40,7 @@ bash infra/scripts/deploy-server.sh <env>
 bash infra/scripts/deploy-backup-monitor.sh <env>
 ```
 
-**(Optional) per-env desktop** — copy `desktop.config.json.example` to `desktop.config.json`, fill in `backendUrl` + `firebaseConfig`, then run dev mode or build:
+**(Optional) per-env desktop** — copy `desktop.config.json.example` to `desktop.config.json`, fill in `backendUrl`, `firebaseConfig`, and `googleOAuth` (the env's "Desktop app" OAuth client id/secret), then run dev mode or build:
 ```bash
 bash infra/scripts/desktop-dev.sh <env>     # hot reload against env
 bash infra/scripts/desktop-build.sh <env>   # produce installer

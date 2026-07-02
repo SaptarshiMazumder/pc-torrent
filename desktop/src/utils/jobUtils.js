@@ -251,6 +251,25 @@ export function jobFileSizeBytes(job) {
   return Number(job?.heaviness?.file_size_bytes) || 0;
 }
 
+// Total scene geometry — a "heaviness" proxy distinct from raw .blend size
+// (a light file can still be geometry-heavy, and vice-versa).
+export function jobVertexCount(job) {
+  return Number(job?.heaviness?.vertex_count_total) || 0;
+}
+
+// Compact big-number label: 12_300_000_000 -> "12.3B".  Shared by the Stats
+// page (pixels pushed, vertex counts) so the abbreviation reads the same
+// everywhere.
+export function formatCompactNumber(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return "—";
+  const units = [["T", 1e12], ["B", 1e9], ["M", 1e6], ["K", 1e3]];
+  for (const [suffix, div] of units) {
+    if (v >= div) return `${(v / div).toFixed(1)}${suffix}`;
+  }
+  return String(Math.round(v));
+}
+
 export function jobSubmittedMs(job) {
   const t = Date.parse(job?.submitted_at || "");
   return Number.isFinite(t) ? t : 0;

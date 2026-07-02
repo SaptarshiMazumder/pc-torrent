@@ -77,6 +77,11 @@ missing = [k for k in required if not fb.get(k)]
 if missing:
     raise SystemExit(f"ERROR: firebaseConfig missing: {missing}")
 
+google = cfg.get("googleOAuth", {})
+google_missing = [k for k in ("clientId", "clientSecret") if not google.get(k)]
+if google_missing:
+    raise SystemExit(f"ERROR: googleOAuth missing: {google_missing}")
+
 # Per-env Vite vars (override the committed desktop/.env defaults; .env.local
 # beats .env in Vite's precedence).  Replaces the old JS source patching.
 lines = [
@@ -87,6 +92,8 @@ lines = [
     f"VITE_FIREBASE_STORAGE_BUCKET={fb['storageBucket']}",
     f"VITE_FIREBASE_MESSAGING_SENDER_ID={fb['messagingSenderId']}",
     f"VITE_FIREBASE_APP_ID={fb['appId']}",
+    f"VITE_GOOGLE_OAUTH_CLIENT_ID={google['clientId']}",
+    f"VITE_GOOGLE_OAUTH_CLIENT_SECRET={google['clientSecret']}",
     f"VITE_ALLOW_BACKEND_OVERRIDE={'true' if allow else 'false'}",
 ]
 (build_dir / ".env.local").write_text("\n".join(lines) + "\n")

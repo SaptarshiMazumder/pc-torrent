@@ -1,14 +1,44 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useAuth } from "../../contexts/AuthContext";
 
 export default function LoginPage() {
-  const { signIn, signUp, resetPassword, rememberMe, setRememberMePreference } = useAuth();
+  const { signIn, signUp, signInWithGoogle, cancelGoogleSignIn, resetPassword, rememberMe, setRememberMePreference } = useAuth();
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  // Distinguishes a user-initiated cancel from a genuine failure so we don't
+  // surface an error toast when the user simply backed out.
+  const googleCancelledRef = useRef(false);
+
+  async function handleGoogleSignIn() {
+    // While a sign-in is pending, the button acts as a Cancel control.
+    if (googleLoading) {
+      googleCancelledRef.current = true;
+      cancelGoogleSignIn();
+      return;
+    }
+    setError("");
+    setNotice("");
+    googleCancelledRef.current = false;
+    setGoogleLoading(true);
+    try {
+      await signInWithGoogle({ remember: rememberMe });
+    } catch (err) {
+      // Firebase errors carry a `code`; the native OAuth flow throws plain
+      // Errors whose message is already user-readable.  Suppress the message
+      // when the user cancelled on purpose.
+      if (!googleCancelledRef.current) {
+        setError(err?.code ? friendlyError(err.code) : (err?.message || "Google sign-in failed."));
+      }
+    } finally {
+      setGoogleLoading(false);
+      googleCancelledRef.current = false;
+    }
+  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -62,6 +92,8 @@ export default function LoginPage() {
         return "Please enter a valid email address.";
       case "auth/too-many-requests":
         return "Too many attempts. Please wait a bit and try again.";
+      case "auth/account-exists-with-different-credential":
+        return "This email is already registered with a password. Sign in with your password instead.";
       default:
         return "Something went wrong. Please try again.";
     }
@@ -127,10 +159,28 @@ export default function LoginPage() {
           {error && <p className="login-error">{error}</p>}
           {notice && <p className="login-success">{notice}</p>}
 
-          <button type="submit" className="btn btn-primary" disabled={loading}>
+          <button type="submit" className="btn btn-primary" disabled={loading || googleLoading}>
             {loading ? "Please wait..." : isSignUp ? "Create account" : "Sign in"}
           </button>
         </form>
+
+        <div className="login-divider"><span>or</span></div>
+
+        <button
+          type="button"
+          className="btn btn-google"
+          onClick={handleGoogleSignIn}
+          disabled={loading}
+        >
+          {googleLoading ? (
+            "Waiting for browser — cancel"
+          ) : (
+            <>
+              <GoogleGlyph />
+              Continue with Google
+            </>
+          )}
+        </button>
 
         <p className="login-toggle">
           {isSignUp ? "Already have an account?" : "Don't have an account?"}
@@ -148,5 +198,16 @@ export default function LoginPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+function GoogleGlyph() {
+  return (
+    <svg viewBox="0 0 18 18" aria-hidden="true" focusable="false">
+      <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.71-1.57 2.68-3.89 2.68-6.62Z" />
+      <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18Z" />
+      <path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33Z" />
+      <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.47.9 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58Z" />
+    </svg>
   );
 }

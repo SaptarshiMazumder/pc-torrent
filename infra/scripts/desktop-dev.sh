@@ -51,6 +51,11 @@ if missing:
 if not backend:
     raise SystemExit("backendUrl missing")
 
+google = cfg.get("googleOAuth", {})
+google_missing = [k for k in ("clientId", "clientSecret") if not google.get(k)]
+if google_missing:
+    raise SystemExit(f"googleOAuth missing: {google_missing}")
+
 lines = [
     f"VITE_BACKEND_URL={backend}",
     f"VITE_FIREBASE_API_KEY={fb['apiKey']}",
@@ -59,6 +64,8 @@ lines = [
     f"VITE_FIREBASE_STORAGE_BUCKET={fb['storageBucket']}",
     f"VITE_FIREBASE_MESSAGING_SENDER_ID={fb['messagingSenderId']}",
     f"VITE_FIREBASE_APP_ID={fb['appId']}",
+    f"VITE_GOOGLE_OAUTH_CLIENT_ID={google['clientId']}",
+    f"VITE_GOOGLE_OAUTH_CLIENT_SECRET={google['clientSecret']}",
     f"VITE_ALLOW_BACKEND_OVERRIDE={'true' if allow else 'false'}",
 ]
 open(sys.argv[2], "w").write("\n".join(lines) + "\n")

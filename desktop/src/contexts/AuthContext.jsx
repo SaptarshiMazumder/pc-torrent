@@ -3,13 +3,16 @@ import {
   browserLocalPersistence,
   browserSessionPersistence,
   createUserWithEmailAndPassword,
+  GoogleAuthProvider,
   onAuthStateChanged,
   sendPasswordResetEmail,
   setPersistence,
+  signInWithCredential,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
 } from "firebase/auth";
 import { auth } from "../firebase/config";
+import { acquireGoogleIdToken, cancelGoogleSignIn } from "../services/googleAuth/googleIdTokenProvider";
 
 const AuthContext = createContext(null);
 const REMEMBER_ME_KEY = "pcrent_remember_me";
@@ -82,6 +85,17 @@ export function AuthProvider({ children }) {
     return signInWithEmailAndPassword(auth, email, password);
   };
 
+  const signInWithGoogle = async (options = {}) => {
+    const remember = typeof options?.remember === "boolean" ? options.remember : rememberMe;
+    setRememberMePreference(remember);
+    await applyPersistence(remember);
+    // The provider drives the system-browser OAuth flow and returns a Google
+    // ID token; Firebase turns it into the same session as email/password.
+    const idToken = await acquireGoogleIdToken();
+    const credential = GoogleAuthProvider.credential(idToken);
+    return signInWithCredential(auth, credential);
+  };
+
   const resetPassword = (email) =>
     sendPasswordResetEmail(auth, email);
 
@@ -94,6 +108,8 @@ export function AuthProvider({ children }) {
         loading,
         signUp,
         signIn,
+        signInWithGoogle,
+        cancelGoogleSignIn,
         resetPassword,
         signOut,
         rememberMe,

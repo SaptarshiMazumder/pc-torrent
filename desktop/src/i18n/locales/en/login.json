@@ -1,0 +1,30 @@
+{
+  "subtitle": "Distributed GPU Rendering",
+  "signIn": "Sign in",
+  "createAccount": "Create account",
+  "email": "Email",
+  "password": "Password",
+  "passwordPlaceholderSignUp": "Min. 6 characters",
+  "passwordPlaceholderSignIn": "Password",
+  "rememberMe": "Remember me on this device",
+  "forgotPassword": "Forgot password?",
+  "pleaseWait": "Please wait...",
+  "or": "or",
+  "continueWithGoogle": "Continue with Google",
+  "googleWaiting": "Waiting for browser — cancel",
+  "haveAccount": "Already have an account?",
+  "noAccount": "Don't have an account?",
+  "signUp": "Sign up",
+  "resetSent": "Password reset link sent. Check your inbox and spam folder.",
+  "enterEmailFirst": "Enter your email first, then click Forgot password.",
+  "errors": {
+    "invalidCredential": "Invalid email or password.",
+    "emailInUse": "An account with this email already exists.",
+    "weakPassword": "Password must be at least 6 characters.",
+    "invalidEmail": "Please enter a valid email address.",
+    "tooManyRequests": "Too many attempts. Please wait a bit and try again.",
+    "accountExistsDifferentCredential": "This email is already registered with a password. Sign in with your password instead.",
+    "generic": "Something went wrong. Please try again.",
+    "googleFailed": "Google sign-in failed."
+  }
+}

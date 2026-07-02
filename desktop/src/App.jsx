@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { lazy, Suspense, useState, useCallback } from "react";
 import Sidebar from "./components/common/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import LogsPage from "./pages/LogsPage";
@@ -19,6 +19,10 @@ import { useVersionGate } from "./hooks/useVersionGate";
 import { useAuth } from "./contexts/AuthContext";
 import { useUserProfile } from "./contexts/UserProfileContext";
 import { useDownloads } from "./contexts/DownloadContext";
+
+// Cinematic 3D backdrop is lazy-loaded so three.js stays out of the main bundle
+// and the app paints instantly; the scene fades in a beat later.
+const ForgeSceneBackdrop = lazy(() => import("./components/scene/ForgeSceneBackdrop"));
 
 const DEFAULT_PAGES = { renter: "dashboard", rentee: "create" };
 
@@ -59,20 +63,27 @@ export default function App() {
     [jobsHook.addRenderGroup]
   );
 
-  if (versionGate.status === "checking") return <div className="auth-loading">Loading...</div>;
-  if (versionGate.status === "blocked") {
-    return (
-      <UpdateRequiredModal
-        currentVersion={versionGate.currentVersion}
-        minVersion={versionGate.minVersion}
-        latestUrl={versionGate.latestUrl}
-      />
-    );
+  // Gating logic returns the foreground content; the 3D backdrop is mounted
+  // separately below so it persists unchanged across every gate transition
+  // (loading → login → app) and the WebGL context is created only once.
+  function renderContent() {
+    if (versionGate.status === "checking") return <div className="auth-loading">Loading...</div>;
+    if (versionGate.status === "blocked") {
+      return (
+        <UpdateRequiredModal
+          currentVersion={versionGate.currentVersion}
+          minVersion={versionGate.minVersion}
+          latestUrl={versionGate.latestUrl}
+        />
+      );
+    }
+    if (authLoading) return <div className="auth-loading">Loading...</div>;
+    if (!user) return <LoginPage />;
+    return renderApp();
   }
-  if (authLoading) return <div className="auth-loading">Loading...</div>;
-  if (!user) return <LoginPage />;
 
-  return (
+  function renderApp() {
+    return (
     <div className="app">
       <ToastViewport />
       <UserCreditsCorner />
@@ -157,5 +168,15 @@ export default function App() {
         )}
       </main>
     </div>
+    );
+  }
+
+  return (
+    <>
+      <Suspense fallback={null}>
+        <ForgeSceneBackdrop mode={user ? "ambient" : "hero"} />
+      </Suspense>
+      {renderContent()}
+    </>
   );
 }

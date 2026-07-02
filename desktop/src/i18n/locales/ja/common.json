@@ -1,0 +1,34 @@
+{
+  "nav": {
+    "dashboard": "ダッシュボード",
+    "logs": "ログ",
+    "about": "情報",
+    "create": "レンダー作成",
+    "myjobs": "マイジョブ",
+    "stats": "統計",
+    "downloads": "ダウンロード",
+    "available": "利用可能なマシン",
+    "configuration": "設定"
+  },
+  "mode": {
+    "rentee": "PCを借りる",
+    "renter": "PCを貸す"
+  },
+  "status": {
+    "connected": "利用可能",
+    "rendering": "レンダリング中",
+    "paused": "一時停止",
+    "disconnected": "オフライン",
+    "error": "エラー",
+    "settingUp": "セットアップ中..."
+  },
+  "user": {
+    "signedIn": "サインイン済み",
+    "signOut": "サインアウト"
+  },
+  "language": {
+    "label": "言語",
+    "en": "English",
+    "ja": "日本語"
+  }
+}

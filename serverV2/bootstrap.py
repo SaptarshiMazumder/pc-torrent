@@ -169,6 +169,7 @@ from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
 from serverV2.repositories.user_input_file_repository import UserInputFileRepository
 from serverV2.repositories.worker_start_repository import WorkerStartRepository
+from serverV2.services.admin import AdminTelemetryService, DownloadStatsRepository
 from serverV2.services.assets.service import AssetService
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
 from serverV2.services.jobs.service import JobService
@@ -239,6 +240,8 @@ class Container:
         scene_resolver: SceneResolver,
         vast_client: VastClient,
         modal_client: ModalClient,
+        admin_telemetry_service: AdminTelemetryService,
+        download_stats: DownloadStatsRepository,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -279,6 +282,10 @@ class Container:
         # the backup monitor (which scans + reports, never writes).
         self.vast_client = vast_client
         self.modal_client = modal_client
+        # Admin dashboard read layer + download counters (both Redis-first,
+        # fail-open).  Wired for the /admin/* router and the download routes.
+        self.admin_telemetry_service = admin_telemetry_service
+        self.download_stats = download_stats
 
 
 def build(
@@ -983,6 +990,21 @@ def build(
         get_credits_per_usd=_get_credits_per_usd,
     )
 
+    # -- admin dashboard read layer --
+    # Read-only aggregation over the Redis mirrors + Neon.  Download
+    # counters are wired into the docker / zip download routes.
+    download_stats = DownloadStatsRepository(redis)
+    admin_telemetry_service = AdminTelemetryService(
+        redis_client=redis,
+        render_group_telemetry=render_group_telemetry,
+        machine_redis_mirror=machine_redis_mirror,
+        fleet_snapshot_cache=fleet_availability_snapshot_cache,
+        job_repo=job_repo,
+        heartbeat_repo=heartbeat_repo,
+        user_facade=user_facade,
+        download_stats=download_stats,
+    )
+
     return Container(
         config=cfg,
         orchestrator=orchestrator,
@@ -1012,4 +1034,6 @@ def build(
         scene_resolver=scene_resolver,
         vast_client=vast_client,
         modal_client=modal_client,
+        admin_telemetry_service=admin_telemetry_service,
+        download_stats=download_stats,
     )

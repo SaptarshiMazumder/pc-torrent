@@ -30,6 +30,7 @@ router = APIRouter(tags=["jobs"])
 _svc: JobService | None = None
 _orchestrator: RenderOrchestrator | None = None
 _callback_router: CallbackRouter | None = None
+_download_stats = None
 
 
 def init(
@@ -37,11 +38,13 @@ def init(
     *,
     orchestrator: RenderOrchestrator,
     callback_router: CallbackRouter,
+    download_stats=None,
 ) -> None:
-    global _svc, _orchestrator, _callback_router
+    global _svc, _orchestrator, _callback_router, _download_stats
     _svc = service
     _orchestrator = orchestrator
     _callback_router = callback_router
+    _download_stats = download_stats
 
 
 def _get() -> JobService:
@@ -274,6 +277,8 @@ def preview_output(job_id: str, filename: str):
 def download_zip(job_id: str):
     try:
         buf = _get().download_all_as_zip(job_id)
+        if _download_stats is not None:
+            _download_stats.record("job_zip")
         return StreamingResponse(
             buf,
             media_type="application/zip",

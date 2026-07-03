@@ -43,6 +43,14 @@ class UserFacade:
         """Authorization role for ``uid`` -- defaults to USER on absent data."""
         return self._repository.get_role(uid)
 
+    def list_profiles(self, limit: int = 500) -> list[dict[str, Any]]:
+        """All user profiles (uid injected).  Admin dashboard read path."""
+        return self._repository.list_all(limit=limit)
+
+    def list_spend(self, uid: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent spend markers for one user.  Admin dashboard read path."""
+        return self._repository.list_spend(uid, limit=limit)
+
     def usd_to_credits(self, total_cost_usd: float) -> float:
         """USD to credits using the configured rate.  Stateless."""
         return self._service.compute_credit_debit(total_cost_usd)

@@ -30,6 +30,7 @@ _svc: RenderGroupService | None = None
 _upload: UploadCoordinator | None = None
 _facade: AllocationFacade | None = None
 _allocation_client: AllocationClient | None = None
+_download_stats = None
 
 
 def init(
@@ -37,12 +38,14 @@ def init(
     upload_coordinator: UploadCoordinator,
     allocation_facade: AllocationFacade,
     allocation_client: AllocationClient,
+    download_stats=None,
 ) -> None:
-    global _svc, _upload, _facade, _allocation_client
+    global _svc, _upload, _facade, _allocation_client, _download_stats
     _svc = service
     _upload = upload_coordinator
     _facade = allocation_facade
     _allocation_client = allocation_client
+    _download_stats = download_stats
 
 
 def _get() -> RenderGroupService:
@@ -220,6 +223,8 @@ def download_zip(group_id: str):
         buf = _get().download_all_as_zip(group_id)
     except RenderGroupServiceError as e:
         raise HTTPException(e.status, e.message)
+    if _download_stats is not None:
+        _download_stats.record("group_zip")
     return StreamingResponse(
         buf,
         media_type="application/zip",

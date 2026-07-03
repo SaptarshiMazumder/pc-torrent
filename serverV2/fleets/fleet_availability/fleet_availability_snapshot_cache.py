@@ -102,6 +102,28 @@ class FleetAvailabilitySnapshotCache:
                 )
         return snapshot
 
+    def peek(self) -> FleetAvailabilitySnapshot | None:
+        """Cache-only read: return the cached snapshot or None on miss /
+        Redis down.  NEVER rebuilds — a rebuild fans out to the Vast API,
+        which a dashboard poll must not trigger."""
+        client = self._redis_client.client()
+        if client is None:
+            return None
+        try:
+            cached = client.get(_KEY)
+        except Exception as exc:
+            log.warning("FleetAvailabilitySnapshotCache: peek GET failed (%s)", exc)
+            return None
+        if cached is None:
+            return None
+        try:
+            return _deserialize(cached)
+        except Exception as exc:
+            log.warning(
+                "FleetAvailabilitySnapshotCache: peek decode failed (%s)", exc,
+            )
+            return None
+
     def persist(self, snapshot: FleetAvailabilitySnapshot) -> None:
         """Update the cached value.  Preserves the existing TTL via
         ``KEEPTTL`` and only writes if the key still exists (``XX``)

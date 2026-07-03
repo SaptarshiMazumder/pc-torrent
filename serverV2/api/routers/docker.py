@@ -26,6 +26,13 @@ DOCKER_R2_PREFIX = os.environ.get("DOCKER_R2_PREFIX", "docker-images/")
 DOCKER_WINDOWS_KEY = os.environ.get("DOCKER_WINDOWS_KEY", "docker-images/pcrent-agent-windows.zip")
 DOCKER_LINUX_KEY = os.environ.get("DOCKER_LINUX_KEY", "docker-images/pcrent-agent-linux.tar.gz")
 
+_download_stats = None
+
+
+def init(download_stats=None) -> None:
+    global _download_stats
+    _download_stats = download_stats
+
 
 @router.get("/docker/version")
 def docker_version():
@@ -38,6 +45,8 @@ def docker_download_windows():
     if not storage.file_exists(DOCKER_WINDOWS_KEY):
         raise HTTPException(404, "Windows agent not available")
     url = storage.generate_presigned_url(DOCKER_WINDOWS_KEY, download_name="pcrent-agent-windows.zip")
+    if _download_stats is not None:
+        _download_stats.record("agent_windows")
     return RedirectResponse(url)
 
 
@@ -46,4 +55,6 @@ def docker_download_linux():
     if not storage.file_exists(DOCKER_LINUX_KEY):
         raise HTTPException(404, "Linux agent not available")
     url = storage.generate_presigned_url(DOCKER_LINUX_KEY, download_name="pcrent-agent-linux.tar.gz")
+    if _download_stats is not None:
+        _download_stats.record("agent_linux")
     return RedirectResponse(url)

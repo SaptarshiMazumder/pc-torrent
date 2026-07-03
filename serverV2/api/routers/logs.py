@@ -1,4 +1,13 @@
-"""SSE log streaming + recent logs endpoint."""
+"""SSE log streaming + recent logs endpoint.
+
+Admin-only: server logs routinely carry user ids, filenames, and infra
+detail, so both routes are gated by ``require_admin``.  The SSE route
+accepts the token as a ``?token=`` query param (EventSource cannot set
+headers); ``get_current_user`` already supports that.
+
+Note: the ring buffer is per-process memory.  With multiple Cloud Run
+instances each request sees only the logs of the instance that served it.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +15,9 @@ import asyncio
 import logging
 from collections import deque
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from serverV2.api.dependencies import require_admin
 
 router = APIRouter(tags=["logs"])
 
@@ -26,12 +37,12 @@ class SSELogHandler(logging.Handler):
 
 
 @router.get("/logs/recent")
-def recent_logs(limit: int = 100):
+def recent_logs(limit: int = 100, _admin: dict = Depends(require_admin)):
     return list(_recent_logs)[-limit:]
 
 
 @router.get("/logs/stream")
-async def log_stream():
+async def log_stream(_admin: dict = Depends(require_admin)):
     from sse_starlette.sse import EventSourceResponse
     import json
 

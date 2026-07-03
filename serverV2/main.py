@@ -22,6 +22,7 @@ load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from serverV2.bootstrap import Container, build
 from serverV2.infrastructure.db import init_db
@@ -103,6 +104,7 @@ def _wire_routers(c: Container) -> None:
     from serverV2.api import dependencies
     from serverV2.api.routers import (
         admin_config,
+        admin_dashboard,
         app_meta,
         assets,
         community,
@@ -123,8 +125,19 @@ def _wire_routers(c: Container) -> None:
     dependencies.init_authz(c.user_facade)
 
     machines.init(c.machine_service, c.allocation_client)
-    jobs.init(c.job_service, orchestrator=c.orchestrator, callback_router=c.callback_router)
-    render_groups.init(c.render_group_service, c.upload_coordinator, c.allocation_facade, c.allocation_client)
+    jobs.init(
+        c.job_service,
+        orchestrator=c.orchestrator,
+        callback_router=c.callback_router,
+        download_stats=c.download_stats,
+    )
+    render_groups.init(
+        c.render_group_service,
+        c.upload_coordinator,
+        c.allocation_facade,
+        c.allocation_client,
+        download_stats=c.download_stats,
+    )
     pre_render.init(c.pre_render_estimator)
     assets.init(c.asset_service)
     users.init(c.user_facade)
@@ -137,8 +150,10 @@ def _wire_routers(c: Container) -> None:
         job_repo=c.job_repo,
     )
     admin_config.init(c.allocation_client)
+    admin_dashboard.init(c.admin_telemetry_service)
     app_meta.init(c.allocation_config_repo)
     community.init(c.config.community_worker_image)
+    docker.init(download_stats=c.download_stats)
 
     app.include_router(health.router)
     app.include_router(machines.router)
@@ -152,7 +167,23 @@ def _wire_routers(c: Container) -> None:
     app.include_router(debug.router)
     app.include_router(internal.router)
     app.include_router(admin_config.router)
+    app.include_router(admin_dashboard.router)
     app.include_router(app_meta.router)
     app.include_router(community.router)
+
+    _mount_home_spa()
+
+
+def _mount_home_spa() -> None:
+    """Serve the /home dashboard SPA (built by the Dockerfile's node stage
+    into ``serverV2/home/dist``).  The SPA uses hash-based navigation, so
+    ``StaticFiles(html=True)`` is all the routing it needs.  Skipped when
+    the bundle isn't present (local dev without a build)."""
+    dist = Path(__file__).parent / "home" / "dist"
+    if not dist.is_dir():
+        log.info("/home SPA bundle not found at %s — skipping mount", dist)
+        return
+    app.mount("/home", StaticFiles(directory=str(dist), html=True), name="home")
+    log.info("/home SPA mounted from %s", dist)
 
 

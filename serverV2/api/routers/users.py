@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from serverV2.api.dependencies import get_current_user
 from serverV2.api.schemas.user_profile import UpdateProfilePayload, UserProfileResponse
+from serverV2.core.user_role import UserRole
 from serverV2.users import UserFacade
 
 router = APIRouter(tags=["users"])
@@ -35,6 +36,9 @@ def get_profile(user: dict = Depends(get_current_user)):
         tier=profile.get("tier", "free") or "free",
         credits=float(profile.get("credits", 0.0) or 0.0),
         credits_per_usd=facade.credits_per_usd,
+        # from_value never elevates: anything but the exact "admin"
+        # string comes back as USER.
+        role=UserRole.from_value(profile.get("role")).value,
     )
 
 

@@ -18,3 +18,6 @@ class UserProfileResponse(BaseModel):
     tier: str
     credits: float
     credits_per_usd: float
+    # Authorization role ("user" / "admin").  Display-only for clients —
+    # every admin route re-checks the role server-side via require_admin.
+    role: str = "user"

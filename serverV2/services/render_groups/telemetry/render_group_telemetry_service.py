@@ -132,6 +132,15 @@ class RenderGroupTelemetryService:
         """``{group_id: dto}`` for the user's mirrored active groups (HGETALL)."""
         return self._mirror.read_active(user_id)
 
+    def get_all_active(self) -> list[dict]:
+        """Every user's mirrored active groups, each DTO annotated with its
+        owning ``user_id``.  Admin dashboard read path — mirror only, no
+        Postgres fallback (an empty mirror means nothing is rendering)."""
+        return [
+            {**dto, "user_id": uid}
+            for (uid, _gid), dto in self._mirror.read_all_active().items()
+        ]
+
     # ------------------------------------------------------------------
     # BUILD -- the active DTO (moved from RenderGroupService)
     # ------------------------------------------------------------------

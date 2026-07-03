@@ -21,6 +21,11 @@ bash infra/terraform/bootstrap.sh
 
 **Fill `infra/envs/<env>/.env`** — copy `.env.example`. The `*_IMAGE` lines default to the existing test tags (`pcrent-*:5.0.4`), so the env works out of the box. Push env-specific tags later (see below) only when you want isolation.
 
+**(Optional) web dashboard at `<backend-url>/home`** — serverV2 serves a browser dashboard (admin console for `role: "admin"` users, personal render stats for everyone else). Two manual steps per env:
+1. Add `FIREBASE_WEB_CONFIG_JSON=<one-line JSON of the env's Firebase *web* SDK config>` to the env's `.env` (server serves it to the SPA via `GET /app/web-config`; web configs are public identifiers, not secrets).
+2. In Firebase Console → Authentication → Settings → Authorized domains, add the env's Cloud Run domain so Google sign-in works from the browser.
+Admins are minted by setting `role: "admin"` on the `users/{uid}` Firestore doc.
+
 **(Optional) push env-specific worker images** — to get `:<env>-vX.Y.Z` tags:
 ```bash
 bash infra/scripts/push-worker.sh <env> 0.0.19 vast-cycles

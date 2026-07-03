@@ -44,6 +44,34 @@ class UserProfileRepository:
             data["tier"] = data["billing_plan"]
         return data
 
+    def list_all(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Every ``users/{uid}`` profile doc with the uid injected.  Admin
+        dashboard read path — capped so a runaway collection can't blow up
+        the response.  Same ``billing_plan`` -> ``tier`` shim as ``get``."""
+        docs = self._db().collection(self._COLLECTION).limit(limit).stream()
+        out: list[dict[str, Any]] = []
+        for doc in docs:
+            data = doc.to_dict() or {}
+            if "tier" not in data and "billing_plan" in data:
+                data["tier"] = data["billing_plan"]
+            data["uid"] = doc.id
+            out.append(data)
+        return out
+
+    def list_spend(self, uid: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Most recent spend marker docs for one user (newest first).
+        Admin dashboard read path."""
+        docs = (
+            self._db()
+            .collection(self._COLLECTION)
+            .document(uid)
+            .collection(self._SPEND_SUBCOLLECTION)
+            .order_by("updated_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        return [{**(d.to_dict() or {}), "task_id": d.id} for d in docs]
+
     def get_role(self, uid: str) -> UserRole:
         """Resolve the authorization role for ``uid``.
 

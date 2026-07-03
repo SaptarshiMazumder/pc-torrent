@@ -90,6 +90,41 @@ class MachineRedisMirror:
             return None
         return {m.decode() if isinstance(m, bytes) else m for m in members}
 
+    def alive_map(self) -> dict[str, float] | None:
+        """Return ``{machine_id: last_heartbeat_unix_ts}`` for every entry
+        in the alive set (no staleness filter — callers decide).  Returns
+        None if Redis is unavailable.  Admin dashboard read path."""
+        client = self._redis_client.client()
+        if client is None:
+            return None
+        try:
+            entries = client.zrange(_SET_KEY, 0, -1, withscores=True)
+        except redis.RedisError as exc:
+            log.warning("MachineRedisMirror alive_map failed: %s", exc)
+            return None
+        out: dict[str, float] = {}
+        for member, score in entries:
+            mid = member.decode() if isinstance(member, bytes) else member
+            out[mid] = float(score)
+        return out
+
+    def status_map(self) -> dict[str, str] | None:
+        """Return the full ``machines:status`` hash (id -> status), or
+        None if Redis is unavailable.  Admin dashboard read path."""
+        client = self._redis_client.client()
+        if client is None:
+            return None
+        try:
+            entries = client.hgetall(_STATUS_KEY)
+        except redis.RedisError as exc:
+            log.warning("MachineRedisMirror status_map failed: %s", exc)
+            return None
+        out: dict[str, str] = {}
+        for mid, status in entries.items():
+            mid_s = mid.decode() if isinstance(mid, bytes) else mid
+            out[mid_s] = status.decode() if isinstance(status, bytes) else status
+        return out
+
     def clear(self, machine_id: str) -> None:
         """Drop a machine from the alive set.  Called on agent
         ``set_idle`` (clean disconnect)."""

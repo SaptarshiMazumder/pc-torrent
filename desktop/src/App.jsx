@@ -174,7 +174,10 @@ export default function App() {
   return (
     <>
       <Suspense fallback={null}>
-        <ForgeSceneBackdrop mode={user ? "ambient" : "hero"} />
+        <ForgeSceneBackdrop
+          mode={user ? "ambient" : "hero"}
+          cameraSet={user && page === "create" ? "create" : "default"}
+        />
       </Suspense>
       {renderContent()}
     </>

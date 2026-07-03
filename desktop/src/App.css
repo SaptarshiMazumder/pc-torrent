@@ -62,10 +62,8 @@ body {
   background: radial-gradient(ellipse at 50% 45%, transparent 25%, rgba(13, 15, 20, 0.35) 100%);
 }
 .forge-scene-scrim.is-ambient {
-  /* stronger, flatter dim + blur so the app UI reads clearly on top */
-  background: linear-gradient(180deg, rgba(13, 15, 20, 0.72) 0%, rgba(13, 15, 20, 0.84) 100%);
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
+  /* lighter dim so the car reads behind the app UI (was hiding the dark paint) */
+  background: linear-gradient(180deg, rgba(13, 15, 20, 0.35) 0%, rgba(13, 15, 20, 0.5) 100%);
 }
 
 /* App Layout */

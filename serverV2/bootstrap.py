@@ -169,7 +169,11 @@ from serverV2.repositories.render_group_repository import RenderGroupRepository
 from serverV2.repositories.telemetry_repository import TelemetryRepository
 from serverV2.repositories.user_input_file_repository import UserInputFileRepository
 from serverV2.repositories.worker_start_repository import WorkerStartRepository
-from serverV2.services.admin import AdminTelemetryService, DownloadStatsRepository
+from serverV2.services.admin import (
+    AdminTelemetryService,
+    DaemonStatusRepository,
+    DownloadStatsRepository,
+)
 from serverV2.services.assets.service import AssetService
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
 from serverV2.services.jobs.service import JobService
@@ -242,6 +246,7 @@ class Container:
         modal_client: ModalClient,
         admin_telemetry_service: AdminTelemetryService,
         download_stats: DownloadStatsRepository,
+        cost_estimation_config_repo: AllocationCostEstimationConfigRepository,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -282,10 +287,14 @@ class Container:
         # the backup monitor (which scans + reports, never writes).
         self.vast_client = vast_client
         self.modal_client = modal_client
-        # Admin dashboard read layer + download counters (both Redis-first,
-        # fail-open).  Wired for the /admin/* router and the download routes.
+        # Admin dashboard read layer (aggregation over the existing Redis
+        # mirrors + Neon).  Wired for the /admin/* router; download_stats also
+        # feeds the docker / zip download routes' best-effort counters.
         self.admin_telemetry_service = admin_telemetry_service
         self.download_stats = download_stats
+        # Separate Firestore config/cost_estimation doc, exposed for the
+        # admin dashboard's read-only config viewer.
+        self.cost_estimation_config_repo = cost_estimation_config_repo
 
 
 def build(
@@ -391,6 +400,9 @@ def build(
     telemetry_repo = TelemetryRepository()
     output_frame_repo = OutputFrameRepository()
     monitor_lock_repo = MonitorLockRepository(redis)
+    # Per-tick daemon heartbeat -> Redis, read by the admin Overview panel's
+    # daemon-health section.  Injected into each background singleton below.
+    daemon_status_repo = DaemonStatusRepository(redis)
 
     # -- fleet registry --
     registry = FleetRegistry()
@@ -664,6 +676,7 @@ def build(
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
         enabled_fleets=list(_allocation_fleet_caps().keys()),
+        status_repo=daemon_status_repo,
     )
     allocation_client = AllocationClient(facade=allocation_facade)
 
@@ -870,6 +883,7 @@ def build(
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
         registry=vast_instance_registry,
+        status_repo=daemon_status_repo,
     )
     modal_fleet_monitor = ModalFleetMonitor(
         config_provider=modal_runtime_config_provider,
@@ -885,6 +899,7 @@ def build(
         lock_repo=monitor_lock_repo,
         instance_id=instance_id,
         registry=modal_instance_registry,
+        status_repo=daemon_status_repo,
     )
 
     # -- community fleet monitor (machine-offline + group-terminal reconciliation)
@@ -905,6 +920,7 @@ def build(
         instance_id=instance_id,
         get_demote_seconds=_get_machine_demote_seconds,
         get_dispatch_claim_timeout_sec=_get_dispatch_claim_timeout_sec,
+        status_repo=daemon_status_repo,
     )
 
     # -- monitor lock facade --
@@ -991,18 +1007,20 @@ def build(
     )
 
     # -- admin dashboard read layer --
-    # Read-only aggregation over the Redis mirrors + Neon.  Download
-    # counters are wired into the docker / zip download routes.
+    # Aggregation over the existing Redis mirrors + Neon.  Download counters
+    # (best-effort HINCRBY, fail-open) are wired into the docker / zip routes.
     download_stats = DownloadStatsRepository(redis)
     admin_telemetry_service = AdminTelemetryService(
         redis_client=redis,
-        render_group_telemetry=render_group_telemetry,
         machine_redis_mirror=machine_redis_mirror,
         fleet_snapshot_cache=fleet_availability_snapshot_cache,
         job_repo=job_repo,
         heartbeat_repo=heartbeat_repo,
         user_facade=user_facade,
         download_stats=download_stats,
+        telemetry_repo=telemetry_repo,
+        status_aggregator=status_aggregator,
+        daemon_status=daemon_status_repo,
     )
 
     return Container(
@@ -1036,4 +1054,5 @@ def build(
         modal_client=modal_client,
         admin_telemetry_service=admin_telemetry_service,
         download_stats=download_stats,
+        cost_estimation_config_repo=cost_estimation_config_repo,
     )

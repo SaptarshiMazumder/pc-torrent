@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 
@@ -26,14 +27,40 @@ _recent_logs: deque[dict] = deque(maxlen=MAX_RECENT_LOGS)
 
 
 class SSELogHandler(logging.Handler):
+    """Ring-buffer handler backing /logs/recent + /logs/stream.  Attached to
+    the root logger at startup (see ``install_log_capture``).  ``emit`` must
+    never raise — a logging path that can crash the app is worse than a
+    dropped log line."""
+
     def emit(self, record: logging.LogRecord) -> None:
-        entry = {
-            "timestamp": self.format(record).split(" ")[0] if " " in self.format(record) else "",
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        _recent_logs.append(entry)
+        try:
+            entry = {
+                "timestamp": datetime.fromtimestamp(
+                    record.created, timezone.utc,
+                ).isoformat(),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+            }
+            _recent_logs.append(entry)
+        except Exception:  # pragma: no cover - logging must never break callers
+            pass
+
+
+def install_log_capture(level: int = logging.INFO) -> None:
+    """Attach a single ``SSELogHandler`` to the root logger so the dashboard's
+    log panel actually fills.  Idempotent — safe to call on every startup /
+    reload without stacking duplicate handlers."""
+    root = logging.getLogger()
+    if any(isinstance(h, SSELogHandler) for h in root.handlers):
+        return
+    handler = SSELogHandler()
+    handler.setLevel(level)
+    root.addHandler(handler)
+    # Ensure records at INFO actually reach handlers even if the root level
+    # was left at WARNING by the hosting environment.
+    if root.level > level or root.level == logging.NOTSET:
+        root.setLevel(level)
 
 
 @router.get("/logs/recent")

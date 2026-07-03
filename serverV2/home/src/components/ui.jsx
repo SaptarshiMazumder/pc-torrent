@@ -173,14 +173,63 @@ export function BarChart({ data, height = 160, formatValue }) {
 }
 
 // Poll helper — fetches now and every `ms`, pausing when the tab is hidden.
-export function usePoll(fetcher, ms, deps = []) {
-  const [data, setData] = useState(null);
+// Cross-mount cache so returning to a tab shows its last data INSTANTLY
+// (stale-while-revalidate) instead of a fresh loading flash.  Panels unmount
+// on tab switch, so their poll state is otherwise lost.  An in-memory Map
+// keeps switches allocation-free; a sessionStorage mirror makes a full page
+// reload instant too (cleared when the browser tab closes, so never long-stale).
+const _cacheMem = new Map();
+
+function cacheGet(key) {
+  if (key == null) return undefined;
+  if (_cacheMem.has(key)) return _cacheMem.get(key);
+  try {
+    const raw = sessionStorage.getItem(`pollcache:${key}`);
+    if (raw != null) {
+      const val = JSON.parse(raw);
+      _cacheMem.set(key, val);
+      return val;
+    }
+  } catch {
+    /* sessionStorage unavailable / bad JSON — treat as miss */
+  }
+  return undefined;
+}
+
+function cacheSet(key, value) {
+  if (key == null) return;
+  _cacheMem.set(key, value);
+  try {
+    sessionStorage.setItem(`pollcache:${key}`, JSON.stringify(value));
+  } catch {
+    /* quota or serialization failure — the in-memory copy still serves */
+  }
+}
+
+// Poll `fetcher` now and every `ms`, pausing when the tab is hidden.
+// Pass a stable `cacheKey` to enable stale-while-revalidate across mounts:
+// the last successful payload is shown immediately on return while a fresh
+// fetch runs in the background.  For parameterized panels (e.g. cost window)
+// vary the key with the param AND list the param in `deps`.
+export function usePoll(fetcher, ms, deps = [], cacheKey = null) {
+  const seed = cacheGet(cacheKey);
+  const [data, setData] = useState(seed === undefined ? null : seed);
   const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(seed === undefined);
   const alive = useRef(true);
 
   useEffect(() => {
     alive.current = true;
+    // Re-seed from cache for the current key — handles a key change (cost
+    // window switch) without flashing the previous key's data or a null.
+    const cached = cacheGet(cacheKey);
+    if (cached === undefined) {
+      setData(null);
+      setLoading(true);
+    } else {
+      setData(cached);
+      setLoading(false);
+    }
     let timer = null;
     const tick = async () => {
       if (document.hidden) {
@@ -190,6 +239,7 @@ export function usePoll(fetcher, ms, deps = []) {
       try {
         const result = await fetcher();
         if (alive.current) {
+          cacheSet(cacheKey, result);
           setData(result);
           setError(null);
         }

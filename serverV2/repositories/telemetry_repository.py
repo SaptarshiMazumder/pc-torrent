@@ -16,12 +16,75 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from serverV2.infrastructure.db import execute
+from serverV2.infrastructure.db import execute, query_all
 
 log = logging.getLogger(__name__)
 
 
+# Columns the admin dashboard's per-render detail view reads.  Kept as one
+# list so the recent / by-group / by-machine reads stay in lock-step.
+_DETAIL_COLUMNS = """
+    t.id, t.job_id, t.group_id, t.fleet, t.gpu_type, t.machine_id,
+    t.gpu_model_normalized, t.device_used, t.blender_version,
+    t.worker_image_version, t.denoiser_used, t.gpu_count, t.cpu_cores,
+    t.ram_gb, t.peak_vram_mb, t.chunk_size, t.rendered_frames,
+    t.seconds_total, t.startup_seconds, t.render_seconds,
+    t.price_per_hour, t.cost_actual_usd, t.cost_estimated_usd,
+    t.file_size_bytes, t.retry_count, t.failure_reason, t.worker_log_url,
+    t.started_at, t.completed_at, t.created_at
+"""
+
+
 class TelemetryRepository:
+
+    # ------------------------------------------------------------------
+    # READ — per-render detail for the admin dashboard.  (The table was
+    # write-only until the dashboard needed a row-level view.)
+    # ------------------------------------------------------------------
+
+    def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Most recently completed chunks, newest first, with the owning
+        group's user_id + input_filename joined on."""
+        limit = max(1, min(int(limit), 500))
+        return query_all(
+            f"""
+            SELECT {_DETAIL_COLUMNS}, g.user_id, g.input_filename
+              FROM render_telemetry t
+              LEFT JOIN render_groups g ON g.id = t.group_id
+             ORDER BY t.completed_at DESC
+             LIMIT %s
+            """,
+            (limit,),
+        )
+
+    def by_group(self, group_id: str) -> list[dict[str, Any]]:
+        """All chunks for one render group, newest first."""
+        return query_all(
+            f"""
+            SELECT {_DETAIL_COLUMNS}
+              FROM render_telemetry t
+             WHERE t.group_id = %s
+             ORDER BY t.completed_at DESC
+             LIMIT 500
+            """,
+            (group_id,),
+        )
+
+    def by_machine(self, machine_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Chunk history for one community machine, newest first."""
+        limit = max(1, min(int(limit), 500))
+        return query_all(
+            f"""
+            SELECT {_DETAIL_COLUMNS}, g.input_filename
+              FROM render_telemetry t
+              LEFT JOIN render_groups g ON g.id = t.group_id
+             WHERE t.machine_id = %s
+             ORDER BY t.completed_at DESC
+             LIMIT %s
+            """,
+            (machine_id, limit),
+        )
+
 
     def record_chunk(
         self,

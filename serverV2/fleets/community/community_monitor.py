@@ -75,6 +75,7 @@ class CommunityMonitor:
         get_dispatch_claim_timeout_sec: Callable[[], int],
         get_demote_seconds: Callable[[], int],
         interval_sec: int = 10,
+        status_repo=None,
     ) -> None:
         self._job_repo = job_repo
         self._group_repo = group_repo
@@ -104,6 +105,19 @@ class CommunityMonitor:
         self._interval = interval_sec
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
+
+        # Heartbeat state for the admin dashboard's daemon-health panel.
+        self._status_repo = status_repo
+        self._tick_count = 0
+        self._last_detail: dict = {}
+
+    def _report_status(self, error: str | None = None) -> None:
+        if self._status_repo is None:
+            return
+        self._status_repo.report(
+            "community_monitor", self._instance_id, self._tick_count,
+            self._last_detail, error,
+        )
 
     def try_start(self) -> bool:
         """Acquire the singleton ``monitor:community`` lock and spawn the
@@ -146,8 +160,11 @@ class CommunityMonitor:
                 return
             try:
                 self._tick()
-            except Exception:
+                self._tick_count += 1
+                self._report_status()
+            except Exception as exc:
                 log.exception("CommunityMonitor tick error")
+                self._report_status(error=str(exc))
             time.sleep(self._interval)
 
     def _tick(self) -> None:
@@ -158,7 +175,15 @@ class CommunityMonitor:
         demote_sec = self._get_demote_seconds()
         machine_alive_ids = self._mirror.alive_ids(demote_sec)
 
-        for group in self._group_repo.get_active_groups():
+        active_groups = self._group_repo.get_active_groups()
+        self._last_detail = {
+            "active_groups_scanned": len(active_groups),
+            "machines_alive": (
+                len(machine_alive_ids) if machine_alive_ids is not None else None
+            ),
+        }
+
+        for group in active_groups:
             try:
                 jobs = self._job_repo.get_by_group(group["id"])
                 owner_uid = group.get("user_id")

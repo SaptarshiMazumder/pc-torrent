@@ -29,9 +29,6 @@ class _FakeMirror:
     def read_active(self, uid):
         return {gid: dto for (u, gid), dto in self.store.items() if u == uid}
 
-    def read_all_active(self):
-        return dict(self.store)
-
 
 class _FakeGroupRepo:
     def __init__(self, groups):
@@ -108,12 +105,3 @@ def test_get_active_map_reads_the_user_hash():
     mirror.write("u2", "g3", {"group_id": "g3"})
     svc = _service(mirror, _FakeGroupRepo({}), [])
     assert set(svc.get_active_map("u1")) == {"g1", "g2"}
-
-
-def test_get_all_active_annotates_each_dto_with_its_owner():
-    mirror = _FakeMirror()
-    mirror.write("u1", "g1", {"group_id": "g1"})
-    mirror.write("u2", "g2", {"group_id": "g2"})
-    svc = _service(mirror, _FakeGroupRepo({}), [])
-    result = {d["group_id"]: d["user_id"] for d in svc.get_all_active()}
-    assert result == {"g1": "u1", "g2": "u2"}

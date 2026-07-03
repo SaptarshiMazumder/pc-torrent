@@ -24,27 +24,22 @@ from typing import Any
 
 from serverV2.infrastructure.db import query_all, query_one
 from serverV2.infrastructure.redis_client import RedisClient, namespaced
-from serverV2.monitor_lock.monitor_lock_repository import MonitorLockRepository
 from serverV2.repositories.heartbeat_repository import HeartbeatRepository
 from serverV2.repositories.job_repository import JobRepository
+from serverV2.repositories.telemetry_repository import TelemetryRepository
+from serverV2.services.admin.daemon_status import DaemonStatusRepository, KNOWN_DAEMONS
 from serverV2.services.admin.download_stats import DownloadStatsRepository
 from serverV2.services.machines.machine_redis_mirror import MachineRedisMirror
 from serverV2.fleets.fleet_availability.fleet_availability_snapshot_cache import (
     FleetAvailabilitySnapshotCache,
 )
-from serverV2.services.render_groups.telemetry.render_group_telemetry_service import (
-    RenderGroupTelemetryService,
-)
+from serverV2.fleets.status_aggregator import InstanceStatusAggregator
 from serverV2.users import UserFacade
 
 log = logging.getLogger(__name__)
 
 _ACTIVE_GROUP_STATUSES = ("uploading", "pending", "running")
 _ACTIVE_JOB_STATUSES = ("pending", "running")
-
-# Same lock key the AllocationDispatchQueueDaemon uses (its module keeps
-# the constant private; the literal is duplicated here read-only).
-_DISPATCH_DAEMON_LOCK = "allocation:dispatch:daemon"
 
 _CACHE_TTL_SEC = 60
 
@@ -68,22 +63,26 @@ class AdminTelemetryService:
         self,
         *,
         redis_client: RedisClient,
-        render_group_telemetry: RenderGroupTelemetryService,
         machine_redis_mirror: MachineRedisMirror,
         fleet_snapshot_cache: FleetAvailabilitySnapshotCache,
         job_repo: JobRepository,
         heartbeat_repo: HeartbeatRepository,
         user_facade: UserFacade,
         download_stats: DownloadStatsRepository,
+        telemetry_repo: TelemetryRepository,
+        status_aggregator: InstanceStatusAggregator,
+        daemon_status: DaemonStatusRepository,
     ) -> None:
         self._redis_client = redis_client
-        self._rg_telemetry = render_group_telemetry
         self._machine_mirror = machine_redis_mirror
         self._fleet_snapshot_cache = fleet_snapshot_cache
         self._job_repo = job_repo
         self._heartbeat_repo = heartbeat_repo
         self._users = user_facade
         self._download_stats = download_stats
+        self._telemetry_repo = telemetry_repo
+        self._status_aggregator = status_aggregator
+        self._daemon_status = daemon_status
 
     # ------------------------------------------------------------------
     # small Redis helpers (fail-open)
@@ -152,7 +151,8 @@ class AdminTelemetryService:
                         "SELECT COUNT(*) AS n FROM pending_allocation_queue",
                     ) or {}).get("n", 0),
                     "failures_24h": (query_one(
-                        "SELECT COUNT(*) AS n FROM failure_events WHERE occurred_at >= %s",
+                        "SELECT COUNT(*) AS n FROM render_telemetry "
+                        "WHERE failure_reason IS NOT NULL AND completed_at >= %s",
                         (self._iso_hours_ago(24),),
                     ) or {}).get("n", 0),
                 }
@@ -160,12 +160,30 @@ class AdminTelemetryService:
                 log.warning("Admin overview counts failed: %s", exc)
 
         alive = self._machine_mirror.alive_map()
-        locks = {
-            "vast_monitor": self._redis_get(MonitorLockRepository.vast_key()),
-            "modal_monitor": self._redis_get(MonitorLockRepository.modal_key()),
-            "community_monitor": self._redis_get(MonitorLockRepository.community_key()),
-            "dispatch_daemon": self._redis_get(namespaced(_DISPATCH_DAEMON_LOCK)),
-        }
+
+        # Daemon health from per-tick heartbeats (a single HGETALL) instead of
+        # four lock GETs -- richer AND cheaper.  A daemon only heartbeats while
+        # it owns its lock, so a present, recent heartbeat IS the live owner
+        # plus what it did last cycle.  No heartbeat -> not running anywhere.
+        statuses = self._daemon_status.read_all()
+        now_ts = datetime.now(timezone.utc).timestamp()
+        daemons = []
+        for name in KNOWN_DAEMONS:
+            s = statuses.get(name)
+            if s is None:
+                daemons.append({"name": name, "reporting": False})
+                continue
+            last = s.get("last_tick_ts")
+            daemons.append({
+                "name": name,
+                "reporting": True,
+                "owner": s.get("owner"),
+                "tick_count": s.get("tick_count"),
+                "last_tick_ts": last,
+                "age_sec": (now_ts - last) if last else None,
+                "detail": s.get("detail") or {},
+                "error": s.get("error"),
+            })
 
         fleet: dict[str, Any] | None = None
         snapshot = self._fleet_snapshot_cache.peek()
@@ -181,7 +199,7 @@ class AdminTelemetryService:
             "redis_ok": self._redis_ok(),
             "db_ok": db_ok,
             "counts": counts,
-            "daemon_locks": locks,
+            "daemons": daemons,
             "fleet_availability": fleet,
             "machines_alive": len(alive) if alive is not None else None,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -235,18 +253,13 @@ class AdminTelemetryService:
     # ------------------------------------------------------------------
 
     def active_render_groups(self) -> list[dict[str, Any]]:
-        """Every user's active groups from the global Redis mirror; slim
-        Postgres fallback when the mirror is cold (fresh boot, Redis flush).
-        Each row is annotated with the owner's email / display name."""
+        """Every user's active groups, read from Postgres (the source of
+        truth).  Each row is annotated with the owner's email / display name.
+
+        Read-only: the per-user Redis mirror is env-scoped by uid and only
+        answers "this user's groups", so the all-users admin view queries
+        Postgres directly rather than imposing a global mirror write."""
         index = self._user_index()
-        mirrored = self._rg_telemetry.get_all_active()
-        if mirrored:
-            ordered = sorted(
-                mirrored,
-                key=lambda d: d.get("submitted_at") or "",
-                reverse=True,
-            )
-            return [self._annotate_user(g, index) for g in ordered]
         try:
             rows = query_all(
                 """
@@ -339,6 +352,104 @@ class AdminTelemetryService:
                 "heartbeat_age_sec": (now_ts - last_hb) if last_hb else None,
             }))
         return out
+
+    # ------------------------------------------------------------------
+    # live serverless instances (in-process registry + jobs join)
+    # ------------------------------------------------------------------
+
+    def serverless_instances(self) -> list[dict[str, Any]]:
+        """Currently-running Vast/Modal containers from the in-process
+        InstanceStatusAggregator, enriched with each job's owner, input file,
+        dispatch price, and a computed live cost-so-far (elapsed x rate).
+
+        The registry only holds in-flight serverless jobs and is wiped when a
+        job goes terminal, so this is strictly a "what's running now" view."""
+        if self._status_aggregator is None:
+            return []
+        snaps: list[dict[str, Any]] = []
+        for fleet, lst in (self._status_aggregator.get_all() or {}).items():
+            for s in lst or []:
+                snaps.append({**s, "fleet_type": s.get("fleet_type") or fleet})
+        if not snaps:
+            return []
+
+        job_ids = [s["job_id"] for s in snaps if s.get("job_id")]
+        rows: dict[str, dict] = {}
+        if job_ids:
+            try:
+                fetched = query_all(
+                    """
+                    SELECT j.id, j.started_at, j.submitted_at, j.gpu_type,
+                           j.price_per_hour_at_dispatch, g.user_id, g.input_filename
+                      FROM jobs j
+                      LEFT JOIN render_groups g ON g.id = j.group_id
+                     WHERE j.id = ANY(%s)
+                    """,
+                    (job_ids,),
+                )
+                rows = {r["id"]: r for r in fetched}
+            except Exception as exc:
+                log.warning("Admin serverless_instances jobs join failed: %s", exc)
+
+        rate = self._credits_per_usd()
+        index = self._user_index()
+        out = []
+        for s in snaps:
+            job = rows.get(s.get("job_id"), {})
+            elapsed = s.get("elapsed_sec")
+            price = job.get("price_per_hour_at_dispatch")
+            cost_usd = None
+            if elapsed is not None and price is not None:
+                cost_usd = float(elapsed) / 3600.0 * float(price)
+            rec = {
+                "job_id": s.get("job_id"),
+                "fleet_type": s.get("fleet_type"),
+                "provider_status": s.get("provider_status"),
+                "gpu_label": s.get("gpu_label") or job.get("gpu_type"),
+                "rendered_frames": s.get("rendered_frames"),
+                "total_frames": s.get("total_frames"),
+                "elapsed_sec": elapsed,
+                "error": s.get("error"),
+                "has_logs": bool(s.get("logs")),
+                "user_id": job.get("user_id"),
+                "input_filename": job.get("input_filename"),
+                "started_at": job.get("started_at"),
+                "price_per_hour": float(price) if price is not None else None,
+                "live_cost_usd": cost_usd,
+                "live_cost_credits": (cost_usd * rate) if cost_usd is not None else None,
+            }
+            out.append(self._annotate_user(rec, index))
+        out.sort(key=lambda r: r.get("elapsed_sec") or 0, reverse=True)
+        return [_jsonable(r) for r in out]
+
+    # ------------------------------------------------------------------
+    # per-render telemetry detail (row-level render_telemetry read)
+    # ------------------------------------------------------------------
+
+    def render_telemetry(self, limit: int = 100, group_id: str | None = None) -> list[dict[str, Any]]:
+        """Per-completed-chunk detail: memory, GPU, device, timing, cost,
+        datetimes.  Scoped to one group when ``group_id`` is given, else the
+        most recent chunks across all renders."""
+        try:
+            rows = (
+                self._telemetry_repo.by_group(group_id)
+                if group_id
+                else self._telemetry_repo.recent(limit)
+            )
+        except Exception as exc:
+            log.warning("Admin render_telemetry read failed: %s", exc)
+            return []
+        rate = self._credits_per_usd()
+        index = self._user_index()
+        out = []
+        for r in rows:
+            enriched = {
+                **r,
+                "cost_actual_credits": float(r.get("cost_actual_usd") or 0) * rate,
+            }
+            # by_group rows have no user_id column; annotate is a no-op there.
+            out.append(self._annotate_user(enriched, index))
+        return [_jsonable(r) for r in out]
 
     # ------------------------------------------------------------------
     # users
@@ -579,15 +690,20 @@ class AdminTelemetryService:
     # ------------------------------------------------------------------
 
     def failures_recent(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent chunk failures, read from the ``render_telemetry`` rows that
+        already record a ``failure_reason`` (the source of truth).  Read-only —
+        no separate failure_events audit table is written."""
         limit = max(1, min(int(limit), 200))
         try:
             rows = query_all(
                 """
-                SELECT id, occurred_at, provider, endpoint_id, job_id,
-                       group_id, failure_type, error_msg, action_taken,
-                       reassigned_job_id, reassigned_to_endpoint, resolved
-                  FROM failure_events
-                 ORDER BY occurred_at DESC
+                SELECT t.id, t.completed_at, t.fleet, t.job_id, t.group_id,
+                       t.machine_id, t.gpu_type, t.retry_count,
+                       t.failure_reason, g.user_id, g.input_filename
+                  FROM render_telemetry t
+                  LEFT JOIN render_groups g ON g.id = t.group_id
+                 WHERE t.failure_reason IS NOT NULL
+                 ORDER BY t.completed_at DESC
                  LIMIT %s
                 """,
                 (limit,),
@@ -595,7 +711,27 @@ class AdminTelemetryService:
         except Exception as exc:
             log.warning("Admin failures query failed: %s", exc)
             return []
-        return [_jsonable(row) for row in rows]
+        index = self._user_index()
+        return [self._annotate_user(_jsonable(row), index) for row in rows]
 
     def downloads(self) -> dict[str, dict]:
         return self._download_stats.totals()
+
+    # ------------------------------------------------------------------
+    # redis command activity (quota / cost observability)
+    # ------------------------------------------------------------------
+
+    def redis_activity(self, recent_limit: int = 200) -> dict[str, Any]:
+        """Live Redis command stream + quota-burn stats.  Pure in-memory read
+        of this process's recorded command traffic (adds NO Redis ops), so
+        watching it never inflates the metric it measures."""
+        act = self._redis_client.activity()
+        if act is None:
+            return {"enabled": False}
+        return {"enabled": True, **act.snapshot(recent_limit=recent_limit)}
+
+    def redis_activity_reset(self) -> dict[str, Any]:
+        act = self._redis_client.activity()
+        if act is not None:
+            act.reset()
+        return {"reset": act is not None}

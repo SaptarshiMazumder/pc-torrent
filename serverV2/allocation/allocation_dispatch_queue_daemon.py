@@ -78,6 +78,7 @@ class AllocationDispatchQueueDaemon:
         instance_id: str,
         enabled_fleets: list[str],
         tick_interval_s: float = DEFAULT_TICK_INTERVAL_S,
+        status_repo=None,
     ) -> None:
         self._dispatch_repo = dispatch_repo
         self._pending_repo = pending_repo
@@ -91,6 +92,19 @@ class AllocationDispatchQueueDaemon:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._owns_lock = False
+
+        # Heartbeat state for the admin dashboard's daemon-health panel.
+        self._status_repo = status_repo
+        self._tick_count = 0
+        self._last_detail: dict = {}
+
+    def _report_status(self, error: str | None = None) -> None:
+        if self._status_repo is None:
+            return
+        self._status_repo.report(
+            "dispatch_daemon", self._instance_id, self._tick_count,
+            self._last_detail, error,
+        )
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -128,8 +142,11 @@ class AllocationDispatchQueueDaemon:
                     self._stop_event.wait(self._tick_interval_s)
                     continue
                 self._tick()
+                self._tick_count += 1
+                self._report_status()
             except Exception as exc:
                 log.error("AllocationDispatchQueueDaemon tick raised: %s", exc)
+                self._report_status(error=str(exc))
             self._stop_event.wait(self._tick_interval_s)
 
     def _gate_lock(self) -> bool:
@@ -160,6 +177,12 @@ class AllocationDispatchQueueDaemon:
         # SCARDs, the community DB query, and the JobRepository COUNT.
         has_dispatch = self._dispatch_tick.has_any_for_fleets(self._enabled_fleets)
         has_pending = self._pending_tick.has_any()
+        self._last_detail = {
+            "idle": not (has_dispatch or has_pending),
+            "has_dispatch": has_dispatch,
+            "has_pending": has_pending,
+            "fleets": list(self._enabled_fleets),
+        }
         if not (has_dispatch or has_pending):
             return
 

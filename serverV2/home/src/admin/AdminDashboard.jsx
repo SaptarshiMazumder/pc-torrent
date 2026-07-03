@@ -1,17 +1,19 @@
 import { useEffect, useState } from "react";
 import {
-  CostsPanel, DownloadsPanel, FailuresPanel, JobsPanel, LiveRendersPanel,
-  LogsPanel, MachinesPanel, OverviewPanel, UsersPanel,
+  ComputePanel, ConfigPanel, CostsPanel, DownloadsPanel, FailuresPanel,
+  JobsPanel, LiveRendersPanel, LogsPanel, OverviewPanel, RedisPanel, UsersPanel,
 } from "./panels.jsx";
 
 const TABS = [
   { id: "overview", label: "Overview", el: OverviewPanel },
   { id: "live", label: "Live renders", el: LiveRendersPanel },
   { id: "jobs", label: "Jobs", el: JobsPanel },
-  { id: "machines", label: "Machines", el: MachinesPanel },
+  { id: "machines", label: "Machines & instances", el: ComputePanel },
   { id: "users", label: "Users", el: UsersPanel },
   { id: "costs", label: "Costs", el: CostsPanel },
   { id: "failures", label: "Failures", el: FailuresPanel },
+  { id: "redis", label: "Redis", el: RedisPanel },
+  { id: "config", label: "Config", el: ConfigPanel },
   { id: "logs", label: "Logs", el: LogsPanel },
   { id: "downloads", label: "Downloads", el: DownloadsPanel },
 ];

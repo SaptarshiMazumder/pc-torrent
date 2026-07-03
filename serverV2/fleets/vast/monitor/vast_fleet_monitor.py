@@ -88,6 +88,7 @@ class VastFleetMonitor:
         instance_id: str,
         registry: InstanceRegistry | None = None,
         interval_sec: int = _DEFAULT_INTERVAL_SEC,
+        status_repo=None,
     ) -> None:
         self._config_provider = config_provider
         self._client = client
@@ -118,6 +119,19 @@ class VastFleetMonitor:
 
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
+
+        # Heartbeat state for the admin dashboard's daemon-health panel.
+        self._status_repo = status_repo
+        self._tick_count = 0
+        self._last_detail: dict = {}
+
+    def _report_status(self, error: str | None = None) -> None:
+        if self._status_repo is None:
+            return
+        self._status_repo.report(
+            "vast_monitor", self._instance_id, self._tick_count,
+            self._last_detail, error,
+        )
 
     def try_start(self) -> bool:
         """Acquire the singleton ``monitor:vast`` lock and spawn the scan
@@ -154,8 +168,11 @@ class VastFleetMonitor:
                 return
             try:
                 self._tick()
-            except Exception:
+                self._tick_count += 1
+                self._report_status()
+            except Exception as exc:
                 log.exception("VastFleetMonitor tick error")
+                self._report_status(error=str(exc))
             time.sleep(self._interval)
 
     # ------------------------------------------------------------------
@@ -191,6 +208,11 @@ class VastFleetMonitor:
                     "leaving jobs in flight; next tick retries",
                     self._consecutive_api_errors,
                 )
+            self._last_detail = {
+                "jobs_scanned": len(rows),
+                "instances_seen": None,
+                "api_errors": self._consecutive_api_errors,
+            }
             return
 
         fleet_dict: dict[int, dict[str, Any]] = {}
@@ -199,6 +221,12 @@ class VastFleetMonitor:
                 fleet_dict[int(inst["id"])] = inst
             except (KeyError, ValueError, TypeError):
                 continue
+
+        self._last_detail = {
+            "jobs_scanned": len(rows),
+            "instances_seen": len(fleet_dict),
+            "api_errors": self._consecutive_api_errors,
+        }
 
         # One live config read per tick (assembled from Firestore knobs +
         # env secrets); threaded into _inspect for the legacy-row fallbacks.

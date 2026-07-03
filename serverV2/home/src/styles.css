@@ -110,6 +110,35 @@ a { color: var(--series-1); text-decoration: none; }
 .panel-head .sub { color: var(--ink-muted); font-size: 12px; }
 .panel-head .spacer { flex: 1; }
 
+/* subtabs (within a panel, e.g. Machines & instances → Live / History) */
+.subtabs {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px;
+}
+.subtab {
+  background: none;
+  border: none;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.subtab:hover { color: var(--ink-2); }
+.subtab.active { background: var(--series-1); color: #fff; }
+
+.section > h3 .sub {
+  color: var(--ink-muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 /* ---------- stat tiles ---------- */
 
 .tiles {
@@ -134,6 +163,7 @@ a { color: var(--series-1); text-decoration: none; }
 }
 .tile .value { font-size: 24px; font-weight: 650; margin-top: 4px; }
 .tile .hint { color: var(--ink-muted); font-size: 11px; margin-top: 2px; }
+.hint { color: var(--ink-muted); font-size: 12px; }
 
 /* ---------- status pills ---------- */
 
@@ -345,4 +375,38 @@ tr.clickable { cursor: pointer; }
   font: inherit;
   cursor: pointer;
   padding: 0;
+}
+
+/* ---------- config viewer ---------- */
+
+.cfg-card { padding: 6px 14px; }
+.cfg-row {
+  display: flex;
+  gap: 16px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--grid);
+}
+.cfg-row:last-child { border-bottom: none; }
+.cfg-key {
+  flex: 0 0 240px;
+  color: var(--ink-2);
+  font-size: 13px;
+  word-break: break-word;
+}
+.cfg-value { flex: 1; min-width: 0; }
+.cfg-val { font-variant-numeric: tabular-nums; }
+.cfg-val.muted { color: var(--ink-muted); }
+.cfg-obj { display: flex; flex-direction: column; }
+/* Nested objects indent under their key via a hairline rail. */
+.cfg-value .cfg-obj {
+  border-left: 1px solid var(--grid);
+  padding-left: 12px;
+  margin: 2px 0;
+}
+.cfg-array { display: flex; flex-direction: column; gap: 6px; }
+.cfg-array-item {
+  border: 1px solid var(--grid);
+  border-radius: 6px;
+  padding: 4px 10px;
+  background: var(--surface-2);
 }

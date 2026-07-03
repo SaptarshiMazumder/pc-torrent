@@ -1,4 +1,4 @@
-"""DownloadStatsRepository — counter writes + totals parsing."""
+"""DownloadStatsRepository — lifetime + per-day HINCRBY counters, fail-open."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ class _FakePipe:
         self._store = store
 
     def hincrby(self, key, field, amount):
-        h = self._store.hashes.setdefault(key, {})
-        h[field] = int(h.get(field, 0)) + amount
+        h = self._store.setdefault(key, {})
+        h[field] = h.get(field, 0) + amount
         return self
 
     def execute(self):
@@ -20,13 +20,13 @@ class _FakePipe:
 
 class _FakeRedis:
     def __init__(self):
-        self.hashes: dict[str, dict[str, int]] = {}
+        self.hashes = {}
 
     def pipeline(self, transaction=False):
-        return _FakePipe(self)
+        return _FakePipe(self.hashes)
 
     def hgetall(self, key):
-        return dict(self.hashes.get(key, {}))
+        return {k: str(v) for k, v in self.hashes.get(key, {}).items()}
 
 
 class _FakeRedisClient:
@@ -37,33 +37,32 @@ class _FakeRedisClient:
         return self._fake
 
 
-def test_record_increments_total_and_daily_counters():
-    fake = _FakeRedis()
-    repo = DownloadStatsRepository(_FakeRedisClient(fake))
-    repo.record("job_zip")
-    repo.record("job_zip")
-    fields = fake.hashes["stats:downloads"]
-    assert fields["job_zip"] == 2
-    daily = [f for f in fields if f.startswith("job_zip:")]
-    assert len(daily) == 1 and fields[daily[0]] == 2
+def _repo(fake=None):
+    return DownloadStatsRepository(_FakeRedisClient(fake if fake is not None else _FakeRedis()))
 
 
-def test_totals_groups_daily_fields_under_their_kind():
+def test_record_increments_lifetime_and_daily():
     fake = _FakeRedis()
-    fake.hashes["stats:downloads"] = {
-        "job_zip": 5,
-        "job_zip:20260701": 3,
-        "job_zip:20260702": 2,
-        "agent_windows": 1,
-    }
-    repo = DownloadStatsRepository(_FakeRedisClient(fake))
+    repo = _repo(fake)
+    repo.record("job_zip")
+    repo.record("job_zip")
     totals = repo.totals()
-    assert totals["job_zip"]["total"] == 5
-    assert totals["job_zip"]["by_day"] == {"20260701": 3, "20260702": 2}
-    assert totals["agent_windows"]["total"] == 1
+    assert totals["job_zip"]["total"] == 2
+    assert sum(totals["job_zip"]["by_day"].values()) == 2
+
+
+def test_totals_empty_when_no_entries():
+    assert _repo().totals() == {}
+
+
+def test_ignores_empty_kind():
+    fake = _FakeRedis()
+    repo = _repo(fake)
+    repo.record("")
+    assert repo.totals() == {}
 
 
 def test_fail_open_when_redis_down():
     repo = DownloadStatsRepository(_FakeRedisClient(None))
-    repo.record("job_zip")   # no raise
+    repo.record("agent_windows")   # no-op, no raise
     assert repo.totals() == {}

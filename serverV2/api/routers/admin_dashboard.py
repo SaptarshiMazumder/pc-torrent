@@ -48,6 +48,20 @@ def machines(_admin: dict = Depends(require_admin)):
     return {"machines": _svc().machines()}
 
 
+@router.get("/instances")
+def serverless_instances(_admin: dict = Depends(require_admin)):
+    return {"instances": _svc().serverless_instances()}
+
+
+@router.get("/telemetry")
+def render_telemetry(
+    limit: int = 100,
+    group_id: str | None = None,
+    _admin: dict = Depends(require_admin),
+):
+    return {"telemetry": _svc().render_telemetry(limit=limit, group_id=group_id)}
+
+
 @router.get("/users")
 def users(_admin: dict = Depends(require_admin)):
     return {"users": _svc().users()}
@@ -71,3 +85,13 @@ def failures_recent(limit: int = 50, _admin: dict = Depends(require_admin)):
 @router.get("/downloads")
 def downloads(_admin: dict = Depends(require_admin)):
     return {"downloads": _svc().downloads()}
+
+
+@router.get("/redis")
+def redis_activity(limit: int = 200, _admin: dict = Depends(require_admin)):
+    return _svc().redis_activity(recent_limit=limit)
+
+
+@router.post("/redis/reset")
+def redis_activity_reset(_admin: dict = Depends(require_admin)):
+    return _svc().redis_activity_reset()

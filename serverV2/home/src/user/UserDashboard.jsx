@@ -9,10 +9,10 @@ import {
 
 export default function UserDashboard({ profile }) {
   const active = usePoll(
-    () => api("/render-groups?status_group=active&limit=50"), 5000,
+    () => api("/render-groups?status_group=active&limit=50"), 5000, [], "user:active",
   );
   const past = usePoll(
-    () => api("/render-groups?status_group=terminal&limit=50"), 30000,
+    () => api("/render-groups?status_group=terminal&limit=50"), 30000, [], "user:past",
   );
 
   const activeGroups = active.data?.groups || [];

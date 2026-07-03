@@ -53,6 +53,11 @@ def _get_container() -> Container:
 @app.on_event("startup")
 def on_startup() -> None:
     global _container
+    # Attach the in-memory log ring buffer FIRST so startup logs are captured
+    # and the admin dashboard's /logs panel has data from boot onward.
+    from serverV2.api.routers.logs import install_log_capture
+    install_log_capture()
+
     log.info("ServerV2 starting up...")
 
     init_db()
@@ -149,7 +154,7 @@ def _wire_routers(c: Container) -> None:
         modal_client=c.modal_client,
         job_repo=c.job_repo,
     )
-    admin_config.init(c.allocation_client)
+    admin_config.init(c.allocation_client, c.cost_estimation_config_repo)
     admin_dashboard.init(c.admin_telemetry_service)
     app_meta.init(c.allocation_config_repo)
     community.init(c.config.community_worker_image)

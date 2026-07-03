@@ -1,9 +1,8 @@
-"""RenderGroupRedisMirror — the per-user hash + global admin index.
+"""RenderGroupRedisMirror — the per-user active-group hash.
 
 Exercises the Redis CRUD against an in-memory fake so no server is needed.
-The contract under guard: every write lands in BOTH the per-user hash and
-the global ``rgmirror:active:all`` hash, every remove clears both, and
-``read_all_active`` splits its composite fields back into (uid, gid).
+The contract under guard: writes land in the per-user hash, removes clear
+them, and reads (single + read_active) round-trip the DTOs.
 """
 
 from __future__ import annotations
@@ -19,10 +18,6 @@ class _FakePipe:
 
     def hset(self, key, field, value):
         self._store.hset(key, field, value)
-        return self
-
-    def hdel(self, key, field):
-        self._store.hdel(key, field)
         return self
 
     def expire(self, key, ttl):
@@ -65,35 +60,32 @@ def _mirror():
     return RenderGroupRedisMirror(_FakeRedisClient(fake)), fake
 
 
-def test_write_lands_in_user_hash_and_global_index():
+def test_write_lands_in_user_hash():
     mirror, fake = _mirror()
     mirror.write("u1", "g1", {"group_id": "g1"})
     assert mirror.read("u1", "g1") == {"group_id": "g1"}
-    assert ("u1:g1") in fake.hashes["rgmirror:active:all"]
+    assert fake.hashes["rgmirror:u1"] == {"g1": '{"group_id": "g1"}'}
 
 
-def test_remove_clears_both_hashes():
-    mirror, fake = _mirror()
+def test_remove_clears_entry():
+    mirror, _ = _mirror()
     mirror.write("u1", "g1", {"group_id": "g1"})
     mirror.remove("u1", "g1")
     assert mirror.read("u1", "g1") is None
-    assert fake.hashes["rgmirror:active:all"] == {}
 
 
-def test_read_all_active_splits_composite_fields():
+def test_read_active_returns_all_user_groups():
     mirror, _ = _mirror()
     mirror.write("u1", "g1", {"group_id": "g1"})
-    mirror.write("u2", "g2", {"group_id": "g2"})
-    result = mirror.read_all_active()
-    assert result[("u1", "g1")] == {"group_id": "g1"}
-    assert result[("u2", "g2")] == {"group_id": "g2"}
+    mirror.write("u1", "g2", {"group_id": "g2"})
+    result = mirror.read_active("u1")
+    assert result == {"g1": {"group_id": "g1"}, "g2": {"group_id": "g2"}}
 
 
-def test_read_all_active_skips_malformed_entries():
+def test_read_active_skips_malformed_entries():
     mirror, fake = _mirror()
-    fake.hset("rgmirror:active:all", "not-a-composite-field-without-gid:", "{}")
-    fake.hset("rgmirror:active:all", "u1:g1", "not json")
-    assert mirror.read_all_active() == {}
+    fake.hset("rgmirror:u1", "g1", "not json")
+    assert mirror.read_active("u1") == {}
 
 
 def test_fail_open_when_redis_down():
@@ -102,4 +94,3 @@ def test_fail_open_when_redis_down():
     mirror.remove("u1", "g1")
     assert mirror.read("u1", "g1") is None
     assert mirror.read_active("u1") == {}
-    assert mirror.read_all_active() == {}

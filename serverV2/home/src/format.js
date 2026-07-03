@@ -46,6 +46,16 @@ export function shortId(id) {
   return id ? String(id).slice(0, 8) : "–";
 }
 
+export function fmtClock(unixSec) {
+  if (!unixSec) return "–";
+  const d = new Date(unixSec * 1000);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  const ms = String(d.getMilliseconds()).padStart(3, "0");
+  return `${hh}:${mm}:${ss}.${ms}`;
+}
+
 export function fmtDay(yyyymmdd) {
   const s = String(yyyymmdd);
   if (s.length === 8) return `${s.slice(4, 6)}/${s.slice(6, 8)}`;

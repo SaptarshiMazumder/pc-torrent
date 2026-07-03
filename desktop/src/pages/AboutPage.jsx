@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { getVersion } from "@tauri-apps/api/app";
 
 /**
@@ -7,15 +8,16 @@ import { getVersion } from "@tauri-apps/api/app";
  * hand-maintained string that could drift out of sync.
  */
 export default function AboutPage() {
+  const { t } = useTranslation("about");
   const [version, setVersion] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     getVersion()
       .then((v) => { if (!cancelled) setVersion(v); })
-      .catch(() => { if (!cancelled) setVersion("unknown"); });
+      .catch(() => { if (!cancelled) setVersion(t("versionUnknown")); });
     return () => { cancelled = true; };
-  }, []);
+  }, [t]);
 
   return (
     <div className="page about-page">

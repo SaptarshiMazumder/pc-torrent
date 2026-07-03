@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useAuth } from "../../contexts/AuthContext";
 import { useUserProfile } from "../../contexts/UserProfileContext";
+import LanguageSelector from "./LanguageSelector";
 
 const STATUS_COLORS = {
   connected: "#22c55e",
@@ -15,12 +17,12 @@ const STATUS_COLORS = {
   needs_reboot: "#f59e0b",
 };
 
-const STATUS_LABELS = {
-  connected: "Available",
-  rendering: "Rendering",
-  paused: "Paused",
-  disconnected: "Offline",
-  error: "Error",
+const STATUS_LABEL_KEYS = {
+  connected: "status.connected",
+  rendering: "status.rendering",
+  paused: "status.paused",
+  disconnected: "status.disconnected",
+  error: "status.error",
 };
 
 function CubeLogo() {
@@ -69,8 +71,8 @@ function ModeIconOffer() {
 }
 
 const MODE_OPTIONS = [
-  { value: "rentee", label: "Rent a PC", Icon: ModeIconRent },
-  { value: "renter", label: "Offer My PC", Icon: ModeIconOffer },
+  { value: "rentee", labelKey: "mode.rentee", Icon: ModeIconRent },
+  { value: "renter", labelKey: "mode.renter", Icon: ModeIconOffer },
 ];
 
 function NavIconCreate() {
@@ -173,20 +175,20 @@ function SignOutIcon() {
 }
 
 const RENTER_PAGES = [
-  { id: "dashboard", label: "Dashboard", Icon: NavIconDashboard },
-  { id: "logs", label: "Logs", Icon: NavIconLogs },
-  { id: "about", label: "About", Icon: NavIconAbout },
+  { id: "dashboard", labelKey: "nav.dashboard", Icon: NavIconDashboard },
+  { id: "logs", labelKey: "nav.logs", Icon: NavIconLogs },
+  { id: "about", labelKey: "nav.about", Icon: NavIconAbout },
 ];
 
 const RENTEE_PAGES = [
-  { id: "create", label: "Create Render", Icon: NavIconCreate },
-  { id: "myjobs", label: "My Jobs", Icon: NavIconJobs },
-  { id: "stats", label: "Stats", Icon: NavIconStats },
-  { id: "downloads", label: "Downloads", Icon: NavIconDownloads },
-  { id: "available", label: "Available Machines", Icon: NavIconMachines },
-  { id: "configuration", label: "Configuration", Icon: NavIconConfiguration },
-  { id: "logs", label: "Logs", Icon: NavIconLogs },
-  { id: "about", label: "About", Icon: NavIconAbout },
+  { id: "create", labelKey: "nav.create", Icon: NavIconCreate },
+  { id: "myjobs", labelKey: "nav.myjobs", Icon: NavIconJobs },
+  { id: "stats", labelKey: "nav.stats", Icon: NavIconStats },
+  { id: "downloads", labelKey: "nav.downloads", Icon: NavIconDownloads },
+  { id: "available", labelKey: "nav.available", Icon: NavIconMachines },
+  { id: "configuration", labelKey: "nav.configuration", Icon: NavIconConfiguration },
+  { id: "logs", labelKey: "nav.logs", Icon: NavIconLogs },
+  { id: "about", labelKey: "nav.about", Icon: NavIconAbout },
 ];
 
 function useClickOutside(ref, handler, enabled) {
@@ -208,6 +210,7 @@ export default function Sidebar({
   onModeChange,
   activeDownloadCount = 0,
 }) {
+  const { t } = useTranslation("common");
   const { user, signOut } = useAuth();
   const { profile } = useUserProfile();
   const isAdmin = profile?.role === "admin";
@@ -215,7 +218,8 @@ export default function Sidebar({
     (p) => p.id !== "configuration" || isAdmin
   );
   const dotColor = STATUS_COLORS[status] || "#6b7280";
-  const statusText = STATUS_LABELS[status] || "Setting up...";
+  const statusKey = STATUS_LABEL_KEYS[status];
+  const statusText = statusKey ? t(statusKey) : t("status.settingUp");
 
   const [modeOpen, setModeOpen] = useState(false);
   const modeWrapRef = useRef(null);
@@ -244,7 +248,7 @@ export default function Sidebar({
           aria-expanded={modeOpen}
         >
           <span className="sidebar-mode-icon"><CurrentModeIcon /></span>
-          <span className="sidebar-mode-label">{currentMode.label}</span>
+          <span className="sidebar-mode-label">{t(currentMode.labelKey)}</span>
           <svg
             className={`sidebar-mode-chevron${modeOpen ? " open" : ""}`}
             width="12" height="12" viewBox="0 0 24 24" fill="none"
@@ -270,7 +274,7 @@ export default function Sidebar({
                   }}
                 >
                   <span className="sidebar-mode-icon"><Icon /></span>
-                  <span className="sidebar-mode-label">{opt.label}</span>
+                  <span className="sidebar-mode-label">{t(opt.labelKey)}</span>
                 </button>
               );
             })}
@@ -290,7 +294,7 @@ export default function Sidebar({
               onClick={() => onNavigate(page.id)}
             >
               <span className="nav-icon"><Icon /></span>
-              <span className="nav-label">{page.label}</span>
+              <span className="nav-label">{t(page.labelKey)}</span>
               {page.id === "downloads" && activeDownloadCount > 0 && (
                 <span className="nav-badge">{activeDownloadCount}</span>
               )}
@@ -305,19 +309,20 @@ export default function Sidebar({
           <div className="sidebar-user-chip">
             <span className="sidebar-avatar" aria-hidden="true">{initial}</span>
             <span className="sidebar-email" title={user.email || ""}>
-              {user.email || user.displayName || "Signed in"}
+              {user.email || user.displayName || t("user.signedIn")}
             </span>
             <button
               type="button"
               className="sidebar-signout"
               onClick={signOut}
-              title="Sign out"
-              aria-label="Sign out"
+              title={t("user.signOut")}
+              aria-label={t("user.signOut")}
             >
               <SignOutIcon />
             </button>
           </div>
         )}
+        <LanguageSelector />
         <div className="sidebar-status-pill">
           <span className="status-dot" style={{ backgroundColor: dotColor, color: dotColor }} />
           <span className="status-label">{statusText}</span>

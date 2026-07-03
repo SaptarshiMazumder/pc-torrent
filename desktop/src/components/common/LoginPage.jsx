@@ -1,7 +1,9 @@
 import { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useAuth } from "../../contexts/AuthContext";
 
 export default function LoginPage() {
+  const { t } = useTranslation("login");
   const { signIn, signUp, signInWithGoogle, cancelGoogleSignIn, resetPassword, rememberMe, setRememberMePreference } = useAuth();
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState("");
@@ -32,7 +34,7 @@ export default function LoginPage() {
       // Errors whose message is already user-readable.  Suppress the message
       // when the user cancelled on purpose.
       if (!googleCancelledRef.current) {
-        setError(err?.code ? friendlyError(err.code) : (err?.message || "Google sign-in failed."));
+        setError(err?.code ? friendlyError(err.code) : (err?.message || t("errors.googleFailed")));
       }
     } finally {
       setGoogleLoading(false);
@@ -62,7 +64,7 @@ export default function LoginPage() {
     const trimmedEmail = email.trim();
     if (!trimmedEmail) {
       setNotice("");
-      setError("Enter your email first, then click Forgot password.");
+      setError(t("enterEmailFirst"));
       return;
     }
     setError("");
@@ -70,7 +72,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await resetPassword(trimmedEmail);
-      setNotice("Password reset link sent. Check your inbox and spam folder.");
+      setNotice(t("resetSent"));
     } catch (err) {
       setError(friendlyError(err.code));
     } finally {
@@ -83,19 +85,19 @@ export default function LoginPage() {
       case "auth/user-not-found":
       case "auth/wrong-password":
       case "auth/invalid-credential":
-        return "Invalid email or password.";
+        return t("errors.invalidCredential");
       case "auth/email-already-in-use":
-        return "An account with this email already exists.";
+        return t("errors.emailInUse");
       case "auth/weak-password":
-        return "Password must be at least 6 characters.";
+        return t("errors.weakPassword");
       case "auth/invalid-email":
-        return "Please enter a valid email address.";
+        return t("errors.invalidEmail");
       case "auth/too-many-requests":
-        return "Too many attempts. Please wait a bit and try again.";
+        return t("errors.tooManyRequests");
       case "auth/account-exists-with-different-credential":
-        return "This email is already registered with a password. Sign in with your password instead.";
+        return t("errors.accountExistsDifferentCredential");
       default:
-        return "Something went wrong. Please try again.";
+        return t("errors.generic");
     }
   }
 
@@ -103,13 +105,13 @@ export default function LoginPage() {
     <div className="login-container">
       <div className="login-card">
         <h1 className="login-title">Forge</h1>
-        <p className="login-subtitle">Distributed GPU Rendering</p>
+        <p className="login-subtitle">{t("subtitle")}</p>
 
         <form onSubmit={handleSubmit} className="login-form">
-          <h2>{isSignUp ? "Create account" : "Sign in"}</h2>
+          <h2>{isSignUp ? t("createAccount") : t("signIn")}</h2>
 
           <label>
-            Email
+            {t("email")}
             <input
               type="email"
               value={email}
@@ -121,12 +123,12 @@ export default function LoginPage() {
           </label>
 
           <label>
-            Password
+            {t("password")}
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder={isSignUp ? "Min. 6 characters" : "Password"}
+              placeholder={isSignUp ? t("passwordPlaceholderSignUp") : t("passwordPlaceholderSignIn")}
               required
             />
           </label>
@@ -139,7 +141,7 @@ export default function LoginPage() {
                 onChange={(e) => setRememberMePreference(e.target.checked)}
                 disabled={loading}
               />
-              <span>Remember me on this device</span>
+              <span>{t("rememberMe")}</span>
             </label>
           )}
 
@@ -151,7 +153,7 @@ export default function LoginPage() {
                 onClick={handlePasswordReset}
                 disabled={loading}
               >
-                Forgot password?
+                {t("forgotPassword")}
               </button>
             </div>
           )}
@@ -160,11 +162,11 @@ export default function LoginPage() {
           {notice && <p className="login-success">{notice}</p>}
 
           <button type="submit" className="btn btn-primary" disabled={loading || googleLoading}>
-            {loading ? "Please wait..." : isSignUp ? "Create account" : "Sign in"}
+            {loading ? t("pleaseWait") : isSignUp ? t("createAccount") : t("signIn")}
           </button>
         </form>
 
-        <div className="login-divider"><span>or</span></div>
+        <div className="login-divider"><span>{t("or")}</span></div>
 
         <button
           type="button"
@@ -173,17 +175,17 @@ export default function LoginPage() {
           disabled={loading}
         >
           {googleLoading ? (
-            "Waiting for browser — cancel"
+            t("googleWaiting")
           ) : (
             <>
               <GoogleGlyph />
-              Continue with Google
+              {t("continueWithGoogle")}
             </>
           )}
         </button>
 
         <p className="login-toggle">
-          {isSignUp ? "Already have an account?" : "Don't have an account?"}
+          {isSignUp ? t("haveAccount") : t("noAccount")}
           <button
             className="btn-link"
             type="button"
@@ -193,7 +195,7 @@ export default function LoginPage() {
               setNotice("");
             }}
           >
-            {isSignUp ? "Sign in" : "Sign up"}
+            {isSignUp ? t("signIn") : t("signUp")}
           </button>
         </p>
       </div>

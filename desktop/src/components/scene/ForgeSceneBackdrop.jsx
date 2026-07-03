@@ -1,19 +1,17 @@
 import { Suspense, useEffect, useState } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { AdaptiveDpr } from "@react-three/drei";
 import { EffectComposer, Bloom, Vignette } from "@react-three/postprocessing";
 import { ACESFilmicToneMapping } from "three";
-import ForgeSceneLighting from "./ForgeSceneLighting";
-import ForgeSwordModel from "./ForgeSwordModel";
-import ForgeEmberField from "./ForgeEmberField";
-import MouseParallaxRig from "./MouseParallaxRig";
-import { useWindowPointer } from "../../hooks/useWindowPointer";
+import CarModel from "./CarModel";
+import GarageModel from "./GarageModel";
+import CinematicCamera from "./CinematicCamera";
 
 // Two intensity presets. Hero is the vivid login "main menu" moment; ambient is
 // the dimmed, quieter backdrop shown behind the app once signed in.
 const PRESETS = {
-  hero: { bloom: 1.5, embers: 500, parallax: 0.18, dprMax: 2, vignette: 0.7 },
-  ambient: { bloom: 0.9, embers: 180, parallax: 0.08, dprMax: 1.5, vignette: 0.95 },
+  hero: { bloom: 1.0, dprMax: 2, vignette: 0.7 },
+  ambient: { bloom: 0.7, dprMax: 1.5, vignette: 0.9 },
 };
 
 function usePrefersReducedMotion() {
@@ -46,53 +44,75 @@ function useVisibilityFrameloop(reducedMotion) {
   return frameloop;
 }
 
+// Tone-mapping exposure is imperative renderer state, not a declarative prop —
+// set it in an effect so live edits actually re-apply (unlike `onCreated`, which
+// only runs once when the Canvas is created). (Environment intensity is set on
+// the <Environment> itself so it isn't reset when the HDRI finishes loading.)
+function ToneMapping({ exposure }) {
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    gl.toneMapping = ACESFilmicToneMapping;
+    gl.toneMappingExposure = exposure;
+  }, [gl, exposure]);
+  return null;
+}
+
 /**
  * Full-window cinematic backdrop mounted once at the app root and kept alive
  * across login → app so the WebGL context is created a single time. Purely
- * presentational: the only input is `mode` (derived from auth state) and the
- * window pointer. Sits behind everything with pointer-events disabled so it
- * never intercepts UI clicks.
+ * presentational: the only input is `mode` (derived from auth state). Sits behind
+ * everything with pointer-events disabled so it never intercepts UI clicks.
  */
-export default function ForgeSceneBackdrop({ mode = "hero" }) {
+export default function ForgeSceneBackdrop({ mode = "hero", cameraSet = "default" }) {
   const preset = PRESETS[mode] ?? PRESETS.hero;
   const reducedMotion = usePrefersReducedMotion();
   const frameloop = useVisibilityFrameloop(reducedMotion);
-  const pointer = useWindowPointer();
 
   return (
     <div className="forge-scene-backdrop" aria-hidden="true">
       <Canvas
+        shadows
         frameloop={frameloop}
         dpr={[1, preset.dprMax]}
-        camera={{ position: [0, 0.6, 4.2], fov: 40 }}
+        camera={{ position: [5, 2, 6.5], fov: 35 }}
         gl={{ antialias: true, powerPreference: "high-performance" }}
-        onCreated={({ gl, camera }) => {
-          gl.toneMapping = ACESFilmicToneMapping;
-          gl.toneMappingExposure = 1.1;
-          camera.lookAt(0, 0.2, 0);
-        }}
       >
         <color attach="background" args={["#0d0f14"]} />
-        <fog attach="fog" args={["#0d0f14", 6, 16]} />
+        <ToneMapping exposure={0.6} />
+
+        {/* page-driven: anim 1 (front-left↔left-rear) by default, anim 2
+            (right-rear↔front-right) on the create page; smooth cross-fade between */}
+        <CinematicCamera set={cameraSet} enabled={!reducedMotion} />
 
         <Suspense fallback={null}>
-          <ForgeSceneLighting mode={mode} animate={!reducedMotion} />
+          <CarModel position={[0, 0.5, 0]} />
+          {/* garage floor: self-centered under the car. scale = tile size vs car,
+              position Y = floor height (0 ≈ wheels). Tune both. */}
+          <GarageModel scale={0.7} position={[0, 1.1, 0]} />
 
-          {/* dark, faintly glossy floor — catches the flame glow + reflections */}
-          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.55, 0]}>
-            <planeGeometry args={[40, 40]} />
-            <meshStandardMaterial color="#0a0b0f" metalness={0.6} roughness={0.5} envMapIntensity={0.5} />
-          </mesh>
+          {/* no HDRI — car lit only by a low key + faint cool rim light */}
+          <ambientLight intensity={0.1} />
+          <directionalLight position={[6, 8, 6]} intensity={0.6} />
+          <directionalLight position={[-6, 5, -4]} intensity={0.3} color="#8fb2ff" />
 
-          <MouseParallaxRig pointer={pointer} strength={preset.parallax} interactive={!reducedMotion}>
-            <ForgeSwordModel />
-            <ForgeEmberField count={preset.embers} animate={!reducedMotion} mode={mode} />
-          </MouseParallaxRig>
+          {/* overhead spotlight — casts the car's shadow onto the floor */}
+          <spotLight
+            castShadow
+            position={[1.5, 7, 2]}
+            angle={0.5}
+            penumbra={0.6}
+            intensity={60}
+            distance={30}
+            shadow-mapSize={[2048, 2048]}
+            shadow-bias={-0.0002}
+            shadow-camera-near={1}
+            shadow-camera-far={30}
+          />
         </Suspense>
 
         <EffectComposer disableNormalPass>
-          <Bloom mipmapBlur intensity={preset.bloom} luminanceThreshold={0.55} luminanceSmoothing={0.2} />
-          <Vignette offset={0.28} darkness={preset.vignette} />
+          <Bloom mipmapBlur intensity={preset.bloom} luminanceThreshold={0.75} luminanceSmoothing={0.2} />
+          <Vignette offset={0.3} darkness={preset.vignette} />
         </EffectComposer>
 
         <AdaptiveDpr pixelated={false} />

@@ -9,15 +9,17 @@ import { initReactI18next } from "react-i18next";
 
 import enCommon from "./locales/en/common.json";
 import enLogin from "./locales/en/login.json";
+import enAbout from "./locales/en/about.json";
 import jaCommon from "./locales/ja/common.json";
 import jaLogin from "./locales/ja/login.json";
+import jaAbout from "./locales/ja/about.json";
 
 const STORAGE_KEY = "pcrent_lang";
 const SUPPORTED = ["en", "ja"];
 
 const resources = {
-  en: { common: enCommon, login: enLogin },
-  ja: { common: jaCommon, login: jaLogin },
+  en: { common: enCommon, login: enLogin, about: enAbout },
+  ja: { common: jaCommon, login: jaLogin, about: jaAbout },
 };
 
 function initialLanguage() {
@@ -36,7 +38,7 @@ i18n.use(initReactI18next).init({
   lng: initialLanguage(),
   fallbackLng: "en",
   supportedLngs: SUPPORTED,
-  ns: ["common", "login"],
+  ns: ["common", "login", "about"],
   defaultNS: "common",
   returnEmptyString: false,
   interpolation: { escapeValue: false }, // React already escapes.

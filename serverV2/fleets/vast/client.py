@@ -178,8 +178,27 @@ class VastClient:
     """Composed facade over offer search + instance management."""
 
     def __init__(self, config_provider: VastRuntimeConfigProvider) -> None:
+        self._config_provider = config_provider
         self.offers = VastOfferSearcher(config_provider)
         self.instances = VastInstanceManager(config_provider)
+
+    def get_account(self) -> dict[str, Any] | None:
+        """Read-only account snapshot (``GET /users/current/``) — remaining
+        prepaid ``credit`` / ``balance`` and email.  Uses the existing
+        ``VAST_API_KEY``; returns None on any error (never raises).  Backs the
+        admin cost dashboard's Vast-balance card."""
+        cfg = self._config_provider.get()
+        try:
+            resp = httpx.get(
+                f"{cfg.api_base}/users/current/",
+                headers=_auth_headers(cfg),
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:  # noqa: BLE001 — pure observability read
+            log.warning("Vast get_account failed: %s", exc)
+            return None
 
     def dispatch_job(
         self,

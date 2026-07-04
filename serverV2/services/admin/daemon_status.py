@@ -34,6 +34,13 @@ _KEY = "daemon:status:all"
 _TTL_SEC = 120
 _MIN_WRITE_INTERVAL = 15.0
 
+# Per-daemon bounded history ring for the admin "daemon detail" graphs.  Same
+# throttle as the snapshot write (so ~1 extra pair of commands per 15s per
+# daemon), capped + TTL'd so it self-cleans and never grows unbounded.
+_HISTORY_KEY_FMT = "daemon:history:{name}"
+_HISTORY_MAX = 2000        # ~8h at the 15s throttle
+_HISTORY_TTL_SEC = 60 * 60 * 24 * 3  # 3 days
+
 # The supervised singletons, in display order.
 KNOWN_DAEMONS = (
     "vast_monitor",
@@ -73,13 +80,44 @@ class DaemonStatusRepository:
             "detail": detail or {},
             "error": (error or None) if error is None else str(error)[:500],
         })
+        hist_key = namespaced(_HISTORY_KEY_FMT.format(name=name))
+        hist_entry = json.dumps({
+            "ts": now,
+            "tick_count": tick_count,
+            "detail": detail or {},
+            "error": bool(error),
+        })
         try:
             pipe = client.pipeline(transaction=False)
             pipe.hset(namespaced(_KEY), name, payload)
             pipe.expire(namespaced(_KEY), _TTL_SEC)
+            # append to the bounded history ring (newest first)
+            pipe.lpush(hist_key, hist_entry)
+            pipe.ltrim(hist_key, 0, _HISTORY_MAX - 1)
+            pipe.expire(hist_key, _HISTORY_TTL_SEC)
             pipe.execute()
         except redis.RedisError as exc:
             log.warning("DaemonStatus report(%s) failed: %s", name, exc)
+
+    def read_history(self, name: str, limit: int = 500) -> list[dict]:
+        """Most-recent-first history samples for one daemon.  Empty on Redis
+        error / no history."""
+        client = self._redis_client.client()
+        if client is None:
+            return []
+        limit = max(1, min(int(limit), _HISTORY_MAX))
+        try:
+            raw = client.lrange(namespaced(_HISTORY_KEY_FMT.format(name=name)), 0, limit - 1)
+        except redis.RedisError as exc:
+            log.warning("DaemonStatus read_history(%s) failed: %s", name, exc)
+            return []
+        out: list[dict] = []
+        for val in raw or []:
+            try:
+                out.append(json.loads(val))
+            except (TypeError, ValueError):
+                continue
+        return out
 
     def read_all(self) -> dict[str, dict]:
         """``{daemon_name: status}`` for every reporting daemon.  Empty on

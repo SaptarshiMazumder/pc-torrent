@@ -216,7 +216,9 @@ export function usePoll(fetcher, ms, deps = [], cacheKey = null) {
   const [data, setData] = useState(seed === undefined ? null : seed);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(seed === undefined);
+  const [updatedAt, setUpdatedAt] = useState(null);
   const alive = useRef(true);
+  const doFetchRef = useRef(null);
 
   useEffect(() => {
     alive.current = true;
@@ -231,26 +233,30 @@ export function usePoll(fetcher, ms, deps = [], cacheKey = null) {
       setLoading(false);
     }
     let timer = null;
-    const tick = async () => {
-      if (document.hidden) {
-        timer = setTimeout(tick, ms);
-        return;
-      }
+    const doFetch = async () => {
       try {
         const result = await fetcher();
         if (alive.current) {
           cacheSet(cacheKey, result);
           setData(result);
           setError(null);
+          setUpdatedAt(Date.now());
         }
       } catch (e) {
         if (alive.current) setError(e);
       } finally {
-        if (alive.current) {
-          setLoading(false);
-          timer = setTimeout(tick, ms);
-        }
+        if (alive.current) setLoading(false);
       }
+    };
+    // Exposed so a Refresh button can force an immediate fetch off-cadence.
+    doFetchRef.current = () => { if (alive.current) { setLoading(true); doFetch(); } };
+    const tick = async () => {
+      if (document.hidden) {
+        timer = setTimeout(tick, ms);
+        return;
+      }
+      await doFetch();
+      if (alive.current) timer = setTimeout(tick, ms);
     };
     tick();
     return () => {
@@ -260,5 +266,31 @@ export function usePoll(fetcher, ms, deps = [], cacheKey = null) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
-  return { data, error, loading };
+  const refresh = () => { if (doFetchRef.current) doFetchRef.current(); };
+  return { data, error, loading, updatedAt, refresh };
+}
+
+// "updated Xm ago · auto every Nm" + a manual Refresh button.  For non-live
+// panels that slow-poll (costs, GCP, users, history) so they don't hammer the
+// backend/external APIs — the button fetches on demand when you want fresh.
+export function RefreshBar({ updatedAt, loading, onRefresh, intervalMs }) {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => force((n) => n + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
+  let ago = "not loaded";
+  if (updatedAt) {
+    const m = Math.max(0, Math.round((Date.now() - updatedAt) / 60000));
+    ago = m === 0 ? "updated just now" : `updated ${m}m ago`;
+  }
+  const every = intervalMs ? ` · auto every ${Math.round(intervalMs / 60000)}m` : "";
+  return (
+    <span className="refreshbar">
+      <span className="hint">{ago}{every}</span>
+      <button className="btn ghost small" onClick={onRefresh} disabled={loading}>
+        {loading ? "refreshing…" : "refresh"}
+      </button>
+    </span>
+  );
 }

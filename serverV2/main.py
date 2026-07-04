@@ -154,8 +154,8 @@ def _wire_routers(c: Container) -> None:
         modal_client=c.modal_client,
         job_repo=c.job_repo,
     )
-    admin_config.init(c.allocation_client, c.cost_estimation_config_repo)
-    admin_dashboard.init(c.admin_telemetry_service)
+    admin_config.init(c.allocation_client, c.cost_estimation_config_repo, c.cost_pricing_config_repo)
+    admin_dashboard.init(c.admin_telemetry_service, c.cost_accounting_service, c.gcp_metrics_service)
     app_meta.init(c.allocation_config_repo)
     community.init(c.config.community_worker_image)
     docker.init(download_stats=c.download_stats)

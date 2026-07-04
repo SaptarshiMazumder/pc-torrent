@@ -118,6 +118,7 @@ class ModalFleetStrategy:
                 frame_end=task.frame_end,
                 frame_step=task.frame_step,
                 render_overrides_json=context.render_overrides_json,
+                log_streamer_env=context.log_streamer_env,
             )
             self._job_repo.save_provider_job_id(
                 job_id, provider_job_id=provider_job_id, column="modal_function_call_id",

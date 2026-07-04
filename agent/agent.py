@@ -46,6 +46,7 @@ from worker_core.blend_file_discovery import (
     choose_render_target,
     find_blend_files,
 )
+from worker_core.handler_log_tap import HandlerLogTap
 from worker_core.telemetry_parser import TelemetryParser
 
 # Phase set the agent's heartbeats use.  Smaller than the cloud-worker set
@@ -1218,6 +1219,7 @@ def execute_job(job):
     final_error = None
     container_name = None
     process = None
+    log_tap = None
 
     try:
         job_id = job["id"]
@@ -1465,11 +1467,33 @@ def execute_job(job):
             if isinstance(render_format, str) and render_format.strip():
                 cmd.extend(["-e", f"RENDER_FORMAT={render_format.strip()}"])
 
+        # jobs_logger: server stamped a JSON dict of PCR_* env pairs on
+        # the job row at dispatch.  Each pair becomes ``docker run -e``
+        # so HandlerLogTap inside the render container sees them and
+        # spawns log_streamer.  Absent / malformed -> capture disabled
+        # for this run; HandlerLogTap will silently no-op.
+        log_streamer_env_raw = job.get("log_streamer_env_json") or ""
+        if log_streamer_env_raw:
+            try:
+                log_streamer_env = json.loads(log_streamer_env_raw)
+                if isinstance(log_streamer_env, dict):
+                    for key, value in log_streamer_env.items():
+                        if value is None:
+                            continue
+                        cmd.extend(["-e", f"{key}={value}"])
+            except (TypeError, ValueError) as exc:
+                _log(
+                    f"[JOB] log_streamer_env_json parse failed ({exc}); "
+                    "worker log capture disabled for this run",
+                    level="warn",
+                )
+
         cmd.append(community_image())
 
         _log(f"[JOB] Starting Docker render container ({community_image()})...")
         _log(f"[JOB] Command: {' '.join(cmd)}")
 
+        log_tap = HandlerLogTap(job_id=job_id)
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -1490,6 +1514,7 @@ def execute_job(job):
         telemetry_parser = TelemetryParser()
         try:
             for line in iter(process.stdout.readline, ""):
+                log_tap.write(line)
                 line = line.rstrip()
                 if line:
                     telemetry_parser.consume(line)
@@ -1625,6 +1650,11 @@ def execute_job(job):
         notify_orchestrator_failure(job_id, final_error)
 
     finally:
+        if log_tap is not None:
+            try:
+                log_tap.close()
+            except Exception as exc:
+                _log(f"[JOB] Log tap close failed: {exc}", level="warn")
         try:
             job_heartbeat.stop()
         except NameError:

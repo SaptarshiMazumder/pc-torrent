@@ -486,6 +486,15 @@ class DispatchContext:
     input_filename: str
     render_overrides_json: str
     blend_url: str
+    # jobs_logger: PCR_* env vars every worker's log_streamer subprocess
+    # needs (signed URL + identity).  Built by LogStreamerEnvBuilder in
+    # the dispatch orchestration layer and stamped here so every fleet
+    # strategy -- current and future -- receives it by construction.  A
+    # new fleet CANNOT be added without receiving log_streamer_env,
+    # because the dataclass is frozen and this field is required.  Empty
+    # dict means the deployment has jobs_logger disabled; workers see
+    # no PCR_LOG_ENDPOINT and HandlerLogTap no-ops (backwards-compat).
+    log_streamer_env: dict[str, str] = field(default_factory=dict)
     max_retries: int = 0
     priority: int = 0
     # Render engine ("BLENDER_EEVEE", "CYCLES", ...).  Read by fleet
@@ -553,6 +562,12 @@ class CreateJobParams:
     #   * UI on instance card mount (deadline display)
     # Single source of truth for the clamp/multiplier math.
     allowed_stall_times: dict[str, Any] | None = None
+    # jobs_logger: JSON-serialized PCR_* env dict.  Community agents read
+    # this back on ``GET /jobs/next-for-machine/{id}`` and stamp each
+    # entry as ``docker run -e KEY=VALUE`` for the render container.
+    # Cloud fleets (vast/modal) also persist for parity/debugging but
+    # consume log_streamer_env from context directly at dispatch time.
+    log_streamer_env_json: str = ""
 
 
 # ---------------------------------------------------------------------------

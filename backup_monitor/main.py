@@ -37,6 +37,7 @@ import redis
 from backup_monitor_config import BackupMonitorConfig
 from ghost_reporter import GhostReporter
 from heartbeat_checker import HeartbeatChecker
+from log_write_trigger import LogWriteTrigger
 from modal_terminal_jobs_repository import ModalTerminalJobsRepository
 from modal_terminal_scanner import ModalTerminalScanner
 from orphan_reporter import OrphanReporter
@@ -131,6 +132,17 @@ def main() -> int:
         _build_modal_terminal_scanner(cfg, ghost_reporter).tick()
     except Exception:
         log.exception("Modal terminal-cleanup tick failed")
+
+    # jobs_logger: flush ready Redis worker logs into R2.  Dumb trigger --
+    # one HTTP POST; all storage logic lives orchestrator-side.
+    try:
+        LogWriteTrigger(
+            orchestrator_url=cfg.orchestrator_url,
+            orphan_secret=cfg.orphan_secret,
+            http_timeout_sec=cfg.http_timeout_sec,
+        ).tick()
+    except Exception:
+        log.exception("write-logs-to-r2 tick failed")
 
     log.info("Backup monitor tick complete")
     return 0

@@ -1,0 +1,634 @@
+@startuml worker_log_capture_classes
+title Plan: worker log capture -> Redis (live) -> R2 (write), per attempt\n(green = NEW entry; green-filled box = NEW class/file)
+
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #FAFAFA
+  BorderColor #444
+}
+skinparam package {
+  BackgroundColor #F4F4F4
+  BorderColor #888
+}
+
+!define NEW <color:#1B7A3E><b>
+!define NEW_END </b></color>
+
+' ============================================================
+' WORKER SIDE -- runs inside each render container
+' ============================================================
+package "worker_core/  <<shared by all fleets>>" #E1F5FE {
+
+  class "LogStreamer\n<size:11><i>NEW FILE: log_streamer.py</i></size>" as LogStreamer <<NEW>> #C8E6C9 {
+    - log_file_path : str
+    - endpoint_url : str          // signed URL, from env
+    - env, group_id, job_id : str
+    - attempt, chunk_index : int
+    - fleet, machine_id : str
+    - tick_interval_sec : int = 10
+    - last_offset : int = 0
+    - first_tick : bool = True
+    + run() : None                // main loop
+    + tick() : None               // one iteration
+    - _read_delta() : bytes       // log_file[last_offset:current]
+    - _post_chunk(bytes, is_first) : None
+    .. behavior ..
+    * runs as its own OS process (sibling of handler.py)
+    * fire-and-forget POST: any HTTP error is swallowed,
+      offset advances unconditionally -> no duplicates,
+      no retry logic, no local buffer, no in-worker state
+      that can grow unbounded.
+    * on first tick, POST carries identity headers so
+      backend can build the R2 write path later.
+    * NEVER blocks the render.  Blender is a subprocess
+      of handler.py with its own PID/memory/GPU state --
+      LogStreamer touches none of it.
+  }
+}
+
+' ============================================================
+' FLEET HANDLERS -- each spawns LogStreamer as subprocess.
+' No new entrypoint scripts, no Dockerfile ENTRYPOINT changes.
+' Same shape across vast / modal / community-agent.
+' ============================================================
+package "vast_worker/scripts/handler.py  <<updated>>" #FFF8E1 {
+  class "handler.py" as VastHandler <<updated>> {
+    + main()
+    .. new startup ..
+    NEW log_path = f"/tmp/pcr_worker_{job_id}.log" NEW_END
+    NEW streamer = subprocess.Popen([sys.executable,  NEW_END
+    NEW               "/log_streamer.py"],           NEW_END
+    NEW    env={..., "PCR_LOG_FILE": log_path,       NEW_END
+    NEW               "PCR_LOG_ENDPOINT": signed_url, NEW_END
+    NEW               "PCR_JOB_ID": job_id,          NEW_END
+    NEW               "PCR_GROUP_ID": group_id, ...  NEW_END
+    NEW               })                             NEW_END
+    NEW log_tap = open(log_path, "ab", buffering=0)  NEW_END
+    .. stdout loop (existing + tap) ..
+    for line in proc.stdout:
+        NEW log_tap.write(line) NEW_END       // one buffered write
+        parser.consume(line)                  // existing
+        ... existing progress / label parse ...
+    .. teardown ..
+    NEW log_tap.close() NEW_END
+    NEW streamer.send_signal(signal.SIGTERM)  NEW_END
+    NEW streamer.wait(timeout=5)              NEW_END
+  }
+  class "Dockerfile.cycles / .eevee" as VastDocker <<updated>> {
+    NEW COPY worker_core/log_streamer.py /  NEW_END
+    // ENTRYPOINT unchanged
+  }
+}
+
+package "modal_worker/handler.py  <<updated>>" #FFF8E1 {
+  class "handler.py" as ModalHandler <<updated>> {
+    + main()
+    .. identical pattern to vast handler ..
+    log_path = f"/tmp/pcr_worker_{job_id}.log"
+    streamer = subprocess.Popen([...])
+    log_tap  = open(log_path, "ab", buffering=0)
+    for line in proc.stdout:
+        log_tap.write(line)
+        parser.consume(line)
+        ...
+    log_tap.close()
+    streamer.send_signal(signal.SIGTERM)
+    streamer.wait(timeout=5)
+  }
+}
+
+package "agent/agent.py  (community) <<updated>>" #FFF8E1 {
+  class "agent.py" as AgentPy <<updated>> {
+    + render_container(...)
+    .. same pattern, host-side ..
+    log_path = os.path.join(tempfile.gettempdir(),
+                            f"pcr_worker_{job_id}.log")
+    streamer = subprocess.Popen([...])
+    log_tap  = open(log_path, "ab", buffering=0)
+    for line in container.logs(stream=True):
+        log_tap.write(line)
+        parser.consume(line)
+        ...
+    log_tap.close()
+    streamer.send_signal(signal.SIGTERM)
+    streamer.wait(timeout=5)
+    .. how PCR_* env vars reach the docker container ..
+    Job dict returned by /jobs/next-for-machine/{id}
+    carries the ``log_streamer_env`` field.  Agent
+    unpacks each key/value into ``-e KEY=VALUE`` on
+    the ``docker run`` command line.
+  }
+}
+
+' ============================================================
+' FLEET DISPATCH INTEGRATION -- log_streamer env is stamped on
+' DispatchContext ONCE, in the dispatch orchestration layer.
+' Every strategy is FORCED to accept a DispatchContext (protocol),
+' and log_streamer_env is a required frozen-dataclass field, so
+' a new fleet cannot be added without receiving it.
+' ============================================================
+
+package "serverV2/services/jobs/jobs_logger/  <<same submodule>>" #E8F5E9 {
+
+  class "LogStreamerEnvBuilder\n<size:11><i>NEW FILE: log_streamer_env_builder.py</i></size>" as EnvBuilder <<NEW>> #C8E6C9 {
+    - jobs_logger_service : JobsLoggerService
+    - env : str
+    + build(job_id, group_id, attempt,
+            chunk_index, fleet, machine_id)
+        : dict[str, str]
+    .. env vars produced ..
+    PCR_LOG_ENDPOINT  = svc.sign_upload_url(job_id)
+    PCR_ENV           = self.env
+    PCR_JOB_ID        = job_id
+    PCR_GROUP_ID      = group_id
+    PCR_ATTEMPT       = str(attempt)
+    PCR_CHUNK_INDEX   = str(chunk_index)
+    PCR_FLEET         = fleet
+    PCR_MACHINE_ID    = machine_id
+    .. called from ONE place ..
+    The dispatch orchestration layer builds this
+    once per job and stamps it on DispatchContext.
+    Strategies never call the builder directly.
+  }
+}
+
+package "serverV2/core/models.py  <<existing>>" #F3E5F5 {
+  class "DispatchContext (dataclass, frozen)" as DispatchCtx <<schema update>> {
+    group_id             : str
+    input_filename       : str
+    render_overrides_json: str
+    blend_url            : str
+    engine               : str
+    max_retries          : int
+    priority             : int
+    NEW log_streamer_env : dict[str, str]  NEW_END
+    .. enforcement ..
+    Required field on a frozen dataclass.
+    Impossible to construct a DispatchContext
+    without a log_streamer_env.  Every fleet
+    strategy accepts DispatchContext (Protocol) --
+    a new fleet cannot skip log capture even if
+    the author forgets, because the field is
+    always present.
+  }
+}
+
+package "serverV2/orchestrator/dispatch  <<dispatch orchestration>>" #FFF8E1 {
+  class "DispatchContextFactory\n<size:11><i>build_context() (existing site, updated)</i></size>" as DispatchFactory <<updated>> {
+    - env_builder : LogStreamerEnvBuilder
+    + build_context(task, group_id, job_id, fleet,
+                    machine_id) : DispatchContext
+    .. new step ..
+    log_streamer_env = env_builder.build(
+        job_id=job_id,
+        group_id=group_id,
+        attempt=task.attempt,
+        chunk_index=task.chunk_index,
+        fleet=fleet,
+        machine_id=machine_id or "")
+    return DispatchContext(
+        ..., log_streamer_env=log_streamer_env)
+    .. why here ..
+    Single call site for the env builder means
+    fleet strategies stay dumb.  Adding a 4th
+    fleet requires zero changes here.
+  }
+}
+
+package "serverV2/fleets/  <<existing, updated>>" #FCE4EC {
+  class "IFleetStrategy (protocol)" as IFleet <<contract>> {
+    + dispatch(task, context : DispatchContext,
+               job_id) : DispatchResult
+    .. contract ..
+    Every current and future fleet MUST
+    implement this signature.  ``context``
+    carries log_streamer_env by construction --
+    no way to receive a context without it.
+  }
+  class "VastFleetStrategy" as VastStrategy <<updated>> {
+    + dispatch(task, context, job_id)
+    .. one-line change ..
+    self.client.dispatch_job(...,
+        log_streamer_env=context.log_streamer_env)
+  }
+  class "ModalFleetStrategy" as ModalStrategy <<updated>> {
+    + dispatch(task, context, job_id)
+    .. one-line change ..
+    self.client.dispatch_job(...,
+        log_streamer_env=context.log_streamer_env)
+  }
+  class "CommunityStrategy" as CommStrategy <<updated>> {
+    + dispatch(task, context, job_id)
+    .. one-line change ..
+    Stashes context.log_streamer_env into
+    the row / next-for-machine response.
+  }
+}
+
+package "serverV2/fleets/vast/client.py  <<existing, updated>>" #FCE4EC {
+  class "VastClient.dispatch_job" as VastClient <<updated>> {
+    + dispatch_job(..., log_streamer_env : dict) : int
+    .. new merge ..
+    env_vars is the existing dict (JOB_ID,
+    BLEND_URL, FRAME_*, ...) merged with
+    NEW log_streamer_env NEW_END (adds PCR_* pairs
+    passed to the Vast API in the ``env`` field).
+  }
+}
+
+package "serverV2/fleets/modal/client.py  <<existing, updated>>" #FCE4EC {
+  class "ModalClient.dispatch_job" as ModalClient <<updated>> {
+    + dispatch_job(..., log_streamer_env : dict) : str
+    .. new merge ..
+    job_input gains
+    NEW log_streamer_env : dict[str, str] NEW_END
+    which handler.py unpacks onto os.environ
+    before HandlerLogTap spawns log_streamer.
+  }
+}
+
+package "serverV2/fleets/community/  <<existing, updated>>" #FCE4EC {
+  class "GET /jobs/next-for-machine/id" as CommEndpoint <<updated>> {
+    .. response body gains ..
+    NEW log_streamer_env NEW_END
+    // dict[str,str] of PCR_* env pairs.
+    // Agent reads this on poll, stamps each pair
+    // as ``docker run -e PCR_...=...``.
+  }
+}
+
+package "serverV2/config/config.py  <<existing>>" #F3E5F5 {
+  class "AppConfig" as AppCfg <<updated>> {
+    community_worker_image : str    // existing
+    orphan_secret          : str    // existing
+    NEW jobs_logger_hmac_secret : str NEW_END
+    NEW public_backend_url      : str NEW_END
+    .. env sources ..
+    JOBS_LOGGER_HMAC_SECRET  (signs upload URLs)
+    PUBLIC_BACKEND_URL       (URL prefix workers
+                              POST log chunks to)
+  }
+}
+
+' ============================================================
+' BACKEND -- ingest + live-read endpoints
+' ============================================================
+package "serverV2/api/routers/  <<existing>>" #E3F2FD {
+  class "internal_logs.py (router)\n<size:11><i>NEW FILE</i></size>" as LogRouter <<NEW>> #C8E6C9 {
+    NEW + POST /internal/jobs/{job_id}/log-append   NEW_END
+    NEW + POST /internal/jobs-logger/write-logs-to-r2  NEW_END
+    NEW + GET  /jobs/{job_id}/log                   NEW_END
+    NEW + GET  /jobs/{job_id}/log-stream (SSE)      NEW_END
+    .. append ..
+    1. delegate signature check to
+       JobsLoggerService.verify_upload_signature
+    2. delegate rest to JobsLoggerService.append
+       (router is thin -- no schema knowledge)
+    .. write-logs-to-r2 ..
+    1. verify X-Orphan-Secret (existing pattern)
+    2. count = JobsLoggerService.write_logs_to_r2()
+    3. return {written: count}
+    .. read (Redis-first, R2 fallback) ..
+    1. try JobsLoggerService.read_from_redis
+    2. if absent: SELECT jobs.worker_log_url
+       -> 302 redirect to R2
+  }
+}
+
+package "serverV2/services/jobs/jobs_logger/  <<NEW submodule>>" #E8F5E9 {
+
+  class "JobsLoggerService\n<size:11><i>NEW FILE: jobs_logger_service.py</i></size>" as JobsLogger <<NEW>> #C8E6C9 {
+    - mirror     : JobsLoggerRedisMirror
+    - r2_repo    : JobsLoggerR2Repository
+    - job_repo   : JobRepository         // existing
+    - stale_no_chunk_sec  : int = 300
+    - upload_url_ttl_sec  : int = 6 * 3600
+    + append(env, group_id, job_id, offset,
+            gzipped, first_ctx : dict | None) : None
+    + read_from_redis(env, group_id, job_id) : bytes | None
+    + sign_upload_url(job_id) : str
+    + verify_upload_signature(job_id, exp : int,
+                              sig : str) : bool
+    + write_logs_to_r2() : int
+    .. append() -- pure orchestration ..
+    // called by router on every worker POST
+    if first_ctx is not None:
+        mirror.write_meta(env, group_id, job_id,
+                          first_ctx)             // first chunk
+    mirror.append_chunk(env, group_id, job_id,
+                        offset, gzipped)
+    mirror.touch_meta(env, group_id, job_id)     // every chunk
+    .. write_logs_to_r2() -- pure orchestration ..
+    n = 0
+    for env, gid, jid in mirror.scan_log_keys():
+        meta = mirror.read_meta(env, gid, jid)
+        row  = job_repo.get_status(jid)
+        terminal = row.status in ('done','failed','cancelled')
+        stale    = (now - meta.last_seen_at)
+                   > stale_no_chunk_sec
+        if not (terminal or stale): continue
+        chunks = mirror.read_chunks(env, gid, jid)
+        blob   = _concat_by_offset(chunks)
+        url    = r2_repo.write_log(
+                    env, row.group_id, row.chunk_index,
+                    row.attempt, jid, gzip(blob))
+        job_repo.stamp_worker_log_url(jid, url)
+        mirror.delete(env, gid, jid)
+        n += 1
+    return n
+    .. signed URL (HMAC helpers) ..
+    URL:  .../log-append?exp={unix_ts}&sig={hex}
+    sig = HMAC_SHA256(server_secret, job_id + "|" + exp)
+    .. ZERO redis / r2 / postgres calls in this file ..
+    every store touch is delegated.  Service owns the
+    DECISIONS (when to write meta, terminal-or-stale
+    filter, when to delete) -- not the I/O.
+  }
+
+  class "JobsLoggerRedisMirror\n<size:11><i>NEW FILE: jobs_logger_redis_mirror.py</i></size>" as RedisMirror <<NEW>> #C8E6C9 {
+    - redis_client : RedisClient
+    - ttl_seconds  : int = 600
+    + append_chunk(env, group_id, job_id,
+                   offset, gzipped) : None
+    + write_meta(env, group_id, job_id,
+                 first_ctx : dict) : None
+    + touch_meta(env, group_id, job_id) : None
+    + read_chunks(env, group_id, job_id)
+        : list[tuple[int, bytes]]
+    + read_meta(env, group_id, job_id) : dict | None
+    + scan_log_keys()
+        : Iterable[tuple[str, str, str]]
+    + delete(env, group_id, job_id) : None
+    .. pure Redis I/O, ZERO business logic ..
+    // key builders
+    _key(env, gid, jid)      = f"logs:{env}:{gid}:{jid}"
+    _meta_key(env, gid, jid) = f"logs:meta:{env}:{gid}:{jid}"
+    // append_chunk
+    pipe.rpush(_key(...), pack(offset, gzipped))
+    pipe.expire(_key(...), ttl_seconds)
+    // write_meta (first chunk only)
+    pipe.hset(_meta_key(...), mapping={
+        "attempt", "chunk_index", "fleet",
+        "machine_id", "first_seen_at": now})
+    pipe.expire(_meta_key(...), ttl_seconds)
+    // touch_meta (every chunk)
+    pipe.hset(_meta_key(...), "last_seen_at", now)
+    pipe.expire(_meta_key(...), ttl_seconds)
+    // scan_log_keys
+    for k in client.scan_iter("logs:*"):
+        if k.startswith("logs:meta:"): continue
+        yield _parse(k) -> (env, gid, jid)
+    .. fail-open ..
+    RedisError -> log.warning + no-op.
+    Reads return None/[] on failure.
+    Mirrors the RenderGroupRedisMirror pattern
+    (services/render_groups/telemetry/) --
+    same fail-open + pipeline shape.
+  }
+
+  class "JobsLoggerR2Repository\n<size:11><i>NEW FILE: jobs_logger_r2_repository.py</i></size>" as R2Repo <<NEW>> #C8E6C9 {
+    - r2_client : R2Client
+    - bucket    : str
+    + write_log(env, group_id, chunk_index,
+                attempt, job_id,
+                gzipped : bytes) : str
+    + read_log(url : str) : bytes           // future
+    + list_logs_for_group(env, group_id)    // future
+        : list[dict]
+    .. pure R2 I/O, ZERO business logic ..
+    // path builder (only place that knows layout)
+    path = f"worker-logs/{env}/{group_id}/" \\
+           f"chunk_{chunk_index}/" \\
+           f"attempt_{attempt}__{job_id}.log.gz"
+    r2_client.put_object(
+        bucket, path, gzipped,
+        content_type="application/gzip",
+        content_encoding="gzip",
+        tags={"created_date": today_iso(),
+              "env": env},
+    )
+    return r2_client.public_url_for(bucket, path)
+    .. read_log / list_logs_for_group ..
+    Reserved for later -- frontend instance card
+    fallback fetch, admin "download all logs for
+    a render" bulk export, etc.
+  }
+}
+
+package "serverV2/repositories/  <<existing>>" #F3E5F5 {
+  class "JobRepository" as JobRepo <<existing, +1 method>> {
+    + get_status(job_id) : dict
+        // returns {status, group_id,
+        //          chunk_index, attempt}
+    NEW + stamp_worker_log_url(job_id, url : str) : None NEW_END
+        // UPDATE jobs SET worker_log_url = %s
+        //  WHERE id = %s
+  }
+}
+
+' ============================================================
+' POSTGRES -- schema changes
+' ============================================================
+package "serverV2/infrastructure/db.py  <<existing>>" #F3E5F5 {
+  class "jobs (table)" as JobsTable <<schema update>> {
+    id, group_id, chunk_index, attempt,
+    machine_id, status, ...
+    NEW worker_log_url : TEXT NULL  NEW_END
+    .. stamped by ..
+    JobRepository.stamp_worker_log_url()
+    called from JobsLoggerService.write_logs_to_r2()
+    .. covers ..
+    every attempt -- success AND failure
+    (identity: job_id, since each retry is a new row)
+  }
+  class "render_telemetry (table)" as TelemTable <<schema update>> {
+    id, job_id, group_id, fleet, machine_id, ...
+    <color:#B00020><s>worker_log_url : TEXT</s></color>  <color:#B00020><b>DROP (pending confirm)</b></color>
+    .. rationale ..
+    render_telemetry rows are only written on chunk
+    SUCCESS.  Failed-attempt logs would have nowhere
+    to be stamped.  jobs.worker_log_url becomes the
+    single source of truth -- one row per attempt,
+    covers all outcomes.
+  }
+}
+
+' ============================================================
+' BACKUP_MONITOR -- existing Cloud Run Job, 60s cadence
+' Dumb scheduler.  ZERO knowledge of Redis / R2 / logs schema.
+' ============================================================
+package "backup_monitor/  <<external Cloud Run Job>>" #FFF8E1 {
+
+  class "LogWriteTrigger\n<size:11><i>NEW FILE</i></size>" as LogTrigger <<NEW>> #C8E6C9 {
+    - url_base : str
+    - secret : str
+    - timeout_sec : int = 60
+    + tick() : None
+    .. behavior (whole thing) ..
+    POST {url_base}/internal/jobs-logger/write-logs-to-r2
+         Header: X-Orphan-Secret
+    log("wrote N logs to R2")
+    .. note ..
+    That is the ENTIRE scanner.  ~15 lines.
+    All storage logic lives in JobsLoggerService.
+    Schema changes never touch this deployment.
+  }
+
+  class "main.py" as BMMain <<existing, updated>> {
+    + main()
+    .. updated body ..
+    orphan_scanner.tick()          // existing
+    vast_ghost_scanner.tick()      // existing
+    modal_terminal_scanner.tick()  // existing
+    NEW log_write_trigger.tick()  NEW_END
+  }
+}
+
+' ============================================================
+' R2 -- storage layout (informational)
+' ============================================================
+package "R2 buckets  <<external>>" #FCE4EC {
+  class "pc-rent-<env>-blends\n<size:11><i>existing, unchanged</i></size>" as R2Blends <<existing>> {
+    rendered frame outputs
+    (jobs_logger does NOT write here)
+  }
+  class "pc-rent-logs-<env>\n<size:11><i>NEW BUCKET per env</i></size>" as R2Logs <<NEW>> #C8E6C9 {
+    env : R2_LOGS_BUCKET_NAME
+    .. layout inside bucket ..
+    {env}/
+      {group_id}/
+        chunk_{chunk_index}/
+          attempt_{attempt}__{job_id}.log.gz
+    .. properties ..
+    * one object per worker attempt (never overwritten)
+    * env encoded in bucket AND path (belt + suspenders)
+    * lifecycle rule (dashboard, one-time):
+      delete objects > 30 days old
+    * frontend instance card reads jobs.worker_log_url
+      -> direct R2 fetch (or backend proxy)
+    * separate bucket keeps retention tightened without
+      affecting user-visible frame retention
+  }
+}
+
+' ============================================================
+' RELATIONSHIPS
+' ============================================================
+
+' --- fleet dispatch wiring (log-streamer env stamping) ---
+VastStrategy   --> EnvBuilder   : build(...)
+ModalStrategy  --> EnvBuilder   : build(...)
+CommStrategy   --> EnvBuilder   : build(...)
+EnvBuilder     --> JobsLogger   : sign_upload_url(job_id)
+VastStrategy   --> VastClient   : dispatch_job(...,\nlog_streamer_env)
+ModalStrategy  --> ModalClient  : dispatch_job(...,\nlog_streamer_env)
+CommStrategy   --> CommEndpoint : response payload
+CommEndpoint   ..> AgentPy      : job dict\n(log_streamer_env)
+
+' --- worker startup wiring ---
+VastDocker    --> VastEntry     : ENTRYPOINT
+CommDocker    --> CommEntry     : ENTRYPOINT
+VastEntry     ..> LogStreamer   : spawns bg process
+CommEntry     ..> LogStreamer   : spawns bg process
+ModalHandler  ..> LogStreamer   : spawns bg process
+VastEntry     --> VastHandler   : runs foreground
+CommEntry     --> CommRender    : runs foreground
+
+' --- HTTP boundary ---
+LogStreamer ..> LogRouter : POST log-append\n<color:#1B7A3E>fire-and-forget</color>
+
+' --- backend internals: service composes three collaborators ---
+LogRouter   --> JobsLogger
+JobsLogger  --> RedisMirror  : append_chunk\nwrite_meta\ntouch_meta\nread_chunks\nread_meta\nscan_log_keys\ndelete
+JobsLogger  --> R2Repo       : write_log
+JobsLogger  --> JobRepo      : get_status\nstamp_worker_log_url
+JobRepo     --> JobsTable    : SQL
+
+' --- archival wiring ---
+BMMain      *-- LogTrigger
+LogTrigger  ..> LogRouter    : POST write-logs-to-r2\n<color:#1B7A3E>X-Orphan-Secret</color>
+LogRouter   --> JobsLogger   : write_logs_to_r2()
+R2Log       ..> R2Logs     : writes objects
+
+' ============================================================
+' NOTES
+' ============================================================
+
+note as IsolationNote #E1F5FE
+  <b>Byte-identical render guarantee</b>
+  LogStreamer is a separate OS process, spawned
+  by the entrypoint BEFORE Blender.  It reads a
+  log file that render.sh / handler.py already
+  write via ``tee`` / subprocess.PIPE.  Blender's
+  command line, env vars, memory, GPU work and
+  output files are UNCHANGED.
+end note
+
+note as FireForgetNote #FFF3E0
+  <b>Fire-and-forget contract</b>
+  Worker advances last_offset UNCONDITIONALLY after
+  every POST (success or failure).
+  * no retry, no local buffer, no worker-side state
+    that could grow unbounded
+  * no duplicate lines possible
+  * trade: an HTTP failure = 10 s window of logs
+    lost forever.  Accepted for alpha telemetry.
+end note
+
+note as IdentityNote #FFFDE7
+  <b>Per-attempt identity</b>
+  Each retry creates a fresh job_id via
+  ``create_failover_job(new_job_id=...)``.
+  Therefore ``job_id`` alone globally identifies
+  one worker attempt end-to-end.
+  R2 filename encodes (attempt, job_id); path
+  encodes (group_id, chunk_index) so R2 listings
+  show the retry story visually.
+end note
+
+note as CommunityNote #F3E5F5
+  <b>Community fleet parity</b>
+  Same LogStreamer, same wire protocol, same R2
+  layout.  Sidecar lives INSIDE the docker
+  container (Dockerfile.cycles COPY + ENTRYPOINT
+  change).  agent.py on the host is untouched --
+  the render happens in the container regardless.
+  Step-0 audit (pre-Phase-1) verifies telemetry
+  field parity between community/vast/modal.
+end note
+
+note as ScheduleNote #E8F5E9
+  <b>Schedule reuse + strict layering</b>
+  backup_monitor is a DUMB scheduler.  LogWriteTrigger
+  is one HTTP POST per tick.  It has no Redis client,
+  no R2 client, no DB connection for this concern.
+  All log-storage knowledge lives in the jobs_logger
+  submodule, split three ways per SRP:
+    * JobsLoggerRedisMirror -- Redis I/O
+    * JobsLoggerR2Repository    -- R2 I/O + path builder
+    * JobRepository (+1 method) -- Postgres stamp
+  JobsLoggerService is pure orchestration and holds
+  no store I/O.  Schema changes never require a
+  backup_monitor redeploy.
+  Redis TTL 10 min + 60 s cadence -> 10 write
+  attempts before auto-expiry.
+end note
+
+note as NamingRule #FCE4EC
+  <b>Naming rule (from feedback memory)</b>
+  Every param / field / dict-key here is named
+  after WHAT IT IS: ``log_streamer_env`` (not
+  ``extra_env``), ``jobs_logger_hmac_secret``
+  (not ``secret``), ``LogStreamerEnvBuilder``
+  (not ``EnvHelper``).  Reject generic names on
+  sight -- the name IS the API.
+end note
+
+note as OpenQuestions #FFEBEE
+  <b>Resolved</b>
+  1. DROP render_telemetry.worker_log_url -- DONE.
+  2. First-chunk context via HTTP headers -- DONE.
+  3. Community parity audit -- ZERO drift found.
+end note
+
+@enduml

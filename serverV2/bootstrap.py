@@ -192,6 +192,18 @@ from serverV2.services.admin.cost.providers import (
 )
 from serverV2.repositories.llm_usage_repository import LlmUsageRepository
 from serverV2.services.assets.service import AssetService
+from serverV2.services.jobs.jobs_logger.jobs_logger_r2_repository import (
+    JobsLoggerR2Repository,
+)
+from serverV2.services.jobs.jobs_logger.jobs_logger_redis_mirror import (
+    JobsLoggerRedisMirror,
+)
+from serverV2.services.jobs.jobs_logger.jobs_logger_service import (
+    JobsLoggerService,
+)
+from serverV2.services.jobs.jobs_logger.log_streamer_env_builder import (
+    LogStreamerEnvBuilder,
+)
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
 from serverV2.services.jobs.service import JobService
 from serverV2.services.machines.service import MachineService
@@ -267,6 +279,7 @@ class Container:
         gcp_metrics_service: GcpMetricsService,
         cost_pricing_config_repo: CostPricingConfigRepository,
         cost_estimation_config_repo: AllocationCostEstimationConfigRepository,
+        jobs_logger_service: JobsLoggerService,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
@@ -323,6 +336,9 @@ class Container:
         # Separate Firestore config/cost_estimation doc, exposed for the
         # admin dashboard's read-only config viewer.
         self.cost_estimation_config_repo = cost_estimation_config_repo
+        # jobs_logger owns the worker-log capture flow: signed URL for
+        # workers to POST chunks, Redis buffer, R2 flush trigger.
+        self.jobs_logger_service = jobs_logger_service
 
 
 def build(
@@ -650,6 +666,34 @@ def build(
     allocation_engine_resolver = AllocationEngineResolver()
     allocation_snapshot_mutator = AllocationSnapshotMutator()
 
+    # jobs_logger submodule: pure-Redis mirror + pure-R2 repo composed
+    # by JobsLoggerService.  Empty HMAC secret / URL -> signed URLs
+    # will not verify, effectively disabling capture (worker's
+    # HandlerLogTap is already a no-op when the endpoint URL is unset
+    # in the dispatch env).  Constructed HERE (before the dispatch tick
+    # processor) because that processor needs the env builder to stamp
+    # PCR_* onto every DispatchContext.
+    from serverV2.infrastructure.storage.client import get_logs_bucket
+    jobs_logger_service = JobsLoggerService(
+        mirror=JobsLoggerRedisMirror(redis),
+        r2_repo=JobsLoggerR2Repository(bucket=get_logs_bucket()),
+        job_repo=job_repo,
+        hmac_secret=cfg.jobs_logger_hmac_secret,
+        public_url_base=cfg.public_backend_url,
+    )
+    # Deployment env string used as the ``PCR_ENV`` header on every worker
+    # log-append.  Sourced from REDIS_KEY_PREFIX (already per-env) with
+    # the trailing colon stripped -- keeps env identity in one source of
+    # truth.  Prod leaves REDIS_KEY_PREFIX empty, so fall back to "prod".
+    _log_streamer_deploy_env = (
+        (os.environ.get("REDIS_KEY_PREFIX", "").strip().rstrip(":"))
+        or "prod"
+    )
+    log_streamer_env_builder = LogStreamerEnvBuilder(
+        jobs_logger_service=jobs_logger_service,
+        env=_log_streamer_deploy_env,
+    )
+
     # Tick-phase processors -- owned by the daemon, no public surface.
     dispatch_tick_processor = AllocationDispatchTickProcessor(
         queue_repo=queue_repo,
@@ -661,6 +705,7 @@ def build(
         get_group_status=_get_group_status,
         codec=allocation_codec,
         engine_resolver=allocation_engine_resolver,
+        log_streamer_env_builder=log_streamer_env_builder,
     )
     # Affinity facade: resolves a group's preferred placements (combos that
     # started/rendered any chunk) from job history.  Injected into the daemon
@@ -1111,4 +1156,5 @@ def build(
         gcp_metrics_service=gcp_metrics_service,
         cost_pricing_config_repo=cost_pricing_config_repo,
         cost_estimation_config_repo=cost_estimation_config_repo,
+        jobs_logger_service=jobs_logger_service,
     )

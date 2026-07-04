@@ -43,6 +43,9 @@ from serverV2.allocation.allocation_queue_item_codec import (
 )
 from serverV2.core.models import DispatchContext, DispatchResult
 from serverV2.repositories.in_progress_chunk_repository import InProgressChunkRepository
+from serverV2.services.jobs.jobs_logger.log_streamer_env_builder import (
+    LogStreamerEnvBuilder,
+)
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +64,7 @@ class AllocationDispatchTickProcessor:
         get_group_status: Callable[[str], str | None],
         codec: AllocationQueueItemCodec,
         engine_resolver: AllocationEngineResolver,
+        log_streamer_env_builder: LogStreamerEnvBuilder,
     ) -> None:
         self._queue_repo = queue_repo
         self._in_progress = in_progress_repo
@@ -71,6 +75,7 @@ class AllocationDispatchTickProcessor:
         self._get_group_status = get_group_status
         self._codec = codec
         self._engine_resolver = engine_resolver
+        self._log_streamer_env_builder = log_streamer_env_builder
 
     def process(self, fleet: str) -> int:
         """Drain ``dispatch_queue`` for one fleet until cap or empty.
@@ -174,15 +179,6 @@ class AllocationDispatchTickProcessor:
 
         task = self._codec.decode(item)
         blend_url = self._blend_url.resolve(task.fleet, group_id, item.input_filename)
-        dispatch_ctx = DispatchContext(
-            group_id=group_id,
-            input_filename=item.input_filename,
-            render_overrides_json=item.render_overrides_json,
-            blend_url=blend_url,
-            max_retries=item.max_retries,
-            priority=item.priority,
-            engine=self._engine_resolver.from_overrides_json(item.render_overrides_json),
-        )
 
         # job_id was pre-generated at enqueue time and stored on the
         # queue row.  Reuse it so the upstream caller's recorded job_id
@@ -190,6 +186,29 @@ class AllocationDispatchTickProcessor:
         # ledger BEFORE dispatch so a synchronous failure can still be
         # deduplicated by the retry chain's stale-signal guard.
         job_id = item.job_id or str(uuid4())
+
+        # jobs_logger: stamp the PCR_* env dict onto the context so
+        # every fleet strategy (current + future) forwards a signed
+        # log-append URL + identity headers into the worker container.
+        # Single call site -- a new fleet cannot skip log capture.
+        log_streamer_env = self._log_streamer_env_builder.build(
+            job_id=job_id,
+            group_id=group_id,
+            attempt=task.attempt,
+            chunk_index=task.chunk_index or 0,
+            fleet=task.fleet,
+            machine_id=task.machine_id or "",
+        )
+        dispatch_ctx = DispatchContext(
+            group_id=group_id,
+            input_filename=item.input_filename,
+            render_overrides_json=item.render_overrides_json,
+            blend_url=blend_url,
+            log_streamer_env=log_streamer_env,
+            max_retries=item.max_retries,
+            priority=item.priority,
+            engine=self._engine_resolver.from_overrides_json(item.render_overrides_json),
+        )
         self._in_progress.claim_or_replace(
             group_id=group_id,
             chunk_index=task.chunk_index or 0,

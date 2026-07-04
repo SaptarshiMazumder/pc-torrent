@@ -680,10 +680,21 @@ class AppConfig:
     # Shared secret expected by ``POST /internal/orphan/{job_id}`` (env
     # ``ORPHAN_SECRET``).  Empty string disables the endpoint.
     orphan_secret: str = ""
+    # jobs_logger: HMAC secret used to sign the per-job worker log-append
+    # URLs (env ``JOBS_LOGGER_HMAC_SECRET``).  Empty disables log capture
+    # (worker's HandlerLogTap goes no-op since dispatch won't stamp a URL).
+    jobs_logger_hmac_secret: str = ""
+    # jobs_logger: public base URL of this backend, used only as the
+    # prefix for signed log-append URLs sent to workers.  Env
+    # ``PUBLIC_BACKEND_URL``.  If unset, log capture is effectively
+    # disabled at the URL-signing layer.
+    public_backend_url: str = ""
 
     @classmethod
     def from_env(cls) -> AppConfig:
         return cls(
             community_worker_image=_env_str("COMMUNITY_WORKER_IMAGE"),
             orphan_secret=_env_str("ORPHAN_SECRET", ""),
+            jobs_logger_hmac_secret=_env_str("JOBS_LOGGER_HMAC_SECRET", ""),
+            public_backend_url=_env_str("PUBLIC_BACKEND_URL", ""),
         )

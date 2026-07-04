@@ -12,6 +12,7 @@ INSERT entirely, which is why community jobs disappeared on dispatch.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from serverV2.allocation.allowed_stall_times_resolver import AllowedStallTimesResolver
@@ -88,6 +89,10 @@ class CommunityStrategy:
             estimated_seconds_per_frame=task.estimated_seconds_per_frame,
             estimated_startup_seconds=task.estimated_startup_seconds,
             allowed_stall_times=allowed_stall_times,
+            # jobs_logger: persist the PCR_* env dict on the row so the
+            # community agent (which polls later) can read the signed URL
+            # + identity headers and stamp them onto docker run -e flags.
+            log_streamer_env_json=json.dumps(context.log_streamer_env),
         ))
         # Flip the machine to 'processing' on dispatch (not on agent claim).
         # Closes the dispatch -> claim race window: subsequent allocator

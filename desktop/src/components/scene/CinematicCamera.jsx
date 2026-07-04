@@ -32,20 +32,29 @@ export default function CinematicCamera({ set = "default", enabled = true }) {
   const setRef = useRef(set);
   setRef.current = set; // always read the latest set inside the frame loop
   const angle = useRef(SETS[set]?.lo ?? SETS.default.lo);
+  const time = useRef({ start: -1, last: -1 });
 
-  useFrame((state, delta) => {
+  useFrame(() => {
+    // Self-time off performance.now() (seconds) rather than R3F's clock: under a
+    // throttled / manual frameloop that clock can stall, freezing the phase and
+    // feeding the smoother garbage deltas (the stuck + jitter). Wall time is stable.
+    const now = performance.now() / 1000;
+    if (time.current.start < 0) time.current.start = time.current.last = now;
+    const elapsed = now - time.current.start;
+    const delta = Math.min(now - time.current.last, 0.1);
+    time.current.last = now;
+
     const { lo, hi } = SETS[setRef.current] ?? SETS.default;
 
     // continuous cosine ping-pong, eased (zero speed) at both endpoints
-    const phase = (state.clock.elapsedTime / HALF_PERIOD) * Math.PI;
+    const phase = (elapsed / HALF_PERIOD) * Math.PI;
     const target = lo + (hi - lo) * (0.5 - 0.5 * Math.cos(phase));
 
     if (enabled) {
-      // shortest angular path to the target, then ease toward it (clamped delta
-      // so returning from a hidden window catches up smoothly, not with a snap)
+      // shortest angular path to the target, then ease toward it
       let t = target;
       t -= Math.round((t - angle.current) / TWO_PI) * TWO_PI;
-      const k = 1 - Math.exp(-Math.min(delta, 0.1) / SMOOTH_TAU);
+      const k = 1 - Math.exp(-delta / SMOOTH_TAU);
       angle.current = MathUtils.lerp(angle.current, t, k);
     } else {
       angle.current = lo;

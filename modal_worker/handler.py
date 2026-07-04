@@ -58,6 +58,7 @@ from worker_core import (
     PhaseTracker,
     ProcessSampler,
 )
+from worker_core.handler_log_tap import HandlerLogTap
 from worker_core.telemetry_parser import TelemetryParser
 
 
@@ -100,6 +101,16 @@ def handler(job: dict) -> dict:
     render_overrides_b64: str = inp.get("render_overrides_b64", "")
     backend_url: str = inp["backend_url"].rstrip("/")
 
+    # jobs_logger: server stamps PCR_* pairs onto the job input.  Modal
+    # workers boot fresh so os.environ starts clean; copy them across so
+    # HandlerLogTap (which reads from os.environ) sees them.  Absent /
+    # empty means capture is disabled for this deployment; HandlerLogTap
+    # then silently no-ops.
+    for key, value in (inp.get("log_streamer_env") or {}).items():
+        if value is None:
+            continue
+        os.environ[str(key)] = str(value)
+
     log.info(f"Job {job_id}: frames {frame_start}-{frame_end} step {frame_step}")
 
     # Shared terminal-signal event.  Set when the orchestrator returns
@@ -139,7 +150,8 @@ def handler(job: dict) -> dict:
         )
         return {"status": "skipped", "reason": "job already terminal"}
 
-    with tempfile.TemporaryDirectory() as workdir:
+    with tempfile.TemporaryDirectory() as workdir, \
+            HandlerLogTap(job_id=job_id) as log_tap:
         input_dir = os.path.join(workdir, "input")
         output_dir = os.path.join(workdir, "output")
         os.makedirs(input_dir)
@@ -288,6 +300,7 @@ def handler(job: dict) -> dict:
         telemetry_parser = TelemetryParser()
 
         for line in proc.stdout:
+            log_tap.write(line)
             # C.1 -- terminal signal from heartbeat / progress.  Orchestrator
             # already considers this job terminal; kill the subprocess and
             # bail out of the read loop.

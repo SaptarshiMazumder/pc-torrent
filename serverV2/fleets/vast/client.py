@@ -93,7 +93,7 @@ class VastInstanceManager:
             "FRAME_STEP": str(frame_step),
             "RENDER_OVERRIDES_B64": render_overrides_b64,
             "BACKEND_URL": cfg.public_backend_url,
-            # jobs_logger: PCR_LOG_ENDPOINT, PCR_ENV, PCR_JOB_ID, ...
+            # jobs_logger: PCR_LOG_ENDPOINT, PCR_ENV, PCR_GROUP_ID.
             # HandlerLogTap reads these to spawn log_streamer.  Empty
             # dict means capture is disabled for this deployment.
             **log_streamer_env,

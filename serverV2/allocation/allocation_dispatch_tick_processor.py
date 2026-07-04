@@ -194,10 +194,6 @@ class AllocationDispatchTickProcessor:
         log_streamer_env = self._log_streamer_env_builder.build(
             job_id=job_id,
             group_id=group_id,
-            attempt=task.attempt,
-            chunk_index=task.chunk_index or 0,
-            fleet=task.fleet,
-            machine_id=task.machine_id or "",
         )
         dispatch_ctx = DispatchContext(
             group_id=group_id,

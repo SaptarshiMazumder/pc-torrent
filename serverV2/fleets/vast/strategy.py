@@ -114,6 +114,7 @@ class VastFleetStrategy:
                 frame_step=task.frame_step,
                 render_overrides_json=context.render_overrides_json,
                 offer_id=task.offer_id,
+                log_streamer_env=context.log_streamer_env,
                 image=image,
             )
             provider_job_id = str(instance_id)

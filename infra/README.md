@@ -16,7 +16,8 @@ bash infra/terraform/bootstrap.sh
 - Firebase project `pc-rent-<env>` → service account JSON + web SDK config
 - Neon project + DB → pooled connection URL
 - Upstash global Redis DB → `rediss://` URL
-- R2 bucket `pc-rent-<env>-blends` in Cloudflare → reuse account-scoped R2 keys
+- R2 bucket `pc-rent-<env>-blends` in Cloudflare → rendered frame outputs
+- R2 bucket `pc-rent-logs-<env>` in Cloudflare → worker stdout logs (jobs_logger). Kept separate so retention lifecycle (recommended: delete after 30 days) can be tightened without touching user output. Reuses the same account-scoped R2 keys.
 - ⚠️ **Separate Vast.ai account per env** — without this, this env's backup monitor will see other envs' Vast instances and destroy them. Shared Vast key = cross-env render kills.
 
 **Fill `infra/envs/<env>/.env`** — copy `.env.example`. The `*_IMAGE` lines default to the existing test tags (`pcrent-*:5.0.4`), so the env works out of the box. Push env-specific tags later (see below) only when you want isolation.
@@ -28,12 +29,12 @@ Admins are minted by setting `role: "admin"` on the `users/{uid}` Firestore doc.
 
 **(Optional) push env-specific worker images** — to get `:<env>-vX.Y.Z` tags:
 ```bash
-bash infra/scripts/push-worker.sh <env> 0.0.19 vast-cycles
-bash infra/scripts/push-worker.sh <env> 0.0.19 vast-eevee
-bash infra/scripts/push-worker.sh <env> 0.0.19 modal-cycles
-bash infra/scripts/push-worker.sh <env> 0.0.19 community-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.21 vast-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.21 vast-eevee
+bash infra/scripts/push-worker.sh <env> 0.0.21 modal-cycles
+bash infra/scripts/push-worker.sh <env> 0.0.21 community-cycles
 ```
-Then on GHCR, flip each new `pc-rent-*-worker-*` package from private → **public** (Modal/Vast can't pull private images). Finally bump the four `*_IMAGE` lines in `.env` to `:<env>-v0.0.19`.
+Then on GHCR, flip each new `pc-rent-*-worker-*` package from private → **public** (Modal/Vast can't pull private images). Finally bump the four `*_IMAGE` lines in `.env` to `:<env>-v0.0.21`.
 
 **Deploy chain (run in this order):**
 ```bash

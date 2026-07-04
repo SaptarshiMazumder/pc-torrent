@@ -73,6 +73,7 @@ class VastInstanceManager:
         frame_end: int,
         frame_step: int,
         render_overrides_json: str,
+        log_streamer_env: dict[str, str],
         image: str | None = None,
     ) -> int:
         cfg = self._config_provider.get()
@@ -92,6 +93,10 @@ class VastInstanceManager:
             "FRAME_STEP": str(frame_step),
             "RENDER_OVERRIDES_B64": render_overrides_b64,
             "BACKEND_URL": cfg.public_backend_url,
+            # jobs_logger: PCR_LOG_ENDPOINT, PCR_ENV, PCR_JOB_ID, ...
+            # HandlerLogTap reads these to spawn log_streamer.  Empty
+            # dict means capture is disabled for this deployment.
+            **log_streamer_env,
         }
         resp = httpx.put(
             f"{cfg.api_base}/asks/{offer_id}/",
@@ -210,6 +215,7 @@ class VastClient:
         frame_step: int,
         render_overrides_json: str,
         offer_id: int,
+        log_streamer_env: dict[str, str],
         image: str | None = None,
     ) -> int:
         """Rent a specific offer chosen at planning time, return instance_id."""
@@ -221,6 +227,7 @@ class VastClient:
             frame_end=frame_end,
             frame_step=frame_step,
             render_overrides_json=render_overrides_json,
+            log_streamer_env=log_streamer_env,
             image=image,
         )
 

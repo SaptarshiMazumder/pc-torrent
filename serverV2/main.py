@@ -118,6 +118,7 @@ def _wire_routers(c: Container) -> None:
         health,
         internal,
         jobs,
+        jobs_logger,
         logs,
         machines,
         pre_render,
@@ -154,6 +155,11 @@ def _wire_routers(c: Container) -> None:
         modal_client=c.modal_client,
         job_repo=c.job_repo,
     )
+    jobs_logger.init(
+        c.jobs_logger_service,
+        orphan_secret=c.config.orphan_secret,
+        job_repo=c.job_repo,
+    )
     admin_config.init(c.allocation_client, c.cost_estimation_config_repo, c.cost_pricing_config_repo)
     admin_dashboard.init(c.admin_telemetry_service, c.cost_accounting_service, c.gcp_metrics_service)
     app_meta.init(c.allocation_config_repo)
@@ -171,6 +177,7 @@ def _wire_routers(c: Container) -> None:
     app.include_router(logs.router)
     app.include_router(debug.router)
     app.include_router(internal.router)
+    app.include_router(jobs_logger.router)
     app.include_router(admin_config.router)
     app.include_router(admin_dashboard.router)
     app.include_router(app_meta.router)

@@ -45,6 +45,7 @@ from worker_core.blend_file_discovery import (
     choose_render_target,
     find_blend_files,
 )
+from worker_core.handler_log_tap import HandlerLogTap
 from worker_core.telemetry_parser import TelemetryParser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -259,6 +260,7 @@ def main() -> int:
         terminal_event=terminal_event,
     )
     heartbeat.start()
+    log_tap = HandlerLogTap(job_id=job_id)
 
     try:
         with tempfile.TemporaryDirectory() as workdir:
@@ -408,6 +410,7 @@ def main() -> int:
             telemetry_parser = TelemetryParser()
 
             for line in proc.stdout:
+                log_tap.write(line)
                 # C.1 -- terminal signal from heartbeat / progress.
                 # Orchestrator already considers this job terminal; no
                 # point continuing the render.  Kill the subprocess and
@@ -524,6 +527,7 @@ def main() -> int:
             log.info(f"Job {job_id} finished rendering - {len(uploaded)} files uploaded")
             return 0
     finally:
+        log_tap.close()
         heartbeat.stop()
 
 

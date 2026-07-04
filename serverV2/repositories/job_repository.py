@@ -52,9 +52,10 @@ class JobRepository:
                 price_per_hour_at_dispatch,
                 estimated_seconds, estimated_cost_usd,
                 estimated_seconds_per_frame, estimated_startup_seconds,
-                allowed_stall_times
+                allowed_stall_times,
+                log_streamer_env_json
             )
-            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+            VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
             """,
             (
                 params.job_id, params.machine_id, params.fleet, params.gpu_type,
@@ -66,6 +67,7 @@ class JobRepository:
                 params.estimated_seconds, params.estimated_cost_usd,
                 params.estimated_seconds_per_frame, params.estimated_startup_seconds,
                 allowed_stall_json,
+                params.log_streamer_env_json or "",
             ),
         )
         return params.job_id
@@ -259,6 +261,16 @@ class JobRepository:
         execute(
             "UPDATE jobs SET worker_telemetry_json = %s WHERE id = %s",
             (_json.dumps(telemetry), job_id),
+        )
+
+    def stamp_worker_log_url(self, job_id: str, url: str) -> None:
+        """jobs_logger: stamp the R2 object key of this attempt's log.
+        Called by JobsLoggerService after draining the log from Redis
+        into R2.  Covers success AND failure attempts (one row per
+        attempt since retries create new job_ids)."""
+        execute(
+            "UPDATE jobs SET worker_log_url = %s WHERE id = %s",
+            (url, job_id),
         )
 
     # ---- status mutations ----

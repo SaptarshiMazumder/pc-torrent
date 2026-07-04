@@ -19,6 +19,8 @@ infra/terraform/
     neon_db/           Neon project + branch + role + database
     upstash_redis/     Upstash Redis database
     r2_bucket/         Cloudflare R2 bucket + scoped API token
+                       (when built: invoke TWICE per env -- once for
+                        pc-rent-<env>-blends, once for pc-rent-logs-<env>)
 
   envs/<env>/          thin per-env compositions (~25 lines each)
     main.tf            calls all 4 modules with this env's values

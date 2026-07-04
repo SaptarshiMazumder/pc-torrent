@@ -64,6 +64,7 @@ class ModalHttpDispatcher:
         frame_end: int,
         frame_step: int,
         render_overrides_json: str,
+        log_streamer_env: dict[str, str],
     ) -> str:
         cfg = self._config_provider.get()
         url = cfg.endpoint_url(gpu_type)
@@ -82,6 +83,10 @@ class ModalHttpDispatcher:
                 "frame_step": frame_step,
                 "render_overrides_b64": render_overrides_b64,
                 "backend_url": cfg.public_backend_url,
+                # jobs_logger: PCR_* env pairs.  Modal handler.py stamps
+                # them onto os.environ before HandlerLogTap spawns
+                # log_streamer.  Empty dict disables capture.
+                "log_streamer_env": log_streamer_env,
             }
         }
 
@@ -151,11 +156,13 @@ class ModalClient:
         frame_end: int,
         frame_step: int,
         render_overrides_json: str,
+        log_streamer_env: dict[str, str],
     ) -> str:
         return self._dispatcher.dispatch(
             gpu_type, job_id, blend_url,
             frame_start, frame_end, frame_step,
             render_overrides_json,
+            log_streamer_env,
         )
 
     def cancel_job(self, provider_job_id: str) -> None:

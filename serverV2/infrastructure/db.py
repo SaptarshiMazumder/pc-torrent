@@ -188,6 +188,32 @@ def init_db() -> None:
                 cur.execute(
                     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS worker_telemetry_json JSONB"
                 )
+                # jobs_logger: R2 object key for this attempt's worker
+                # stdout log.  Stamped by JobsLoggerService.write_logs_to_r2()
+                # after the log is drained from Redis into R2.  One row
+                # per attempt (retries create fresh job_ids) so this
+                # covers success AND failure -- render_telemetry only
+                # gets a row on chunk success.
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS worker_log_url TEXT"
+                )
+                # jobs_logger: PCR_* env dict stamped on the row at
+                # dispatch time so community agents (which poll for
+                # their job later, from another machine) can read the
+                # signed URL + identity headers and stamp them onto
+                # docker run's -e flags.  Cloud fleets (vast/modal) also
+                # populate this for debugging parity, but they consume
+                # log_streamer_env directly from context at dispatch.
+                cur.execute(
+                    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS log_streamer_env_json TEXT"
+                )
+                # render_telemetry.worker_log_url was declared for the
+                # same purpose but is unreachable for failed attempts
+                # (no telemetry row).  jobs.worker_log_url is the single
+                # source of truth now; drop the telemetry column.
+                cur.execute(
+                    "ALTER TABLE render_telemetry DROP COLUMN IF EXISTS worker_log_url"
+                )
                 # Serverless jobs (modal/vast) have no machine row, so
                 # machine_id must be NULL on those rows.  Drop the legacy
                 # NOT NULL constraint that pre-dates Phase 1.
@@ -306,7 +332,6 @@ def init_db() -> None:
                     "render_seconds         INTEGER",     # first-to-last frame Saved:
                     "retry_count            INTEGER",     # jobs.attempt - 1
                     "failure_reason         TEXT",        # oom/timeout/cuda_error/...
-                    "worker_log_url         TEXT",        # tail of Blender stdout in R2
                     "gpu_specs_json         JSONB",       # free-form catchall
                 )
                 for col_def in _telemetry_alters:

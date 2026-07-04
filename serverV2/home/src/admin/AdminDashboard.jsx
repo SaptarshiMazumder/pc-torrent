@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  ComputePanel, ConfigPanel, CostsPanel, DownloadsPanel, FailuresPanel,
+  ComputePanel, ConfigPanel, CostsPanel, DownloadsPanel, FailuresPanel, GcpPanel,
   JobsPanel, LiveRendersPanel, LogsPanel, OverviewPanel, RedisPanel, UsersPanel,
 } from "./panels.jsx";
 
@@ -11,6 +11,7 @@ const TABS = [
   { id: "machines", label: "Machines & instances", el: ComputePanel },
   { id: "users", label: "Users", el: UsersPanel },
   { id: "costs", label: "Costs", el: CostsPanel },
+  { id: "gcp", label: "Cloud (GCP)", el: GcpPanel },
   { id: "failures", label: "Failures", el: FailuresPanel },
   { id: "redis", label: "Redis", el: RedisPanel },
   { id: "config", label: "Config", el: ConfigPanel },

@@ -410,3 +410,47 @@ tr.clickable { cursor: pointer; }
   padding: 4px 10px;
   background: var(--surface-2);
 }
+
+/* ---------- cost source cards ---------- */
+
+.cost-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+}
+.cost-card {
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cost-card:hover { border-color: var(--series-1); background: var(--surface-2); }
+.cost-card .cc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cost-card .cc-label { font-size: 13px; color: var(--ink-2); font-weight: 600; }
+.cost-card .cc-amount { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.cost-card .cc-unit { font-size: 12px; color: var(--ink-muted); font-weight: 400; }
+.cost-card .cc-sub { font-size: 12px; color: var(--ink-2); min-height: 14px; }
+.cost-card .cc-note { font-size: 11px; color: var(--ink-muted); line-height: 1.35; }
+
+/* cost strip on the overview page */
+.cost-strip { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+.cost-strip .cs-tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  min-width: 150px;
+}
+.cost-strip .cs-tile .label { color: var(--ink-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; }
+.cost-strip .cs-tile .value { font-size: 20px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+
+/* refresh bar for slow-poll panels */
+.refreshbar { display: inline-flex; align-items: center; gap: 10px; }
+.refreshbar .hint { white-space: nowrap; }

@@ -174,6 +174,23 @@ from serverV2.services.admin import (
     DaemonStatusRepository,
     DownloadStatsRepository,
 )
+from serverV2.services.admin.cost import (
+    CostAccountingService,
+    CostPricingConfigRepository,
+)
+from serverV2.services.admin.gcp_metrics_service import GcpMetricsService
+from serverV2.infrastructure.gcp.cloud_monitoring import CloudMonitoringClient
+from serverV2.services.admin.cost.providers import (
+    CloudRunCostProvider,
+    FirestoreCostProvider,
+    LlmCostProvider,
+    PostgresCostProvider,
+    R2CostProvider,
+    RedisCostProvider,
+    RenderCostProvider,
+    VastAccountProvider,
+)
+from serverV2.repositories.llm_usage_repository import LlmUsageRepository
 from serverV2.services.assets.service import AssetService
 from serverV2.services.jobs.outputs_resolver import OutputsResolver
 from serverV2.services.jobs.service import JobService
@@ -246,6 +263,9 @@ class Container:
         modal_client: ModalClient,
         admin_telemetry_service: AdminTelemetryService,
         download_stats: DownloadStatsRepository,
+        cost_accounting_service: CostAccountingService,
+        gcp_metrics_service: GcpMetricsService,
+        cost_pricing_config_repo: CostPricingConfigRepository,
         cost_estimation_config_repo: AllocationCostEstimationConfigRepository,
     ) -> None:
         self.config = config
@@ -292,6 +312,14 @@ class Container:
         # feeds the docker / zip download routes' best-effort counters.
         self.admin_telemetry_service = admin_telemetry_service
         self.download_stats = download_stats
+        # Read-only cost accounting layer (one provider per paid dependency),
+        # aggregated for the admin cost overview + per-source drill-downs.
+        self.cost_accounting_service = cost_accounting_service
+        # GCP Cloud Run metrics (project-wide) for the admin Cloud tab.
+        self.gcp_metrics_service = gcp_metrics_service
+        # Tunable unit-price doc (config/cost_pricing) exposed for the admin
+        # Config viewer's read-only cost-pricing card.
+        self.cost_pricing_config_repo = cost_pricing_config_repo
         # Separate Firestore config/cost_estimation doc, exposed for the
         # admin dashboard's read-only config viewer.
         self.cost_estimation_config_repo = cost_estimation_config_repo
@@ -579,7 +607,10 @@ def build(
     llm_registry.register(
         OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"]),
     )
-    llm_facade = LLMFacade(registry=llm_registry)
+    # Append-only LLM token usage sink (fail-open) — feeds the admin cost
+    # dashboard's LLM provider.  Recording never affects the chat result.
+    llm_usage_repo = LlmUsageRepository()
+    llm_facade = LLMFacade(registry=llm_registry, on_usage=llm_usage_repo.record)
     allocation_llm_client = AllocationLLMClient(facade=llm_facade)
     cost_file_formula_repo = AllocationCostFileFormulaRepository()
     cost_llm_caller = AllocationCostLLMCaller(
@@ -1021,7 +1052,29 @@ def build(
         telemetry_repo=telemetry_repo,
         status_aggregator=status_aggregator,
         daemon_status=daemon_status_repo,
+        instance_id=instance_id,
     )
+
+    # -- cost accounting (read-only) --
+    # One provider per paid dependency; each reads only its own source and
+    # fails open.  Pricing knobs come from Firestore (config/cost_pricing) and
+    # are read per call so admin edits take effect without a redeploy.
+    cost_pricing_config_repo = CostPricingConfigRepository()
+    cost_accounting_service = CostAccountingService([
+        RenderCostProvider(),
+        VastAccountProvider(vast_client),
+        RedisCostProvider(redis, cost_pricing_config_repo.get),
+        PostgresCostProvider(cost_pricing_config_repo.get),
+        R2CostProvider(cost_pricing_config_repo.get),
+        CloudRunCostProvider(cost_pricing_config_repo.get),
+        LlmCostProvider(llm_usage_repo, cost_pricing_config_repo.get),
+        FirestoreCostProvider(),
+    ])
+
+    # GCP Cloud Run metrics (requests / billable time / cost per service,
+    # project-wide across dev/staging/prod) via Application Default Creds.
+    # Dormant until the runtime SA gets roles/monitoring.viewer — no key.
+    gcp_metrics_service = GcpMetricsService(CloudMonitoringClient(), cost_pricing_config_repo.get)
 
     return Container(
         config=cfg,
@@ -1054,5 +1107,8 @@ def build(
         modal_client=modal_client,
         admin_telemetry_service=admin_telemetry_service,
         download_stats=download_stats,
+        cost_accounting_service=cost_accounting_service,
+        gcp_metrics_service=gcp_metrics_service,
+        cost_pricing_config_repo=cost_pricing_config_repo,
         cost_estimation_config_repo=cost_estimation_config_repo,
     )

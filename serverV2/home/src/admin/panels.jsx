@@ -6,8 +6,20 @@ import {
   fmtAgo, fmtClock, fmtCredits, fmtDay, fmtHours, fmtNum, fmtSecs, fmtUsd, shortId,
 } from "../format.js";
 import {
-  BarChart, DataTable, Pill, Progress, Tile, statusTone, usePoll,
+  BarChart, DataTable, Pill, Progress, RefreshBar, Tile, statusTone, usePoll,
 } from "../components/ui.jsx";
+
+// Slow-poll cadence for non-live panels (costs, GCP, users, history, config):
+// they refresh every 30 min and expose a manual Refresh button, instead of
+// hammering the backend / external APIs every few seconds.  Live panels
+// (overview, live renders/jobs/instances, Redis stream, logs) keep their fast
+// intervals.
+const SLOW_MS = 30 * 60 * 1000;
+
+// Hard floor for ALL polling in the dashboard: 60s.  Nothing polls faster than
+// this — "live" panels use LIVE_MS, non-live use SLOW_MS.  (Logs is push/SSE,
+// not polling, and reads an in-memory ring, so it's exempt.)
+const LIVE_MS = 60 * 1000;
 
 // Human identity for a row that carries user_email / user_display_name
 // (annotated server-side), falling back to the short uid.
@@ -77,13 +89,100 @@ function ErrorBanner({ error }) {
 
 // ---------------------------------------------------------------- overview
 
+function CostStrip() {
+  const { data } = usePoll(() => api("/admin/costs/overview"), SLOW_MS, [], "admin:costs:overview");
+  if (!data) return null;
+  const top = (data.sources || [])[0];
+  return (
+    <div className="section">
+      <h3>
+        Cost <span className="sub">· this month + live burn · </span>
+        <button className="back-link" onClick={() => { window.location.hash = "/costs"; }}>full breakdown →</button>
+      </h3>
+      <div className="cost-strip">
+        <div className="cs-tile"><div className="label">This month · all sources</div><div className="value">{fmtUsd(data.total_month_to_date_usd)}</div></div>
+        <div className="cs-tile"><div className="label">Live burn</div><div className="value">{fmtUsd(data.total_live_rate_usd_per_hr)}/hr</div></div>
+        {top ? (
+          <div className="cs-tile"><div className="label">Top: {top.label}</div><div className="value">{fmtUsd(top.month_to_date_usd ?? top.projected_monthly_usd ?? 0)}</div></div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function DaemonDetail({ name, onClose }) {
+  const { data, error } = usePoll(() => api(`/admin/daemons/${name}`), LIVE_MS, [name], `admin:daemon:${name}`);
+  const current = data?.current;
+  const tone = !current ? "neutral" : current.error ? "critical" : "good";
+  const text = !current ? "no heartbeat" : current.error ? "error" : "healthy";
+  const activity = (data?.series || [])
+    .filter((s) => s.ticks != null)
+    .map((s) => ({ label: fmtClock(s.ts), value: s.ticks }));
+  const metricKeys = data?.metric_keys || [];
+  const metricSeries = data?.metric_series || {};
+  return (
+    <>
+      <div className="panel-head">
+        <button className="back-link" onClick={onClose}>← overview</button>
+        <h2 style={{ fontSize: 15, margin: 0 }}>
+          {DAEMON_INFO[name]?.label || name} <Pill tone={tone}>{text}</Pill>
+        </h2>
+      </div>
+      <ErrorBanner error={error} />
+      {DAEMON_INFO[name]?.desc ? <div className="hint" style={{ marginBottom: 8 }}>{DAEMON_INFO[name].desc}</div> : null}
+      <div className="tiles">
+        <Tile label="Owner instance" value={<span className="mono">{shortId(current?.owner)}</span>} />
+        <Tile label="Ticks (total)" value={fmtNum(current?.tick_count)} />
+        <Tile label="History samples" value={fmtNum(data?.samples)} />
+        <Tile label="Errors in history" value={fmtNum(data?.error_count)} />
+      </div>
+      {current?.error ? <div className="error-banner">Last error: {String(current.error).slice(0, 200)}</div> : null}
+      <div className="section">
+        <div className="card chart-card">
+          <div className="chart-title">Activity — ticks per ~15s sample</div>
+          <BarChart data={activity} formatValue={(v) => `${fmtNum(v)} ticks`} />
+        </div>
+      </div>
+      {metricKeys.map((k) => {
+        const pts = (metricSeries[k] || [])
+          .filter((p) => p.value != null)
+          .map((p) => ({ label: fmtClock(p.ts), value: Number(p.value) || 0 }));
+        if (!pts.length) return null;
+        return (
+          <div className="section" key={k}>
+            <div className="card chart-card">
+              <div className="chart-title">{k.replace(/_/g, " ")} over time</div>
+              <BarChart data={pts} formatValue={(v) => fmtNum(v)} />
+            </div>
+          </div>
+        );
+      })}
+      <div className="section">
+        <h3>Last cycle detail</h3>
+        <div className="card cfg-card">
+          {Object.entries(current?.detail || {}).map(([k, v]) => (
+            <div className="cfg-row" key={k}>
+              <div className="cfg-key">{k}</div>
+              <div className="cfg-value"><span className="cfg-val">{v == null ? "—" : String(v)}</span></div>
+            </div>
+          ))}
+          {!Object.keys(current?.detail || {}).length && <div className="empty">No detail in the latest sample.</div>}
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function OverviewPanel() {
-  const { data, error } = usePoll(() => api("/admin/overview"), 8000, [], "admin:overview");
+  const { data, error } = usePoll(() => api("/admin/overview"), LIVE_MS, [], "admin:overview");
+  const [openDaemon, setOpenDaemon] = useState(null);
   const counts = data?.counts || {};
   const byFleet = counts.active_jobs_by_fleet || {};
   const activeJobs = Object.values(byFleet).reduce((a, b) => a + b, 0);
   const daemons = data?.daemons || [];
   const fleet = data?.fleet_availability;
+
+  if (openDaemon) return <DaemonDetail name={openDaemon} onClose={() => setOpenDaemon(null)} />;
 
   return (
     <>
@@ -103,6 +202,8 @@ export function OverviewPanel() {
         <Tile label="Machines alive" value={fmtNum(data?.machines_alive)} />
         <Tile label="Failures (24h)" value={fmtNum(counts.failures_24h)} />
       </div>
+
+      <CostStrip />
 
       <div className="section">
         <h3>Background daemons <span className="sub">· singletons, one owner each · live health</span></h3>
@@ -132,10 +233,11 @@ export function OverviewPanel() {
             ]}
             rows={daemons}
             keyFn={(d) => d.name}
+            onRowClick={(d) => d.reporting && setOpenDaemon(d.name)}
           />
         </div>
         <div className="hint" style={{ marginTop: 6 }}>
-          Same owner across all rows = one instance holds every singleton (normal at 1 instance). Heartbeats are throttled to ~15s and cost one shared Redis hash.
+          Click a daemon for its history, activity graph & stats. Same owner across all rows = one instance holds every singleton (normal at 1 instance); heartbeats throttle to ~15s.
         </div>
       </div>
 
@@ -168,7 +270,7 @@ export function OverviewPanel() {
 // ------------------------------------------------------------- live renders
 
 export function LiveRendersPanel() {
-  const { data, error } = usePoll(() => api("/admin/render-groups/active"), 5000, [], "admin:live");
+  const { data, error } = usePoll(() => api("/admin/render-groups/active"), LIVE_MS, [], "admin:live");
   const groups = data?.groups || [];
   return (
     <>
@@ -214,7 +316,7 @@ function heartbeatPill(job) {
 }
 
 export function JobsPanel() {
-  const { data, error } = usePoll(() => api("/admin/jobs/active"), 5000, [], "admin:jobs");
+  const { data, error } = usePoll(() => api("/admin/jobs/active"), LIVE_MS, [], "admin:jobs");
   const jobs = data?.jobs || [];
   return (
     <>
@@ -278,7 +380,7 @@ const MACHINE_COLUMNS = [
 
 export function UsersPanel() {
   const [selected, setSelected] = useState(null);
-  const { data, error } = usePoll(() => api("/admin/users"), 60000, [], "admin:users");
+  const { data, error, updatedAt, refresh, loading } = usePoll(() => api("/admin/users"), SLOW_MS, [], "admin:users");
   const users = data?.users || [];
 
   if (selected) {
@@ -286,7 +388,9 @@ export function UsersPanel() {
   }
   return (
     <>
-      <PanelHead title="Users" sub="cached 60s · click a row for detail" />
+      <PanelHead title="Users" sub="click a row for detail">
+        <RefreshBar updatedAt={updatedAt} loading={loading} onRefresh={refresh} intervalMs={SLOW_MS} />
+      </PanelHead>
       <ErrorBanner error={error} />
       <div className="card">
         <DataTable
@@ -384,13 +488,139 @@ function UserDetail({ uid, onBack }) {
 
 const COST_WINDOWS = [1, 7, 30, 90];
 
+function ConfidencePill({ c }) {
+  const tone = c === "exact" ? "good" : c === "estimated" ? "warning" : "neutral";
+  return <Pill tone={tone}>{c}</Pill>;
+}
+
+function CostSourceDetail({ name, onClose }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    api(`/admin/costs/source/${name}`).then((d) => alive && setData(d)).catch((e) => alive && setError(e));
+    return () => { alive = false; };
+  }, [name]);
+  const monthly = data?.month_to_date_usd ?? data?.projected_monthly_usd ?? 0;
+  const usage = data?.usage || {};
+  return (
+    <div className="section">
+      <div className="panel-head">
+        <button className="back-link" onClick={onClose}>← all sources</button>
+        <h2 style={{ fontSize: 15, margin: 0 }}>{data?.label || name} <ConfidencePill c={data?.confidence || "estimated"} /></h2>
+      </div>
+      <ErrorBanner error={error} />
+      {data?.note ? <div className="hint" style={{ marginBottom: 10 }}>{data.note}</div> : null}
+      <div className="tiles">
+        <Tile label={data?.month_to_date_usd != null ? "Month-to-date" : "Projected / month"} value={fmtUsd(monthly)} />
+        <Tile label="Live burn" value={data?.live_rate_usd_per_hr != null ? `${fmtUsd(data.live_rate_usd_per_hr)}/hr` : "—"} />
+      </div>
+      {data?.series?.length ? (
+        <div className="section">
+          <div className="card chart-card">
+            <div className="chart-title">Cost by day (USD)</div>
+            <BarChart
+              data={data.series.map((d) => ({ label: fmtDay(d.day), value: Number(d.usd) || 0 }))}
+              formatValue={(v) => fmtUsd(v)}
+            />
+          </div>
+        </div>
+      ) : null}
+      {data?.breakdown?.length ? (
+        <div className="section">
+          <h3>Breakdown</h3>
+          <div className="card">
+            <DataTable
+              columns={[
+                { key: "key", label: "Item" },
+                { key: "usd", label: "USD", num: true, render: (r) => fmtUsd(r.usd) },
+              ]}
+              rows={data.breakdown}
+              keyFn={(r) => r.key}
+            />
+          </div>
+        </div>
+      ) : null}
+      {Object.keys(usage).length ? (
+        <div className="section">
+          <h3>Usage</h3>
+          <div className="card cfg-card">
+            {Object.entries(usage).map(([k, v]) => (
+              <div className="cfg-row" key={k}>
+                <div className="cfg-key">{k}</div>
+                <div className="cfg-value"><span className="cfg-val">{v == null ? "—" : String(v)}</span></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AllSourcesCosts() {
+  const { data, error, updatedAt, refresh, loading } = usePoll(() => api("/admin/costs/overview"), SLOW_MS, [], "admin:costs:overview");
+  const [open, setOpen] = useState(null);
+  const sources = data?.sources || [];
+  if (open) return <CostSourceDetail name={open} onClose={() => setOpen(null)} />;
+  return (
+    <>
+      <PanelHead title="Cost — all sources" sub="month-to-date + live burn · every paid dependency">
+        <RefreshBar updatedAt={updatedAt} loading={loading} onRefresh={refresh} intervalMs={SLOW_MS} />
+      </PanelHead>
+      <ErrorBanner error={error} />
+      <div className="tiles">
+        <Tile label="This month · all sources" value={fmtUsd(data?.total_month_to_date_usd)} hint="exact where known, else estimated" />
+        <Tile label="Live burn" value={`${fmtUsd(data?.total_live_rate_usd_per_hr)}/hr`} hint="current $/hour across sources" />
+        <Tile label="Sources tracked" value={fmtNum(sources.length)} />
+      </div>
+      <div className="section">
+        <h3>By source <span className="sub">· click a card for detail, graphs & usage</span></h3>
+        <div className="cost-cards">
+          {sources.map((s) => (
+            <button key={s.name} className="cost-card" onClick={() => setOpen(s.name)}>
+              <div className="cc-head">
+                <span className="cc-label">{s.label}</span>
+                <ConfidencePill c={s.confidence} />
+              </div>
+              <div className="cc-amount">
+                {fmtUsd(s.month_to_date_usd ?? s.projected_monthly_usd ?? 0)}
+                <span className="cc-unit">{s.month_to_date_usd != null ? " this mo" : " /mo est"}</span>
+              </div>
+              <div className="cc-sub">{s.live_rate_usd_per_hr ? `${fmtUsd(s.live_rate_usd_per_hr)}/hr live` : " "}</div>
+              <div className="cc-note">{s.note}</div>
+            </button>
+          ))}
+          {sources.length === 0 && <div className="empty">No cost sources reporting yet.</div>}
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function CostsPanel() {
+  const [view, setView] = useState("sources");
+  return (
+    <>
+      <div className="panel-head">
+        <div className="subtabs">
+          <button className={`subtab${view === "sources" ? " active" : ""}`} onClick={() => setView("sources")}>All sources</button>
+          <button className={`subtab${view === "render" ? " active" : ""}`} onClick={() => setView("render")}>Render detail</button>
+        </div>
+      </div>
+      {view === "sources" ? <AllSourcesCosts /> : <RenderCostDetail />}
+    </>
+  );
+}
+
+function RenderCostDetail() {
   const [days, setDays] = useState(7);
-  const { data, error } = usePoll(() => api(`/admin/costs/summary?days=${days}`), 60000, [days], `admin:costs:${days}`);
+  const { data, error, updatedAt, refresh, loading } = usePoll(() => api(`/admin/costs/summary?days=${days}`), SLOW_MS, [days], `admin:costs:${days}`);
   const totals = data?.totals || {};
   return (
     <>
-      <PanelHead title="Costs" sub={`render_telemetry · last ${days} day(s) · cached 60s`}>
+      <PanelHead title="Render cost detail" sub={`render_telemetry · last ${days} day(s)`}>
+        <RefreshBar updatedAt={updatedAt} loading={loading} onRefresh={refresh} intervalMs={SLOW_MS} />
         {COST_WINDOWS.map((d) => (
           <button
             key={d}
@@ -474,13 +704,69 @@ export function CostsPanel() {
   );
 }
 
+// ------------------------------------------------------------- cloud (gcp)
+
+export function GcpPanel() {
+  const { data, error, updatedAt, refresh, loading } = usePoll(() => api("/admin/gcp/metrics?days=30"), SLOW_MS, [], "admin:gcp");
+  const daySeries = (arr, unit) => (arr || []).map((d) => ({ label: fmtDay(d.day), value: Number(d.value) || 0 }));
+  return (
+    <>
+      <PanelHead title="Cloud (GCP)" sub="Cloud Run usage & cost · every service in the project (dev/staging/prod) · last 30d">
+        <RefreshBar updatedAt={updatedAt} loading={loading} onRefresh={refresh} intervalMs={SLOW_MS} />
+      </PanelHead>
+      <ErrorBanner error={error} />
+      {data && data.available === false ? (
+        <div className="notice">
+          GCP metrics aren&apos;t available yet — {data.note || data.error}
+          <div style={{ marginTop: 8 }}>
+            <code>gcloud projects add-iam-policy-binding gen-lang-client-0545494042 --member=&quot;serviceAccount:&lt;runtime-SA&gt;&quot; --role=&quot;roles/monitoring.viewer&quot;</code>
+          </div>
+          <div style={{ marginTop: 6 }}>No key needed — the app reads Monitoring via the runtime service account. Then hit Refresh.</div>
+        </div>
+      ) : !data ? (
+        <div className="loading">Loading GCP metrics…</div>
+      ) : (
+        <>
+          <div className="tiles">
+            <Tile label="Cloud Run cost · 30d (est)" value={fmtUsd(data.total_est_cost_usd)} hint="billable time × price" />
+            <Tile label="Requests · 30d" value={fmtNum(data.total_requests)} />
+            <Tile label="Services" value={fmtNum(data.services?.length)} hint={`project ${data.project || "?"}`} />
+          </div>
+          {(data.services || []).map((s) => (
+            <div className="section" key={s.service}>
+              <h3>{s.service} <span className="sub">· {fmtNum(s.requests_total)} req · {fmtUsd(s.est_cost_usd)} est · 30d</span></h3>
+              <div className="card chart-card">
+                <div className="chart-title">Requests / day</div>
+                <BarChart data={daySeries(s.requests_series)} formatValue={(v) => `${fmtNum(v)} req`} />
+              </div>
+              <div className="card chart-card" style={{ marginTop: 10 }}>
+                <div className="chart-title">Billable instance-seconds / day</div>
+                <BarChart data={daySeries(s.billable_series)} formatValue={(v) => fmtNum(v)} />
+              </div>
+              <div className="card chart-card" style={{ marginTop: 10 }}>
+                <div className="chart-title">Avg instances / day</div>
+                <BarChart data={daySeries(s.instances_series)} formatValue={(v) => fmtNum(v)} />
+              </div>
+            </div>
+          ))}
+          {(!data.services || data.services.length === 0) && (
+            <div className="card"><div className="empty">No Cloud Run series returned for this window.</div></div>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 // ---------------------------------------------------------------- failures
 
 export function FailuresPanel() {
-  const { data, error } = usePoll(() => api("/admin/failures/recent?limit=100"), 30000, [], "admin:failures");
+  const { data, error, updatedAt, refresh, loading } = usePoll(() => api("/admin/failures/recent?limit=100"), SLOW_MS, [], "admin:failures");
   return (
     <>
-      <PanelHead title="Failure events" sub="most recent first · refreshes every 30s" />
+      <PanelHead title="Failure events" sub="most recent first">
+        <RefreshBar updatedAt={updatedAt} loading={loading} onRefresh={refresh} intervalMs={SLOW_MS} />
+      </PanelHead>
       <ErrorBanner error={error} />
       <div className="card">
         <DataTable
@@ -566,6 +852,10 @@ export function LogsPanel() {
         </button>
       </PanelHead>
       <ErrorBanner error={error} />
+      <div className="hint" style={{ marginBottom: 8 }}>
+        Per-instance view — this is only the Cloud Run instance that answered your request.
+        For logs across every instance, use Cloud Logging (Cloud Run ships all stdout there automatically).
+      </div>
       <div className="card logbox" ref={boxRef}>
         {lines.length === 0 ? (
           <div className="empty">No log lines yet.</div>
@@ -586,12 +876,14 @@ export function LogsPanel() {
 // --------------------------------------------------------------- downloads
 
 export function DownloadsPanel() {
-  const { data, error } = usePoll(() => api("/admin/downloads"), 60000, [], "admin:downloads");
+  const { data, error, updatedAt, refresh, loading } = usePoll(() => api("/admin/downloads"), SLOW_MS, [], "admin:downloads");
   const downloads = data?.downloads || {};
   const kinds = Object.entries(downloads);
   return (
     <>
-      <PanelHead title="Downloads" sub="agent installers + output zips · counted since this feature shipped" />
+      <PanelHead title="Downloads" sub="agent installers + output zips · counted since this feature shipped">
+        <RefreshBar updatedAt={updatedAt} loading={loading} onRefresh={refresh} intervalMs={SLOW_MS} />
+      </PanelHead>
       <ErrorBanner error={error} />
       {kinds.length === 0 ? (
         <div className="card"><div className="empty">No downloads counted yet.</div></div>
@@ -641,22 +933,28 @@ function mergeByDay(downloads) {
 const REDIS_MONTHLY_QUOTA = 500000;
 
 export function RedisPanel() {
-  const { data, error } = usePoll(() => api("/admin/redis?limit=250"), 2000, [], "admin:redis");
+  // Command stream: in-memory proxy, ZERO Redis ops — safe at a live cadence.
+  const { data, error } = usePoll(() => api("/admin/redis?limit=250"), LIVE_MS, [], "admin:redis");
+  // Fleet INFO: real Redis reads — same 60s floor so watching this panel
+  // doesn't burn the very quota it displays.
+  const { data: srv } = usePoll(() => api("/admin/redis/server"), LIVE_MS, [], "admin:redis:server");
   const [resetting, setResetting] = useState(false);
 
-  if (data && data.enabled === false) {
-    return (
-      <>
-        <PanelHead title="Redis activity" />
-        <div className="notice">
-          Redis command logging is disabled on this server. Set
-          {" "}<code>REDIS_CMD_LOG=1</code> (the default) and redeploy to capture
-          every command. It records in memory only — it adds zero Redis ops.
-        </div>
-      </>
-    );
-  }
+  const server = srv?.server || null;
+  const instanceOn = data ? data.enabled !== false : true;
+  const servedBy = srv?.served_by_instance || data?.served_by_instance;
 
+  // Fleet-wide (Redis INFO): the server's own global counters — every instance
+  // plus the backup-monitor cron. This is the real quota number.
+  const fleetOps = server?.instantaneous_ops_per_sec ?? 0;
+  const fleetProjected = fleetOps * 60 * 60 * 24 * 30;
+  const fleetPct = Math.min(100, (fleetProjected / REDIS_MONTHLY_QUOTA) * 100);
+  const fleetTone = fleetPct > 90 ? "critical" : fleetPct > 60 ? "warning" : "good";
+  const hits = server?.keyspace_hits ?? 0;
+  const misses = server?.keyspace_misses ?? 0;
+  const hitRate = hits + misses > 0 ? (hits / (hits + misses)) * 100 : null;
+
+  // This instance (in-memory proxy): per-command detail, zero Redis ops.
   const projected = data?.projected_per_month ?? 0;
   const quotaPct = Math.min(100, (projected / REDIS_MONTHLY_QUOTA) * 100);
   const quotaTone = quotaPct > 90 ? "critical" : quotaPct > 60 ? "warning" : "good";
@@ -671,75 +969,124 @@ export function RedisPanel() {
 
   return (
     <>
-      <PanelHead title="Redis activity" sub="every command this server sends · live, 2s refresh">
-        <button className="btn ghost small" onClick={doReset} disabled={resetting}>
-          {resetting ? "resetting…" : "reset counters"}
-        </button>
-      </PanelHead>
+      <PanelHead title="Redis activity" sub="fleet-wide quota (Redis INFO) + this instance's live command detail" />
       <ErrorBanner error={error} />
 
-      <div className="tiles">
-        <Tile label="Requests / min (now)" value={fmtNum(data?.rate_per_min)} hint="rolling last 60s" />
-        <Tile
-          label="Projected / month"
-          value={<Pill tone={quotaTone}>{fmtNum(projected)}</Pill>}
-          hint={`${quotaPct.toFixed(0)}% of 500k free tier`}
-        />
-        <Tile label="Projected / day" value={fmtNum(data?.projected_per_day)} />
-        <Tile label="Total since reset" value={fmtNum(data?.total)} hint={`avg ${fmtNum(data?.avg_per_min_since_start)}/min`} />
+      {/* -------- fleet-wide, from Redis' own INFO -------- */}
+      <div className="section">
+        <h3>Whole Redis <span className="sub">· all instances + backup-monitor cron · from Redis INFO (read-only)</span></h3>
+        {server ? (
+          <div className="tiles">
+            <Tile label="Ops / sec (now)" value={fmtNum(fleetOps)} hint="Redis instantaneous rate" />
+            <Tile
+              label="Projected / month"
+              value={<Pill tone={fleetTone}>{fmtNum(fleetProjected)}</Pill>}
+              hint={`${fleetPct.toFixed(0)}% of 500k · at current ops/sec`}
+            />
+            <Tile label="Commands processed" value={fmtNum(server.total_commands_processed)} hint="server total since uptime" />
+            <Tile label="Keys in DB" value={fmtNum(server.dbsize)} />
+            <Tile label="Connected clients" value={fmtNum(server.connected_clients)} />
+            <Tile label="Memory used" value={server.used_memory_human || "—"} />
+            <Tile
+              label="Keyspace hit rate"
+              value={hitRate == null ? "—" : `${hitRate.toFixed(1)}%`}
+              hint={`${fmtNum(hits)} hits / ${fmtNum(misses)} misses`}
+            />
+            <Tile label="Redis uptime" value={fmtSecs(server.uptime_in_seconds)} />
+          </div>
+        ) : (
+          <div className="card"><div className="empty">Redis INFO unavailable on this server.</div></div>
+        )}
       </div>
 
-      <div className="section">
-        <h3>By purpose <span className="sub">· what the commands are for</span></h3>
-        <div className="card">
-          <DataTable
-            columns={[
-              { key: "purpose", label: "Purpose" },
-              { key: "count", label: "Commands", num: true, render: (r) => fmtNum(r.count) },
-              {
-                key: "share", label: "Share", num: true,
-                render: (r) => `${((r.count / Math.max(1, data?.total || 1)) * 100).toFixed(0)}%`,
-              },
-            ]}
-            rows={byPurpose}
-            keyFn={(r) => r.purpose}
-          />
-        </div>
+      {/* -------- this instance, from the in-memory proxy -------- */}
+      <div className="panel-head">
+        <h2 style={{ fontSize: 14 }}>
+          This instance
+          <span className="sub">
+            {" · "}{servedBy ? `${servedBy.slice(0, 12)} · ` : ""}per-command detail, in-memory · zero Redis ops · 60s
+          </span>
+        </h2>
+        <div className="spacer" />
+        {instanceOn && (
+          <button className="btn ghost small" onClick={doReset} disabled={resetting}>
+            {resetting ? "resetting…" : "reset counters"}
+          </button>
+        )}
       </div>
 
-      <div className="section">
-        <h3>By command</h3>
-        <div className="card">
-          <DataTable
-            columns={[
-              { key: "command", label: "Command", mono: true },
-              { key: "count", label: "Count", num: true, render: (r) => fmtNum(r.count) },
-            ]}
-            rows={byCommand}
-            keyFn={(r) => r.command}
-          />
+      {!instanceOn ? (
+        <div className="notice">
+          Per-command logging is off on the instance that answered. Set
+          {" "}<code>REDIS_CMD_LOG=1</code> (the default) to capture the stream.
+          It records in memory only — zero Redis ops.
         </div>
-      </div>
+      ) : (
+        <>
+          <div className="tiles">
+            <Tile label="Requests / min (now)" value={fmtNum(data?.rate_per_min)} hint="rolling 60s · this instance" />
+            <Tile
+              label="Projected / month"
+              value={<Pill tone={quotaTone}>{fmtNum(projected)}</Pill>}
+              hint={`${quotaPct.toFixed(0)}% of 500k · this instance only`}
+            />
+            <Tile label="Projected / day" value={fmtNum(data?.projected_per_day)} />
+            <Tile label="Total since reset" value={fmtNum(data?.total)} hint={`avg ${fmtNum(data?.avg_per_min_since_start)}/min`} />
+          </div>
 
-      <div className="section">
-        <h3>Live command stream <span className="sub">· newest first, last {recent.length}</span></h3>
-        <div className="card">
-          <DataTable
-            emptyText="No commands captured yet."
-            columns={[
-              { key: "seq", label: "#", num: true },
-              { key: "ts", label: "Time", mono: true, render: (r) => fmtClock(r.ts) },
-              { key: "command", label: "Command", mono: true, render: (r) => r.command.toUpperCase() },
-              { key: "rw", label: "R/W", render: (r) => (r.write ? <Pill tone="warning">write</Pill> : <Pill tone="neutral">read</Pill>) },
-              { key: "key", label: "Key", mono: true },
-              { key: "purpose", label: "Purpose" },
-              { key: "source", label: "Via" },
-            ]}
-            rows={recent}
-            keyFn={(r) => r.seq}
-          />
-        </div>
-      </div>
+          <div className="section">
+            <h3>By purpose <span className="sub">· what the commands are for</span></h3>
+            <div className="card">
+              <DataTable
+                columns={[
+                  { key: "purpose", label: "Purpose" },
+                  { key: "count", label: "Commands", num: true, render: (r) => fmtNum(r.count) },
+                  {
+                    key: "share", label: "Share", num: true,
+                    render: (r) => `${((r.count / Math.max(1, data?.total || 1)) * 100).toFixed(0)}%`,
+                  },
+                ]}
+                rows={byPurpose}
+                keyFn={(r) => r.purpose}
+              />
+            </div>
+          </div>
+
+          <div className="section">
+            <h3>By command</h3>
+            <div className="card">
+              <DataTable
+                columns={[
+                  { key: "command", label: "Command", mono: true },
+                  { key: "count", label: "Count", num: true, render: (r) => fmtNum(r.count) },
+                ]}
+                rows={byCommand}
+                keyFn={(r) => r.command}
+              />
+            </div>
+          </div>
+
+          <div className="section">
+            <h3>Live command stream <span className="sub">· newest first, last {recent.length}</span></h3>
+            <div className="card">
+              <DataTable
+                emptyText="No commands captured yet."
+                columns={[
+                  { key: "seq", label: "#", num: true },
+                  { key: "ts", label: "Time", mono: true, render: (r) => fmtClock(r.ts) },
+                  { key: "command", label: "Command", mono: true, render: (r) => r.command.toUpperCase() },
+                  { key: "rw", label: "R/W", render: (r) => (r.write ? <Pill tone="warning">write</Pill> : <Pill tone="neutral">read</Pill>) },
+                  { key: "key", label: "Key", mono: true },
+                  { key: "purpose", label: "Purpose" },
+                  { key: "source", label: "Via" },
+                ]}
+                rows={recent}
+                keyFn={(r) => r.seq}
+              />
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -784,10 +1131,14 @@ const RUN_HISTORY_COLUMNS = [
   { key: "cost_actual_usd", label: "Cost", num: true, render: (r) => fmtUsd(r.cost_actual_usd) },
 ];
 
-function Section({ title, sub, error, children }) {
+function Section({ title, sub, error, action, children }) {
   return (
     <div className="section">
-      <h3>{title}{sub ? <span className="sub"> · {sub}</span> : null}</h3>
+      <h3 style={action ? { display: "flex", alignItems: "baseline" } : undefined}>
+        <span>{title}{sub ? <span className="sub"> · {sub}</span> : null}</span>
+        {action ? <span className="spacer" /> : null}
+        {action}
+      </h3>
       <ErrorBanner error={error} />
       <div className="card">{children}</div>
     </div>
@@ -795,12 +1146,28 @@ function Section({ title, sub, error, children }) {
 }
 
 function LiveInstancesSection() {
-  const { data, error } = usePoll(() => api("/admin/instances"), 5000, [], "admin:instances");
+  const { data, error } = usePoll(() => api("/admin/instances"), LIVE_MS, [], "admin:instances");
+  const servedBy = data?.served_by;
+  // Base rows come from Postgres (fleet-correct); "live" rows are additionally
+  // enriched with provider status/logs by the instance running that monitor.
+  const cols = [
+    ...INSTANCE_COLUMNS,
+    {
+      key: "source", label: "Detail",
+      render: (i) => (i.source === "live"
+        ? <Pill tone="good">live</Pill>
+        : <Pill tone="neutral">db</Pill>),
+    },
+  ];
   return (
-    <Section title="Serverless instances (live)" sub="Vast / Modal running now" error={error}>
+    <Section
+      title="Serverless instances (live)"
+      sub={`Vast / Modal running now · base from Postgres${servedBy ? ` · live detail via ${servedBy.slice(0, 8)}` : ""}`}
+      error={error}
+    >
       <DataTable
         emptyText="No serverless containers running right now."
-        columns={INSTANCE_COLUMNS}
+        columns={cols}
         rows={data?.instances || []}
         keyFn={(i) => i.job_id}
       />
@@ -809,7 +1176,7 @@ function LiveInstancesSection() {
 }
 
 function LiveMachinesSection() {
-  const { data, error } = usePoll(() => api("/admin/machines"), 15000, [], "admin:machines");
+  const { data, error } = usePoll(() => api("/admin/machines"), LIVE_MS, [], "admin:machines");
   const online = (data?.machines || []).filter((m) => m.alive);
   return (
     <Section title="Community machines (online)" sub="alive heartbeat now" error={error}>
@@ -824,9 +1191,10 @@ function LiveMachinesSection() {
 }
 
 function MachineRegistrySection() {
-  const { data, error } = usePoll(() => api("/admin/machines"), 30000, [], "admin:machines");
+  const { data, error, updatedAt, refresh, loading } = usePoll(() => api("/admin/machines"), SLOW_MS, [], "admin:machines");
   return (
-    <Section title="All registered machines" sub="full registry, incl. offline" error={error}>
+    <Section title="All registered machines" sub="full registry, incl. offline" error={error}
+      action={<RefreshBar updatedAt={updatedAt} loading={loading} onRefresh={refresh} intervalMs={SLOW_MS} />}>
       <DataTable
         emptyText="No machines have ever registered."
         columns={MACHINE_COLUMNS}
@@ -838,9 +1206,10 @@ function MachineRegistrySection() {
 }
 
 function RunHistorySection() {
-  const { data, error } = usePoll(() => api("/admin/telemetry?limit=200"), 30000, [], "admin:telemetry");
+  const { data, error, updatedAt, refresh, loading } = usePoll(() => api("/admin/telemetry?limit=200"), SLOW_MS, [], "admin:telemetry");
   return (
-    <Section title="Completed runs" sub="per finished chunk, newest first" error={error}>
+    <Section title="Completed runs" sub="per finished chunk, newest first" error={error}
+      action={<RefreshBar updatedAt={updatedAt} loading={loading} onRefresh={refresh} intervalMs={SLOW_MS} />}>
       <DataTable
         emptyText="No completed-chunk telemetry yet."
         columns={RUN_HISTORY_COLUMNS}
@@ -914,18 +1283,26 @@ function ConfigTree({ value }) {
 export function ConfigPanel() {
   const [global, setGlobal] = useState(null);
   const [cost, setCost] = useState(null);
+  const [pricing, setPricing] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     api("/admin/config").then((d) => setGlobal(d.config)).catch(setError);
     api("/admin/config/cost-estimation").then((d) => setCost(d.config)).catch(() => {});
+    api("/admin/config/cost-pricing").then((d) => setPricing(d.config)).catch(() => {});
   }, []);
 
   const sections = global ? Object.entries(global) : [];
   return (
     <>
-      <PanelHead title="Configuration" sub="read-only view of Firestore config/global + config/cost_estimation" />
+      <PanelHead title="Configuration" sub="read-only view of Firestore config/global + cost_estimation + cost_pricing" />
       <ErrorBanner error={error} />
+      {pricing ? (
+        <div className="section">
+          <h3>Cost pricing <span className="sub">· config/cost_pricing · unit prices for cost estimates · edit in Firestore</span></h3>
+          <div className="card cfg-card"><ConfigTree value={pricing} /></div>
+        </div>
+      ) : null}
       {cost ? (
         <div className="section">
           <h3>Cost estimation (config/cost_estimation)</h3>

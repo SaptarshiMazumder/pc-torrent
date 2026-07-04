@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -41,7 +43,15 @@ log = logging.getLogger(__name__)
 _ACTIVE_GROUP_STATUSES = ("uploading", "pending", "running")
 _ACTIVE_JOB_STATUSES = ("pending", "running")
 
-_CACHE_TTL_SEC = 60
+# Redis-backed caches for user index / users / costs (Firestore + Neon heavy).
+# 30 min: profiles and rollups change slowly and this is the biggest Firestore
+# saver (the user-profile list is the priciest read).
+_CACHE_TTL_SEC = 1800
+
+# In-process cache for the live read-heavy panels (overview / live renders /
+# jobs / instances / machines).  60s so the paid stores are hit at most ~once
+# per minute regardless of UI poll rate or number of admins watching.
+_LIVE_CACHE_TTL = 60.0
 
 
 def _jsonable(value: Any) -> Any:
@@ -72,6 +82,7 @@ class AdminTelemetryService:
         telemetry_repo: TelemetryRepository,
         status_aggregator: InstanceStatusAggregator,
         daemon_status: DaemonStatusRepository,
+        instance_id: str = "",
     ) -> None:
         self._redis_client = redis_client
         self._machine_mirror = machine_redis_mirror
@@ -83,6 +94,33 @@ class AdminTelemetryService:
         self._telemetry_repo = telemetry_repo
         self._status_aggregator = status_aggregator
         self._daemon_status = daemon_status
+        # This process's per-instance id (same UUID the monitor locks use).
+        # Stamped onto per-instance panels so the reader knows which Cloud Run
+        # instance answered.  Read-only display value.
+        self._instance_id = instance_id
+        # In-process cache for the read-heavy live panels so the paid stores
+        # (Redis / Neon / Firestore) are read at most ~once per minute no matter
+        # how fast the UI polls or how many admins watch.  Admin-display only —
+        # no operational path reads this service.
+        self._memo_cache: dict[str, tuple[Any, float]] = {}
+        self._memo_lock = threading.Lock()
+
+    @property
+    def instance_id(self) -> str:
+        return self._instance_id
+
+    def _memo(self, key: str, producer):
+        """Serve ``producer()`` from a 60s in-process cache so repeated admin
+        polls (and multiple viewers) don't re-hit Redis/Neon/Firestore."""
+        now = time.time()
+        with self._memo_lock:
+            entry = self._memo_cache.get(key)
+            if entry is not None and entry[1] > now:
+                return entry[0]
+        value = producer()
+        with self._memo_lock:
+            self._memo_cache[key] = (value, now + _LIVE_CACHE_TTL)
+        return value
 
     # ------------------------------------------------------------------
     # small Redis helpers (fail-open)
@@ -129,6 +167,9 @@ class AdminTelemetryService:
     # ------------------------------------------------------------------
 
     def overview(self) -> dict[str, Any]:
+        return self._memo("overview", self._overview_uncached)
+
+    def _overview_uncached(self) -> dict[str, Any]:
         db_ok = True
         try:
             query_one("SELECT 1")
@@ -210,6 +251,53 @@ class AdminTelemetryService:
         from datetime import timedelta
         return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
+    def daemon_detail(self, name: str) -> dict[str, Any]:
+        """One daemon's full picture for the click-through view: current health,
+        per-tick history, an activity series (ticks per interval), error count,
+        and a series for each numeric detail metric (e.g. jobs_scanned over
+        time) so the UI can graph it.  Read-only."""
+        current = self._daemon_status.read_all().get(name)
+        history = self._daemon_status.read_history(name, limit=500)  # newest first
+        chron = list(reversed(history))
+
+        series: list[dict[str, Any]] = []
+        prev_tc: float | None = None
+        for h in chron:
+            tc = h.get("tick_count")
+            ticks = None
+            if prev_tc is not None and isinstance(tc, (int, float)):
+                ticks = max(0, tc - prev_tc)
+            if isinstance(tc, (int, float)):
+                prev_tc = tc
+            series.append({
+                "ts": h.get("ts"),
+                "tick_count": tc,
+                "ticks": ticks,
+                "error": bool(h.get("error")),
+            })
+
+        errors = sum(1 for h in history if h.get("error"))
+        latest_detail = (current or {}).get("detail") or {}
+        metric_keys = [k for k, v in latest_detail.items() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        metric_series = {
+            k: [
+                {"ts": h.get("ts"), "value": (h.get("detail") or {}).get(k)}
+                for h in chron
+                if isinstance((h.get("detail") or {}).get(k), (int, float))
+                and not isinstance((h.get("detail") or {}).get(k), bool)
+            ]
+            for k in metric_keys
+        }
+        return _jsonable({
+            "name": name,
+            "current": current,
+            "samples": len(history),
+            "error_count": errors,
+            "series": series,
+            "metric_keys": metric_keys,
+            "metric_series": metric_series,
+        })
+
     def _credits_per_usd(self) -> float:
         """Live conversion rate for projecting USD aggregates into tokens
         (credits).  Reads through the user facade; cheap, config-backed."""
@@ -253,6 +341,9 @@ class AdminTelemetryService:
     # ------------------------------------------------------------------
 
     def active_render_groups(self) -> list[dict[str, Any]]:
+        return self._memo("active_render_groups", self._active_render_groups_uncached)
+
+    def _active_render_groups_uncached(self) -> list[dict[str, Any]]:
         """Every user's active groups, read from Postgres (the source of
         truth).  Each row is annotated with the owner's email / display name.
 
@@ -279,6 +370,9 @@ class AdminTelemetryService:
         return [self._annotate_user(_jsonable(row), index) for row in rows]
 
     def active_jobs(self) -> list[dict[str, Any]]:
+        return self._memo("active_jobs", self._active_jobs_uncached)
+
+    def _active_jobs_uncached(self) -> list[dict[str, Any]]:
         """Pending/running jobs with owner + live heartbeat state."""
         try:
             rows = query_all(
@@ -322,6 +416,9 @@ class AdminTelemetryService:
         return out
 
     def machines(self) -> list[dict[str, Any]]:
+        return self._memo("machines", self._machines_uncached)
+
+    def _machines_uncached(self) -> list[dict[str, Any]]:
         """Community machine rows merged with Redis liveness + status."""
         try:
             rows = query_all(
@@ -358,67 +455,117 @@ class AdminTelemetryService:
     # ------------------------------------------------------------------
 
     def serverless_instances(self) -> list[dict[str, Any]]:
-        """Currently-running Vast/Modal containers from the in-process
-        InstanceStatusAggregator, enriched with each job's owner, input file,
-        dispatch price, and a computed live cost-so-far (elapsed x rate).
+        return self._memo("serverless_instances", self._serverless_instances_uncached)
 
-        The registry only holds in-flight serverless jobs and is wiped when a
-        job goes terminal, so this is strictly a "what's running now" view."""
-        if self._status_aggregator is None:
-            return []
-        snaps: list[dict[str, Any]] = []
-        for fleet, lst in (self._status_aggregator.get_all() or {}).items():
-            for s in lst or []:
-                snaps.append({**s, "fleet_type": s.get("fleet_type") or fleet})
-        if not snaps:
-            return []
+    def _serverless_instances_uncached(self) -> list[dict[str, Any]]:
+        """Serverless (Vast/Modal) containers running now.
 
-        job_ids = [s["job_id"] for s in snaps if s.get("job_id")]
-        rows: dict[str, dict] = {}
-        if job_ids:
-            try:
-                fetched = query_all(
-                    """
-                    SELECT j.id, j.started_at, j.submitted_at, j.gpu_type,
-                           j.price_per_hour_at_dispatch, g.user_id, g.input_filename
-                      FROM jobs j
-                      LEFT JOIN render_groups g ON g.id = j.group_id
-                     WHERE j.id = ANY(%s)
-                    """,
-                    (job_ids,),
-                )
-                rows = {r["id"]: r for r in fetched}
-            except Exception as exc:
-                log.warning("Admin serverless_instances jobs join failed: %s", exc)
+        The fleet-correct base is the set of running serverless jobs read from
+        Postgres — shared state, so ANY Cloud Run instance answers identically,
+        including when several run at once.  Each row is then enriched with live
+        provider status / logs / frames from THIS instance's in-process
+        registry *when it happens to be the one running that fleet's monitor*
+        (``source: "live"``); rows with only Postgres truth are ``"db"``.
 
+        Strictly read-only: a ``SELECT`` plus an in-memory registry read.  No
+        writes, no new Redis keys, no interference with any workflow."""
         rate = self._credits_per_usd()
         index = self._user_index()
-        out = []
-        for s in snaps:
-            job = rows.get(s.get("job_id"), {})
-            elapsed = s.get("elapsed_sec")
-            price = job.get("price_per_hour_at_dispatch")
-            cost_usd = None
-            if elapsed is not None and price is not None:
-                cost_usd = float(elapsed) / 3600.0 * float(price)
-            rec = {
-                "job_id": s.get("job_id"),
-                "fleet_type": s.get("fleet_type"),
-                "provider_status": s.get("provider_status"),
-                "gpu_label": s.get("gpu_label") or job.get("gpu_type"),
-                "rendered_frames": s.get("rendered_frames"),
-                "total_frames": s.get("total_frames"),
+
+        # -- fleet-correct base: running serverless jobs from Postgres.
+        # elapsed is computed in-SQL so it's timezone-correct regardless of the
+        # started_at column type.  machine_type LIKE vast%/modal% matches the
+        # codebase's own fleet classifier (JobRepository).
+        base: dict[str, dict[str, Any]] = {}
+        try:
+            rows = query_all(
+                """
+                SELECT j.id, j.machine_type, j.gpu_type, j.started_at,
+                       j.price_per_hour_at_dispatch, j.rendered_frames,
+                       j.total_frames,
+                       EXTRACT(EPOCH FROM (NOW() - j.started_at)) AS elapsed_sec,
+                       g.user_id, g.input_filename
+                  FROM jobs j
+                  LEFT JOIN render_groups g ON g.id = j.group_id
+                 WHERE j.status = 'running'
+                   AND (j.machine_type LIKE 'vast%%' OR j.machine_type LIKE 'modal%%')
+                 ORDER BY j.started_at DESC NULLS LAST
+                 LIMIT 200
+                """,
+            )
+        except Exception as exc:
+            log.warning("Admin serverless_instances base query failed: %s", exc)
+            rows = []
+
+        for r in rows:
+            jid = r["id"]
+            elapsed = float(r["elapsed_sec"]) if r.get("elapsed_sec") is not None else None
+            price = r.get("price_per_hour_at_dispatch")
+            cost_usd = (
+                float(elapsed) / 3600.0 * float(price)
+                if elapsed is not None and price is not None else None
+            )
+            mt = str(r.get("machine_type") or "")
+            fleet = "vast" if mt.startswith("vast") else "modal" if mt.startswith("modal") else mt
+            base[jid] = {
+                "job_id": jid,
+                "fleet_type": fleet,
+                "provider_status": None,
+                "gpu_label": r.get("gpu_type"),
+                "rendered_frames": r.get("rendered_frames"),
+                "total_frames": r.get("total_frames"),
                 "elapsed_sec": elapsed,
-                "error": s.get("error"),
-                "has_logs": bool(s.get("logs")),
-                "user_id": job.get("user_id"),
-                "input_filename": job.get("input_filename"),
-                "started_at": job.get("started_at"),
+                "error": None,
+                "has_logs": False,
+                "user_id": r.get("user_id"),
+                "input_filename": r.get("input_filename"),
+                "started_at": r.get("started_at"),
                 "price_per_hour": float(price) if price is not None else None,
                 "live_cost_usd": cost_usd,
                 "live_cost_credits": (cost_usd * rate) if cost_usd is not None else None,
+                "source": "db",
             }
-            out.append(self._annotate_user(rec, index))
+
+        # -- enrich / union with THIS instance's live registry, if it owns the
+        # monitor for that fleet.  Read of an in-process object; no I/O.
+        if self._status_aggregator is not None:
+            for fleet, lst in (self._status_aggregator.get_all() or {}).items():
+                for s in lst or []:
+                    jid = s.get("job_id")
+                    if not jid:
+                        continue
+                    live: dict[str, Any] = {
+                        "provider_status": s.get("provider_status"),
+                        "error": s.get("error"),
+                        "has_logs": bool(s.get("logs")),
+                        "source": "live",
+                    }
+                    if s.get("rendered_frames") is not None:
+                        live["rendered_frames"] = s.get("rendered_frames")
+                    if s.get("total_frames") is not None:
+                        live["total_frames"] = s.get("total_frames")
+                    if s.get("elapsed_sec") is not None:
+                        live["elapsed_sec"] = s.get("elapsed_sec")
+                    if jid in base:
+                        base[jid].update(live)
+                    else:
+                        # Live-only (e.g. just went terminal in the DB but the
+                        # registry hasn't cleared yet) — keep it so nothing the
+                        # owning instance can see is dropped.
+                        base[jid] = {
+                            "job_id": jid,
+                            "fleet_type": s.get("fleet_type") or fleet,
+                            "gpu_label": s.get("gpu_label"),
+                            "user_id": None,
+                            "input_filename": None,
+                            "started_at": None,
+                            "price_per_hour": None,
+                            "live_cost_usd": None,
+                            "live_cost_credits": None,
+                            **live,
+                        }
+
+        out = [self._annotate_user(rec, index) for rec in base.values()]
         out.sort(key=lambda r: r.get("elapsed_sec") or 0, reverse=True)
         return [_jsonable(r) for r in out]
 
@@ -722,13 +869,69 @@ class AdminTelemetryService:
     # ------------------------------------------------------------------
 
     def redis_activity(self, recent_limit: int = 200) -> dict[str, Any]:
-        """Live Redis command stream + quota-burn stats.  Pure in-memory read
-        of this process's recorded command traffic (adds NO Redis ops), so
-        watching it never inflates the metric it measures."""
+        """Two views of Redis usage, side by side:
+
+        * ``server`` — fleet-wide truth from Redis' own ``INFO`` (total commands
+          processed, ops/sec, memory, keyspace, dbsize).  This is the server's
+          global counter across ALL Cloud Run instances AND the backup_monitor
+          cron, so it's the real quota number — and it's fleet-correct no matter
+          which instance answers.  ``INFO`` is a read; nothing is written.
+        * the flat ``by_command`` / ``by_purpose`` / ``recent`` fields — THIS
+          instance's per-command detail from the in-memory proxy (zero Redis
+          ops).  ``served_by_instance`` says which instance that is."""
         act = self._redis_client.activity()
         if act is None:
-            return {"enabled": False}
-        return {"enabled": True, **act.snapshot(recent_limit=recent_limit)}
+            payload: dict[str, Any] = {"enabled": False}
+        else:
+            payload = {"enabled": True, **act.snapshot(recent_limit=recent_limit)}
+        payload["served_by_instance"] = self._instance_id
+        return payload
+
+    def redis_server_info(self) -> dict[str, Any]:
+        """Fleet-wide Redis INFO (real Redis reads) — a SEPARATE endpoint from
+        the command stream so those reads happen on a slow poll / manual
+        refresh, not on every fast stream tick.  Watching the panel must not
+        inflate the quota it reports."""
+        return {"served_by_instance": self._instance_id, "server": self._redis_server_info()}
+
+    def _redis_server_info(self) -> dict[str, Any] | None:
+        """Fleet-wide Redis stats from the server's own ``INFO`` (all instances
+        + cron).  Read-only; None if Redis is down or INFO is unavailable.
+        ``commandstats`` is optional — some managed tiers (e.g. Upstash) don't
+        expose it, in which case ``by_command`` is empty."""
+        client = self._redis_client.client()
+        if client is None:
+            return None
+        try:
+            info = client.info()
+        except Exception as exc:
+            log.warning("Admin redis INFO failed: %s", exc)
+            return None
+        by_command: dict[str, int] = {}
+        try:
+            raw = client.info("commandstats") or {}
+            for key, val in raw.items():
+                if key.startswith("cmdstat_") and isinstance(val, dict):
+                    by_command[key[len("cmdstat_"):]] = int(val.get("calls", 0))
+        except Exception:
+            by_command = {}
+        by_command = dict(sorted(by_command.items(), key=lambda kv: kv[1], reverse=True))
+        try:
+            dbsize = client.dbsize()
+        except Exception:
+            dbsize = None
+        return _jsonable({
+            "total_commands_processed": info.get("total_commands_processed"),
+            "instantaneous_ops_per_sec": info.get("instantaneous_ops_per_sec"),
+            "connected_clients": info.get("connected_clients"),
+            "used_memory": info.get("used_memory"),
+            "used_memory_human": info.get("used_memory_human"),
+            "uptime_in_seconds": info.get("uptime_in_seconds"),
+            "keyspace_hits": info.get("keyspace_hits"),
+            "keyspace_misses": info.get("keyspace_misses"),
+            "dbsize": dbsize,
+            "by_command": by_command,
+        })
 
     def redis_activity_reset(self) -> dict[str, Any]:
         act = self._redis_client.activity()

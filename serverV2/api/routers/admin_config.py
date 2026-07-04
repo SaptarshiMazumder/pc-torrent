@@ -32,12 +32,14 @@ router = APIRouter(tags=["admin_config"])
 
 _allocation_client: AllocationClient | None = None
 _cost_estimation_repo = None
+_cost_pricing_repo = None
 
 
-def init(allocation_client: AllocationClient, cost_estimation_repo=None) -> None:
-    global _allocation_client, _cost_estimation_repo
+def init(allocation_client: AllocationClient, cost_estimation_repo=None, cost_pricing_repo=None) -> None:
+    global _allocation_client, _cost_estimation_repo, _cost_pricing_repo
     _allocation_client = allocation_client
     _cost_estimation_repo = cost_estimation_repo
+    _cost_pricing_repo = cost_pricing_repo
 
 
 def _get_client() -> AllocationClient:
@@ -56,6 +58,15 @@ def get_cost_estimation_config(_admin: dict = Depends(require_admin)):
     if _cost_estimation_repo is None:
         raise HTTPException(500, "Cost estimation config repo not initialized")
     return {"config": asdict(_cost_estimation_repo.get())}
+
+
+@router.get("/admin/config/cost-pricing")
+def get_cost_pricing_config(_admin: dict = Depends(require_admin)):
+    """Unit prices used for the cost dashboard's usage×price estimates.  Edit
+    the ``config/cost_pricing`` Firestore doc to override any field live."""
+    if _cost_pricing_repo is None:
+        raise HTTPException(500, "Cost pricing config repo not initialized")
+    return {"config": _cost_pricing_repo.get().as_dict()}
 
 
 @router.put("/admin/config")

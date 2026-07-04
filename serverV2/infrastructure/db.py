@@ -619,6 +619,26 @@ def init_db() -> None:
                     "ALTER TABLE machines ADD COLUMN IF NOT EXISTS "
                     "commitment_end_at TIMESTAMP WITH TIME ZONE"
                 )
+                # Cost observability — append-only LLM token usage.  One row per
+                # LLM call (recorded by LLMFacade, fail-open), read by the admin
+                # cost dashboard's LLM provider.  Additive; nothing else reads
+                # or writes it, so it can never affect an existing flow.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS llm_usage (
+                        id            TEXT PRIMARY KEY,
+                        occurred_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                        provider      TEXT NOT NULL,
+                        model         TEXT NOT NULL,
+                        input_tokens  INTEGER NOT NULL DEFAULT 0,
+                        output_tokens INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS llm_usage_occurred_at "
+                    "ON llm_usage (occurred_at DESC)"
+                )
         log.info("Database connection pool initialized")
     except Exception as exc:
         log.error("Failed to initialize database: %s", exc)

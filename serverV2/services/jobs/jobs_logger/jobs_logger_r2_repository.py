@@ -13,12 +13,11 @@ Layout (per attempt = one object, never overwritten):
         chunk_{chunk_index}/
           attempt_{attempt}__{job_id}.log.gz
 
-Each object carries R2 tags used by lifecycle rules:
-
-    created_date=YYYY-MM-DD   -- for age-based deletion
-    env={env}                 -- redundant with bucket, but sanity-check
-                                 if a misconfigured deploy ever points
-                                 dev's client at prod's bucket
+No object tags are set.  Cloudflare R2 rejects the ``x-amz-tagging``
+header (returns ``NotImplemented``) even though the boto3 S3 client
+happily accepts it -- we found this the hard way.  R2's lifecycle
+rules operate on bucket + optional prefix, not object tags, so tag-
+based retention was aspirational anyway.
 
 Deployment TODO (per env, one-time in Cloudflare R2 dashboard):
     Add a lifecycle rule on the ``pc-rent-logs-<env>`` bucket:
@@ -34,7 +33,6 @@ presigned URL because presigned URLs expire.  The frontend read path
 from __future__ import annotations
 
 import logging
-from datetime import date
 
 from serverV2.infrastructure.storage.client import get_s3_client
 
@@ -66,7 +64,6 @@ class JobsLoggerR2Repository:
             Body=gzipped,
             ContentType="application/gzip",
             ContentEncoding="gzip",
-            Tagging=f"created_date={date.today().isoformat()}&env={env}",
         )
         return key
 

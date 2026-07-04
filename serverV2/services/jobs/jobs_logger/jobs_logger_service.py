@@ -43,7 +43,6 @@ from serverV2.services.jobs.jobs_logger.jobs_logger_r2_repository import (
 log = logging.getLogger(__name__)
 
 _UPLOAD_URL_TTL_SEC = 6 * 3600
-_STALE_NO_CHUNK_SEC = 300
 _TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 
 
@@ -76,12 +75,8 @@ class JobsLoggerService:
         job_id: str,
         offset: int,
         gzipped: bytes,
-        first_ctx: Optional[dict],
     ) -> None:
-        if first_ctx is not None:
-            self._mirror.write_meta(env, group_id, job_id, first_ctx)
         self._mirror.append_chunk(env, group_id, job_id, offset, gzipped)
-        self._mirror.touch_meta(env, group_id, job_id)
 
     # ------------------------------------------------------------
     # READ PATH -- Redis first, R2 fallback via presigned URL
@@ -91,18 +86,14 @@ class JobsLoggerService:
         self, env: str, group_id: str, job_id: str,
     ) -> Optional[bytes]:
         """Return the assembled log bytes (decompressed) if the job's
-        chunks are still in Redis; ``None`` otherwise."""
+        chunks are still in Redis; ``None`` if the key doesn't exist.
+        A malformed chunk raises -- fail loud, we wrote it, we must
+        be able to read it back."""
         chunks = self._mirror.read_chunks(env, group_id, job_id)
         if not chunks:
             return None
         chunks.sort(key=lambda t: t[0])
-        parts: list[bytes] = []
-        for _, gz in chunks:
-            try:
-                parts.append(gzip.decompress(gz))
-            except OSError:
-                continue
-        return b"".join(parts) if parts else None
+        return b"".join(gzip.decompress(gz) for _, gz in chunks)
 
     def presign_r2_url(self, key: str, expires_in: int = 3600) -> str:
         return self._r2_repo.presign_get(key, expires_in=expires_in)
@@ -115,80 +106,73 @@ class JobsLoggerService:
     def write_logs_to_r2(self) -> int:
         """Move every Redis-side log whose job is terminal (or whose
         worker has gone silent for >5 min) into R2.  Returns the number
-        of logs written."""
+        of logs written.
+
+        Fail loud: any exception in ``_process_one`` propagates to the
+        router (HTTP 500).  ``backup_monitor``'s ``LogWriteTrigger`` will
+        log the non-200 response at WARNING, and the operator sees the
+        failure immediately instead of a silent ``{"written": 0}``."""
         n = 0
         for env, group_id, job_id in self._mirror.scan_log_keys():
-            try:
-                if self._process_one(env, group_id, job_id):
-                    n += 1
-            except Exception as exc:
-                log.warning(
-                    "write_logs_to_r2: unhandled error on %s: %s",
-                    job_id, exc,
-                )
+            if self._process_one(env, group_id, job_id):
+                n += 1
         return n
 
     def _process_one(self, env: str, group_id: str, job_id: str) -> bool:
-        meta = self._mirror.read_meta(env, group_id, job_id) or {}
         row = self._job_repo.get_raw_by_id(job_id)
         if not row:
-            log.warning(
-                "write_logs_to_r2: job %s not in DB; dropping Redis keys",
+            # Chunks in Redis for a job we don't have a DB row for --
+            # somebody deleted the row, or key drifted.  Drop the key
+            # and move on.  Not defensive; this is a real "nothing to
+            # archive against" state.
+            log.info(
+                "write_logs_to_r2: job %s not in DB; dropping Redis key",
                 job_id,
             )
             self._mirror.delete(env, group_id, job_id)
             return False
 
-        status = row.get("status") or ""
-        terminal = status in _TERMINAL_STATUSES
-        stale = False
-        try:
-            last_seen = int(meta.get("last_seen_at", "0") or 0)
-            stale = (int(time.time()) - last_seen) > _STALE_NO_CHUNK_SEC
-        except (TypeError, ValueError):
-            pass
-        if not (terminal or stale):
-            return False
-
         chunks = self._mirror.read_chunks(env, group_id, job_id)
         if not chunks:
+            # Key exists but returned an empty list -- concurrent expire
+            # or drain.  Real state, drop the key.
             self._mirror.delete(env, group_id, job_id)
             return False
 
         chunks.sort(key=lambda t: t[0])
-        decoded_parts: list[bytes] = []
-        for _, gz in chunks:
-            try:
-                decoded_parts.append(gzip.decompress(gz))
-            except OSError as exc:
-                log.warning(
-                    "write_logs_to_r2: chunk decompress failed for %s: %s",
-                    job_id, exc,
-                )
-        if not decoded_parts:
-            self._mirror.delete(env, group_id, job_id)
-            return False
-
-        combined = b"".join(decoded_parts)
+        # gzip.decompress errors bubble up -- if the worker wrote it and
+        # append_chunk stored it, we MUST be able to read it back.  A
+        # decode failure here is a genuine bug we want to see.
+        combined = b"".join(gzip.decompress(gz) for _, gz in chunks)
         recompressed = gzip.compress(combined)
-        try:
-            r2_key = self._r2_repo.write_log(
-                env=env,
-                group_id=str(row.get("group_id") or group_id),
-                chunk_index=int(row.get("chunk_index") or 0),
-                attempt=int(row.get("attempt") or 0),
-                job_id=job_id,
-                gzipped=recompressed,
-            )
-        except Exception as exc:
-            log.warning(
-                "write_logs_to_r2: R2 upload failed for %s: %s",
-                job_id, exc,
-            )
-            return False
-
+        # R2 upload errors bubble up -- exactly the class of failure the
+        # x-amz-tagging incident hid for hours behind a swallow.  Every
+        # tick uploads the CURRENT state of Redis to R2, overwriting the
+        # object.  A render in progress gets partial snapshots; a done
+        # render gets a final complete snapshot on the tick after the
+        # worker stops posting.  Idempotent (same Redis input -> same
+        # R2 bytes), and any observer can fetch the log at any time
+        # instead of only after the job hits a terminal status.
+        r2_key = self._r2_repo.write_log(
+            env=env,
+            group_id=str(row.get("group_id") or group_id),
+            chunk_index=int(row.get("chunk_index") or 0),
+            attempt=int(row.get("attempt") or 0),
+            job_id=job_id,
+            gzipped=recompressed,
+        )
         self._job_repo.stamp_worker_log_url(job_id, r2_key)
-        self._mirror.delete(env, group_id, job_id)
+
+        # Only delete the Redis key once the job is terminal.  While the
+        # render is still running the worker keeps appending, so keeping
+        # Redis intact lets the live-tail read path serve fresh bytes;
+        # each tick just overwrites the R2 object with the newer state.
+        # After terminal, no more appends will come -- delete the key so
+        # subsequent ticks skip this job cleanly instead of re-uploading
+        # the same bytes until TTL expires.
+        status = row.get("status") or ""
+        if status in _TERMINAL_STATUSES:
+            self._mirror.delete(env, group_id, job_id)
         return True
 
     # ------------------------------------------------------------

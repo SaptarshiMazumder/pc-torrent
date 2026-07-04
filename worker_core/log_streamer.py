@@ -17,14 +17,10 @@ without this module present.
 Configuration is entirely via env vars set by the handler at spawn:
 
     PCR_LOG_FILE        path to the log file to tail (handler creates)
-    PCR_LOG_ENDPOINT    signed URL for POST log-append (HMAC in URL)
+    PCR_LOG_ENDPOINT    signed URL for POST log-append (HMAC signs the
+                        job_id, so job identity rides in the URL path)
     PCR_ENV             deployment env ("dev" / "prod")
-    PCR_GROUP_ID        render_group_id
-    PCR_JOB_ID          job_id  (per-attempt PK; retries get a new one)
-    PCR_ATTEMPT         attempt number (0, 1, 2, ...)
-    PCR_CHUNK_INDEX     chunk index within the group
-    PCR_FLEET           "vast" / "modal" / "community"
-    PCR_MACHINE_ID      machine id (may be empty for serverless)
+    PCR_GROUP_ID        render_group_id (needed for Redis key routing)
     PCR_LOG_TICK_SEC    tick interval, default 10
 
 SIGTERM handling: sets a stop flag, does one final tick to flush the
@@ -62,25 +58,14 @@ class LogStreamer:
         endpoint_url: str,
         env: str,
         group_id: str,
-        job_id: str,
-        attempt: int,
-        chunk_index: int,
-        fleet: str,
-        machine_id: str,
         tick_sec: float = DEFAULT_TICK_SEC,
     ) -> None:
         self._log_file_path = log_file_path
         self._endpoint_url = endpoint_url
         self._env = env
         self._group_id = group_id
-        self._job_id = job_id
-        self._attempt = attempt
-        self._chunk_index = chunk_index
-        self._fleet = fleet
-        self._machine_id = machine_id
         self._tick_sec = tick_sec
         self._last_offset = 0
-        self._first_post_pending = True
         self._stop_requested = False
 
     def run(self) -> None:
@@ -143,13 +128,6 @@ class LogStreamer:
             "X-Env": self._env,
             "X-Group-Id": self._group_id,
         }
-        if self._first_post_pending:
-            headers.update({
-                "X-Attempt": str(self._attempt),
-                "X-Chunk-Index": str(self._chunk_index),
-                "X-Fleet": self._fleet,
-                "X-Machine-Id": self._machine_id,
-            })
         try:
             gzipped = gzip.compress(chunk)
             requests.post(
@@ -158,7 +136,6 @@ class LogStreamer:
                 headers=headers,
                 timeout=POST_TIMEOUT_SEC,
             )
-            self._first_post_pending = False
         except Exception as exc:
             # Fire and forget.  Offset has already advanced; these bytes
             # are now lost -- accepted trade for zero worker-side state.
@@ -212,11 +189,6 @@ def main() -> None:
         endpoint_url=endpoint,
         env=os.environ.get("PCR_ENV", ""),
         group_id=os.environ.get("PCR_GROUP_ID", ""),
-        job_id=os.environ.get("PCR_JOB_ID", ""),
-        attempt=int(os.environ.get("PCR_ATTEMPT", "0") or 0),
-        chunk_index=int(os.environ.get("PCR_CHUNK_INDEX", "0") or 0),
-        fleet=os.environ.get("PCR_FLEET", ""),
-        machine_id=os.environ.get("PCR_MACHINE_ID", ""),
         tick_sec=float(
             os.environ.get("PCR_LOG_TICK_SEC", "") or DEFAULT_TICK_SEC
         ),

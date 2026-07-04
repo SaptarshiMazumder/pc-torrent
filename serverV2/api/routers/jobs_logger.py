@@ -6,10 +6,10 @@ Three endpoints, each with its own auth:
       Called by the worker's log_streamer subprocess every 10 s.  Auth
       is a HMAC-SHA256 signature over ``(job_id, exp)`` embedded in the
       query string; ``JobsLoggerService.verify_upload_signature`` is the
-      arbiter.  Body is the gzipped delta bytes; ``X-Chunk-Offset`` is
-      the offset the bytes start at; the first request per job additionally
-      carries ``X-Env / X-Group-Id / X-Attempt / X-Chunk-Index / X-Fleet /
-      X-Machine-Id`` so the backend can populate the meta hash.
+      arbiter.  Body is the gzipped delta bytes.  Headers: ``X-Chunk-Offset``
+      (the byte offset the payload starts at), ``X-Env`` and ``X-Group-Id``
+      (needed to route the RPUSH -- Redis key is
+      ``logs:{env}:{group}:{job}``).
 
   POST /internal/write-logs-to-r2
       Called by the backup_monitor Cloud Run Job on its 60 s tick.
@@ -94,12 +94,8 @@ async def log_append(
     exp: int = Query(...),
     sig: str = Query(...),
     x_chunk_offset: int = Header(..., alias="X-Chunk-Offset"),
-    x_env: str | None = Header(default=None, alias="X-Env"),
-    x_group_id: str | None = Header(default=None, alias="X-Group-Id"),
-    x_attempt: str | None = Header(default=None, alias="X-Attempt"),
-    x_chunk_index: str | None = Header(default=None, alias="X-Chunk-Index"),
-    x_fleet: str | None = Header(default=None, alias="X-Fleet"),
-    x_machine_id: str | None = Header(default=None, alias="X-Machine-Id"),
+    x_env: str = Header(..., alias="X-Env"),
+    x_group_id: str = Header(..., alias="X-Group-Id"),
 ) -> Response:
     svc = _require_service()
     if not svc.verify_upload_signature(job_id, exp, sig):
@@ -109,38 +105,12 @@ async def log_append(
     if not body:
         return Response(status_code=204)
 
-    # First chunk carries the identity headers so the backend can
-    # populate the Redis meta hash.  Subsequent chunks only carry the
-    # offset -- the mirror already knows the identity.
-    first_ctx: dict | None = None
-    if x_group_id and x_env:
-        first_ctx = {
-            "attempt":     x_attempt or "",
-            "chunk_index": x_chunk_index or "",
-            "fleet":       x_fleet or "",
-            "machine_id":  x_machine_id or "",
-        }
-
-    env = x_env or ""
-    group_id = x_group_id or ""
-    if not env or not group_id:
-        # Non-first chunk -- the mirror path builder still needs env +
-        # group_id to route the RPUSH.  Pull them from the meta hash if
-        # we can (the first-chunk POST that populated them is already
-        # authenticated by the same signed URL).
-        # Fail closed if we can't route -- worker will keep POSTing.
-        raise HTTPException(
-            400,
-            "Missing X-Env / X-Group-Id; first-chunk headers required",
-        )
-
     svc.append(
-        env=env,
-        group_id=group_id,
+        env=x_env,
+        group_id=x_group_id,
         job_id=job_id,
         offset=x_chunk_offset,
         gzipped=body,
-        first_ctx=first_ctx,
     )
     return Response(status_code=204)
 

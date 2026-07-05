@@ -32,6 +32,7 @@
     "signedIn": "サインイン済み",
     "signOut": "サインアウト"
   },
+  "tokens": "トークン",
   "language": {
     "label": "言語",
     "en": "English",

@@ -7921,6 +7921,24 @@ body:has(.job-detail) .jd-header-top {
   margin: auto;
 }
 
+/* Format tile for browser-un-thumbnailable raster formats (e.g. TIFF) —
+   an image glyph + format label instead of a broken/blank preview. */
+.frame-thumb-fmt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  box-sizing: border-box;
+}
+.frame-thumb-fmt-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
 .job-frame-tile {
   position: relative;
   display: block;

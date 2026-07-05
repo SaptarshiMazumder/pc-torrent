@@ -20,6 +20,7 @@ function fmtTime(ts) {
 }
 
 function DownloadEntry({ dl, onRemove }) {
+  const { t } = useTranslation("downloads");
   const pct = dl.totalFiles > 0 ? Math.round((dl.completedFiles / dl.totalFiles) * 100) : 0;
   const isActive = dl.status === "loading";
   const isDone = dl.status === "done";
@@ -29,10 +30,10 @@ function DownloadEntry({ dl, onRemove }) {
     : dl.completedAt ? dl.completedAt - dl.startedAt : 0;
 
   const summaryParts = [];
-  if (dl.downloaded > 0) summaryParts.push(`${dl.downloaded} downloaded`);
-  if (dl.skipped > 0) summaryParts.push(`${dl.skipped} skipped`);
-  if (dl.failed > 0) summaryParts.push(`${dl.failed} failed`);
-  const summary = summaryParts.join(", ");
+  if (dl.downloaded > 0) summaryParts.push(t("summary.downloaded", { count: dl.downloaded }));
+  if (dl.skipped > 0) summaryParts.push(t("summary.skipped", { count: dl.skipped }));
+  if (dl.failed > 0) summaryParts.push(t("summary.failed", { count: dl.failed }));
+  const summary = summaryParts.join(t("summarySeparator"));
 
   const statusColor = isDone ? "#12a150" : isError ? "#ef4444" : "var(--th)";
 
@@ -58,16 +59,16 @@ function DownloadEntry({ dl, onRemove }) {
           <span className="dl-entry-name">{dl.jobName}</span>
           <span className="dl-entry-meta">
             {isActive && dl.totalFiles > 0 && (
-              <span>{dl.completedFiles} / {dl.totalFiles} files</span>
+              <span>{t("filesProgress", { completed: dl.completedFiles, total: dl.totalFiles })}</span>
             )}
             {isDone && summary && <span>{summary}</span>}
-            {isError && <span className="dl-entry-err-text">{dl.error || "Failed"}</span>}
+            {isError && <span className="dl-entry-err-text">{dl.error || t("status.failed")}</span>}
             {elapsed > 0 && <span className="dl-entry-elapsed">{fmtDuration(elapsed)}</span>}
             {dl.startedAt && <span className="dl-entry-time">{fmtTime(dl.startedAt)}</span>}
           </span>
         </div>
         {!isActive && (
-          <button className="dl-entry-dismiss" onClick={onRemove} title="Remove from list">
+          <button className="dl-entry-dismiss" onClick={onRemove} title={t("removeFromList")}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
           </button>
         )}
@@ -86,7 +87,7 @@ function DownloadEntry({ dl, onRemove }) {
         <button
           className="dl-entry-path"
           onClick={() => { open(dl.path).catch(() => {}); }}
-          title="Open in Explorer"
+          title={t("openInExplorer")}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
           <span>{dl.path}</span>
@@ -98,7 +99,7 @@ function DownloadEntry({ dl, onRemove }) {
 }
 
 export default function DownloadsPage() {
-  const { t } = useTranslation("common");
+  const { t } = useTranslation(["downloads", "common"]);
   const { downloads, removeDownload, clearCompleted } = useDownloads();
 
   const sorted = useMemo(() => {
@@ -119,16 +120,16 @@ export default function DownloadsPage() {
       <div className="dl-header">
         <div className="dl-header-left">
           <div className="page-header-title">
-            <div className="page-eyebrow">{t("eyebrow.rentee")}</div>
-            <h2>Downloads</h2>
+            <div className="page-eyebrow">{t("common:eyebrow.rentee")}</div>
+            <h2>{t("title")}</h2>
           </div>
           {activeCount > 0 && (
-            <span className="dl-header-badge">{activeCount} active</span>
+            <span className="dl-header-badge">{t("active", { count: activeCount })}</span>
           )}
         </div>
         {completedCount > 0 && (
           <button className="btn btn-secondary dl-clear-btn" onClick={clearCompleted}>
-            Clear Finished
+            {t("clearFinished")}
           </button>
         )}
       </div>
@@ -140,8 +141,8 @@ export default function DownloadsPage() {
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
             </svg>
           </div>
-          <p>No downloads yet</p>
-          <p className="dl-empty-hint">Downloads from your render jobs will appear here.</p>
+          <p>{t("empty")}</p>
+          <p className="dl-empty-hint">{t("emptyHint")}</p>
         </div>
       )}
 

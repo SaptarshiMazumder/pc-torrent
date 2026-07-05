@@ -1,0 +1,7 @@
+{
+  "title": "Logs",
+  "entries_one": "{{count}} entry",
+  "entries_other": "{{count}} entries",
+  "clear": "Clear Logs",
+  "empty": "No logs yet"
+}

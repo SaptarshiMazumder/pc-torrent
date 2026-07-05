@@ -1,0 +1,29 @@
+{
+  "title": "Downloads",
+  "active": "{{count}} active",
+  "clearFinished": "Clear Finished",
+  "empty": "No downloads yet",
+  "emptyHint": "Downloads from your render jobs will appear here.",
+  "removeFromList": "Remove from list",
+  "openInExplorer": "Open in Explorer",
+  "filesProgress": "{{completed}} / {{total}} files",
+  "summarySeparator": ", ",
+  "summary": {
+    "downloaded": "{{count}} downloaded",
+    "skipped": "{{count}} skipped",
+    "failed": "{{count}} failed"
+  },
+  "status": {
+    "failed": "Failed",
+    "allFailed": "All files failed to download",
+    "genericFailed": "Download failed",
+    "noOutputFiles": "No output files found",
+    "unknownError": "unknown error"
+  },
+  "toast": {
+    "complete": "Download complete: {{jobName}}",
+    "completeWithSummary": "Download complete: {{jobName}} ({{summary}})",
+    "failed": "Download failed: {{jobName}}",
+    "failedWithReason": "Download failed: {{jobName}} — {{reason}}"
+  }
+}

@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { downloadJobOutputToDownloads } from "../services/sidecar";
 import { buildDownloadFolderName, extractTypeFolder } from "../utils/jobUtils";
 import { useToast } from "./ToastContext";
@@ -9,6 +10,7 @@ export function DownloadProvider({ children }) {
   const [downloads, setDownloads] = useState({});
   const activeRef = useRef(new Set());
   const { pushToast } = useToast();
+  const { t } = useTranslation("downloads");
 
   const startDownload = useCallback(async (id, jobName, fetchOutputs) => {
     if (activeRef.current.has(id)) return;
@@ -36,7 +38,7 @@ export function DownloadProvider({ children }) {
       const jobFolder = buildDownloadFolderName(jobName, id);
       const data = await fetchOutputs();
       const files = Array.isArray(data?.files) ? data.files : [];
-      if (files.length === 0) throw new Error("No output files found");
+      if (files.length === 0) throw new Error(t("status.noOutputFiles"));
 
       setDownloads((prev) => ({
         ...prev,
@@ -75,7 +77,7 @@ export function DownloadProvider({ children }) {
       }
 
       const finalStatus = stats.failed === files.length ? "error" : "done";
-      const finalError = stats.failed === files.length ? "All files failed to download" : "";
+      const finalError = stats.failed === files.length ? t("status.allFailed") : "";
       setDownloads((prev) => ({
         ...prev,
         [id]: {
@@ -88,16 +90,18 @@ export function DownloadProvider({ children }) {
       }));
       if (finalStatus === "done") {
         const summary = [
-          stats.downloaded > 0 ? `${stats.downloaded} downloaded` : "",
-          stats.skipped > 0 ? `${stats.skipped} skipped` : "",
-          stats.failed > 0 ? `${stats.failed} failed` : "",
-        ].filter(Boolean).join(", ");
+          stats.downloaded > 0 ? t("summary.downloaded", { count: stats.downloaded }) : "",
+          stats.skipped > 0 ? t("summary.skipped", { count: stats.skipped }) : "",
+          stats.failed > 0 ? t("summary.failed", { count: stats.failed }) : "",
+        ].filter(Boolean).join(t("summarySeparator"));
         pushToast(
-          `Download complete: ${jobName}${summary ? ` (${summary})` : ""}`,
+          summary
+            ? t("toast.completeWithSummary", { jobName, summary })
+            : t("toast.complete", { jobName }),
           "success",
         );
       } else {
-        pushToast(`Download failed: ${jobName}`, "error");
+        pushToast(t("toast.failed", { jobName }), "error");
       }
     } catch (error) {
       setDownloads((prev) => ({
@@ -105,18 +109,18 @@ export function DownloadProvider({ children }) {
         [id]: {
           ...prev[id],
           status: "error",
-          error: error.message || "Download failed",
+          error: error.message || t("status.genericFailed"),
           completedAt: Date.now(),
         },
       }));
       pushToast(
-        `Download failed: ${jobName} — ${error.message || "unknown error"}`,
+        t("toast.failedWithReason", { jobName, reason: error.message || t("status.unknownError") }),
         "error",
       );
     } finally {
       activeRef.current.delete(id);
     }
-  }, [pushToast]);
+  }, [pushToast, t]);
 
   const isDownloading = useCallback(
     (id) => activeRef.current.has(id),

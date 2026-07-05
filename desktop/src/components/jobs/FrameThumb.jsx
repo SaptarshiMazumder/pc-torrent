@@ -13,6 +13,10 @@ function isExrFilename(name) {
   return typeof name === "string" && /\.exr$/i.test(name);
 }
 
+function isTiffFilename(name) {
+  return typeof name === "string" && /\.tiff?$/i.test(name);
+}
+
 export default function FrameThumb({ file, backendUrl, className }) {
   const [src, setSrc] = useState("");
   const mountedRef = useRef(true);
@@ -71,6 +75,18 @@ export default function FrameThumb({ file, backendUrl, className }) {
       return (
         <div className={`${className} frame-thumb-exr`} title={file?.filename}>
           <img src={openexrIcon} alt="OpenEXR" className="frame-thumb-exr-icon" />
+        </div>
+      );
+    }
+    if (isTiffFilename(file?.filename)) {
+      return (
+        <div className={`${className} frame-thumb-fmt`} title={file?.filename}>
+          <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <circle cx="8.5" cy="9.5" r="1.5" />
+            <path d="M21 15l-5-5-6 6-3-3-4 4" />
+          </svg>
+          <span className="frame-thumb-fmt-label">TIFF</span>
         </div>
       );
     }

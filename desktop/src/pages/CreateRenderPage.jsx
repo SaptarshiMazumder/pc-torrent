@@ -385,7 +385,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
     },
     output: outputFormat === "OPEN_EXR_MULTILAYER"
       ? { file_format: "OPEN_EXR_MULTILAYER", color_depth: exrColorDepth, exr_codec: exrCodec, film_transparent: filmTransparent }
-      : { file_format: "PNG" },
+      : { file_format: outputFormat === "TIFF" ? "TIFF" : "PNG" },
     passes: outputFormat === "OPEN_EXR_MULTILAYER" && !passesUseFile
       ? { use_file_settings: false, ...renderPasses }
       : { use_file_settings: true },
@@ -1027,7 +1027,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
       },
       output: outputFormat === "OPEN_EXR_MULTILAYER"
         ? { file_format: "OPEN_EXR_MULTILAYER", color_depth: exrColorDepth, exr_codec: exrCodec, film_transparent: filmTransparent }
-        : { file_format: "PNG" },
+        : { file_format: outputFormat === "TIFF" ? "TIFF" : "PNG" },
       passes: outputFormat === "OPEN_EXR_MULTILAYER" && !passesUseFile
         ? { use_file_settings: false, ...renderPasses }
         : { use_file_settings: true },
@@ -1442,6 +1442,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                       className="cr-input"
                     >
                       <option value="PNG">PNG (single image)</option>
+                      <option value="TIFF">TIFF (single image)</option>
                       <option value="OPEN_EXR_MULTILAYER">OpenEXR MultiLayer (render passes)</option>
                     </select>
                   </label>

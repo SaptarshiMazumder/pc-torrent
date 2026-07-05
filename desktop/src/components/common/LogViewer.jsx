@@ -1,4 +1,5 @@
 import { useRef, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 
 const LEVEL_COLORS = {
   info: "var(--muted)",
@@ -14,6 +15,7 @@ const SOURCE_COLORS = {
 };
 
 export default function LogViewer({ logs }) {
+  const { t } = useTranslation("logs");
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -23,7 +25,7 @@ export default function LogViewer({ logs }) {
   if (logs.length === 0) {
     return (
       <div className="log-viewer">
-        <div className="log-empty">No logs yet</div>
+        <div className="log-empty">{t("empty")}</div>
       </div>
     );
   }

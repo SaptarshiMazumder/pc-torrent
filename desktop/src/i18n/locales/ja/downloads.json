@@ -1,0 +1,29 @@
+{
+  "title": "ダウンロード",
+  "active": "{{count}}件実行中",
+  "clearFinished": "完了分をクリア",
+  "empty": "ダウンロードはまだありません",
+  "emptyHint": "レンダージョブのダウンロードがここに表示されます。",
+  "removeFromList": "リストから削除",
+  "openInExplorer": "エクスプローラーで開く",
+  "filesProgress": "{{completed}} / {{total}} ファイル",
+  "summarySeparator": "、",
+  "summary": {
+    "downloaded": "{{count}}件ダウンロード",
+    "skipped": "{{count}}件スキップ",
+    "failed": "{{count}}件失敗"
+  },
+  "status": {
+    "failed": "失敗",
+    "allFailed": "すべてのファイルのダウンロードに失敗しました",
+    "genericFailed": "ダウンロードに失敗しました",
+    "noOutputFiles": "出力ファイルが見つかりません",
+    "unknownError": "不明なエラー"
+  },
+  "toast": {
+    "complete": "ダウンロード完了: {{jobName}}",
+    "completeWithSummary": "ダウンロード完了: {{jobName}}（{{summary}}）",
+    "failed": "ダウンロード失敗: {{jobName}}",
+    "failedWithReason": "ダウンロード失敗: {{jobName}} — {{reason}}"
+  }
+}

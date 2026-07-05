@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useUserProfile } from "../../contexts/UserProfileContext";
 
 function formatCredits(value) {
@@ -16,12 +17,13 @@ function formatCredits(value) {
  * button -- the value is always live.
  */
 export default function UserCreditsCorner() {
+  const { t } = useTranslation(["credits", "common"]);
   const { profile, loading } = useUserProfile();
 
   if (!profile && !loading) return null;
 
   return (
-    <div className="user-credits-corner" role="status" aria-label="Tokens balance">
+    <div className="user-credits-corner" role="status" aria-label={t("balanceAria")}>
       {profile ? (
         <>
           <span className="user-credits-corner-icon" aria-hidden="true">
@@ -37,10 +39,10 @@ export default function UserCreditsCorner() {
           <span className="user-credits-corner-credits">
             {formatCredits(profile.credits)}
           </span>
-          <span className="user-credits-corner-unit">tokens</span>
+          <span className="user-credits-corner-unit">{t("common:tokens")}</span>
         </>
       ) : (
-        <span className="user-credits-corner-loader">Loading…</span>
+        <span className="user-credits-corner-loader">{t("loading")}</span>
       )}
     </div>
   );

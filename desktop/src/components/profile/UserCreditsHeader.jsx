@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useUserProfile } from "../../contexts/UserProfileContext";
 
 function formatCredits(value) {
@@ -15,6 +16,7 @@ function formatCredits(value) {
  * math, no polling.
  */
 export default function UserCreditsHeader() {
+  const { t } = useTranslation("common");
   const { profile, loading } = useUserProfile();
 
   if (loading && !profile) {
@@ -31,7 +33,7 @@ export default function UserCreditsHeader() {
       <span className="user-credits-header-tier">{profile.tier || "free"}</span>
       <span className="user-credits-header-sep">·</span>
       <span className="user-credits-header-credits">{formatCredits(profile.credits)}</span>
-      <span className="user-credits-header-unit">tokens</span>
+      <span className="user-credits-header-unit">{t("tokens")}</span>
     </div>
   );
 }

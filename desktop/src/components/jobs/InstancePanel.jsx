@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { cancelJob, getAllowedStallTimes } from "../../services/api";
 import { formatCredits } from "../../utils/creditsFormat";
 import AllowedStallTimesOverlay from "./AllowedStallTimesOverlay";
 
-function formatActualCost(task) {
+function formatActualCost(task, t) {
   // ``actual_cost_credits`` is computed server-side on every read.
   // Running tasks substitute ``now`` in the formula; terminal tasks
   // have frozen values.  Server applies the priority multiplier and
   // USD->credits conversion at the wire boundary, so we just display.
   if (typeof task?.actual_cost_credits !== "number") return null;
-  const label = (task.status === "running" || task.status === "uploading")
-    ? "live"
-    : "actual";
-  return `${formatCredits(task.actual_cost_credits)} tokens ${label}`;
+  const credits = formatCredits(task.actual_cost_credits);
+  return (task.status === "running" || task.status === "uploading")
+    ? t("cost.liveTokens", { credits })
+    : t("cost.actualTokens", { credits });
 }
 
 const MERGED_STATUS_COLORS = {
@@ -98,6 +99,7 @@ const ICON = {
  */
 
 function ActiveCard({ data, jobId, backendUrl, onCancel }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const [showLogs, setShowLogs] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState("");
@@ -148,7 +150,7 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
       if (onCancel) onCancel();
     } catch (e) {
       setCancelling(false);
-      setCancelError(e?.message || "Cancel failed");
+      setCancelError(e?.message || t("instance.cancelFailed"));
     }
   }
 
@@ -184,8 +186,8 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
               ref={clockBtnRef}
               type="button"
               onClick={() => setStallTimesOpen((v) => !v)}
-              title="Allowed stall times"
-              aria-label="Show allowed stall times"
+              title={t("stall.title")}
+              aria-label={t("instance.showAllowedStallTimes")}
               style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -229,8 +231,8 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
               className="inst-active-cancel-btn"
               onClick={handleCancel}
               disabled={cancelling}
-              title={cancelling ? "Cancelling…" : "Cancel this chunk"}
-              aria-label="Cancel this chunk"
+              title={cancelling ? t("instance.cancelling") : t("instance.cancelChunk")}
+              aria-label={t("instance.cancelChunk")}
               style={{
                 marginLeft: 6,
                 display: "inline-flex",
@@ -258,7 +260,7 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
           )}
         </div>
         <div className="inst-active-stats">
-          <StatChip icon={ICON.frames}>{data.rendered}{data.total != null ? ` / ${data.total}` : ""} frames</StatChip>
+          <StatChip icon={ICON.frames}>{t("instance.frames", { value: data.total != null ? `${data.rendered} / ${data.total}` : `${data.rendered}` })}</StatChip>
           {data.rangeLabel && <StatChip icon={ICON.range}>{data.rangeLabel}</StatChip>}
           {data.elapsedSec != null && <StatChip icon={ICON.uptime}>{fmtElapsed(data.elapsedSec)}</StatChip>}
           {data.cost != null && <StatChip icon={ICON.cost}>{data.cost}</StatChip>}
@@ -289,7 +291,7 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
           <div className="inst-logs-section">
             <button className="inst-logs-toggle" onClick={() => setShowLogs((v) => !v)}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
-              {showLogs ? "Hide logs" : "Show logs"}
+              {showLogs ? t("instance.hideLogs") : t("instance.showLogs")}
             </button>
             {showLogs && <pre ref={logsRef} className="inst-logs-pre">{data.logs}</pre>}
           </div>
@@ -299,21 +301,16 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
   );
 }
 
-// Maps backend stall-rule names (parsed from job.error in the
-// serializer) to compact UI labels.  Add new entries here when new
-// rules are added to PreRenderStallDetector.
-const STALL_RULE_LABELS = {
-  loading_stall: "loading stall",
-  bytes_stall: "bytes stall",
-  download_ceiling: "download ceiling",
-  cpu_stall: "cpu stall",
-  hard_ceiling: "hard ceiling",
-};
-
 function FinishedRow({ data }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const dot = statusColor(data.displayStatus);
   const [showError, setShowError] = useState(false);
-  const stallLabel = data.stallRule ? (STALL_RULE_LABELS[data.stallRule] || data.stallRule) : null;
+  // Backend stall-rule names (parsed from job.error in the serializer) map
+  // to compact UI labels under myJobs:instance.stallRules; unknown rules
+  // fall back to the raw name.
+  const stallLabel = data.stallRule
+    ? t(`instance.stallRules.${data.stallRule}`, { defaultValue: data.stallRule })
+    : null;
 
   return (
     <div className="inst-fin-row" style={{ "--inst-color": dot }}>
@@ -325,15 +322,15 @@ function FinishedRow({ data }) {
           <span
             className="inst-fin-pill"
             style={{ background: "#f59e0b18", color: "#f59e0b", fontWeight: 600 }}
-            title={`Stall rule: ${data.stallRule}`}
+            title={t("instance.stallRuleTitle", { rule: data.stallRule })}
           >
             {stallLabel}
           </span>
         )}
-        <span className="inst-fin-stat">{data.rendered}{data.total != null ? ` / ${data.total}` : ""} frames</span>
+        <span className="inst-fin-stat">{t("instance.frames", { value: data.total != null ? `${data.rendered} / ${data.total}` : `${data.rendered}` })}</span>
         {data.rangeLabel && <span className="inst-fin-stat inst-fin-range">{data.rangeLabel}</span>}
         {data.actualCost != null && (
-          <span className="inst-fin-stat" title="Actual cost (price_per_hour × elapsed)">{data.actualCost}</span>
+          <span className="inst-fin-stat" title={t("instance.actualCostTitle")}>{data.actualCost}</span>
         )}
         {data.error && (
           <button className="inst-fin-err-toggle" onClick={() => setShowError((v) => !v)}>
@@ -350,13 +347,14 @@ function FinishedRow({ data }) {
  * Generic instance panel driven by a provider strategy.
  *
  * @param {Object} provider
- * @param {string} provider.title
+ * @param {string} provider.titleKey
  * @param {ReactNode} provider.icon
  * @param {(task) => boolean} provider.filterTask
  * @param {(backendUrl) => Promise<Array>} provider.fetchInstances
  * @param {(task, live) => CardData} provider.extractCardData
  */
 export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, mode = "both" }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const [liveMap, setLiveMap] = useState({});
   // Cost values come from the polled task DTOs (server-computed live
   // for running tasks).  No local 1Hz tick.
@@ -403,13 +401,13 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, 
       <div className="inst-panel-header">
         <div className="inst-panel-title-row">
           <div className="inst-panel-icon">{provider.icon}</div>
-          <span className="inst-panel-title">{provider.title}</span>
+          <span className="inst-panel-title">{t(provider.titleKey)}</span>
           <span className="inst-panel-count">{visibleCount}</span>
         </div>
         <div className="inst-panel-chips">
-          {showActive && activeTasks.length > 0 && <span className="inst-chip inst-chip--active"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{activeTasks.length} active</span>}
-          {showFinished && doneCount > 0 && <span className="inst-chip inst-chip--done"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{doneCount} done</span>}
-          {showFinished && failedCount > 0 && <span className="inst-chip inst-chip--failed"><span className="inst-chip-dot" style={{ background: "#f87171" }} />{failedCount} failed</span>}
+          {showActive && activeTasks.length > 0 && <span className="inst-chip inst-chip--active"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{t("instance.activeCount", { count: activeTasks.length })}</span>}
+          {showFinished && doneCount > 0 && <span className="inst-chip inst-chip--done"><span className="inst-chip-dot" style={{ background: "#22c55e" }} />{t("instance.doneCount", { count: doneCount })}</span>}
+          {showFinished && failedCount > 0 && <span className="inst-chip inst-chip--failed"><span className="inst-chip-dot" style={{ background: "#f87171" }} />{t("instance.failedCount", { count: failedCount })}</span>}
         </div>
       </div>
 
@@ -417,7 +415,7 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, 
         <div className="inst-active-list">
           {activeTasks.map((task) => {
             const data = provider.extractCardData(task, liveMap[task.job_id] || null);
-            data.actualCost = formatActualCost(task);
+            data.actualCost = formatActualCost(task, t);
             return (
               <ActiveCard
                 key={task.job_id}
@@ -433,10 +431,10 @@ export default function InstancePanel({ tasks, backendUrl, provider, onRefresh, 
 
       {showFinished && finishedTasks.length > 0 && (
         <div className="inst-fin-list">
-          {showActive && activeTasks.length > 0 && <div className="inst-fin-divider">Completed</div>}
+          {showActive && activeTasks.length > 0 && <div className="inst-fin-divider">{t("instance.completed")}</div>}
           {finishedTasks.map((task) => {
             const data = provider.extractCardData(task, null);
-            data.actualCost = formatActualCost(task);
+            data.actualCost = formatActualCost(task, t);
             return <FinishedRow key={task.job_id} data={data} />;
           })}
         </div>

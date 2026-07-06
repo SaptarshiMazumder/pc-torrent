@@ -47,6 +47,7 @@ fn main() {
             commands::remove_image,
             commands::download_job_output_to_downloads,
             commands::get_file_size,
+            commands::reveal_path,
             commands::read_file_head_base64,
             commands::start_upload_file_to_presigned_url,
             commands::start_upload_file_to_render_group_multipart,

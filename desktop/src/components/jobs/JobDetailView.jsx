@@ -1,6 +1,7 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
-  STATUS_LABELS,
+  jobStatusLabel,
   isTerminalStatus,
   terminalFallbackPct,
   resolveJobFilename,
@@ -20,10 +21,12 @@ import UserCreditsHeader from "../profile/UserCreditsHeader";
 import { usePendingQueue } from "../../hooks/usePendingQueue";
 import { formatCredits } from "../../utils/creditsFormat";
 
-const DRAWER_TITLES = {
-  instances: "Instances",
-  scene: "Scene",
-  costs: "Costs",
+// Maps each drawer to the dock's "hide" tooltip key so the drawer's own
+// close button reuses the same phrasing the dock uses.
+const DRAWER_HIDE_KEYS = {
+  instances: "detail.dock.hideInstances",
+  scene: "detail.dock.hideScene",
+  costs: "detail.dock.hideCosts",
 };
 
 function BigGauge({ pct, color, label }) {
@@ -73,16 +76,17 @@ function RenderGroupDetail({
   onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
   onRefresh, onRefreshFrames,
 }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const id = job.group_id;
   const rawPct = typeof job.overall_progress_pct === "number" ? Math.max(0, Math.min(100, job.overall_progress_pct)) : null;
   const overallPct = rawPct !== null ? Math.round(rawPct) : (job.status === "done" ? 100 : job.status === "cancelled" || job.status === "failed" ? 0 : null);
-  const tasksDone = (job.tasks || []).filter((t) => t.status === "done").length;
+  const tasksDone = (job.tasks || []).filter((task) => task.status === "done").length;
   const taskCount = (job.tasks || []).length;
   const rendered = job.overall_rendered_frames || 0;
   const total = typeof job.total_frames === "number" ? job.total_frames : null;
   const availableOutputCount = typeof job.available_output_files_count === "number"
     ? job.available_output_files_count
-    : (job.tasks || []).reduce((sum, t) => sum + (t.output_files_count || 0), 0);
+    : (job.tasks || []).reduce((sum, task) => sum + (task.output_files_count || 0), 0);
   const canDownloadAvailable = availableOutputCount > 0;
   const isDownloading = downloadingId === id;
   const canCancel = ["pending", "running", "uploading"].includes(job.status);
@@ -121,7 +125,7 @@ function RenderGroupDetail({
   const totalEstimatedCost = typeof job.total_estimated_cost_credits === "number"
     ? job.total_estimated_cost_credits
     : tasksList.reduce(
-        (sum, t) => sum + (typeof t.estimated_cost_credits === "number" ? t.estimated_cost_credits : 0),
+        (sum, task) => sum + (typeof task.estimated_cost_credits === "number" ? task.estimated_cost_credits : 0),
         0,
       );
 
@@ -129,7 +133,7 @@ function RenderGroupDetail({
   // directly.  Server computes live values at request time (running
   // tasks substitute ``now``); each ~10s poll refreshes.
   const totalActualCost = tasksList.reduce(
-    (sum, t) => sum + (typeof t.actual_cost_credits === "number" ? t.actual_cost_credits : 0),
+    (sum, task) => sum + (typeof task.actual_cost_credits === "number" ? task.actual_cost_credits : 0),
     0,
   );
   // Server provides ``total_actual_cost_credits`` on the group payload
@@ -148,11 +152,11 @@ function RenderGroupDetail({
               <div className="jd-headline-value" style={{ color: gaugeColor }}>
                 {overallPct != null ? `${overallPct}%` : "—"}
               </div>
-              <div className="jd-headline-label">COMPLETE</div>
+              <div className="jd-headline-label">{t("detail.complete")}</div>
             </div>
             <div className="jd-headline-progress">
               <div className="jd-headline-frames">
-                <span className="jd-headline-frames-label">Frames</span>
+                <span className="jd-headline-frames-label">{t("detail.frames")}</span>
                 <span className="jd-headline-frames-value">
                   {total != null ? `${rendered} / ${total}` : `${rendered}`}
                 </span>
@@ -165,8 +169,8 @@ function RenderGroupDetail({
               </div>
               {totalEstimatedCost > 0 && (
                 <div className="jd-headline-cost">
-                  <span className="jd-headline-cost-label">Estimated cost</span>
-                  <span className="jd-headline-cost-value">~{formatCredits(totalEstimatedCost)} tokens</span>
+                  <span className="jd-headline-cost-label">{t("detail.estimatedCost")}</span>
+                  <span className="jd-headline-cost-value">{t("cost.approx", { credits: formatCredits(totalEstimatedCost) })}</span>
                 </div>
               )}
             </div>
@@ -176,25 +180,25 @@ function RenderGroupDetail({
             <div className="jd-stat-tile-card">
               <StatTile
                 icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>}
-                label="Frames" value={total != null ? `${rendered} / ${total}` : `${rendered}`}
+                label={t("detail.frames")} value={total != null ? `${rendered} / ${total}` : `${rendered}`}
               />
             </div>
             <div className="jd-stat-tile-card">
               <StatTile
                 icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 14h.01M10 14h.01" /></svg>}
-                label="Machines" value={tasksLoading ? "…" : `${tasksDone} / ${taskCount}`}
+                label={t("detail.machines")} value={tasksLoading ? "…" : `${tasksDone} / ${taskCount}`}
               />
             </div>
             <div className="jd-stat-tile-card">
               <StatTile
                 icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>}
-                label="Output Files" value={availableOutputCount}
+                label={t("detail.outputFiles")} value={availableOutputCount}
               />
             </div>
             <div className="jd-stat-tile-card">
               <StatTile
                 icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01" /></svg>}
-                label="Failed" value={tasksLoading ? "…" : (tasksList.filter((t) => t.status === "failed")).length}
+                label={t("detail.failed")} value={tasksLoading ? "…" : (tasksList.filter((task) => task.status === "failed")).length}
               />
             </div>
           </div>
@@ -206,7 +210,7 @@ function RenderGroupDetail({
               </div>
               <div className="jd-preview-meta">
                 <span className="jd-preview-name">{latestOutputFile}</span>
-                <span className="jd-preview-tag">Latest Rendered Frame</span>
+                <span className="jd-preview-tag">{t("detail.latestFrame")}</span>
               </div>
             </div>
           ) : (
@@ -218,16 +222,16 @@ function RenderGroupDetail({
           <div className={`jd-actions${latestOutputFile ? "" : " jd-actions--centered"}`}>
             {canCancel && (
               <button className="btn btn-danger" onClick={onCancel} disabled={canceling}>
-                {canceling ? "Stopping..." : "Stop Render"}
+                {canceling ? t("detail.stopping") : t("detail.stopRender")}
               </button>
             )}
             {canDownloadAvailable && (
               <button className="btn btn-primary" onClick={onDownload} disabled={isDownloading}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
-                {isDownloading ? (downloadState?.progress || "Downloading...") : job.status === "done" ? "Download All" : "Download Available"}
+                {isDownloading ? (downloadState?.progress || t("detail.downloading")) : job.status === "done" ? t("detail.downloadAll") : t("detail.downloadAvailable")}
               </button>
             )}
-            <button className="btn btn-secondary" onClick={onRemove}>Remove</button>
+            <button className="btn btn-secondary" onClick={onRemove}>{t("common:actions.remove")}</button>
           </div>
         </div>
 
@@ -260,7 +264,7 @@ function RenderGroupDetail({
               <div className="jd-frames-header">
                 <button type="button" className="jd-frames-toggle" onClick={onToggleGallery}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
-                  <span>Rendered Frames</span>
+                  <span>{t("detail.renderedFrames")}</span>
                   <span className="jd-frames-count">
                     {availableOutputCount}
                     {galleryOpen && countUniqueFrames(galleryState?.files) > 0 && ` (${countUniqueFrames(galleryState?.files)})`}
@@ -273,8 +277,8 @@ function RenderGroupDetail({
                     className={`jd-frames-refresh${galleryState?.loading ? " jd-frames-refresh--spinning" : ""}`}
                     onClick={onRefreshFrames}
                     disabled={!!galleryState?.loading}
-                    title={galleryState?.loading ? "Refreshing..." : "Refresh frames"}
-                    aria-label="Refresh frames"
+                    title={galleryState?.loading ? t("common:actions.refreshing") : t("detail.refreshFrames")}
+                    aria-label={t("detail.refreshFrames")}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
@@ -302,12 +306,12 @@ function RenderGroupDetail({
       {activeDrawer && (
         <aside className="jd-drawer-panel">
           <div className="jd-drawer-panel-header">
-            <span className="jd-drawer-panel-title">{DRAWER_TITLES[activeDrawer]}</span>
+            <span className="jd-drawer-panel-title">{t(`detail.drawers.${activeDrawer}`)}</span>
             <button
               type="button"
               className="jd-drawer-panel-close"
               onClick={() => setActiveDrawer(null)}
-              title={`Hide ${DRAWER_TITLES[activeDrawer].toLowerCase()}`}
+              title={t(DRAWER_HIDE_KEYS[activeDrawer])}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                 <path d="M18 6L6 18M6 6l12 12" />
@@ -320,7 +324,7 @@ function RenderGroupDetail({
                 <div className="jd-section-loader">
                   <Loader />
                 </div>
-              ) : tasksList.some((t) => ["done", "failed", "cancelled"].includes(t.status)) ? (
+              ) : tasksList.some((task) => ["done", "failed", "cancelled"].includes(task.status)) ? (
                 <>
                   <VastInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
                   <ModalInstancePanel tasks={tasksList} backendUrl={backendUrl} onRefresh={onRefresh} mode="finished" />
@@ -328,7 +332,7 @@ function RenderGroupDetail({
                 </>
               ) : (
                 <div className="jd-drawer-empty">
-                  <p className="muted">Terminated machines will be displayed here.</p>
+                  <p className="muted">{t("detail.instancesEmpty")}</p>
                 </div>
               )
             )}
@@ -343,15 +347,15 @@ function RenderGroupDetail({
               <>
                 <div className="jd-cost-summary">
                   <div className="jd-cost-summary-row">
-                    <span className="jd-cost-summary-label">Estimated</span>
+                    <span className="jd-cost-summary-label">{t("detail.cost.estimated")}</span>
                     <span className="jd-cost-summary-value">
-                      {tasksLoading ? "…" : totalEstimatedCost > 0 ? `~${formatCredits(totalEstimatedCost)} tokens` : "—"}
+                      {tasksLoading ? "…" : totalEstimatedCost > 0 ? t("cost.approx", { credits: formatCredits(totalEstimatedCost) }) : "—"}
                     </span>
                   </div>
                   <div className="jd-cost-summary-row">
-                    <span className="jd-cost-summary-label">Actual</span>
+                    <span className="jd-cost-summary-label">{t("detail.cost.actual")}</span>
                     <span className="jd-cost-summary-value">
-                      {tasksLoading ? "…" : groupActualCost > 0 ? `${formatCredits(groupActualCost)} tokens` : "—"}
+                      {tasksLoading ? "…" : groupActualCost > 0 ? t("cost.exact", { credits: formatCredits(groupActualCost) }) : "—"}
                     </span>
                   </div>
                 </div>
@@ -365,21 +369,21 @@ function RenderGroupDetail({
                     {tasksList
                       .slice()
                       .sort((a, b) => (a.chunk_index ?? 0) - (b.chunk_index ?? 0))
-                      .map((t) => {
-                        const range = t.frame_start != null && t.frame_end != null
-                          ? `${t.frame_start}–${t.frame_end}`
+                      .map((task) => {
+                        const range = task.frame_start != null && task.frame_end != null
+                          ? `${task.frame_start}–${task.frame_end}`
                           : "—";
-                        const est = typeof t.estimated_cost_credits === "number"
-                          ? `~${formatCredits(t.estimated_cost_credits)} tokens`
+                        const est = typeof task.estimated_cost_credits === "number"
+                          ? t("cost.approx", { credits: formatCredits(task.estimated_cost_credits) })
                           : "—";
-                        const actual = typeof t.actual_cost_credits === "number"
-                          ? `${formatCredits(t.actual_cost_credits)} tokens`
+                        const actual = typeof task.actual_cost_credits === "number"
+                          ? t("cost.exact", { credits: formatCredits(task.actual_cost_credits) })
                           : "—";
                         return (
-                          <li key={t.job_id} className="jd-cost-item">
+                          <li key={task.job_id} className="jd-cost-item">
                             <span className="jd-cost-item-range">{range}</span>
-                            <span className="jd-cost-item-machine" title={t.machine_gpu}>
-                              {t.machine_gpu || "Unassigned"}
+                            <span className="jd-cost-item-machine" title={task.machine_gpu}>
+                              {task.machine_gpu || t("detail.unassigned")}
                             </span>
                             <span className="jd-cost-item-value jd-cost-item-est">{est}</span>
                             <span className="jd-cost-item-value">{actual}</span>
@@ -389,7 +393,7 @@ function RenderGroupDetail({
                   </ul>
                 ) : (
                   <div className="jd-cost-empty">
-                    No estimates yet — costs will appear once chunks are dispatched.
+                    {t("detail.costsEmpty")}
                   </div>
                 )}
               </>
@@ -398,12 +402,12 @@ function RenderGroupDetail({
         </aside>
       )}
 
-      <nav className={`jd-dock${activeDrawer ? " jd-dock-shifted" : ""}`} aria-label="Drawers">
+      <nav className={`jd-dock${activeDrawer ? " jd-dock-shifted" : ""}`} aria-label={t("detail.dock.ariaLabel")}>
         <button
           type="button"
           className={`jd-dock-btn${instancesOpen ? " jd-dock-btn-active" : ""}`}
           onClick={() => toggleDrawer("instances")}
-          title={instancesOpen ? "Hide instances" : "Show instances"}
+          title={instancesOpen ? t("detail.dock.hideInstances") : t("detail.dock.showInstances")}
           aria-pressed={instancesOpen}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -416,7 +420,7 @@ function RenderGroupDetail({
           type="button"
           className={`jd-dock-btn${sceneOpen ? " jd-dock-btn-active" : ""}`}
           onClick={() => toggleDrawer("scene")}
-          title={sceneOpen ? "Hide scene details" : "Show scene details"}
+          title={sceneOpen ? t("detail.dock.hideScene") : t("detail.dock.showScene")}
           aria-pressed={sceneOpen}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -429,7 +433,7 @@ function RenderGroupDetail({
           type="button"
           className={`jd-dock-btn${costsOpen ? " jd-dock-btn-active" : ""}`}
           onClick={() => toggleDrawer("costs")}
-          title={costsOpen ? "Hide costs" : "Show costs"}
+          title={costsOpen ? t("detail.dock.hideCosts") : t("detail.dock.showCosts")}
           aria-pressed={costsOpen}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -449,6 +453,7 @@ function SingleJobDetail({
   onDownload, onToggleGallery, onOpenFrame, onRemove,
   onRefreshFrames,
 }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const id = job.job_id;
   const totalFrames = typeof job.total_frames === "number" ? job.total_frames : null;
   const renderedFrames = typeof job.rendered_frames === "number" ? job.rendered_frames : 0;
@@ -463,15 +468,15 @@ function SingleJobDetail({
     <div className="jd-body">
       <div className="jd-top-grid">
         <div className="jd-card jd-card-gauge">
-          <BigGauge pct={progressPct} color={gaugeColor} label="COMPLETE" />
+          <BigGauge pct={progressPct} color={gaugeColor} label={t("detail.complete")} />
           <div className="jd-gauge-stats">
             <StatTile
               icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>}
-              label="Frames" value={hasTotalFrames ? `${renderedFrames} / ${totalFrames}` : `${renderedFrames}`}
+              label={t("detail.frames")} value={hasTotalFrames ? `${renderedFrames} / ${totalFrames}` : `${renderedFrames}`}
             />
             <StatTile
               icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>}
-              label="Output Files" value={availableOutputCount}
+              label={t("detail.outputFiles")} value={availableOutputCount}
             />
           </div>
         </div>
@@ -485,7 +490,7 @@ function SingleJobDetail({
           <div className="jd-frames-header">
             <button type="button" className="jd-frames-toggle" onClick={onToggleGallery}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
-              <span>Rendered Frames</span>
+              <span>{t("detail.renderedFrames")}</span>
               <span className="jd-frames-count">
                 {availableOutputCount}
                 {galleryOpen && countUniqueFrames(galleryState?.files) > 0 && ` (${countUniqueFrames(galleryState?.files)})`}
@@ -498,8 +503,8 @@ function SingleJobDetail({
                 className={`jd-frames-refresh${galleryState?.loading ? " jd-frames-refresh--spinning" : ""}`}
                 onClick={onRefreshFrames}
                 disabled={!!galleryState?.loading}
-                title={galleryState?.loading ? "Refreshing..." : "Refresh frames"}
-                aria-label="Refresh frames"
+                title={galleryState?.loading ? t("common:actions.refreshing") : t("detail.refreshFrames")}
+                aria-label={t("detail.refreshFrames")}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
@@ -526,10 +531,10 @@ function SingleJobDetail({
         {canDownloadAvailable && (
           <button className="btn btn-primary" onClick={onDownload} disabled={downloadingId === id}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
-            {downloadingId === id ? "Downloading..." : job.status === "done" ? "Download" : "Download Available"}
+            {downloadingId === id ? t("detail.downloading") : job.status === "done" ? t("detail.download") : t("detail.downloadAvailable")}
           </button>
         )}
-        <button className="btn btn-secondary" onClick={onRemove}>Remove</button>
+        <button className="btn btn-secondary" onClick={onRemove}>{t("common:actions.remove")}</button>
       </div>
     </div>
   );
@@ -541,6 +546,7 @@ export default function JobDetailView({
   onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
   onRefresh, onRefreshFrames,
 }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const isGroup = !!job?.group_id;
   const displayName = resolveJobFilename(job);
   const status = job?.status || "pending";
@@ -560,7 +566,7 @@ export default function JobDetailView({
   // at the wire boundary; we just sum and display.
   const costTasks = isGroup ? (job?.tasks || []) : (job ? [job] : []);
   const liveCostSum = costTasks.reduce(
-    (sum, t) => sum + (typeof t?.actual_cost_credits === "number" ? t.actual_cost_credits : 0),
+    (sum, task) => sum + (typeof task?.actual_cost_credits === "number" ? task.actual_cost_credits : 0),
     0,
   );
   const liveCost = liveCostSum > 0
@@ -572,10 +578,10 @@ export default function JobDetailView({
   // instead of the live-active "LIVE COST".  Same value either way --
   // it's the actual cost as of now (or end-of-render for terminal).
   const costLabel = status === "done"
-    ? "Total cost"
+    ? t("detail.costLabel.total")
     : status === "failed" || status === "cancelled"
-      ? "Final cost"
-      : "Live cost";
+      ? t("detail.costLabel.final")
+      : t("detail.costLabel.live");
 
   return (
     <div className="job-detail">
@@ -583,7 +589,7 @@ export default function JobDetailView({
         <div className="jd-header-top" style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <button type="button" className="job-detail-back" onClick={onBack}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M19 12H5M12 5l-7 7 7 7" /></svg>
-            All Jobs
+            {t("detail.allJobs")}
           </button>
           <button
             type="button"
@@ -593,7 +599,7 @@ export default function JobDetailView({
             style={{ opacity: refreshing ? 0.5 : 1 }}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
-            {refreshing ? "Refreshing..." : "Refresh"}
+            {refreshing ? t("common:actions.refreshing") : t("common:actions.refresh")}
           </button>
           <div style={{ marginLeft: "auto" }}>
             <UserCreditsHeader />
@@ -612,7 +618,7 @@ export default function JobDetailView({
             <div className="job-detail-meta-row">
               <span className={`status-badge status-${status}`}>
                 {status === "running" && <span className="status-badge-dot" />}
-                {STATUS_LABELS[status] || status}
+                {jobStatusLabel(status)}
               </span>
               {(() => {
                 // Priority surfaces from any task row (every chunk stamps
@@ -621,16 +627,16 @@ export default function JobDetailView({
                 // would be noise.
                 const p = costTasks[0]?.priority;
                 if (p === 0) {
-                  return <span className="priority-badge priority-low">LOW</span>;
+                  return <span className="priority-badge priority-low">{t("detail.priority.low")}</span>;
                 }
                 if (p === 2) {
-                  return <span className="priority-badge priority-high">HIGH</span>;
+                  return <span className="priority-badge priority-high">{t("detail.priority.high")}</span>;
                 }
                 return null;
               })()}
               <span className="job-detail-meta-chip">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 14h.01M10 14h.01" /></svg>
-                {taskCount} machine{taskCount !== 1 ? "s" : ""}
+                {t("machineCount", { count: taskCount })}
               </span>
               <span className="job-detail-id">{id ? id.slice(0, 12) + "..." : ""}</span>
               {job?.submitted_at && (
@@ -638,9 +644,9 @@ export default function JobDetailView({
                   {new Date(job.submitted_at).toLocaleDateString()} {new Date(job.submitted_at).toLocaleTimeString()}
                 </span>
               )}
-              <span className="jd-live-cost" title="Accrued cost for this render">
+              <span className="jd-live-cost" title={t("detail.accruedCostTitle")}>
                 <span className="jd-live-cost-label">{costLabel}</span>
-                <span className="jd-live-cost-value">{formatCredits(liveCost)} tokens</span>
+                <span className="jd-live-cost-value">{t("cost.exact", { credits: formatCredits(liveCost) })}</span>
               </span>
             </div>
           </div>

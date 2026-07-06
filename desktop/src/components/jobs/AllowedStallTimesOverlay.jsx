@@ -1,19 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
-// Each entry: human label + the phase the deadline applies to.
-// ``heartbeat_grace_sec`` is intentionally absent -- it's a server-
-// side grace window, not a UI-meaningful kill deadline.
-const KEY_INFO = {
-  startup_timeout_sec: { label: "Startup", when: "while pending" },
-  in_queue_timeout_sec: { label: "In-queue", when: "while pending" },
-  loading_stall_sec: { label: "Loading stall", when: "before first frame" },
-  download_phase_max_sec: { label: "Download max", when: "download phase" },
-  download_bytes_stall_sec: { label: "Bytes stall", when: "download phase" },
-  frame_progress_stale_sec: { label: "Frame stale", when: "while running" },
-  hard_ceiling_sec: { label: "Hard ceiling", when: "always" },
-};
-
+// Deadline keys in display order.  Each key's human label + the phase it
+// applies to are looked up from myJobs:stall.keys.<key>.  ``heartbeat_grace_sec``
+// is intentionally absent -- it's a server-side grace window, not a
+// UI-meaningful kill deadline.
 const KEY_ORDER = [
   "startup_timeout_sec",
   "in_queue_timeout_sec",
@@ -65,6 +57,7 @@ export default function AllowedStallTimesOverlay({
   isLoading,
   onClose,
 }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const ref = useRef(null);
   const [pos, setPos] = useState({ top: -9999, left: -9999, width: 0 });
   const [accent, setAccent] = useState("");
@@ -177,12 +170,12 @@ export default function AllowedStallTimesOverlay({
             color: "var(--text-secondary)",
           }}
         >
-          Allowed stall times
+          {t("stall.title")}
         </span>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close"
+          aria-label={t("common:actions.close")}
           style={{
             marginLeft: "auto",
             display: "inline-flex",
@@ -207,13 +200,13 @@ export default function AllowedStallTimesOverlay({
 
       {isLoading && (
         <div style={{ fontSize: 11, color: "var(--text-muted)", padding: "6px 0" }}>
-          Loading…
+          {t("stall.loading")}
         </div>
       )}
 
       {!isLoading && stallTimes == null && (
         <div style={{ fontSize: 11, color: "var(--text-muted)", padding: "6px 0" }}>
-          No deadline data for this chunk.
+          {t("stall.noData")}
         </div>
       )}
 
@@ -226,7 +219,6 @@ export default function AllowedStallTimesOverlay({
           }}
         >
           {KEY_ORDER.filter((k) => stallTimes[k] != null).map((k) => {
-            const info = KEY_INFO[k];
             return (
               <div
                 key={k}
@@ -243,10 +235,10 @@ export default function AllowedStallTimesOverlay({
               >
                 <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
                   <span style={{ color: "var(--text-primary)", fontSize: 11, fontWeight: 600 }}>
-                    {info.label}
+                    {t(`stall.keys.${k}.label`)}
                   </span>
                   <span style={{ color: "var(--text-muted)", fontSize: 10 }}>
-                    {info.when}
+                    {t(`stall.keys.${k}.when`)}
                   </span>
                 </div>
                 <span

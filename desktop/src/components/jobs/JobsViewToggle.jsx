@@ -1,12 +1,15 @@
+import { useTranslation } from "react-i18next";
+
 // List/grid view switcher.  Controlled: value ("table" | "grid") + onChange.
 export default function JobsViewToggle({ value, onChange }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   return (
-    <div className="jobs-view-toggle" role="group" aria-label="View mode">
+    <div className="jobs-view-toggle" role="group" aria-label={t("view.mode")}>
       <button
         type="button"
         className={`jobs-view-btn${value === "table" ? " active" : ""}`}
         onClick={() => onChange("table")}
-        title="List view"
+        title={t("view.list")}
         aria-pressed={value === "table"}
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -22,7 +25,7 @@ export default function JobsViewToggle({ value, onChange }) {
         type="button"
         className={`jobs-view-btn${value === "grid" ? " active" : ""}`}
         onClick={() => onChange("grid")}
-        title="Grid view"
+        title={t("view.grid")}
         aria-pressed={value === "grid"}
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">

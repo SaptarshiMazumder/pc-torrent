@@ -1,0 +1,325 @@
+{
+  "heading": "Create Render",
+  "stage": {
+    "selectFile": "Select a file",
+    "analyzing": "Analyzing…",
+    "readyToRender": "Ready to render",
+    "configureUpload": "Configure & upload",
+    "uploading": "Uploading… {{pct}}%",
+    "startingRender": "Starting render…",
+    "submitted": "Submitted"
+  },
+  "filePicker": {
+    "chooseOrDrop": "Choose or drop file",
+    "fileTypeHint": ".blend or .zip",
+    "dialogFilterName": "Blender project",
+    "analyzeContinue": "Analyze & Continue",
+    "recentFiles": "Recent Files",
+    "searchPlaceholder": "Search files…",
+    "loading": "Loading…",
+    "emptyNoFiles": "No saved files yet.",
+    "emptyNoMatches": "No matches.",
+    "clear": "Clear",
+    "columns": {
+      "name": "Name",
+      "date": "Date",
+      "type": "Type",
+      "size": "Size"
+    },
+    "kind": {
+      "blend": "Blend",
+      "zip": "Zip",
+      "file": "File"
+    }
+  },
+  "fileBar": {
+    "noFileSelected": "No file selected",
+    "changeFile": "Change File"
+  },
+  "savedGroup": {
+    "today": "Today",
+    "previous7": "Previous 7 days",
+    "previous30": "Previous 30 days",
+    "earlier": "Earlier"
+  },
+  "progress": {
+    "packaging": "Packaging file for upload",
+    "uploading": "Uploading",
+    "starting": "Starting",
+    "working": "Working…",
+    "packagingHint": "Blender packed your assets while you were configuring; we're now zipping the prepared bundle for upload. Heavy inputs (multi-GB textures + Alembic/VDB caches) can take a couple of minutes."
+  },
+  "renderSetup": {
+    "title": "Render Setup"
+  },
+  "output": {
+    "title": "Output",
+    "renderEngine": "Render Engine",
+    "samples": "Samples",
+    "resolution": "Resolution",
+    "mpEffective": "{{mp}} MP effective",
+    "outputFormat": "Output format",
+    "format": {
+      "png": "PNG (single image)",
+      "tiff": "TIFF (single image)",
+      "exr": "OpenEXR MultiLayer (render passes)"
+    },
+    "bitDepth": "Bit depth",
+    "bitDepthOption": {
+      "half": "16-bit half (smaller)",
+      "full": "32-bit full (max precision)"
+    },
+    "exrCodec": "EXR codec",
+    "codec": {
+      "dwaa": "DWAA (lossy, smallest)",
+      "zip": "ZIP (lossless)",
+      "piz": "PIZ (lossless)",
+      "none": "None (uncompressed)"
+    },
+    "transparentBackground": "Transparent background (alpha)",
+    "usePassSetup": "Use the .blend's own pass setup",
+    "controlledByFile": " (controlled by .blend file)",
+    "passGroup": {
+      "Data": "Data",
+      "Light": "Light",
+      "Volume": "Volume",
+      "Cryptomatte": "Cryptomatte",
+      "Denoising": "Denoising"
+    },
+    "pass": {
+      "z": "Depth (Z)",
+      "mist": "Mist",
+      "normal": "Normal",
+      "position": "Position",
+      "vector": "Vector (motion)",
+      "uv": "UV",
+      "object_index": "Object Index",
+      "material_index": "Material Index",
+      "diffuse_direct": "Diffuse Direct",
+      "diffuse_indirect": "Diffuse Indirect",
+      "diffuse_color": "Diffuse Color",
+      "glossy_direct": "Glossy Direct",
+      "glossy_indirect": "Glossy Indirect",
+      "glossy_color": "Glossy Color",
+      "transmission_direct": "Transmission Direct",
+      "transmission_indirect": "Transmission Indirect",
+      "transmission_color": "Transmission Color",
+      "shadow_catcher": "Shadow Catcher",
+      "diffuse_light": "Diffuse Light",
+      "specular_light": "Specular Light",
+      "specular_color": "Specular Color",
+      "volume_light": "Volume Light",
+      "transparent": "Transparent",
+      "emission": "Emission",
+      "environment": "Environment",
+      "ambient_occlusion": "Ambient Occlusion",
+      "shadow": "Shadow",
+      "volume_direct": "Volume Direct",
+      "volume_indirect": "Volume Indirect",
+      "cryptomatte_object": "Object",
+      "cryptomatte_material": "Material",
+      "cryptomatte_asset": "Asset",
+      "denoising_data": "Denoising Data (Albedo + Normal + Depth)"
+    }
+  },
+  "sceneCamera": {
+    "title": "Scene & Camera",
+    "blendFileLabel": "Blend file (bundle contains {{count}} candidates)",
+    "analyzedSuffix": "(analyzed)",
+    "reanalyzeWarn": {
+      "text": "<0>Analysis was based on <1>{{baseline}}</1>.</0> The frame range, cameras, and cost estimate below reflect that file. If <2>{{picked}}</2> has different scene settings, re-analyze so those stay accurate.",
+      "reanalyzeButton": "Re-analyze with this file"
+    },
+    "scene": "Scene",
+    "defaultScene": "Default Scene",
+    "viewLayer": "View Layer",
+    "defaultViewLayer": "Default",
+    "cameraMode": "Camera Mode",
+    "cameraModeOption": {
+      "auto_markers": "Auto (Scene Camera + Marker Cuts)",
+      "force_camera": "Force Single Camera",
+      "camera_ranges": "Camera Ranges (Editable)"
+    },
+    "camera": "Camera",
+    "noCameras": "No cameras",
+    "editMappings": "Edit camera-to-frame mappings.",
+    "useMarkerCuts": "Use Marker Cuts",
+    "addRange": "Add Range",
+    "rangeTable": {
+      "use": "Use",
+      "camera": "Camera",
+      "start": "Start",
+      "end": "End",
+      "step": "Step",
+      "frames": "Frames"
+    },
+    "noRanges": "No ranges. Add one to continue.",
+    "framesAfterStep_one": "{{count}} frame after step filtering.",
+    "framesAfterStep_other": "{{count}} frames after step filtering."
+  },
+  "frames": {
+    "title": "Frames",
+    "count_one": "{{count}} frame",
+    "count_other": "{{count}} frames",
+    "start": "Start",
+    "end": "End",
+    "step": "Step"
+  },
+  "queuePriority": {
+    "title": "Queue Priority",
+    "ariaLabel": "Queue priority",
+    "option": {
+      "low": "Low",
+      "normal": "Normal",
+      "high": "High"
+    },
+    "hint": {
+      "low": "100% cost · runs last",
+      "normal": "110% cost · default",
+      "high": "120% cost · runs first"
+    }
+  },
+  "sceneStats": {
+    "title": "Scene Stats",
+    "vertices": "Vertices",
+    "objects": "Objects",
+    "meshes": "Meshes",
+    "materials": "Materials",
+    "textures": "Textures",
+    "textureSize": "Texture size",
+    "shaderNodes": "Shader nodes",
+    "blendSize": "Blend size",
+    "heavyFeatures": "Heavy features",
+    "heavyFeature": {
+      "uses_subdivision": "Subdivision",
+      "uses_displacement": "Displacement",
+      "uses_particles": "Particles",
+      "uses_geometry_nodes": "Geometry Nodes",
+      "uses_subsurface_scattering": "SSS",
+      "uses_volumetrics": "Volumetrics"
+    }
+  },
+  "queuePanel": {
+    "title": "Queue right now",
+    "high": "HIGH",
+    "normal": "NORMAL",
+    "low": "LOW",
+    "waitNote": "Wait depends on what's ahead of your priority."
+  },
+  "analysisReport": {
+    "title": "Analysis Report",
+    "errorTag": "[ERROR]",
+    "warningTag": "[WARNING]",
+    "deepSearchDone": "Already searched every fixed drive — these files aren't on this machine. Get them from the .blend's source or upload as a .zip with the assets alongside.",
+    "searching": "Searching this machine…",
+    "searchButton": "Search this machine for missing files",
+    "searchHint": "Walks every fixed drive looking for the missing files by filename. Up to ~90 seconds."
+  },
+  "header": {
+    "upload": "Upload",
+    "recalculate": "Recalculate",
+    "recalculating": "Recalculating…",
+    "recalculateTitle": "Re-fetch the cost / wall-time estimate from the backend (useful while tuning the analyzer constants)",
+    "costPillTitle": "Estimated cost range and wall-clock time for this render",
+    "startRendering": "Start Rendering",
+    "stop": "Stop",
+    "waitingPackaging": "Waiting for background packaging to finish…"
+  },
+  "time": {
+    "seconds": "{{n}}s",
+    "minutes": "{{n}} min",
+    "hoursMinutes": "{{h}}h {{m}}m",
+    "hours": "{{h}}h"
+  },
+  "eta": {
+    "zero": "0s",
+    "lessThanSecond": "less than a second",
+    "elapsed": {
+      "seconds": "{{n}}s elapsed",
+      "minutesSeconds": "{{m}}m {{s}}s elapsed",
+      "minutes": "{{m}}m elapsed",
+      "hoursMinutes": "{{h}}h {{m}}m elapsed",
+      "hours": "{{h}}h elapsed"
+    },
+    "left": {
+      "seconds": "{{n}}s left",
+      "minutesSeconds": "{{m}}m {{s}}s left",
+      "minutes": "{{m}}m left",
+      "hoursMinutes": "{{h}}h {{m}}m left",
+      "hours": "{{h}}h left"
+    }
+  },
+  "phase": {
+    "loading_blend": "Loading Blender",
+    "scene_report": "Reading scene",
+    "fix_output": "Normalizing output format",
+    "relative_paths": "Remapping paths",
+    "deep_search": "Searching for missing files",
+    "relink_libs": "Relinking libraries",
+    "enable_addons": "Enabling addons",
+    "pack_images": "Packing textures",
+    "pack_fonts": "Packing fonts",
+    "pack_sounds": "Packing sounds",
+    "check_external": "Checking external refs",
+    "bake_drivers": "Baking drivers",
+    "validate": "Validating cameras",
+    "save": "Writing packed .blend",
+    "analyze_scene": "Inspecting scene",
+    "analyze_heaviness": "Computing heaviness",
+    "finalizing": "Finalizing"
+  },
+  "phaseHint": {
+    "loading_blend": "Blender is reading the .blend and unpacking assets into memory. Heavy scenes (multi-GB textures, complex graphs) can take several minutes — nothing's stuck.",
+    "finalizing": "Blender is releasing memory and shutting down. Usually under a minute, but heavy scenes can take longer. Forge has already captured everything it needs."
+  },
+  "cameraValidation": {
+    "addOne": "Add at least one enabled camera range.",
+    "needsCamera": "Each enabled camera range needs a camera.",
+    "needFrameRange": "Enter a valid frame range first.",
+    "gap": "Camera ranges do not cover frame {{frame}}. Adjust ranges or switch to Auto mode.",
+    "overlap": "Frame {{frame}} is in more than one camera range ({{names}}). Ranges must not overlap."
+  },
+  "display": {
+    "sizeUnknown": "Size unknown",
+    "unknown": "Unknown"
+  },
+  "errors": {
+    "loadSavedFailed": "Failed to load saved files",
+    "costEstimate": {
+      "title": "Couldn't compute cost estimate",
+      "message": "Backend cost-estimate call failed."
+    },
+    "filePickerOpen": "Could not open file picker: {{error}}",
+    "unsupportedFile": "Only .blend or .zip files are supported",
+    "droppedPathUnavailable": "Dropped file path unavailable. Use the file picker instead.",
+    "selectFileFirst": "Select a .blend or .zip file first",
+    "selectSavedFirst": "Select a saved file first",
+    "savedMetadataUnavailable": "Saved file metadata unavailable",
+    "noFileSelected": "No file selected",
+    "filePathUnavailableReselect": "File path unavailable. Re-select with the file picker.",
+    "preparingUploadFailed": "Preparing upload failed: {{error}}",
+    "uploadCancelled": "Upload cancelled",
+    "uploadFailed": "Upload failed: {{error}}",
+    "uploadFailedGeneric": "Upload failed",
+    "uploadMustComplete": "Upload must complete first",
+    "noGroupId": "Server did not return a group_id",
+    "createGroupFailed": "Failed to create render group",
+    "serverNeedsFrames": "Server requires manual frame range",
+    "cancelled": "Cancelled",
+    "startRenderFailed": "Failed to start render",
+    "renameFailed": "Rename failed",
+    "deleteFailed": "Delete failed"
+  },
+  "notes": {
+    "blenderNotFound": "Blender not found — analysis skipped. You can still upload and set frame range manually.",
+    "filePathUnavailable": "File path unavailable — re-select with file picker to enable analysis.",
+    "noMetadata": "Analysis metadata not returned. Set frame range manually.",
+    "prepareFailed": "Prepare: {{detail}}. Upload will use original file.",
+    "preparationIncomplete": "Preparation incomplete",
+    "analysisFailed": "Analysis failed: {{error}}. You can still upload."
+  },
+  "prompts": {
+    "renameSaved": "Rename saved file",
+    "deleteConfirm": "Delete \"{{name}}\"?"
+  }
+}

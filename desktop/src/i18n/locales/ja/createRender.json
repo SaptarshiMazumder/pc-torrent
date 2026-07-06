@@ -1,0 +1,325 @@
+{
+  "heading": "レンダー作成",
+  "stage": {
+    "selectFile": "ファイルを選択",
+    "analyzing": "解析中…",
+    "readyToRender": "レンダー準備完了",
+    "configureUpload": "設定してアップロード",
+    "uploading": "アップロード中… {{pct}}%",
+    "startingRender": "レンダーを開始中…",
+    "submitted": "送信済み"
+  },
+  "filePicker": {
+    "chooseOrDrop": "ファイルを選択またはドロップ",
+    "fileTypeHint": ".blend または .zip",
+    "dialogFilterName": "Blender プロジェクト",
+    "analyzeContinue": "解析して続行",
+    "recentFiles": "最近のファイル",
+    "searchPlaceholder": "ファイルを検索…",
+    "loading": "読み込み中…",
+    "emptyNoFiles": "保存されたファイルはまだありません。",
+    "emptyNoMatches": "一致するものがありません。",
+    "clear": "クリア",
+    "columns": {
+      "name": "名前",
+      "date": "日付",
+      "type": "種類",
+      "size": "サイズ"
+    },
+    "kind": {
+      "blend": "Blend",
+      "zip": "Zip",
+      "file": "ファイル"
+    }
+  },
+  "fileBar": {
+    "noFileSelected": "ファイルが選択されていません",
+    "changeFile": "ファイルを変更"
+  },
+  "savedGroup": {
+    "today": "今日",
+    "previous7": "過去7日間",
+    "previous30": "過去30日間",
+    "earlier": "それ以前"
+  },
+  "progress": {
+    "packaging": "アップロード用にファイルをパッケージ中",
+    "uploading": "アップロード中",
+    "starting": "開始中",
+    "working": "処理中…",
+    "packagingHint": "設定中に Blender がアセットをパックしました。現在、アップロード用に準備済みバンドルを圧縮しています。重い入力（数GBのテクスチャ＋Alembic/VDBキャッシュ）では数分かかることがあります。"
+  },
+  "renderSetup": {
+    "title": "レンダー設定"
+  },
+  "output": {
+    "title": "出力",
+    "renderEngine": "レンダーエンジン",
+    "samples": "サンプル",
+    "resolution": "解像度",
+    "mpEffective": "実効 {{mp}} MP",
+    "outputFormat": "出力フォーマット",
+    "format": {
+      "png": "PNG（単一画像）",
+      "tiff": "TIFF（単一画像）",
+      "exr": "OpenEXR MultiLayer（レンダーパス）"
+    },
+    "bitDepth": "ビット深度",
+    "bitDepthOption": {
+      "half": "16bit ハーフ（小サイズ）",
+      "full": "32bit フル（最高精度）"
+    },
+    "exrCodec": "EXR コーデック",
+    "codec": {
+      "dwaa": "DWAA（非可逆・最小）",
+      "zip": "ZIP（可逆）",
+      "piz": "PIZ（可逆）",
+      "none": "なし（非圧縮）"
+    },
+    "transparentBackground": "透明背景（アルファ）",
+    "usePassSetup": ".blend 自身のパス設定を使用",
+    "controlledByFile": "（.blend ファイルで制御）",
+    "passGroup": {
+      "Data": "データ",
+      "Light": "ライト",
+      "Volume": "ボリューム",
+      "Cryptomatte": "Cryptomatte",
+      "Denoising": "デノイズ"
+    },
+    "pass": {
+      "z": "深度（Z）",
+      "mist": "ミスト",
+      "normal": "法線",
+      "position": "位置",
+      "vector": "ベクトル（モーション）",
+      "uv": "UV",
+      "object_index": "オブジェクトインデックス",
+      "material_index": "マテリアルインデックス",
+      "diffuse_direct": "ディフューズ直接光",
+      "diffuse_indirect": "ディフューズ間接光",
+      "diffuse_color": "ディフューズカラー",
+      "glossy_direct": "光沢直接光",
+      "glossy_indirect": "光沢間接光",
+      "glossy_color": "光沢カラー",
+      "transmission_direct": "透過直接光",
+      "transmission_indirect": "透過間接光",
+      "transmission_color": "透過カラー",
+      "shadow_catcher": "シャドウキャッチャー",
+      "diffuse_light": "ディフューズライト",
+      "specular_light": "スペキュラーライト",
+      "specular_color": "スペキュラーカラー",
+      "volume_light": "ボリュームライト",
+      "transparent": "透過",
+      "emission": "エミッション",
+      "environment": "環境",
+      "ambient_occlusion": "アンビエントオクルージョン",
+      "shadow": "シャドウ",
+      "volume_direct": "ボリューム直接光",
+      "volume_indirect": "ボリューム間接光",
+      "cryptomatte_object": "オブジェクト",
+      "cryptomatte_material": "マテリアル",
+      "cryptomatte_asset": "アセット",
+      "denoising_data": "デノイズデータ（Albedo + Normal + Depth）"
+    }
+  },
+  "sceneCamera": {
+    "title": "シーンとカメラ",
+    "blendFileLabel": "Blend ファイル（バンドルに {{count}} 個の候補）",
+    "analyzedSuffix": "（解析済み）",
+    "reanalyzeWarn": {
+      "text": "<0><1>{{baseline}}</1> に基づいて解析しました。</0>下のフレーム範囲・カメラ・コスト見積もりはそのファイルを反映しています。<2>{{picked}}</2> のシーン設定が異なる場合は、再解析して正確さを保ってください。",
+      "reanalyzeButton": "このファイルで再解析"
+    },
+    "scene": "シーン",
+    "defaultScene": "デフォルトシーン",
+    "viewLayer": "ビューレイヤー",
+    "defaultViewLayer": "デフォルト",
+    "cameraMode": "カメラモード",
+    "cameraModeOption": {
+      "auto_markers": "自動（シーンカメラ＋マーカーカット）",
+      "force_camera": "単一カメラを強制",
+      "camera_ranges": "カメラ範囲（編集可能）"
+    },
+    "camera": "カメラ",
+    "noCameras": "カメラなし",
+    "editMappings": "カメラとフレームの対応を編集します。",
+    "useMarkerCuts": "マーカーカットを使用",
+    "addRange": "範囲を追加",
+    "rangeTable": {
+      "use": "使用",
+      "camera": "カメラ",
+      "start": "開始",
+      "end": "終了",
+      "step": "ステップ",
+      "frames": "フレーム"
+    },
+    "noRanges": "範囲がありません。続行するには追加してください。",
+    "framesAfterStep_one": "ステップフィルタ後 {{count}} フレーム。",
+    "framesAfterStep_other": "ステップフィルタ後 {{count}} フレーム。"
+  },
+  "frames": {
+    "title": "フレーム",
+    "count_one": "{{count}} フレーム",
+    "count_other": "{{count}} フレーム",
+    "start": "開始",
+    "end": "終了",
+    "step": "ステップ"
+  },
+  "queuePriority": {
+    "title": "キュー優先度",
+    "ariaLabel": "キュー優先度",
+    "option": {
+      "low": "低",
+      "normal": "標準",
+      "high": "高"
+    },
+    "hint": {
+      "low": "100% コスト · 最後に実行",
+      "normal": "110% コスト · デフォルト",
+      "high": "120% コスト · 最初に実行"
+    }
+  },
+  "sceneStats": {
+    "title": "シーン統計",
+    "vertices": "頂点",
+    "objects": "オブジェクト",
+    "meshes": "メッシュ",
+    "materials": "マテリアル",
+    "textures": "テクスチャ",
+    "textureSize": "テクスチャサイズ",
+    "shaderNodes": "シェーダーノード",
+    "blendSize": "Blend サイズ",
+    "heavyFeatures": "重い機能",
+    "heavyFeature": {
+      "uses_subdivision": "サブディビジョン",
+      "uses_displacement": "ディスプレイスメント",
+      "uses_particles": "パーティクル",
+      "uses_geometry_nodes": "ジオメトリノード",
+      "uses_subsurface_scattering": "SSS",
+      "uses_volumetrics": "ボリューメトリック"
+    }
+  },
+  "queuePanel": {
+    "title": "現在のキュー",
+    "high": "高",
+    "normal": "標準",
+    "low": "低",
+    "waitNote": "待ち時間は、あなたの優先度より前にある処理量によって変わります。"
+  },
+  "analysisReport": {
+    "title": "解析レポート",
+    "errorTag": "[エラー]",
+    "warningTag": "[警告]",
+    "deepSearchDone": "すべての固定ドライブを検索済みです — これらのファイルはこのマシンにありません。.blend の入手元から取得するか、アセットを同梱した .zip としてアップロードしてください。",
+    "searching": "このマシンを検索中…",
+    "searchButton": "不足ファイルをこのマシンで検索",
+    "searchHint": "ファイル名をもとにすべての固定ドライブを走査します。最大で約90秒。"
+  },
+  "header": {
+    "upload": "アップロード",
+    "recalculate": "再計算",
+    "recalculating": "再計算中…",
+    "recalculateTitle": "バックエンドからコスト／実時間の見積もりを再取得します（アナライザー定数の調整時に便利）。",
+    "costPillTitle": "このレンダーの推定コスト範囲と実時間。",
+    "startRendering": "レンダリング開始",
+    "stop": "停止",
+    "waitingPackaging": "バックグラウンドのパッケージ処理の完了を待っています…"
+  },
+  "time": {
+    "seconds": "{{n}}秒",
+    "minutes": "{{n}}分",
+    "hoursMinutes": "{{h}}時間{{m}}分",
+    "hours": "{{h}}時間"
+  },
+  "eta": {
+    "zero": "0秒",
+    "lessThanSecond": "1秒未満",
+    "elapsed": {
+      "seconds": "{{n}}秒経過",
+      "minutesSeconds": "{{m}}分{{s}}秒経過",
+      "minutes": "{{m}}分経過",
+      "hoursMinutes": "{{h}}時間{{m}}分経過",
+      "hours": "{{h}}時間経過"
+    },
+    "left": {
+      "seconds": "残り{{n}}秒",
+      "minutesSeconds": "残り{{m}}分{{s}}秒",
+      "minutes": "残り{{m}}分",
+      "hoursMinutes": "残り{{h}}時間{{m}}分",
+      "hours": "残り{{h}}時間"
+    }
+  },
+  "phase": {
+    "loading_blend": "Blender を読み込み中",
+    "scene_report": "シーンを読み込み中",
+    "fix_output": "出力フォーマットを正規化中",
+    "relative_paths": "パスを再マッピング中",
+    "deep_search": "不足ファイルを検索中",
+    "relink_libs": "ライブラリを再リンク中",
+    "enable_addons": "アドオンを有効化中",
+    "pack_images": "テクスチャをパック中",
+    "pack_fonts": "フォントをパック中",
+    "pack_sounds": "サウンドをパック中",
+    "check_external": "外部参照を確認中",
+    "bake_drivers": "ドライバーをベイク中",
+    "validate": "カメラを検証中",
+    "save": "パック済み .blend を書き込み中",
+    "analyze_scene": "シーンを検査中",
+    "analyze_heaviness": "負荷を計算中",
+    "finalizing": "仕上げ中"
+  },
+  "phaseHint": {
+    "loading_blend": "Blender が .blend を読み込み、アセットをメモリに展開しています。重いシーン（数GBのテクスチャや複雑なグラフ）では数分かかることがあります — 停止していません。",
+    "finalizing": "Blender がメモリを解放して終了しています。通常は1分未満ですが、重いシーンではもう少しかかることがあります。Forge は必要な情報をすでに取得済みです。"
+  },
+  "cameraValidation": {
+    "addOne": "有効なカメラ範囲を少なくとも1つ追加してください。",
+    "needsCamera": "各有効なカメラ範囲にはカメラが必要です。",
+    "needFrameRange": "先に有効なフレーム範囲を入力してください。",
+    "gap": "カメラ範囲がフレーム {{frame}} をカバーしていません。範囲を調整するか、自動モードに切り替えてください。",
+    "overlap": "フレーム {{frame}} が複数のカメラ範囲（{{names}}）に含まれています。範囲は重複できません。"
+  },
+  "display": {
+    "sizeUnknown": "サイズ不明",
+    "unknown": "不明"
+  },
+  "errors": {
+    "loadSavedFailed": "保存されたファイルの読み込みに失敗しました",
+    "costEstimate": {
+      "title": "コスト見積もりを計算できませんでした",
+      "message": "バックエンドのコスト見積もり呼び出しに失敗しました。"
+    },
+    "filePickerOpen": "ファイルピッカーを開けませんでした: {{error}}",
+    "unsupportedFile": ".blend または .zip ファイルのみ対応しています",
+    "droppedPathUnavailable": "ドロップされたファイルのパスを取得できません。代わりにファイルピッカーを使用してください。",
+    "selectFileFirst": "先に .blend または .zip ファイルを選択してください",
+    "selectSavedFirst": "先に保存されたファイルを選択してください",
+    "savedMetadataUnavailable": "保存されたファイルのメタデータを取得できません",
+    "noFileSelected": "ファイルが選択されていません",
+    "filePathUnavailableReselect": "ファイルパスを取得できません。ファイルピッカーで選択し直してください。",
+    "preparingUploadFailed": "アップロードの準備に失敗しました: {{error}}",
+    "uploadCancelled": "アップロードをキャンセルしました",
+    "uploadFailed": "アップロードに失敗しました: {{error}}",
+    "uploadFailedGeneric": "アップロードに失敗しました",
+    "uploadMustComplete": "先にアップロードを完了してください",
+    "noGroupId": "サーバーが group_id を返しませんでした",
+    "createGroupFailed": "レンダーグループの作成に失敗しました",
+    "serverNeedsFrames": "サーバーは手動のフレーム範囲を必要としています",
+    "cancelled": "キャンセルしました",
+    "startRenderFailed": "レンダーの開始に失敗しました",
+    "renameFailed": "名前の変更に失敗しました",
+    "deleteFailed": "削除に失敗しました"
+  },
+  "notes": {
+    "blenderNotFound": "Blender が見つかりません — 解析をスキップしました。アップロードしてフレーム範囲を手動で設定できます。",
+    "filePathUnavailable": "ファイルパスを取得できません — 解析を有効にするにはファイルピッカーで選択し直してください。",
+    "noMetadata": "解析メタデータが返されませんでした。フレーム範囲を手動で設定してください。",
+    "prepareFailed": "準備: {{detail}}。元のファイルを使用してアップロードします。",
+    "preparationIncomplete": "準備が未完了です",
+    "analysisFailed": "解析に失敗しました: {{error}}。引き続きアップロードできます。"
+  },
+  "prompts": {
+    "renameSaved": "保存されたファイルの名前を変更",
+    "deleteConfirm": "「{{name}}」を削除しますか？"
+  }
+}

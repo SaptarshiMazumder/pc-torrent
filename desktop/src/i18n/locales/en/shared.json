@@ -1,0 +1,45 @@
+{
+  "loading": "Loading...",
+  "actions": {
+    "dismiss": "Dismiss"
+  },
+  "error": {
+    "title": "Error",
+    "fallbackMessage": "Something went wrong."
+  },
+  "updateRequired": {
+    "title": "Update Required",
+    "body": "Forge v{{minVersion}} is required to continue. You're running v{{currentVersion}}.",
+    "sub": "Download the latest installer below, run it, and reopen Forge.",
+    "download": "Download v{{minVersion}}"
+  },
+  "agent": {
+    "preflightNotRun": "Preflight has not run yet.",
+    "notCheckedYet": "Not checked yet.",
+    "ready": "Ready",
+    "uacFallback": "Windows will ask for permission to install software — please click Yes to continue.",
+    "jobLog": "Job {{jobId}} {{status}}: {{detail}}",
+    "jobCompleted": "completed"
+  },
+  "job": {
+    "untitled": "Untitled",
+    "cancelledByUser": "Cancelled by user"
+  },
+  "api": {
+    "backendUrlNotConfigured": "Backend URL is not configured",
+    "requestFailed": "Request failed ({{status}})",
+    "networkError": "Network error reaching {{url}}: {{detail}}",
+    "authRefreshFailed": "Auth token refresh failed: {{detail}}",
+    "uploadFailed": "Upload failed",
+    "uploadAborted": "Upload aborted",
+    "uploadFailedStatus": "Upload failed with status {{status}}",
+    "missingEtag": "Missing ETag in multipart part response",
+    "partUploadFailed": "Part upload failed",
+    "partUploadFailedStatus": "Part upload failed with status {{status}}",
+    "missingPartUrl": "Missing upload URL for part {{n}}"
+  },
+  "google": {
+    "notConfigured": "Google sign-in is not configured.",
+    "noIdToken": "Google did not return an ID token."
+  }
+}

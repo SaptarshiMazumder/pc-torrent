@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { getAdminConfig, putAdminConfig } from "../services/api";
 import { useError } from "../contexts/ErrorContext";
 import SectionCard from "../components/configuration/SectionCard";
@@ -30,6 +31,7 @@ export default function ConfigurationPage({ backendUrl }) {
   const [error, setError] = useState("");
   const [savedAt, setSavedAt] = useState(null);
   const { showError } = useError();
+  const { t } = useTranslation(["configuration", "common"]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -40,13 +42,13 @@ export default function ConfigurationPage({ backendUrl }) {
       setOriginal(cfg);
       setDraft(cfg);
     } catch (e) {
-      const msg = e?.message || "Failed to load config";
+      const msg = e?.message || t("errors.loadFallback");
       setError(msg);
-      showError({ title: "Couldn't load configuration", message: msg });
+      showError({ title: t("errors.loadTitle"), message: msg });
     } finally {
       setLoading(false);
     }
-  }, [backendUrl, showError]);
+  }, [backendUrl, showError, t]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -68,32 +70,32 @@ export default function ConfigurationPage({ backendUrl }) {
       setOriginal(draft);
       setSavedAt(new Date());
     } catch (e) {
-      const msg = e?.message || "Save failed";
+      const msg = e?.message || t("errors.saveFallback");
       setError(msg);
       showError({
-        title: "Couldn't save configuration",
+        title: t("errors.saveTitle"),
         message: msg,
         detail: e?.body || null,
       });
     } finally {
       setSaving(false);
     }
-  }, [backendUrl, draft, saving, showError]);
+  }, [backendUrl, draft, saving, showError, t]);
 
   const handleReload = useCallback(() => { void load(); }, [load]);
 
   if (loading && draft == null) {
     return (
       <div className="page">
-        <div className="page-header"><h2>Configuration</h2></div>
-        <div className="empty-state"><p>Loading…</p></div>
+        <div className="page-header"><h2>{t("title")}</h2></div>
+        <div className="empty-state"><p>{t("loading")}</p></div>
       </div>
     );
   }
   if (!draft) {
     return (
       <div className="page">
-        <div className="page-header"><h2>Configuration</h2></div>
+        <div className="page-header"><h2>{t("title")}</h2></div>
         {error && <p className="error-text">{error}</p>}
       </div>
     );
@@ -102,8 +104,8 @@ export default function ConfigurationPage({ backendUrl }) {
   return (
     <div className="page">
       <div className="page-header">
-        <h2>Configuration</h2>
-        <span className="log-count">{dirty ? "Unsaved changes" : "Saved"}</span>
+        <h2>{t("title")}</h2>
+        <span className="log-count">{dirty ? t("badge.unsaved") : t("badge.saved")}</span>
       </div>
 
       <div className="cfg-layout">
@@ -120,14 +122,14 @@ export default function ConfigurationPage({ backendUrl }) {
         <aside className="cfg-side">
           <div className="cfg-side-card">
             <div className="cfg-side-row">
-              <span className="cfg-side-label">Status</span>
+              <span className="cfg-side-label">{t("status.label")}</span>
               <span className={`cfg-side-value${dirty ? " dirty" : ""}`}>
-                {dirty ? "Unsaved" : "Synced"}
+                {dirty ? t("status.unsaved") : t("status.synced")}
               </span>
             </div>
             {savedAt && (
               <div className="cfg-side-row">
-                <span className="cfg-side-label">Last saved</span>
+                <span className="cfg-side-label">{t("lastSaved")}</span>
                 <span className="cfg-side-value">{savedAt.toLocaleTimeString()}</span>
               </div>
             )}
@@ -139,7 +141,7 @@ export default function ConfigurationPage({ backendUrl }) {
                 onClick={handleReload}
                 disabled={loading || saving}
               >
-                {loading ? "Reloading…" : "Reload"}
+                {loading ? t("actions.reloading") : t("actions.reload")}
               </button>
               <button
                 type="button"
@@ -147,14 +149,10 @@ export default function ConfigurationPage({ backendUrl }) {
                 onClick={handleSave}
                 disabled={!dirty || saving}
               >
-                {saving ? "Saving…" : "Save"}
+                {saving ? t("actions.saving") : t("actions.save")}
               </button>
             </div>
-            <p className="cfg-side-hint">
-              Changes take effect on the next planning tick.
-              vast_instances / modal_instances are deploy-time only and
-              are preserved untouched.
-            </p>
+            <p className="cfg-side-hint">{t("hint")}</p>
           </div>
         </aside>
       </div>
@@ -167,6 +165,7 @@ export default function ConfigurationPage({ backendUrl }) {
 // ---------------------------------------------------------------------
 
 function FrameAllocationSection({ draft, update }) {
+  const { t } = useTranslation(["configuration", "common"]);
   const fa = draft.frame_allocation || {};
   const w = fa.weights || {};
   const vfb = fa.vram_fleet_boost || {};
@@ -185,8 +184,8 @@ function FrameAllocationSection({ draft, update }) {
     update(["frame_allocation", "render_time", sub, key], val);
 
   return (
-    <SectionCard title="Frame allocation" subtitle="planner tuning">
-      <SectionCard title="Weights" defaultOpen={true}>
+    <SectionCard title={t("sections.frameAllocation.title")} subtitle={t("sections.frameAllocation.subtitle")}>
+      <SectionCard title={t("sections.weights.title")} defaultOpen={true}>
         <div className="cfg-grid">
           <RatioSlider label="speed_weight" value={w.speed_weight}
             onChange={(v) => setIn("weights", "speed_weight", v)} />
@@ -217,8 +216,8 @@ function FrameAllocationSection({ draft, update }) {
             min={0} max={2.0} step={0.05} precision={2}
             onChange={(v) => setIn("weights", "time_headroom_falloff", v)} />
         </div>
-        <SectionCard title="Fleet target share"
-          subtitle="per-fleet share of the serverless slots; renormalized over the fleets that have supply">
+        <SectionCard title={t("sections.fleetTargetShare.title")}
+          subtitle={t("sections.fleetTargetShare.subtitle")}>
           <div className="cfg-grid">
             {Object.keys(w.fleet_target_share || {}).map((fleet) => (
               <RatioSlider key={fleet} label={fleet} value={(w.fleet_target_share || {})[fleet]}
@@ -228,7 +227,7 @@ function FrameAllocationSection({ draft, update }) {
         </SectionCard>
       </SectionCard>
 
-      <SectionCard title="VRAM fleet boost" subtitle="multiplier on machine VRAM during eligibility">
+      <SectionCard title={t("sections.vramFleetBoost.title")} subtitle={t("sections.vramFleetBoost.subtitle")}>
         <div className="cfg-grid">
           <RatioSlider label="vast" value={vfb.vast} min={1} max={5} step={0.1} precision={2}
             onChange={(v) => setIn("vram_fleet_boost", "vast", v)} />
@@ -239,7 +238,7 @@ function FrameAllocationSection({ draft, update }) {
         </div>
       </SectionCard>
 
-      <SectionCard title="Startup buffer (sec)" subtitle="per-fleet additive on planning startup">
+      <SectionCard title={t("sections.startupBuffer.title")} subtitle={t("sections.startupBuffer.subtitle")}>
         <div className="cfg-grid">
           <NumberField label="vast" value={sb.vast}
             onChange={(v) => setIn("startup_buffer_sec", "vast", v)} />
@@ -250,7 +249,7 @@ function FrameAllocationSection({ draft, update }) {
         </div>
       </SectionCard>
 
-      <SectionCard title="Failure rate" subtitle="per-fleet expected failure prob (0–1)">
+      <SectionCard title={t("sections.failureRate.title")} subtitle={t("sections.failureRate.subtitle")}>
         <div className="cfg-grid">
           <RatioSlider label="vast" value={fr.vast}
             onChange={(v) => setIn("failure_rate", "vast", v)} />
@@ -261,14 +260,14 @@ function FrameAllocationSection({ draft, update }) {
         </div>
       </SectionCard>
 
-      <SectionCard title="Render time calibration" defaultOpen={false}>
+      <SectionCard title={t("sections.renderTimeCalibration.title")} defaultOpen={false}>
         <div className="cfg-grid">
           <NumberField label="baseline_sec_cycles" value={rt.baseline_sec_cycles} step={1}
             onChange={(v) => setRT("baseline_sec_cycles", v)} />
           <NumberField label="baseline_sec_eevee" value={rt.baseline_sec_eevee} step={1}
             onChange={(v) => setRT("baseline_sec_eevee", v)} />
         </div>
-        <SectionCard title="Cycles factors" defaultOpen={false}>
+        <SectionCard title={t("sections.cyclesFactors.title")} defaultOpen={false}>
           <div className="cfg-grid">
             {Object.keys(fc).map((k) => (
               <RatioSlider key={k} label={k} value={fc[k]} min={0.1} max={4} step={0.05}
@@ -276,7 +275,7 @@ function FrameAllocationSection({ draft, update }) {
             ))}
           </div>
         </SectionCard>
-        <SectionCard title="EEVEE factors" defaultOpen={false}>
+        <SectionCard title={t("sections.eeveeFactors.title")} defaultOpen={false}>
           <div className="cfg-grid">
             {Object.keys(fe).map((k) => (
               <RatioSlider key={k} label={k} value={fe[k]} min={0.1} max={4} step={0.05}
@@ -284,8 +283,8 @@ function FrameAllocationSection({ draft, update }) {
             ))}
           </div>
         </SectionCard>
-        <SectionCard title="Scene scaling — Cycles"
-          subtitle="pixel + sample curves: factor = max(min, (value/baseline)^exponent)"
+        <SectionCard title={t("sections.sceneScalingCycles.title")}
+          subtitle={t("sections.sceneScalingCycles.subtitle")}
           defaultOpen={false}>
           <div className="cfg-grid">
             <NumberField label="baseline_pixels" value={ssC.baseline_pixels} step={1}
@@ -306,8 +305,8 @@ function FrameAllocationSection({ draft, update }) {
               onChange={(v) => setRTIn("scene_scaling_cycles", "min_sample_factor", v)} />
           </div>
         </SectionCard>
-        <SectionCard title="Scene scaling — EEVEE"
-          subtitle="EEVEE TAA + raster scale sublinearly; defaults pixel=0.5, sample=0.4"
+        <SectionCard title={t("sections.sceneScalingEevee.title")}
+          subtitle={t("sections.sceneScalingEevee.subtitle")}
           defaultOpen={false}>
           <div className="cfg-grid">
             <NumberField label="baseline_pixels" value={ssE.baseline_pixels} step={1}
@@ -328,7 +327,7 @@ function FrameAllocationSection({ draft, update }) {
               onChange={(v) => setRTIn("scene_scaling_eevee", "min_sample_factor", v)} />
           </div>
         </SectionCard>
-        <SectionCard title="Startup sec breakdown" defaultOpen={false}>
+        <SectionCard title={t("sections.startupSecBreakdown.title")} defaultOpen={false}>
           <div className="cfg-grid">
             {Object.keys(ss).map((k) => (
               <NumberField key={k} label={k} value={ss[k]} step={0.5}
@@ -342,10 +341,11 @@ function FrameAllocationSection({ draft, update }) {
 }
 
 function StallSection({ draft, update }) {
+  const { t } = useTranslation(["configuration", "common"]);
   const s = draft.stall || {};
   const set = (k, v) => update(["stall", k], v);
   return (
-    <SectionCard title="Stall watchdog" defaultOpen={false}>
+    <SectionCard title={t("sections.stallWatchdog.title")} defaultOpen={false}>
       <div className="cfg-grid">
         <RatioSlider label="cpu_threshold_pct" value={s.cpu_threshold_pct}
           min={0} max={100} step={0.5} precision={1}
@@ -377,9 +377,10 @@ function StallSection({ draft, update }) {
 }
 
 function MonitorSection({ draft, update }) {
+  const { t } = useTranslation(["configuration", "common"]);
   const m = draft.monitor || {};
   return (
-    <SectionCard title="Monitor" defaultOpen={false}>
+    <SectionCard title={t("sections.monitor.title")} defaultOpen={false}>
       <div className="cfg-grid">
         <NumberField label="in_progress_stale_sec" value={m.in_progress_stale_sec}
           onChange={(v) => update(["monitor", "in_progress_stale_sec"], v)} />
@@ -453,9 +454,10 @@ function CommunitySection({ draft, update }) {
 }
 
 function OrchestratorSection({ draft, update }) {
+  const { t } = useTranslation(["configuration", "common"]);
   const o = draft.orchestrator || {};
   return (
-    <SectionCard title="Orchestrator" defaultOpen={false}>
+    <SectionCard title={t("sections.orchestrator.title")} defaultOpen={false}>
       <div className="cfg-grid">
         <NumberField label="max_retries" value={o.max_retries} step={1}
           onChange={(v) => update(["orchestrator", "max_retries"], v)} />

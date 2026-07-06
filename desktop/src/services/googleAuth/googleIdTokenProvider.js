@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { GOOGLE_OAUTH } from "./googleOAuthConfig";
 import { createPkceChallenge } from "./pkce";
+import i18n from "../../i18n/i18n";
 
 // Upper bound on how long the native side waits for the browser redirect.
 const TIMEOUT_SECS = 300;
@@ -19,7 +20,7 @@ function createStateToken() {
 // ID token for a Firebase session.
 export async function acquireGoogleIdToken() {
   if (!GOOGLE_OAUTH.clientId || !GOOGLE_OAUTH.clientSecret) {
-    throw new Error("Google sign-in is not configured.");
+    throw new Error(i18n.t("shared:google.notConfigured"));
   }
 
   const { verifier, challenge } = await createPkceChallenge();
@@ -52,7 +53,7 @@ export async function acquireGoogleIdToken() {
   });
 
   const idToken = tokenResponse?.id_token;
-  if (!idToken) throw new Error("Google did not return an ID token.");
+  if (!idToken) throw new Error(i18n.t("shared:google.noIdToken"));
   return idToken;
 }
 

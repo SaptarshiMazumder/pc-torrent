@@ -1,6 +1,8 @@
+import { useTranslation } from "react-i18next";
 import { useToast } from "../../contexts/ToastContext";
 
 export default function ToastViewport() {
+  const { t } = useTranslation("shared");
   const { toasts, dismissToast } = useToast();
   if (!toasts.length) return null;
   return (
@@ -11,7 +13,7 @@ export default function ToastViewport() {
           type="button"
           className={`toast toast--${t.kind}`}
           onClick={() => dismissToast(t.id)}
-          aria-label="Dismiss"
+          aria-label={t("actions.dismiss")}
         >
           <span className="toast-message">{t.message}</span>
         </button>

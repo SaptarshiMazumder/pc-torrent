@@ -1,8 +1,9 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { removeImage, runPreflight } from "../../services/sidecar";
 import PreflightChecklist from "./PreflightChecklist";
 
-function formatStatus(flag, whenTrue, whenFalse, whenUnknown = "Not checked") {
+function formatStatus(flag, whenTrue, whenFalse, whenUnknown) {
   if (flag === true) return whenTrue;
   if (flag === false) return whenFalse;
   return whenUnknown;
@@ -16,6 +17,7 @@ function formatBytes(bytes) {
 }
 
 export default function RuntimeCard({ runtimeInfo, preflightSteps, status }) {
+  const { t } = useTranslation(["dashboard", "common"]);
   const [removing, setRemoving] = useState(false);
   const preflightRunning =
     status === "checking_requirements" ||
@@ -32,7 +34,7 @@ export default function RuntimeCard({ runtimeInfo, preflightSteps, status }) {
       await runPreflight(true);
     } catch (err) {
       console.error("Failed to run preflight:", err);
-      alert(`Failed to run preflight: ${err}`);
+      alert(t("runtime.failedPreflight", { error: err }));
     }
   };
 
@@ -42,7 +44,7 @@ export default function RuntimeCard({ runtimeInfo, preflightSteps, status }) {
       await removeImage();
     } catch (err) {
       console.error("Failed to delete render image:", err);
-      alert(`Failed to delete render image: ${err}`);
+      alert(t("runtime.failedDelete", { error: err }));
     } finally {
       setRemoving(false);
     }
@@ -67,17 +69,17 @@ export default function RuntimeCard({ runtimeInfo, preflightSteps, status }) {
     <div className="card runtime-card">
       <div className="card-header-row">
         <div>
-          <h3>Render Runtime</h3>
+          <h3>{t("runtime.title")}</h3>
           <p className="card-subtitle">
-            Local requirements, Docker state, and cached render image.
+            {t("runtime.subtitle")}
           </p>
         </div>
         <div className="runtime-actions">
           <button className="btn btn-secondary" onClick={handleRefresh} disabled={refreshDisabled}>
-            {preflightRunning ? "Checking..." : "Refresh"}
+            {preflightRunning ? t("checking") : t("common:actions.refresh")}
           </button>
           <button className="btn btn-danger" onClick={handleRemove} disabled={!canRemove}>
-            {removing ? "Deleting..." : "Delete Render Image"}
+            {removing ? t("runtime.deleting") : t("runtime.deleteImage")}
           </button>
         </div>
       </div>
@@ -88,72 +90,72 @@ export default function RuntimeCard({ runtimeInfo, preflightSteps, status }) {
         <>
           {runtimeInfo?.awaiting_uac && (
             <div className="uac-warning">
-              <strong>Action needed:</strong>{" "}
-              {runtimeInfo.uac_message || "Windows will ask for permission to install software — please click Yes to continue."}
+              <strong>{t("preflight.actionNeeded")}</strong>{" "}
+              {runtimeInfo.uac_message || t("preflight.uac")}
             </div>
           )}
 
           {status === "needs_reboot" && (
             <div className="reboot-notice">
-              Your PC needs a restart to finish setup. After restarting, open the app again and setup will continue automatically.
+              {t("preflight.reboot")}
             </div>
           )}
 
           <div className="runtime-grid">
             <div className="runtime-item">
-              <span className="runtime-label">Requirements</span>
+              <span className="runtime-label">{t("runtime.label.requirements")}</span>
               <span className="runtime-value">
                 {runtimeInfo?.requirements_checked
-                  ? formatStatus(runtimeInfo?.requirements_ready, "Ready", "Issues found")
-                  : "Checking..."}
+                  ? formatStatus(runtimeInfo?.requirements_ready, t("runtime.value.ready"), t("runtime.value.issuesFound"), t("runtime.notChecked"))
+                  : t("checking")}
               </span>
             </div>
             <div className="runtime-item">
-              <span className="runtime-label">Docker</span>
+              <span className="runtime-label">{t("runtime.label.docker")}</span>
               <span className="runtime-value">
                 {!runtimeInfo?.requirements_checked
-                  ? "Checking..."
+                  ? t("checking")
                   : runtimeInfo?.docker_installed === false
-                    ? "Not installed"
+                    ? t("runtime.value.notInstalled")
                     : runtimeInfo?.docker_running === true
-                      ? "Running"
+                      ? t("runtime.value.running")
                       : runtimeInfo?.docker_running === false
-                        ? "Installed, not running"
-                        : "Checking..."}
+                        ? t("runtime.value.installedNotRunning")
+                        : t("checking")}
               </span>
             </div>
             <div className="runtime-item">
-              <span className="runtime-label">GPU in Docker</span>
+              <span className="runtime-label">{t("runtime.label.gpuInDocker")}</span>
               <span className="runtime-value">
                 {!runtimeInfo?.requirements_checked
-                  ? "Checking..."
+                  ? t("checking")
                   : runtimeInfo?.docker_installed === false
-                    ? "Docker required"
+                    ? t("runtime.value.dockerRequired")
                     : runtimeInfo?.docker_running === false
-                      ? "Start Docker"
+                      ? t("runtime.value.startDocker")
                       : isGpuCheckRunning
-                        ? "Checking..."
+                        ? t("checking")
                         : runtimeInfo?.gpu_verified === true
-                          ? "Ready"
+                          ? t("runtime.value.ready")
                           : runtimeInfo?.gpu_verified === false
-                            ? "CPU only"
-                            : "Not checked"}
+                            ? t("runtime.value.cpuOnly")
+                            : t("runtime.notChecked")}
               </span>
             </div>
             <div className="runtime-item">
-              <span className="runtime-label">Render Image</span>
+              <span className="runtime-label">{t("runtime.label.renderImage")}</span>
               <span className="runtime-value">
                 {imageStage === "downloading"
-                  ? "Downloading"
+                  ? t("runtime.value.downloading")
                   : imageStage === "installing"
-                    ? "Installing"
+                    ? t("runtime.value.installing")
                     : imageStage === "removing"
-                      ? "Removing"
+                      ? t("runtime.value.removing")
                       : runtimeInfo?.image_present === true
-                        ? "Installed"
+                        ? t("runtime.value.installed")
                         : runtimeInfo?.image_present === false
-                          ? "Missing"
-                          : "Checking..."}
+                          ? t("runtime.value.missing")
+                          : t("checking")}
               </span>
             </div>
           </div>
@@ -174,7 +176,7 @@ export default function RuntimeCard({ runtimeInfo, preflightSteps, status }) {
           </div>
           <div className="runtime-progress-meta">
             <span>
-              {progress !== null ? `${Math.round(progress)}%` : "Working..."}
+              {progress !== null ? t("runtime.progressPct", { pct: Math.round(progress) }) : t("runtime.working")}
             </span>
             <span>
               {runtimeInfo?.image_downloaded_bytes && runtimeInfo?.image_total_bytes
@@ -197,7 +199,7 @@ export default function RuntimeCard({ runtimeInfo, preflightSteps, status }) {
 
       {!canRemove && runtimeInfo?.image_present === true && (
         <p className="setting-hint">
-          Disconnect the agent before deleting the local render image.
+          {t("runtime.disconnectHint")}
         </p>
       )}
     </div>

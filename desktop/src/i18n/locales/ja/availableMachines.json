@@ -1,0 +1,14 @@
+{
+  "title": "利用可能なマシン",
+  "total": "合計{{count}}台",
+  "loading": "マシンを読み込み中…",
+  "loadError": "利用可能なマシンの読み込みに失敗しました",
+  "available": "{{count}}台利用可能",
+  "inFlight": "{{count}}台実行中",
+  "availability": { "expired": "期限切れ" },
+  "section": { "desktopWorkers": "デスクトップワーカー", "vastOffers": "Vast.ai オファー", "modalEndpoints": "Modal エンドポイント" },
+  "badge": { "desktopWorker": "デスクトップワーカー" },
+  "empty": { "desktop": "現在オンラインのデスクトップワーカーはありません。", "vast": "現在利用可能なVast.aiのオファーはありません。", "modal": "現在余裕のあるModalエンドポイントはありません。" },
+  "label": { "vram": "VRAM", "cpu": "CPU", "ram": "RAM", "speed": "速度", "price": "価格", "availableFor": "利用可能時間" },
+  "value": { "cores_one": "{{count}} core", "cores_other": "{{count}}コア" }
+}

@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 function rangeLabel(item) {
   const start = item.frame_start;
   const end = item.frame_end;
@@ -6,6 +8,7 @@ function rangeLabel(item) {
 }
 
 function PendingChunkCell({ item }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const color = "#3f74ff";
   return (
     <div className="pq-cell">
@@ -21,7 +24,7 @@ function PendingChunkCell({ item }) {
         </svg>
         <span className="pq-cell-title">{rangeLabel(item)}</span>
         <span className="pq-cell-meta">
-          {item.type === "retry_chunk" ? "retry" : "queued"}
+          {item.type === "retry_chunk" ? t("pendingChunks.retry") : t("pendingChunks.queued")}
           {typeof item.attempt === "number" ? ` · #${item.attempt}` : ""}
         </span>
       </div>
@@ -30,6 +33,7 @@ function PendingChunkCell({ item }) {
 }
 
 export default function PendingChunksPanel({ pendingQueue }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const { items, loading, stopped, expectsPending, refresh } = pendingQueue;
 
   let body;
@@ -44,19 +48,19 @@ export default function PendingChunksPanel({ pendingQueue }) {
   } else if (!expectsPending) {
     body = (
       <div className="muted" style={{ padding: "12px 4px", fontSize: 13 }}>
-        No items pending.
+        {t("pendingChunks.empty")}
       </div>
     );
   } else if (stopped) {
     body = (
       <div className="muted" style={{ padding: "12px 4px", fontSize: 13 }}>
-        Stopped polling — chunk likely lost. Use Refresh to try again.
+        {t("pendingChunks.stopped")}
       </div>
     );
   } else {
     body = (
       <div className="muted" style={{ padding: "12px 4px", fontSize: 13 }}>
-        {loading ? "Checking..." : "Waiting for queue..."}
+        {loading ? t("pendingChunks.checking") : t("pendingChunks.waiting")}
       </div>
     );
   }
@@ -71,7 +75,7 @@ export default function PendingChunksPanel({ pendingQueue }) {
               <polyline points="12 6 12 12 16 14" />
             </svg>
           </div>
-          <span className="inst-panel-title">Pending Chunks</span>
+          <span className="inst-panel-title">{t("pendingChunks.title")}</span>
           {items.length > 0 && (
             <span className="inst-panel-count">{items.length}</span>
           )}
@@ -80,7 +84,7 @@ export default function PendingChunksPanel({ pendingQueue }) {
             className="pq-refresh"
             onClick={refresh}
             disabled={loading}
-            title="Refresh pending queue"
+            title={t("pendingChunks.refreshTitle")}
           >
             <svg
               width="13" height="13" viewBox="0 0 24 24" fill="none"
@@ -90,7 +94,7 @@ export default function PendingChunksPanel({ pendingQueue }) {
               <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
               <path d="M21 3v5h-5" />
             </svg>
-            {loading ? "Refreshing..." : "Refresh"}
+            {loading ? t("common:actions.refreshing") : t("common:actions.refresh")}
           </button>
         </div>
       </div>

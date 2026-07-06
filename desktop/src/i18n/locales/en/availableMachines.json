@@ -1,0 +1,14 @@
+{
+  "title": "Available Machines",
+  "total": "{{count}} total",
+  "loading": "Loading available machines…",
+  "loadError": "Failed to load available machines",
+  "available": "{{count}} available",
+  "inFlight": "{{count}} in flight",
+  "availability": { "expired": "Expired" },
+  "section": { "desktopWorkers": "Desktop Workers", "vastOffers": "Vast.ai Offers", "modalEndpoints": "Modal Endpoints" },
+  "badge": { "desktopWorker": "Desktop Worker" },
+  "empty": { "desktop": "No desktop workers online right now.", "vast": "No Vast.ai offers available right now.", "modal": "No Modal endpoints with headroom right now." },
+  "label": { "vram": "VRAM", "cpu": "CPU", "ram": "RAM", "speed": "Speed", "price": "Price", "availableFor": "Available for" },
+  "value": { "cores_one": "{{count}} core", "cores_other": "{{count}} cores" }
+}

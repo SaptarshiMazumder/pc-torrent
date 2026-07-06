@@ -1,0 +1,116 @@
+{
+  "title": "ダッシュボード",
+  "machine": "マシン",
+  "machineId": "マシンID: <code>{{id}}</code>",
+  "checking": "確認中...",
+  "loading": "読み込み中",
+  "kpi": {
+    "status": "ステータス",
+    "gpuVram": "GPU VRAM",
+    "cpuCores": "CPUコア",
+    "memory": "メモリ"
+  },
+  "kpiStatus": {
+    "checking": "確認中",
+    "settingUp": "セットアップ中",
+    "downloading": "ダウンロード中",
+    "installing": "インストール中",
+    "registering": "登録中",
+    "removing": "削除中",
+    "reboot": "再起動"
+  },
+  "statusMap": {
+    "checkingSystem": "システム確認中",
+    "settingUpDocker": "Dockerセットアップ中",
+    "downloadingImage": "イメージをダウンロード中",
+    "installingImage": "イメージをインストール中",
+    "registering": "登録中",
+    "removingImage": "イメージを削除中",
+    "rebootRequired": "再起動が必要"
+  },
+  "connect": {
+    "connect": "接続",
+    "disconnect": "切断",
+    "connecting": "接続中...",
+    "pickerAria": "利用可能時間を選択",
+    "pickerHeading": "PCをどのくらいの時間利用可能にしますか？",
+    "preset": "{{hours}}時間",
+    "availableUntil": "利用可能な期限",
+    "errPickDateTime": "日時を選択してください。",
+    "errInvalid": "無効な日時です。",
+    "errTooSoon": "現在から15分以上先の時刻を選択してください。",
+    "errFailed": "失敗しました: {{error}}"
+  },
+  "system": {
+    "title": "システム情報",
+    "connectPrompt": "接続するとシステム仕様を検出します",
+    "gpu": "GPU",
+    "cpu": "CPU",
+    "ram": "RAM",
+    "os": "OS",
+    "driver": "ドライバー",
+    "notDetected": "検出されません",
+    "unknown": "不明",
+    "na": "N/A",
+    "vram": "({{vram}} GB VRAM)",
+    "cores": "{{cores}}コア",
+    "ramValue": "{{ram}} GB"
+  },
+  "job": {
+    "standingBy": "待機中",
+    "waitingChip": "レンダージョブを待機中",
+    "idleNote": "レンダージョブを待機中 — お使いのマシンは登録済みで、自動的に処理を開始します。",
+    "viewportPreview": "ビューポートプレビュー",
+    "rendering": "レンダリング中",
+    "idle": "アイドル",
+    "paused": "一時停止",
+    "liveRender": "ライブレンダー",
+    "jobId": "ジョブ {{jobId}}",
+    "preparing": "レンダー準備中…",
+    "frameProgress": "フレーム {{current}} / {{total}}",
+    "frame": "フレーム {{frame}}",
+    "rendered": "レンダリング済み",
+    "currentFrame": "現在のフレーム",
+    "resume": "再開",
+    "pause": "一時停止",
+    "stop": "停止"
+  },
+  "runtime": {
+    "title": "レンダーランタイム",
+    "subtitle": "ローカル要件、Dockerの状態、キャッシュされたレンダーイメージ。",
+    "deleteImage": "レンダーイメージを削除",
+    "deleting": "削除中...",
+    "working": "処理中...",
+    "notChecked": "未確認",
+    "failedPreflight": "事前チェックの実行に失敗しました: {{error}}",
+    "failedDelete": "レンダーイメージの削除に失敗しました: {{error}}",
+    "disconnectHint": "ローカルのレンダーイメージを削除する前にエージェントを切断してください。",
+    "progressPct": "{{pct}}%",
+    "label": {
+      "requirements": "要件",
+      "docker": "Docker",
+      "gpuInDocker": "Docker内のGPU",
+      "renderImage": "レンダーイメージ"
+    },
+    "value": {
+      "ready": "準備完了",
+      "issuesFound": "問題が見つかりました",
+      "notInstalled": "未インストール",
+      "running": "実行中",
+      "installedNotRunning": "インストール済み、未実行",
+      "dockerRequired": "Dockerが必要",
+      "startDocker": "Dockerを起動",
+      "cpuOnly": "CPUのみ",
+      "downloading": "ダウンロード中",
+      "installing": "インストール中",
+      "removing": "削除中",
+      "installed": "インストール済み",
+      "missing": "見つかりません"
+    }
+  },
+  "preflight": {
+    "actionNeeded": "対応が必要です:",
+    "uac": "Windowsがソフトウェアのインストール許可を求めます。「はい」をクリックして続行してください。",
+    "reboot": "セットアップを完了するにはPCの再起動が必要です。再起動後、アプリを再度開くとセットアップが自動的に続行します。"
+  }
+}

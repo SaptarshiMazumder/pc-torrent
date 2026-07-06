@@ -13,19 +13,31 @@ import enAbout from "./locales/en/about.json";
 import enLogs from "./locales/en/logs.json";
 import enCredits from "./locales/en/credits.json";
 import enDownloads from "./locales/en/downloads.json";
+import enDashboard from "./locales/en/dashboard.json";
+import enAvailableMachines from "./locales/en/availableMachines.json";
+import enShared from "./locales/en/shared.json";
+import enCreateRender from "./locales/en/createRender.json";
+import enMyJobs from "./locales/en/myJobs.json";
+import enConfiguration from "./locales/en/configuration.json";
 import jaCommon from "./locales/ja/common.json";
 import jaLogin from "./locales/ja/login.json";
 import jaAbout from "./locales/ja/about.json";
 import jaLogs from "./locales/ja/logs.json";
 import jaCredits from "./locales/ja/credits.json";
 import jaDownloads from "./locales/ja/downloads.json";
+import jaDashboard from "./locales/ja/dashboard.json";
+import jaAvailableMachines from "./locales/ja/availableMachines.json";
+import jaShared from "./locales/ja/shared.json";
+import jaCreateRender from "./locales/ja/createRender.json";
+import jaMyJobs from "./locales/ja/myJobs.json";
+import jaConfiguration from "./locales/ja/configuration.json";
 
 const STORAGE_KEY = "pcrent_lang";
 const SUPPORTED = ["en", "ja"];
 
 const resources = {
-  en: { common: enCommon, login: enLogin, about: enAbout, logs: enLogs, credits: enCredits, downloads: enDownloads },
-  ja: { common: jaCommon, login: jaLogin, about: jaAbout, logs: jaLogs, credits: jaCredits, downloads: jaDownloads },
+  en: { common: enCommon, login: enLogin, about: enAbout, logs: enLogs, credits: enCredits, downloads: enDownloads, dashboard: enDashboard, availableMachines: enAvailableMachines, shared: enShared, createRender: enCreateRender, myJobs: enMyJobs, configuration: enConfiguration },
+  ja: { common: jaCommon, login: jaLogin, about: jaAbout, logs: jaLogs, credits: jaCredits, downloads: jaDownloads, dashboard: jaDashboard, availableMachines: jaAvailableMachines, shared: jaShared, createRender: jaCreateRender, myJobs: jaMyJobs, configuration: jaConfiguration },
 };
 
 function initialLanguage() {
@@ -44,7 +56,7 @@ i18n.use(initReactI18next).init({
   lng: initialLanguage(),
   fallbackLng: "en",
   supportedLngs: SUPPORTED,
-  ns: ["common", "login", "about", "logs", "credits", "downloads"],
+  ns: ["common", "login", "about", "logs", "credits", "downloads", "dashboard", "availableMachines", "shared", "createRender", "myJobs", "configuration"],
   defaultNS: "common",
   returnEmptyString: false,
   interpolation: { escapeValue: false }, // React already escapes.

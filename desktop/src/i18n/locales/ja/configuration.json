@@ -1,0 +1,81 @@
+{
+  "title": "設定",
+  "loading": "読み込み中…",
+  "badge": {
+    "unsaved": "未保存の変更",
+    "saved": "保存済み"
+  },
+  "status": {
+    "label": "ステータス",
+    "unsaved": "未保存",
+    "synced": "同期済み"
+  },
+  "lastSaved": "最終保存",
+  "actions": {
+    "reload": "再読み込み",
+    "reloading": "再読み込み中…",
+    "save": "保存",
+    "saving": "保存中…"
+  },
+  "hint": "変更は次のプランニングティックで反映されます。vast_instances / modal_instances はデプロイ時のみの設定で、変更されずに保持されます。",
+  "errors": {
+    "loadFallback": "設定の読み込みに失敗しました",
+    "loadTitle": "設定を読み込めませんでした",
+    "saveFallback": "保存に失敗しました",
+    "saveTitle": "設定を保存できませんでした"
+  },
+  "sections": {
+    "frameAllocation": {
+      "title": "フレーム割り当て",
+      "subtitle": "プランナーの調整"
+    },
+    "weights": {
+      "title": "重み"
+    },
+    "fleetTargetShare": {
+      "title": "フリート目標シェア",
+      "subtitle": "サーバーレススロットのフリートごとのシェア。供給のあるフリート間で再正規化されます"
+    },
+    "vramFleetBoost": {
+      "title": "VRAMフリートブースト",
+      "subtitle": "適格性判定時のマシンVRAMに対する倍率"
+    },
+    "startupBuffer": {
+      "title": "起動バッファ（秒）",
+      "subtitle": "プランニング起動時のフリートごとの加算値"
+    },
+    "failureRate": {
+      "title": "失敗率",
+      "subtitle": "フリートごとの想定失敗確率（0〜1）"
+    },
+    "renderTimeCalibration": {
+      "title": "レンダー時間の較正"
+    },
+    "cyclesFactors": {
+      "title": "Cycles係数"
+    },
+    "eeveeFactors": {
+      "title": "EEVEE係数"
+    },
+    "sceneScalingCycles": {
+      "title": "シーンスケーリング — Cycles",
+      "subtitle": "ピクセル＋サンプルのカーブ: factor = max(min, (value/baseline)^exponent)"
+    },
+    "sceneScalingEevee": {
+      "title": "シーンスケーリング — EEVEE",
+      "subtitle": "EEVEEのTAA＋ラスタは劣線形にスケール。デフォルトは pixel=0.5、sample=0.4"
+    },
+    "startupSecBreakdown": {
+      "title": "起動秒数の内訳"
+    },
+    "stallWatchdog": {
+      "title": "ストールウォッチドッグ"
+    },
+    "monitor": {
+      "title": "モニター"
+    },
+    "orchestrator": {
+      "title": "オーケストレーター"
+    }
+  }
+}

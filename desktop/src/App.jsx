@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import Sidebar from "./components/common/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import HomePage from "./pages/HomePage";
@@ -27,6 +28,7 @@ import { useDownloads } from "./contexts/DownloadContext";
 const DEFAULT_PAGES = { renter: "dashboard", rentee: "dashboard" };
 
 export default function App() {
+  const { t } = useTranslation("shared");
   const { user, loading: authLoading } = useAuth();
   const { profile } = useUserProfile();
   const isAdmin = profile?.role === "admin";
@@ -80,7 +82,7 @@ export default function App() {
   // separately below so it persists unchanged across every gate transition
   // (loading → login → app) and the WebGL context is created only once.
   function renderContent() {
-    if (versionGate.status === "checking") return <div className="auth-loading">Loading...</div>;
+    if (versionGate.status === "checking") return <div className="auth-loading">{t("loading")}</div>;
     if (versionGate.status === "blocked") {
       return (
         <UpdateRequiredModal
@@ -90,7 +92,7 @@ export default function App() {
         />
       );
     }
-    if (authLoading) return <div className="auth-loading">Loading...</div>;
+    if (authLoading) return <div className="auth-loading">{t("loading")}</div>;
     if (!user) return <LoginPage />;
     return renderApp();
   }

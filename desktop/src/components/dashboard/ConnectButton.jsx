@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { connectAgent, disconnectAgent } from "../../services/sidecar";
 import { getFirebaseToken } from "../../services/api";
 import Loader from "../common/Loader";
@@ -35,6 +36,7 @@ function roundUpToFiveMinutes(date) {
 }
 
 export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
+  const { t } = useTranslation(["dashboard", "common"]);
   const isConnected = ["connected", "rendering", "paused"].includes(status);
   const preflightRunning =
     status === "checking_requirements" ||
@@ -83,17 +85,17 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
 
   const handleConnectConfirm = useCallback(async () => {
     if (!pickerValue) {
-      setPickerError("Pick a date and time.");
+      setPickerError(t("connect.errPickDateTime"));
       return;
     }
     const chosen = new Date(pickerValue);
     if (Number.isNaN(chosen.getTime())) {
-      setPickerError("Invalid date/time.");
+      setPickerError(t("connect.errInvalid"));
       return;
     }
     const seconds = Math.floor((chosen.getTime() - Date.now()) / 1000);
     if (seconds < MIN_COMMITMENT_SECONDS) {
-      setPickerError("Pick a time at least 15 minutes from now.");
+      setPickerError(t("connect.errTooSoon"));
       return;
     }
     try {
@@ -104,7 +106,7 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
       setPickerError("");
     } catch (err) {
       console.error("Agent connect failed:", err);
-      setPickerError(`Failed: ${err?.message || err}`);
+      setPickerError(t("connect.errFailed", { error: err?.message || err }));
     }
   }, [pickerValue, backendUrl]);
 
@@ -114,7 +116,7 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
         await disconnectAgent();
       } catch (err) {
         console.error("Agent disconnect failed:", err);
-        alert(`Failed: ${err}`);
+        alert(t("connect.errFailed", { error: err }));
       }
       return;
     }
@@ -132,24 +134,24 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
         {preflightRunning ? (
           <>
             <Loader size="sm" />
-            Checking...
+            {t("checking")}
           </>
         ) : connectRunning ? (
           <>
             <Loader size="sm" />
-            Connecting...
+            {t("connect.connecting")}
           </>
         ) : isConnected ? (
-          "Disconnect"
+          t("connect.disconnect")
         ) : (
-          "Connect"
+          t("connect.connect")
         )}
       </button>
 
       {pickerOpen && (
-        <div className="connect-commitment-popover" ref={popoverRef} role="dialog" aria-label="Choose availability window">
+        <div className="connect-commitment-popover" ref={popoverRef} role="dialog" aria-label={t("connect.pickerAria")}>
           <div className="connect-commitment-head">
-            <span>How long will your PC be available?</span>
+            <span>{t("connect.pickerHeading")}</span>
           </div>
 
           <div className="connect-commitment-presets">
@@ -160,13 +162,13 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
                 className="connect-commitment-preset"
                 onClick={() => applyPreset(h)}
               >
-                {h}h
+                {t("connect.preset", { hours: h })}
               </button>
             ))}
           </div>
 
           <label className="connect-commitment-label">
-            Available until
+            {t("connect.availableUntil")}
             <input
               type="datetime-local"
               className="connect-commitment-input"
@@ -189,7 +191,7 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
               className="btn btn-secondary"
               onClick={() => setPickerOpen(false)}
             >
-              Cancel
+              {t("common:actions.cancel")}
             </button>
             <button
               type="button"
@@ -197,7 +199,7 @@ export default function ConnectButton({ status, backendUrl, runtimeInfo }) {
               onClick={handleConnectConfirm}
               disabled={!pickerValue}
             >
-              Connect
+              {t("connect.connect")}
             </button>
           </div>
         </div>

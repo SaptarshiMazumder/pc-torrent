@@ -1,23 +1,23 @@
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import GpuInfoCard from "../components/dashboard/GpuInfoCard";
 import ConnectButton from "../components/dashboard/ConnectButton";
 import StatusIndicator from "../components/common/StatusIndicator";
 import JobCard from "../components/dashboard/JobCard";
 import RuntimeCard from "../components/dashboard/RuntimeCard";
 
-const STATUS_LABELS = {
-  disconnected: "Offline",
-  connected: "Available",
-  rendering: "Rendering",
-  paused: "Paused",
-  error: "Error",
-  checking_requirements: "Checking",
-  setting_up_docker: "Setting up",
-  downloading_image: "Downloading",
-  installing_image: "Installing",
-  registering: "Registering",
-  removing_image: "Removing",
-  needs_reboot: "Reboot",
+const STATUS_LABEL_KEYS = {
+  disconnected: "common:status.disconnected",
+  connected: "common:status.connected",
+  rendering: "common:status.rendering",
+  paused: "common:status.paused",
+  error: "common:status.error",
+  checking_requirements: "kpiStatus.checking",
+  setting_up_docker: "kpiStatus.settingUp",
+  downloading_image: "kpiStatus.downloading",
+  installing_image: "kpiStatus.installing",
+  registering: "kpiStatus.registering",
+  removing_image: "kpiStatus.removing",
+  needs_reboot: "kpiStatus.reboot",
 };
 
 function KpiIconStatus() {
@@ -83,34 +83,34 @@ export default function DashboardPage({
   currentJob,
   backendUrl,
 }) {
-  const { t } = useTranslation("common");
-  const statusLabel = STATUS_LABELS[status] || "Setting up";
+  const { t } = useTranslation(["dashboard", "common"]);
+  const statusLabel = t(STATUS_LABEL_KEYS[status] || "kpiStatus.settingUp");
 
   return (
     <div className="page dashboard-page">
-      <div className="page-eyebrow">{t("eyebrow.home")}</div>
-      <h2>Dashboard</h2>
+      <div className="page-eyebrow">{t("common:eyebrow.home")}</div>
+      <h2>{t("title")}</h2>
 
       {/* KPI strip — real machine facts in the prototype's stat-card shells */}
       <div className="dash-kpis">
-        <KpiCard tone="blue" Icon={KpiIconStatus} label="Status" value={statusLabel} />
+        <KpiCard tone="blue" Icon={KpiIconStatus} label={t("kpi.status")} value={statusLabel} />
         <KpiCard
           tone="teal"
           Icon={KpiIconGpu}
-          label="GPU VRAM"
+          label={t("kpi.gpuVram")}
           value={systemInfo?.gpu_vram_gb > 0 ? systemInfo.gpu_vram_gb : "—"}
           suffix={systemInfo?.gpu_vram_gb > 0 ? "GB" : ""}
         />
         <KpiCard
           tone="violet"
           Icon={KpiIconCpu}
-          label="CPU Cores"
+          label={t("kpi.cpuCores")}
           value={systemInfo?.cpu_cores ?? "—"}
         />
         <KpiCard
           tone="amber"
           Icon={KpiIconRam}
-          label="Memory"
+          label={t("kpi.memory")}
           value={systemInfo?.ram_gb ?? "—"}
           suffix={systemInfo?.ram_gb ? "GB" : ""}
         />
@@ -123,14 +123,14 @@ export default function DashboardPage({
         <div className="dash-side">
           <div className="card dash-connect-card">
             <div className="dash-panel-head">
-              <span className="dash-panel-title">Machine</span>
+              <span className="dash-panel-title">{t("machine")}</span>
               <StatusIndicator status={status} message={message} />
             </div>
             <div className="connect-section">
               <ConnectButton status={status} backendUrl={backendUrl} runtimeInfo={runtimeInfo} />
               {machineId && (
                 <div className="machine-id">
-                  Machine ID: <code>{machineId}</code>
+                  <Trans t={t} i18nKey="machineId" values={{ id: machineId }} components={{ code: <code /> }} />
                 </div>
               )}
             </div>

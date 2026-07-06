@@ -43,10 +43,10 @@ const STATUS_FILTERS = {
 };
 
 const FILTER_TABS = [
-  { key: "all", label: "All" },
-  { key: "rendering", label: "Rendering" },
-  { key: "queued", label: "Queued" },
-  { key: "done", label: "Done" },
+  { key: "all", labelKey: "page.filters.all" },
+  { key: "rendering", labelKey: "page.filters.rendering" },
+  { key: "queued", labelKey: "page.filters.queued" },
+  { key: "done", labelKey: "page.filters.done" },
 ];
 
 // Small glass stat card for the My Jobs KPI strip.
@@ -143,7 +143,7 @@ export default function MyJobsPage({
   const [terminalDetailJob, setTerminalDetailJob] = useState(null);
   const { downloads, startDownload } = useDownloads();
   const { showError } = useError();
-  const { t } = useTranslation("common");
+  const { t } = useTranslation(["myJobs", "common", "downloads"]);
 
   // If selected job gets removed, go back to grid
   useEffect(() => {
@@ -234,11 +234,11 @@ export default function MyJobsPage({
       } catch (err) {
         setFrameGalleries((prev) => ({
           ...prev,
-          [id]: { loading: false, error: err?.message || "Failed to load frames", files: prev[id]?.files || [], updatedAt: Date.now() },
+          [id]: { loading: false, error: err?.message || t("errors.loadFramesFailed"), files: prev[id]?.files || [], updatedAt: Date.now() },
         }));
       }
     },
-    [backendUrl]
+    [backendUrl, t]
   );
 
   const handleOpenFrame = useCallback(async (job, file) => {
@@ -256,11 +256,11 @@ export default function MyJobsPage({
       );
       setFrameViewer({ title: file.filename, loading: false, error: "", imageSrc: convertFileSrc(localPath), action: "cached" });
     } catch (error) {
-      setFrameViewer({ title: file.filename, loading: false, error: error?.message || "Failed to load frame", imageSrc: "", action: "" });
+      setFrameViewer({ title: file.filename, loading: false, error: error?.message || t("errors.loadFrameFailed"), imageSrc: "", action: "" });
     } finally {
       setOpeningFrameKey("");
     }
-  }, []);
+  }, [t]);
 
   const handleToggleFrameGallery = useCallback(
     (job) => {
@@ -422,8 +422,8 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
           setSelectedJobId(null);
         } catch (err) {
           showError({
-            title: "Couldn't delete render",
-            message: err?.message || "Server rejected the delete request.",
+            title: t("deleteError.title"),
+            message: err?.message || t("deleteError.message"),
             detail: err?.body || null,
           });
         }
@@ -438,8 +438,8 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
         <>
           <div className="page-header">
             <div className="page-header-title">
-              <div className="page-eyebrow">{t("eyebrow.rentee")}</div>
-              <h2>My Jobs</h2>
+              <div className="page-eyebrow">{t("common:eyebrow.rentee")}</div>
+              <h2>{t("common:nav.myjobs")}</h2>
             </div>
             <button
               className="btn btn-danger"
@@ -448,7 +448,7 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
               disabled={cancelingAll || ongoingJobs.length === 0}
               style={{ marginLeft: "auto" }}
             >
-              {cancelingAll ? "Cancelling..." : "Cancel All"}
+              {cancelingAll ? t("page.cancellingAll") : t("page.cancelAll")}
             </button>
             <button
               className="btn btn-secondary"
@@ -457,18 +457,18 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
               disabled={loadingOngoing || loadingPast}
               style={{ marginLeft: 8 }}
             >
-              {(loadingOngoing || loadingPast) ? "Refreshing..." : "Refresh"}
+              {(loadingOngoing || loadingPast) ? t("common:actions.refreshing") : t("common:actions.refresh")}
             </button>
           </div>
 
           {/* KPI strip */}
           <div className="jobs-stats">
-            <JobStatCard tone="ember" label="ACTIVE" value={jobStats.active} />
-            <JobStatCard tone="blue" label="QUEUED" value={jobStats.queued} />
-            <JobStatCard tone="green" label="COMPLETED" value={jobStats.completed} />
+            <JobStatCard tone="ember" label={t("page.stats.active")} value={jobStats.active} />
+            <JobStatCard tone="blue" label={t("page.stats.queued")} value={jobStats.queued} />
+            <JobStatCard tone="green" label={t("page.stats.completed")} value={jobStats.completed} />
             <JobStatCard
               tone="violet"
-              label="CREDITS SPENT"
+              label={t("page.stats.creditsSpent")}
               value={jobStats.credits > 0 ? formatCredits(jobStats.credits) : "0"}
             />
           </div>
@@ -486,12 +486,12 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
                     className={`jobs-filter-tab${statusFilter === tab.key ? " active" : ""}`}
                     onClick={() => setStatusFilter(tab.key)}
                   >
-                    {tab.label}
+                    {t(tab.labelKey)}
                   </button>
                 ))}
               </div>
               <div className="jobs-toolbar-right">
-                <JobSearchBox value={search} onChange={setSearch} placeholder="Search jobs…" />
+                <JobSearchBox value={search} onChange={setSearch} placeholder={t("page.searchPlaceholder")} />
                 <JobsViewToggle value={viewMode} onChange={handleViewChange} />
               </div>
             </div>
@@ -503,8 +503,8 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
             ) : filteredJobs.length === 0 ? (
               <div className="jobs-panel-empty">
                 {allJobs.length === 0
-                  ? "No renders yet — start one from Create Render."
-                  : "No jobs match this filter."}
+                  ? t("page.emptyNoRenders")
+                  : t("page.emptyNoMatch")}
               </div>
             ) : (
               <div className="jobs-list-scroll">
@@ -540,10 +540,10 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
           error: dlState.error || "",
           progress: dlState.totalFiles > 0 ? `${dlState.completedFiles} / ${dlState.totalFiles}` : "",
           summary: [
-            dlState.downloaded > 0 ? `${dlState.downloaded} downloaded` : "",
-            dlState.skipped > 0 ? `${dlState.skipped} skipped` : "",
-            dlState.failed > 0 ? `${dlState.failed} failed` : "",
-          ].filter(Boolean).join(", "),
+            dlState.downloaded > 0 ? t("downloads:summary.downloaded", { count: dlState.downloaded }) : "",
+            dlState.skipped > 0 ? t("downloads:summary.skipped", { count: dlState.skipped }) : "",
+            dlState.failed > 0 ? t("downloads:summary.failed", { count: dlState.failed }) : "",
+          ].filter(Boolean).join(t("downloads:summarySeparator")),
         } : undefined;
         return (
           <JobDetailView

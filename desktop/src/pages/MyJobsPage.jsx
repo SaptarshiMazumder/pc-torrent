@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   cancelRenderGroup,
@@ -12,7 +13,9 @@ import {
   jobKey,
   resolveJobFilename,
   outputSort,
+  jobCostCredits,
 } from "../utils/jobUtils";
+import { formatCredits } from "../utils/creditsFormat";
 import {
   getTerminalDetailFromCache,
   setTerminalDetailInCache,
@@ -29,6 +32,35 @@ import { useDownloads } from "../contexts/DownloadContext";
 import { useError } from "../contexts/ErrorContext";
 
 const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
+
+// Status filter tabs → the statuses each includes.  `all` (null) shows every
+// job, including failed/cancelled rows.
+const STATUS_FILTERS = {
+  all: null,
+  rendering: ["running", "uploading"],
+  queued: ["pending"],
+  done: ["done"],
+};
+
+const FILTER_TABS = [
+  { key: "all", label: "All" },
+  { key: "rendering", label: "Rendering" },
+  { key: "queued", label: "Queued" },
+  { key: "done", label: "Done" },
+];
+
+// Small glass stat card for the My Jobs KPI strip.
+function JobStatCard({ tone, label, value }) {
+  return (
+    <div className="jobs-stat">
+      <div className="jobs-stat-label">
+        <span className={`jobs-stat-dot jobs-stat-dot--${tone}`} />
+        {label}
+      </div>
+      <div className="jobs-stat-value">{value}</div>
+    </div>
+  );
+}
 
 export default function MyJobsPage({
   ongoingJobs,
@@ -54,6 +86,36 @@ export default function MyJobsPage({
     () => [...ongoingJobs, ...pastJobs],
     [ongoingJobs, pastJobs],
   );
+  // Status filter tabs: all | rendering | queued | done.  Declared before the
+  // memos below so their dependency arrays can reference it (avoids a
+  // temporal-dead-zone ReferenceError during render).
+  const [statusFilter, setStatusFilter] = useState("all");
+
+  // KPI strip totals — derived client-side from the loaded jobs (same pattern
+  // as the Telemetry page; reflects what's in the cache, not a server count).
+  const jobStats = useMemo(() => {
+    let active = 0;
+    let queued = 0;
+    let completed = 0;
+    let credits = 0;
+    for (const j of allJobs) {
+      const s = j.status;
+      if (s === "running" || s === "uploading") active += 1;
+      else if (s === "pending") queued += 1;
+      else if (s === "done") completed += 1;
+      credits += jobCostCredits(j);
+    }
+    return { active, queued, completed, credits };
+  }, [allJobs]);
+
+  // Unified list filtered by the active status tab; search + sort are applied
+  // downstream inside JobsListSection.
+  const filteredJobs = useMemo(() => {
+    const statuses = STATUS_FILTERS[statusFilter];
+    if (!statuses) return allJobs;
+    const set = new Set(statuses);
+    return allJobs.filter((j) => set.has(j.status));
+  }, [allJobs, statusFilter]);
   const [selectedJobId, setSelectedJobId] = useState(null);
   // Shared search (filters both sections); sort is per-section.
   const [search, setSearch] = useState("");
@@ -65,8 +127,9 @@ export default function MyJobsPage({
     setViewMode(mode);
     try { localStorage.setItem("pcrent_jobs_view", mode); } catch { /* storage unavailable */ }
   }, []);
-  const ongoingView = useJobTableView();
-  const pastView = useJobTableView();
+  // Single sort view for the unified list (the design shows one list, not
+  // separate ongoing/past sections).
+  const view = useJobTableView();
   const [cancelingGroupIds, setCancelingGroupIds] = useState({});
   const [cancelingAll, setCancelingAll] = useState(false);
   const [openFrameGalleries, setOpenFrameGalleries] = useState({});
@@ -80,6 +143,7 @@ export default function MyJobsPage({
   const [terminalDetailJob, setTerminalDetailJob] = useState(null);
   const { downloads, startDownload } = useDownloads();
   const { showError } = useError();
+  const { t } = useTranslation("common");
 
   // If selected job gets removed, go back to grid
   useEffect(() => {
@@ -371,99 +435,99 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
   return (
     <div className="page">
       {!selectedJob && (
-        <div className="page-header">
-          <h2>My Jobs</h2>
-          <JobSearchBox value={search} onChange={setSearch} />
-          <JobsViewToggle value={viewMode} onChange={handleViewChange} />
-          <button
-            className="btn btn-danger"
-            type="button"
-            onClick={handleCancelAll}
-            disabled={cancelingAll || ongoingJobs.length === 0}
-            style={{ marginLeft: "auto" }}
-          >
-            {cancelingAll ? "Cancelling..." : "Cancel All"}
-          </button>
-          <button
-            className="btn btn-secondary"
-            type="button"
-            onClick={onRefresh}
-            disabled={loadingOngoing || loadingPast}
-            style={{ marginLeft: 8 }}
-          >
-            {(loadingOngoing || loadingPast) ? "Refreshing..." : "Refresh"}
-          </button>
-        </div>
-      )}
-
-      {!selectedJob && (loadingOngoing || ongoingJobs.length > 0) && (
-        <section className="myjobs-section">
-          <div className="myjobs-section-head">
-            <h3>Ongoing renders</h3>
-            <span className="log-count">
-              {ongoingJobs.length}{hasMoreOngoing ? "+" : ""}
-            </span>
+        <>
+          <div className="page-header">
+            <div className="page-header-title">
+              <div className="page-eyebrow">{t("eyebrow.rentee")}</div>
+              <h2>My Jobs</h2>
+            </div>
+            <button
+              className="btn btn-danger"
+              type="button"
+              onClick={handleCancelAll}
+              disabled={cancelingAll || ongoingJobs.length === 0}
+              style={{ marginLeft: "auto" }}
+            >
+              {cancelingAll ? "Cancelling..." : "Cancel All"}
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={onRefresh}
+              disabled={loadingOngoing || loadingPast}
+              style={{ marginLeft: 8 }}
+            >
+              {(loadingOngoing || loadingPast) ? "Refreshing..." : "Refresh"}
+            </button>
           </div>
-          {loadingOngoing && ongoingJobs.length === 0 ? (
-            <div className="myjobs-section-loader">
-              <Loader size="sm" />
-            </div>
-          ) : (
-            <JobsListSection
-              jobs={ongoingJobs}
-              view={ongoingView}
-              viewMode={viewMode}
-              search={search}
-              onSelect={handleSelectJob}
-              onRemove={removeJob}
-              backendUrl={backendUrl}
-              authToken={authToken}
-              hasMore={hasMoreOngoing}
-              loadingMore={loadingMoreOngoing}
-              onLoadMore={loadMoreOngoing}
-            />
-          )}
-          {loadingMoreOngoing && (
-            <div className="myjobs-section-loader">
-              <Loader size="sm" />
-            </div>
-          )}
-        </section>
-      )}
 
-      {!selectedJob && (loadingPast || pastJobs.length > 0) && (
-        <section className="myjobs-section">
-          <div className="myjobs-section-head">
-            <h3>Past renders</h3>
-            <span className="log-count">
-              {pastJobs.length}{hasMorePast ? "+" : ""}
-            </span>
-          </div>
-          {loadingPast && pastJobs.length === 0 ? (
-            <div className="myjobs-section-loader">
-              <Loader size="sm" />
-            </div>
-          ) : (
-            <JobsListSection
-              jobs={pastJobs}
-              view={pastView}
-              viewMode={viewMode}
-              search={search}
-              onSelect={handleSelectJob}
-              onRemove={removeJob}
-              backendUrl={backendUrl}
-              authToken={authToken}
-              hasMore={hasMorePast}
-              loadingMore={loadingMorePast}
-              onLoadMore={loadMorePast}
+          {/* KPI strip */}
+          <div className="jobs-stats">
+            <JobStatCard tone="ember" label="ACTIVE" value={jobStats.active} />
+            <JobStatCard tone="blue" label="QUEUED" value={jobStats.queued} />
+            <JobStatCard tone="green" label="COMPLETED" value={jobStats.completed} />
+            <JobStatCard
+              tone="violet"
+              label="CREDITS SPENT"
+              value={jobStats.credits > 0 ? formatCredits(jobStats.credits) : "0"}
             />
-          )}
-          {loadingMorePast && (
-            <div className="myjobs-section-loader">
-              <Loader size="sm" />
+          </div>
+
+          {/* Jobs panel — filter tabs + search + view toggle + list/grid */}
+          <div className="jobs-panel">
+            <div className="jobs-toolbar">
+              <div className="jobs-filter-tabs" role="tablist">
+                {FILTER_TABS.map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={statusFilter === tab.key}
+                    className={`jobs-filter-tab${statusFilter === tab.key ? " active" : ""}`}
+                    onClick={() => setStatusFilter(tab.key)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              <div className="jobs-toolbar-right">
+                <JobSearchBox value={search} onChange={setSearch} placeholder="Search jobs…" />
+                <JobsViewToggle value={viewMode} onChange={handleViewChange} />
+              </div>
             </div>
-          )}
-        </section>
+
+            {(loadingOngoing || loadingPast) && allJobs.length === 0 ? (
+              <div className="myjobs-section-loader">
+                <Loader size="sm" />
+              </div>
+            ) : filteredJobs.length === 0 ? (
+              <div className="jobs-panel-empty">
+                {allJobs.length === 0
+                  ? "No renders yet — start one from Create Render."
+                  : "No jobs match this filter."}
+              </div>
+            ) : (
+              <JobsListSection
+                jobs={filteredJobs}
+                view={view}
+                viewMode={viewMode}
+                search={search}
+                onSelect={handleSelectJob}
+                onRemove={removeJob}
+                backendUrl={backendUrl}
+                authToken={authToken}
+                hasMore={(statusFilter === "all" || statusFilter === "done") && hasMorePast}
+                loadingMore={loadingMorePast}
+                onLoadMore={loadMorePast}
+              />
+            )}
+            {loadingMorePast && (
+              <div className="myjobs-section-loader">
+                <Loader size="sm" />
+              </div>
+            )}
+          </div>
+        </>
       )}
 
       {jobForDetail && (() => {

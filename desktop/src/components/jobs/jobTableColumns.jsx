@@ -3,6 +3,7 @@ import {
   statusRank,
   jobProgressPct,
   jobTotalFrames,
+  jobGpuCount,
   jobPixels,
   jobResolutionLabel,
   jobSamples,
@@ -26,12 +27,13 @@ import JobProgressCell from "./JobProgressCell";
 // Declarative column set -- the single source of truth for the jobs table.
 // Each column owns how it SORTS (sortValue: job -> primitive) and how it
 // RENDERS (Cell).  JobsTable / JobTableRow iterate this and stay completely
-// field-agnostic, so adding a column (or the Phase-2 cost/priority columns)
-// is one entry here and nothing else changes.
+// field-agnostic, so adding a column is one entry here and nothing else
+// changes.  The Aurora Glass redesign restyles this table (glass panel, mono
+// headers, KPI strip, filter tabs) but keeps every data column intact.
 export const JOB_TABLE_COLUMNS = [
   {
     key: "name",
-    label: "Name",
+    label: "Job",
     sortable: true,
     align: "left",
     sortValue: (job) => resolveJobFilename(job).toLowerCase(),
@@ -62,6 +64,14 @@ export const JOB_TABLE_COLUMNS = [
     align: "right",
     sortValue: (job) => jobTotalFrames(job),
     Cell: ({ job }) => jobTotalFrames(job) || "—",
+  },
+  {
+    key: "gpus",
+    label: "GPUs",
+    sortable: true,
+    align: "right",
+    sortValue: (job) => jobGpuCount(job),
+    Cell: ({ job }) => jobGpuCount(job) || "—",
   },
   {
     key: "resolution",

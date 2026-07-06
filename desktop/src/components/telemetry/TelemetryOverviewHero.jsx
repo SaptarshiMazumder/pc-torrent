@@ -13,9 +13,9 @@ export default function TelemetryOverviewHero({ lifetime }) {
   return (
     <section className="tele-hero">
       <div className="tele-hero-orbs">
-        <TelemetryGauge id="g-renders" value={totalRenders.toLocaleString()} label="renders" from="#e8724a" to="#f5a623" />
-        <TelemetryGauge id="g-frames" value={formatCompactNumber(framesRendered)} label="frames" from="#5ea0fa" to="#7c5cfc" />
-        <TelemetryGauge id="g-tokens" value={formatCredits(creditsSpent)} label="tokens" from="#f59e0b" to="#e8724a" />
+        <TelemetryGauge id="g-renders" value={totalRenders.toLocaleString()} label="renders" from="#ff8f45" to="#ee5a29" />
+        <TelemetryGauge id="g-frames" value={formatCompactNumber(framesRendered)} label="frames" from="#0ea5b7" to="#3f74ff" />
+        <TelemetryGauge id="g-tokens" value={formatCredits(creditsSpent)} label="tokens" from="#8b6cf0" to="#6a45e0" />
       </div>
 
       <div className="tele-hero-side">
@@ -24,8 +24,8 @@ export default function TelemetryOverviewHero({ lifetime }) {
             id="g-engine"
             size={104}
             fillPct={engineShare}
-            from="#22c55e"
-            to="#5ea0fa"
+            from="#ff8f45"
+            to="#ee5a29"
             value={`${Math.round(engineShare * 100)}%`}
             label={primaryEngine.name}
           />

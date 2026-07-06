@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-shell";
 import { useDownloads } from "../contexts/DownloadContext";
 
@@ -33,7 +34,7 @@ function DownloadEntry({ dl, onRemove }) {
   if (dl.failed > 0) summaryParts.push(`${dl.failed} failed`);
   const summary = summaryParts.join(", ");
 
-  const statusColor = isDone ? "#22c55e" : isError ? "#ef4444" : "var(--accent)";
+  const statusColor = isDone ? "#12a150" : isError ? "#ef4444" : "var(--th)";
 
   return (
     <div className={`dl-entry${isDone ? " dl-entry--done" : ""}${isError ? " dl-entry--error" : ""}`}>
@@ -97,6 +98,7 @@ function DownloadEntry({ dl, onRemove }) {
 }
 
 export default function DownloadsPage() {
+  const { t } = useTranslation("common");
   const { downloads, removeDownload, clearCompleted } = useDownloads();
 
   const sorted = useMemo(() => {
@@ -116,7 +118,10 @@ export default function DownloadsPage() {
     <div className="page dl-page">
       <div className="dl-header">
         <div className="dl-header-left">
-          <h2>Downloads</h2>
+          <div className="page-header-title">
+            <div className="page-eyebrow">{t("eyebrow.rentee")}</div>
+            <h2>Downloads</h2>
+          </div>
           {activeCount > 0 && (
             <span className="dl-header-badge">{activeCount} active</span>
           )}

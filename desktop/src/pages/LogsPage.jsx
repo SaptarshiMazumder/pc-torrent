@@ -1,10 +1,15 @@
+import { useTranslation } from "react-i18next";
 import LogViewer from "../components/common/LogViewer";
 
 export default function LogsPage({ logs, onClearLogs }) {
+  const { t } = useTranslation("common");
   return (
     <div className="page logs-page">
       <div className="page-header">
-        <h2>Logs</h2>
+        <div className="page-header-title">
+          <div className="page-eyebrow">{t("eyebrow.system")}</div>
+          <h2>Logs</h2>
+        </div>
         <div className="page-header-actions">
           <span className="log-count">{logs.length} entries</span>
           <button

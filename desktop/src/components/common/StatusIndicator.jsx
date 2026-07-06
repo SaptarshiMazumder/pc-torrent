@@ -1,7 +1,7 @@
 const STATUS_MAP = {
-  disconnected: { color: "#6b7280", label: "Offline" },
-  connected: { color: "#22c55e", label: "Available" },
-  rendering: { color: "#3b82f6", label: "Rendering" },
+  disconnected: { color: "#9a8d7b", label: "Offline" },
+  connected: { color: "#12a150", label: "Available" },
+  rendering: { color: "#3f74ff", label: "Rendering" },
   paused: { color: "#f59e0b", label: "Paused" },
   error: { color: "#ef4444", label: "Error" },
   checking_requirements: { color: "#f5a623", label: "Checking System" },

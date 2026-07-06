@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useUserTelemetry } from "../hooks/useUserTelemetry";
 import TelemetryOverviewHero from "../components/telemetry/TelemetryOverviewHero";
 import TelemetryChartCard from "../components/telemetry/TelemetryChartCard";
@@ -33,11 +34,15 @@ export default function TelemetryPage({
   });
 
   const isEmpty = lifetime.totalRenders === 0;
+  const { t } = useTranslation("common");
 
   return (
     <div className="page">
       <div className="page-header">
-        <h2>Stats</h2>
+        <div className="page-header-title">
+          <div className="page-eyebrow">{t("eyebrow.rentee")}</div>
+          <h2>Telemetry</h2>
+        </div>
         {loadingHistory && (
           <span className="tele-loading">
             <Loader size="sm" /> loading history…

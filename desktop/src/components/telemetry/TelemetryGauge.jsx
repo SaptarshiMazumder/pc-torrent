@@ -7,8 +7,8 @@ export default function TelemetryGauge({
   size = 92,
   strokeWidth = 8,
   fillPct = 1,
-  from = "#e8724a",
-  to = "#f5a623",
+  from = "#ff8f45",
+  to = "#ee5a29",
   value,
   label,
 }) {
@@ -25,7 +25,7 @@ export default function TelemetryGauge({
             <stop offset="100%" stopColor={to} />
           </linearGradient>
         </defs>
-        <circle cx={center} cy={center} r={r} fill="none" stroke="var(--border)" strokeWidth={strokeWidth} />
+        <circle cx={center} cy={center} r={r} fill="none" stroke="var(--hair)" strokeWidth={strokeWidth} />
         <circle
           cx={center}
           cy={center}

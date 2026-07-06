@@ -1,6 +1,6 @@
 {
   "nav": {
-    "dashboard": "ダッシュボード",
+    "dashboard": "ホーム",
     "logs": "ログ",
     "about": "情報",
     "create": "レンダー作成",
@@ -11,8 +11,14 @@
     "configuration": "設定"
   },
   "mode": {
-    "rentee": "PCを借りる",
-    "renter": "PCを貸す"
+    "rentee": "借りる",
+    "renter": "貸す"
+  },
+  "eyebrow": {
+    "home": "ホーム",
+    "rentee": "レンタル",
+    "marketplace": "マーケット",
+    "system": "システム"
   },
   "status": {
     "connected": "利用可能",

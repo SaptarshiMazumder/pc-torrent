@@ -6,7 +6,7 @@ function rangeLabel(item) {
 }
 
 function PendingChunkCell({ item }) {
-  const color = "#a5b4fc";
+  const color = "#3f74ff";
   return (
     <div className="pq-cell">
       <div className="pq-cell-head">

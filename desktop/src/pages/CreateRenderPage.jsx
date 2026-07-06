@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
@@ -219,6 +220,7 @@ function reducer(state, action) {
 // ─── Component ──────────────────────────────────────────────
 
 export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
+  const { t } = useTranslation("common");
   const { showError } = useError();
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const {
@@ -1157,7 +1159,10 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   return (
     <div className="page cr-page">
       <div className="cr-header">
-        <h2>Create Render</h2>
+        <div className="page-header-title">
+          <div className="page-eyebrow">{t("eyebrow.rentee")}</div>
+          <h2>Create Render</h2>
+        </div>
         {showSettings && (
           <div className="cr-header-actions">
             {needsUpload && (

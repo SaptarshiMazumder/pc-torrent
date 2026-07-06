@@ -16,11 +16,11 @@ function formatActualCost(task) {
 }
 
 const MERGED_STATUS_COLORS = {
-  created: "#888", provisioning: "#f5a623", loading: "#f5a623",
-  running: "#22c55e", exited: "#f59e0b", stopped: "#f59e0b",
-  offline: "#f59e0b", gone: "#6b7280", done: "#22c55e",
-  failed: "#ef4444", cancelled: "#6b7280", pending: "#888",
-  success: "#22c55e", failure: "#ef4444", timeout: "#ef4444",
+  created: "#9a8d7b", provisioning: "#f5a623", loading: "#f5a623",
+  running: "#12a150", exited: "#f59e0b", stopped: "#f59e0b",
+  offline: "#f59e0b", gone: "#9a8d7b", done: "#12a150",
+  failed: "#ef4444", cancelled: "#9a8d7b", pending: "#9a8d7b",
+  success: "#12a150", failure: "#ef4444", timeout: "#ef4444",
   terminated: "#ef4444", initializing: "#f5a623", queued: "#f5a623",
 };
 

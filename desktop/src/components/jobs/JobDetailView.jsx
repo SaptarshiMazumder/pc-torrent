@@ -87,7 +87,7 @@ function RenderGroupDetail({
   const isDownloading = downloadingId === id;
   const canCancel = ["pending", "running", "uploading"].includes(job.status);
 
-  const gaugeColor = job.status === "done" ? "#22c55e" : job.status === "failed" ? "#ef4444" : job.status === "cancelled" ? "#6b7280" : "#e8724a";
+  const gaugeColor = job.status === "done" ? "#12a150" : job.status === "failed" ? "#ef4444" : job.status === "cancelled" ? "#9a8d7b" : "#ee5a29";
   const canViewFrames = availableOutputCount > 0;
 
   const [activeDrawer, setActiveDrawer] = useState(null);

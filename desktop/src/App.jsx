@@ -1,6 +1,7 @@
-import { lazy, Suspense, useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import Sidebar from "./components/common/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
+import HomePage from "./pages/HomePage";
 import LogsPage from "./pages/LogsPage";
 import CreateRenderPage from "./pages/CreateRenderPage";
 import MyJobsPage from "./pages/MyJobsPage";
@@ -20,11 +21,10 @@ import { useAuth } from "./contexts/AuthContext";
 import { useUserProfile } from "./contexts/UserProfileContext";
 import { useDownloads } from "./contexts/DownloadContext";
 
-// Cinematic 3D backdrop is lazy-loaded so three.js stays out of the main bundle
-// and the app paints instantly; the scene fades in a beat later.
-const ForgeSceneBackdrop = lazy(() => import("./components/scene/ForgeSceneBackdrop"));
-
-const DEFAULT_PAGES = { renter: "dashboard", rentee: "create" };
+// Rentee lands on Home (its first sidebar tab); renter lands on its machine
+// dashboard. Both use the "dashboard" page key (App renders HomePage vs
+// DashboardPage by mode).
+const DEFAULT_PAGES = { renter: "dashboard", rentee: "dashboard" };
 
 export default function App() {
   const { user, loading: authLoading } = useAuth();
@@ -34,6 +34,19 @@ export default function App() {
     () => localStorage.getItem("pcrent_mode") || "rentee"
   );
   const [page, setPage] = useState(() => DEFAULT_PAGES[localStorage.getItem("pcrent_mode") || "rentee"] || "create");
+  // Aurora Glass theme — "light" (default) or "dark", persisted like `mode`.
+  // Applied to <html> so the 3D backdrop (rendered outside `.app`) themes too.
+  const [theme, setTheme] = useState(
+    () => localStorage.getItem("pcrent_theme") || "light"
+  );
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("pcrent_theme", theme);
+  }, [theme]);
+  const toggleTheme = useCallback(
+    () => setTheme((t) => (t === "light" ? "dark" : "light")),
+    []
+  );
   const backendUrl = import.meta.env.VITE_BACKEND_URL;
 
   // Boot-time force-update gate.  Runs BEFORE auth so an out-of-date
@@ -86,7 +99,27 @@ export default function App() {
     return (
     <div className="app">
       <ToastViewport />
-      <UserCreditsCorner />
+      <div className="app-corner-controls">
+        <UserCreditsCorner />
+        <button
+          type="button"
+          className="theme-toggle"
+          onClick={toggleTheme}
+          title="Toggle theme"
+          aria-label="Toggle theme"
+        >
+          {theme === "dark" ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="4.2" />
+              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+            </svg>
+          ) : (
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z" />
+            </svg>
+          )}
+        </button>
+      </div>
       <Sidebar
         activePage={page}
         onNavigate={setPage}
@@ -96,8 +129,9 @@ export default function App() {
         activeDownloadCount={activeDownloadCount}
       />
       <main className="main-content">
-        {/* Renter pages */}
-        {page === "dashboard" && (
+        {/* Home — Rent mode shows the renting overview (what's being
+            rendered for you); Provide mode keeps the machine dashboard. */}
+        {page === "dashboard" && mode === "renter" && (
           <DashboardPage
             status={agent.status}
             message={agent.message}
@@ -106,6 +140,17 @@ export default function App() {
             runtimeInfo={agent.runtimeInfo}
             preflightSteps={agent.preflightSteps}
             currentJob={agent.currentJob}
+            backendUrl={backendUrl}
+          />
+        )}
+        {page === "dashboard" && mode !== "renter" && (
+          <HomePage
+            ongoingJobs={jobsHook.ongoingJobs}
+            pastJobs={jobsHook.pastJobs}
+            loadingOngoing={jobsHook.loadingOngoing}
+            loadingPast={jobsHook.loadingPast}
+            onRefresh={jobsHook.refresh}
+            onNavigate={setPage}
             backendUrl={backendUrl}
           />
         )}
@@ -171,15 +216,5 @@ export default function App() {
     );
   }
 
-  return (
-    <>
-      <Suspense fallback={null}>
-        <ForgeSceneBackdrop
-          mode={user ? "ambient" : "hero"}
-          cameraSet={user && page === "create" ? "create" : "default"}
-        />
-      </Suspense>
-      {renderContent()}
-    </>
-  );
+  return renderContent();
 }

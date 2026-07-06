@@ -190,6 +190,14 @@ export function statusRank(status) {
   return STATUS_RANK[status] ?? 99;
 }
 
+// Number of GPUs (chunk instances) actively working a render.  Only in-flight
+// groups carry `tasks`, so terminal/queued rows have no live GPU count and
+// return 0 (rendered as "—").
+export function jobGpuCount(job) {
+  if (!Array.isArray(job?.tasks)) return 0;
+  return job.tasks.filter((t) => t?.machine_gpu).length;
+}
+
 function renderSettings(job) {
   return job?.resolved_render_settings?.render || {};
 }

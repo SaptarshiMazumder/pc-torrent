@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { getAvailableMachines } from "../services/api";
 
 const EMPTY_SNAPSHOT = {
@@ -177,7 +178,7 @@ function ModalCard({ c }) {
 function FleetSection({ title, count, inFlight, items, emptyMsg, renderCard }) {
   return (
     <section style={{ marginBottom: 24 }}>
-      <div className="page-header" style={{ paddingBottom: 8, borderBottom: "1px solid rgba(180, 175, 220, 0.1)", marginBottom: 12 }}>
+      <div className="page-header" style={{ paddingBottom: 8, borderBottom: "1px solid var(--hair)", marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>{title}</h3>
         <span className="log-count">{count} available</span>
         {typeof inFlight === "number" && inFlight > 0 && (
@@ -200,6 +201,7 @@ function FleetSection({ title, count, inFlight, items, emptyMsg, renderCard }) {
 }
 
 export default function AvailableMachinesPage({ backendUrl }) {
+  const { t } = useTranslation("common");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -234,7 +236,10 @@ export default function AvailableMachinesPage({ backendUrl }) {
   return (
     <div className="page">
       <div className="page-header">
-        <h2>Available Machines</h2>
+        <div className="page-header-title">
+          <div className="page-eyebrow">{t("eyebrow.marketplace")}</div>
+          <h2>Available Machines</h2>
+        </div>
         <span className="log-count">{total} total</span>
         <div className="page-header-actions" style={{ marginLeft: "auto" }}>
           <button className="btn btn-secondary" onClick={() => { void load(); }} disabled={loading}>

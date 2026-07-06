@@ -8,16 +8,25 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
+// Aurora Glass chart language: 2.5px line over a vertical gradient fill,
+// faint horizontal gridlines, mono axis ticks.  Tokens/credits wear the
+// data-viz violet — orange stays reserved for the brand.
+const VIOLET = "rgb(139, 108, 240)";
+const GRID = "rgba(154, 141, 123, 0.28)";
+const TICK = "#9a8d7b";
+
 const TOOLTIP = {
   contentStyle: {
-    background: "#1c1f25",
-    border: "1px solid #252830",
-    borderRadius: 8,
-    color: "#eae9f1",
+    background: "var(--bg-primary)",
+    border: "1px solid var(--gbrd)",
+    borderRadius: 12,
+    color: "var(--text)",
     fontSize: 12,
+    fontFamily: "var(--font-ui)",
+    boxShadow: "var(--card-shadow)",
   },
-  labelStyle: { color: "#a3a4ac" },
-  itemStyle: { color: "#f59e0b" },
+  labelStyle: { color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 },
+  itemStyle: { color: VIOLET },
 };
 
 // Tokens (credits) spent per day.  Only active days are present in the data,
@@ -28,20 +37,20 @@ export default function TokenUsageChart({ data }) {
       <AreaChart data={data} margin={{ top: 8, right: 12, left: -16, bottom: 0 }}>
         <defs>
           <linearGradient id="tele-token-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#f59e0b" stopOpacity={0.45} />
-            <stop offset="100%" stopColor="#f59e0b" stopOpacity={0} />
+            <stop offset="0%" stopColor={VIOLET} stopOpacity={0.28} />
+            <stop offset="100%" stopColor={VIOLET} stopOpacity={0} />
           </linearGradient>
         </defs>
-        <CartesianGrid stroke="#252830" vertical={false} />
+        <CartesianGrid stroke={GRID} strokeWidth={0.6} vertical={false} />
         <XAxis
           dataKey="label"
-          tick={{ fill: "#5e616a", fontSize: 11 }}
-          axisLine={{ stroke: "#252830" }}
+          tick={{ fill: TICK, fontSize: 9.5, fontFamily: "IBM Plex Mono, monospace", fontWeight: 600 }}
+          axisLine={{ stroke: GRID }}
           tickLine={false}
           minTickGap={24}
         />
         <YAxis
-          tick={{ fill: "#5e616a", fontSize: 11 }}
+          tick={{ fill: TICK, fontSize: 9.5, fontFamily: "IBM Plex Mono, monospace", fontWeight: 600 }}
           axisLine={false}
           tickLine={false}
           width={34}
@@ -51,8 +60,9 @@ export default function TokenUsageChart({ data }) {
           type="monotone"
           dataKey="credits"
           name="Tokens"
-          stroke="#f59e0b"
-          strokeWidth={2}
+          stroke={VIOLET}
+          strokeWidth={2.5}
+          strokeLinecap="round"
           fill="url(#tele-token-grad)"
         />
       </AreaChart>

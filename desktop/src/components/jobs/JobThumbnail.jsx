@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { getGroupPreviewUrl, getSingleJobPreviewUrl } from "../../utils/jobUtils";
 import { getCachedFramePreview } from "../../services/frameCache";
 import openexrIcon from "../../assets/openexr-icon-color.svg";
@@ -70,6 +71,7 @@ function isExrFilename(name) {
 }
 
 export default function JobThumbnail({ job, authToken, backendUrl, className }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const previewUrl = job?.group_id
     ? getGroupPreviewUrl(job, backendUrl, authToken)
     : getSingleJobPreviewUrl(job, backendUrl, authToken);
@@ -121,7 +123,7 @@ export default function JobThumbnail({ job, authToken, backendUrl, className }) 
     <img
       className={`job-thumb-img ${className || ""}`}
       src={src}
-      alt="Render preview"
+      alt={t("thumbnail.renderPreview")}
       loading="lazy"
     />
   );

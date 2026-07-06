@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import FrameThumb from "./FrameThumb";
 import Loader from "../common/Loader";
 
@@ -44,6 +45,7 @@ function groupFilesByFrame(files) {
 }
 
 function FrameTile({ file, id, openingFrameKey, onOpenFrame, backendUrl }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const fileKey = `${id}:${file.job_id || ""}:${file.filename}`;
   const isOpening = openingFrameKey === fileKey;
   return (
@@ -57,13 +59,14 @@ function FrameTile({ file, id, openingFrameKey, onOpenFrame, backendUrl }) {
     >
       <FrameThumb className="job-frame-thumb" file={file} backendUrl={backendUrl} />
       <span className="job-frame-name">
-        {isOpening ? "Caching..." : file.filename}
+        {isOpening ? t("frames.caching") : file.filename}
       </span>
     </button>
   );
 }
 
 export default function FrameGalleryPanel({ id, files, loading, error, openingFrameKey, onOpenFrame, backendUrl }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const grouped = useMemo(() => groupFilesByFrame(files), [files]);
   // When every frame has at most one output file, fall back to the
   // flat grid -- the per-frame group headers add visual weight that
@@ -105,7 +108,7 @@ export default function FrameGalleryPanel({ id, files, loading, error, openingFr
         </div>
       )}
       {!loading && !error && files.length === 0 && (
-        <div className="job-frame-gallery-empty">No frames rendered yet — they'll appear here as machines complete them.</div>
+        <div className="job-frame-gallery-empty">{t("frames.empty")}</div>
       )}
       {error && (
         <div className="inst-error" style={{ margin: 0 }}>{error}</div>
@@ -117,10 +120,10 @@ export default function FrameGalleryPanel({ id, files, loading, error, openingFr
             <div key={`group-${frameNum}`} className="job-frame-group">
               <div className="job-frame-group-header">
                 <span className="job-frame-group-label">
-                  {frameNum >= 0 ? `Frame ${frameNum}` : "Unparsed"}
+                  {frameNum >= 0 ? t("frames.frameN", { n: frameNum }) : t("frames.unparsed")}
                 </span>
                 {groupFiles.length > 1 && (
-                  <span className="job-frame-group-count">{groupFiles.length} files</span>
+                  <span className="job-frame-group-count">{t("frames.fileCount", { count: groupFiles.length })}</span>
                 )}
               </div>
               <div className="job-frame-group-row">

@@ -33,6 +33,15 @@
     "signOut": "サインアウト"
   },
   "tokens": "トークン",
+  "actions": {
+    "refresh": "更新",
+    "refreshing": "更新中…",
+    "cancel": "キャンセル",
+    "close": "閉じる",
+    "remove": "削除",
+    "retry": "再試行",
+    "loadMore": "もっと読み込む"
+  },
   "language": {
     "label": "言語",
     "en": "English",

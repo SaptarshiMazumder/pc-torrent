@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { retryJobChunk } from "../../services/api";
 import { getRetriedJobIds, markJobRetried } from "../../utils/retriedJobsCache";
 import { clearTerminalDetailFromCache } from "../../utils/terminalDetailCache";
@@ -11,6 +12,7 @@ function rangeLabel(task) {
 }
 
 function FailedChunkCell({ task, backendUrl, groupId, onRetried, onRefresh, onPendingQueueRefresh }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const [retrying, setRetrying] = useState(false);
   const [actionError, setActionError] = useState("");
   const color = "#ef4444";
@@ -37,7 +39,7 @@ function FailedChunkCell({ task, backendUrl, groupId, onRetried, onRefresh, onPe
       if (onRefresh) onRefresh();
     } catch (e) {
       setRetrying(false);
-      setActionError(e?.message || "Retry failed");
+      setActionError(e?.message || t("failedChunks.retryFailed"));
     }
   }
 
@@ -61,7 +63,7 @@ function FailedChunkCell({ task, backendUrl, groupId, onRetried, onRefresh, onPe
           onClick={handleRetry}
           disabled={retrying}
         >
-          {retrying ? "..." : "Retry"}
+          {retrying ? "..." : t("common:actions.retry")}
         </button>
       </div>
       {actionError && (
@@ -72,6 +74,7 @@ function FailedChunkCell({ task, backendUrl, groupId, onRetried, onRefresh, onPe
 }
 
 export default function FailedChunksPanel({ tasks, backendUrl, groupId, onRefresh, onPendingQueueRefresh }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const [retriedIds, setRetriedIds] = useState(() => getRetriedJobIds());
   const [confirmation, setConfirmation] = useState("");
   const confirmTimerRef = useRef(null);
@@ -86,8 +89,8 @@ export default function FailedChunksPanel({ tasks, backendUrl, groupId, onRefres
       next.add(jobId);
       return next;
     });
-    const label = chunkIndex != null ? `Chunk ${chunkIndex + 1}` : "Chunk";
-    setConfirmation(`${label} retried — new instance will appear shortly.`);
+    const label = chunkIndex != null ? t("failedChunks.chunkN", { index: chunkIndex + 1 }) : t("failedChunks.chunk");
+    setConfirmation(t("failedChunks.retriedConfirm", { label }));
     if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
     confirmTimerRef.current = setTimeout(() => setConfirmation(""), 3000);
   }
@@ -107,7 +110,7 @@ export default function FailedChunksPanel({ tasks, backendUrl, groupId, onRefres
               <path d="M12 9v4M12 17h.01" />
             </svg>
           </div>
-          <span className="inst-panel-title">Failed Chunks</span>
+          <span className="inst-panel-title">{t("failedChunks.title")}</span>
           {retryable.length > 0 && (
             <span className="inst-panel-count">{retryable.length}</span>
           )}

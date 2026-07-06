@@ -33,6 +33,15 @@
     "signOut": "Sign out"
   },
   "tokens": "tokens",
+  "actions": {
+    "refresh": "Refresh",
+    "refreshing": "Refreshing…",
+    "cancel": "Cancel",
+    "close": "Close",
+    "remove": "Remove",
+    "retry": "Retry",
+    "loadMore": "Load more"
+  },
   "language": {
     "label": "Language",
     "en": "English",

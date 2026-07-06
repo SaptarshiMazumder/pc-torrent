@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 const ErrorContext = createContext(null);
 
@@ -14,20 +15,21 @@ const ErrorContext = createContext(null);
  * via setError(null) externally if you need to hide it programmatically.
  */
 export function ErrorProvider({ children }) {
+  const { t } = useTranslation("shared");
   const [error, setError] = useState(null);
 
   const showError = useCallback((err) => {
     if (!err) return;
     if (typeof err === "string") {
-      setError({ title: "Error", message: err });
+      setError({ title: t("error.title"), message: err });
       return;
     }
     setError({
-      title: err.title || "Error",
-      message: err.message || "Something went wrong.",
+      title: err.title || t("error.title"),
+      message: err.message || t("error.fallbackMessage"),
       detail: err.detail || null,
     });
-  }, []);
+  }, [t]);
 
   const dismiss = useCallback(() => setError(null), []);
 
@@ -52,6 +54,7 @@ export function useError() {
 }
 
 function ErrorDialog({ error, onDismiss }) {
+  const { t } = useTranslation("shared");
   return (
     <div className="error-dialog-backdrop" onClick={onDismiss}>
       <div
@@ -78,7 +81,7 @@ function ErrorDialog({ error, onDismiss }) {
         </div>
         <div className="error-dialog-actions">
           <button type="button" className="btn btn-primary" onClick={onDismiss}>
-            Dismiss
+            {t("actions.dismiss")}
           </button>
         </div>
       </div>

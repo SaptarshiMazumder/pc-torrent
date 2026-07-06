@@ -1,6 +1,9 @@
+import { useTranslation } from "react-i18next";
 import Loader from "../common/Loader";
 
 export default function PreflightChecklist({ steps }) {
+  const { t } = useTranslation(["dashboard", "common"]);
+
   if (!steps || steps.length === 0) return null;
 
   const uacStep = steps.find((s) => s.awaiting_uac);
@@ -13,15 +16,13 @@ export default function PreflightChecklist({ steps }) {
     <div className="preflight-checklist">
       {uacStep && (
         <div className="uac-warning">
-          <strong>Action needed:</strong> Windows will ask for permission to
-          install software — please click Yes to continue.
+          <strong>{t("preflight.actionNeeded")}</strong> {t("preflight.uac")}
         </div>
       )}
 
       {rebootStep && (
         <div className="reboot-notice">
-          Your PC needs a restart to finish setup. After restarting, open the app
-          again and setup will continue automatically.
+          {t("preflight.reboot")}
         </div>
       )}
 

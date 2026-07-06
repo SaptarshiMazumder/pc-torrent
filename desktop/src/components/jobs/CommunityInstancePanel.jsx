@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { formatCredits } from "../../utils/creditsFormat";
+import i18n from "../../i18n/i18n";
 import InstancePanel from "./InstancePanel";
 
 const COMMUNITY_ICON = (
@@ -15,7 +16,7 @@ function gpuShortName(name) {
 }
 
 const communityProvider = {
-  title: "Community",
+  titleKey: "providers.community",
   icon: COMMUNITY_ICON,
 
   filterTask(task) {
@@ -46,7 +47,7 @@ const communityProvider = {
       rangeLabel,
       elapsedSec: null,
       cost: task.estimated_cost_credits != null
-        ? `~${formatCredits(Number(task.estimated_cost_credits))} tokens est.`
+        ? i18n.t("myJobs:cost.estTokens", { credits: formatCredits(Number(task.estimated_cost_credits)) })
         : null,
       error: task.status === "failed" ? (task.error || "") : "",
       stallRule: task.stall_rule || null,

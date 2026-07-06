@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 export default function FrameViewerModal({ viewer, onClose }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const draggingRef = useRef(null);
@@ -51,7 +53,7 @@ export default function FrameViewerModal({ viewer, onClose }) {
       <div className="frame-viewer-card" onClick={(e) => e.stopPropagation()}>
         <div className="frame-viewer-head">
           <div>
-            <strong>{viewer?.title || "Frame"}</strong>
+            <strong>{viewer?.title || t("viewer.frameFallback")}</strong>
             {viewer?.action ? (
               <span className="frame-viewer-subtext"> ({viewer.action})</span>
             ) : null}
@@ -59,13 +61,13 @@ export default function FrameViewerModal({ viewer, onClose }) {
           <div className="frame-viewer-actions">
             <button className="btn btn-secondary" type="button" onClick={() => applyZoom(scale - 0.2)}>−</button>
             <button className="btn btn-secondary" type="button" onClick={() => applyZoom(scale + 0.2)}>+</button>
-            <button className="btn btn-secondary" type="button" onClick={() => { setScale(1); setOffset({ x: 0, y: 0 }); }}>Reset</button>
-            <button className="btn btn-secondary" type="button" onClick={onClose}>Close</button>
+            <button className="btn btn-secondary" type="button" onClick={() => { setScale(1); setOffset({ x: 0, y: 0 }); }}>{t("viewer.reset")}</button>
+            <button className="btn btn-secondary" type="button" onClick={onClose}>{t("common:actions.close")}</button>
           </div>
         </div>
 
         {viewer?.loading ? (
-          <div className="frame-viewer-status">Downloading full-resolution frame...</div>
+          <div className="frame-viewer-status">{t("viewer.downloading")}</div>
         ) : viewer?.error ? (
           <div className="frame-viewer-status frame-viewer-error">{viewer.error}</div>
         ) : (
@@ -80,7 +82,7 @@ export default function FrameViewerModal({ viewer, onClose }) {
             <img
               className="frame-viewer-image"
               src={viewer?.imageSrc || ""}
-              alt={viewer?.title || "Rendered frame"}
+              alt={viewer?.title || t("viewer.altRenderedFrame")}
               draggable={false}
               style={{
                 transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,

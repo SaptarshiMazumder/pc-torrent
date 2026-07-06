@@ -1,7 +1,11 @@
 /**
- * Pure utility functions for blend file analysis, camera ranges,
- * and frame range parsing. No React, no side effects.
+ * Utility functions for blend file analysis, camera ranges, and frame
+ * range parsing. No React. User-facing strings (validation messages,
+ * display fallbacks) resolve through ``i18n.t`` at call time so the
+ * current language wins; everything else is a pure function.
  */
+
+import i18n from "../i18n/i18n";
 
 // ── Frame range ─────────────────────────────────────────────
 
@@ -111,11 +115,11 @@ export function countRowFramesInRange(row, range) {
 
 export function validateCameraRanges(rows, frameRange) {
   const enabled = parseCameraRangeRows(rows).filter((r) => r.enabled);
-  if (enabled.length === 0) return { ok: false, error: "Add at least one enabled camera range." };
+  if (enabled.length === 0) return { ok: false, error: i18n.t("createRender:cameraValidation.addOne") };
   for (const r of enabled) {
-    if (!r.camera_name) return { ok: false, error: "Each enabled camera range needs a camera." };
+    if (!r.camera_name) return { ok: false, error: i18n.t("createRender:cameraValidation.needsCamera") };
   }
-  if (!frameRange) return { ok: false, error: "Enter a valid frame range first." };
+  if (!frameRange) return { ok: false, error: i18n.t("createRender:cameraValidation.needFrameRange") };
   // Every rendered frame must be claimed by exactly one enabled range:
   // 0 → coverage gap; >1 → overlap (the frame would map to two cameras,
   // making its {camera}_frame#### output filename ambiguous). Step-aware
@@ -124,11 +128,11 @@ export function validateCameraRanges(rows, frameRange) {
   for (let f = frameRange.frame_start; f <= frameRange.frame_end; f += frameRange.frame_step) {
     const matches = enabled.filter((r) => rowMatchesFrame(r, f));
     if (matches.length === 0) {
-      return { ok: false, error: `Camera ranges do not cover frame ${f}. Adjust ranges or switch to Auto mode.` };
+      return { ok: false, error: i18n.t("createRender:cameraValidation.gap", { frame: f }) };
     }
     if (matches.length > 1) {
       const names = [...new Set(matches.map((r) => r.camera_name))].join(", ");
-      return { ok: false, error: `Frame ${f} is in more than one camera range (${names}). Ranges must not overlap.` };
+      return { ok: false, error: i18n.t("createRender:cameraValidation.overlap", { frame: f, names }) };
     }
   }
   return { ok: true, error: "", rows: enabled };
@@ -139,50 +143,53 @@ export function validateCameraRanges(rows, frameRange) {
 // _PASS_ATTR / _PASS_ATTR_CYCLES_SUB maps so detect -> override
 // round-trips 1:1.  ``group`` drives the UI sectioning; ``engines``
 // drives engine-aware show/hide (the worker silently no-ops anything
-// the active engine doesn't have).
+// the active engine doesn't have).  Display labels are user-facing and
+// live in the ``createRender`` locale: pass checkbox labels under
+// ``output.pass.<key>`` and group titles under ``output.passGroup.<group>``;
+// CreateRenderPage resolves them at render via ``t``.
 export const PASS_GROUP_ORDER = ["Data", "Light", "Volume", "Cryptomatte", "Denoising"];
 
 export const RENDER_PASS_CATALOG = [
   // Data
-  { key: "z", label: "Depth (Z)", group: "Data", engines: ["CYCLES", "EEVEE"] },
-  { key: "mist", label: "Mist", group: "Data", engines: ["CYCLES", "EEVEE"] },
-  { key: "normal", label: "Normal", group: "Data", engines: ["CYCLES", "EEVEE"] },
-  { key: "position", label: "Position", group: "Data", engines: ["CYCLES", "EEVEE"] },
-  { key: "vector", label: "Vector (motion)", group: "Data", engines: ["CYCLES", "EEVEE"] },
-  { key: "uv", label: "UV", group: "Data", engines: ["CYCLES", "EEVEE"] },
-  { key: "object_index", label: "Object Index", group: "Data", engines: ["CYCLES", "EEVEE"] },
-  { key: "material_index", label: "Material Index", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "z", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "mist", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "normal", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "position", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "vector", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "uv", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "object_index", group: "Data", engines: ["CYCLES", "EEVEE"] },
+  { key: "material_index", group: "Data", engines: ["CYCLES", "EEVEE"] },
   // Light (Cycles split direct/indirect/color)
-  { key: "diffuse_direct", label: "Diffuse Direct", group: "Light", engines: ["CYCLES"] },
-  { key: "diffuse_indirect", label: "Diffuse Indirect", group: "Light", engines: ["CYCLES"] },
-  { key: "diffuse_color", label: "Diffuse Color", group: "Light", engines: ["CYCLES"] },
-  { key: "glossy_direct", label: "Glossy Direct", group: "Light", engines: ["CYCLES"] },
-  { key: "glossy_indirect", label: "Glossy Indirect", group: "Light", engines: ["CYCLES"] },
-  { key: "glossy_color", label: "Glossy Color", group: "Light", engines: ["CYCLES"] },
-  { key: "transmission_direct", label: "Transmission Direct", group: "Light", engines: ["CYCLES"] },
-  { key: "transmission_indirect", label: "Transmission Indirect", group: "Light", engines: ["CYCLES"] },
-  { key: "transmission_color", label: "Transmission Color", group: "Light", engines: ["CYCLES"] },
-  { key: "shadow_catcher", label: "Shadow Catcher", group: "Light", engines: ["CYCLES"] },
+  { key: "diffuse_direct", group: "Light", engines: ["CYCLES"] },
+  { key: "diffuse_indirect", group: "Light", engines: ["CYCLES"] },
+  { key: "diffuse_color", group: "Light", engines: ["CYCLES"] },
+  { key: "glossy_direct", group: "Light", engines: ["CYCLES"] },
+  { key: "glossy_indirect", group: "Light", engines: ["CYCLES"] },
+  { key: "glossy_color", group: "Light", engines: ["CYCLES"] },
+  { key: "transmission_direct", group: "Light", engines: ["CYCLES"] },
+  { key: "transmission_indirect", group: "Light", engines: ["CYCLES"] },
+  { key: "transmission_color", group: "Light", engines: ["CYCLES"] },
+  { key: "shadow_catcher", group: "Light", engines: ["CYCLES"] },
   // Light (EEVEE combined-style)
-  { key: "diffuse_light", label: "Diffuse Light", group: "Light", engines: ["EEVEE"] },
-  { key: "specular_light", label: "Specular Light", group: "Light", engines: ["EEVEE"] },
-  { key: "specular_color", label: "Specular Color", group: "Light", engines: ["EEVEE"] },
-  { key: "volume_light", label: "Volume Light", group: "Light", engines: ["EEVEE"] },
-  { key: "transparent", label: "Transparent", group: "Light", engines: ["EEVEE"] },
+  { key: "diffuse_light", group: "Light", engines: ["EEVEE"] },
+  { key: "specular_light", group: "Light", engines: ["EEVEE"] },
+  { key: "specular_color", group: "Light", engines: ["EEVEE"] },
+  { key: "volume_light", group: "Light", engines: ["EEVEE"] },
+  { key: "transparent", group: "Light", engines: ["EEVEE"] },
   // Light (engine-agnostic)
-  { key: "emission", label: "Emission", group: "Light", engines: ["CYCLES", "EEVEE"] },
-  { key: "environment", label: "Environment", group: "Light", engines: ["CYCLES", "EEVEE"] },
-  { key: "ambient_occlusion", label: "Ambient Occlusion", group: "Light", engines: ["CYCLES", "EEVEE"] },
-  { key: "shadow", label: "Shadow", group: "Light", engines: ["CYCLES", "EEVEE"] },
+  { key: "emission", group: "Light", engines: ["CYCLES", "EEVEE"] },
+  { key: "environment", group: "Light", engines: ["CYCLES", "EEVEE"] },
+  { key: "ambient_occlusion", group: "Light", engines: ["CYCLES", "EEVEE"] },
+  { key: "shadow", group: "Light", engines: ["CYCLES", "EEVEE"] },
   // Volume (Cycles only)
-  { key: "volume_direct", label: "Volume Direct", group: "Volume", engines: ["CYCLES"] },
-  { key: "volume_indirect", label: "Volume Indirect", group: "Volume", engines: ["CYCLES"] },
+  { key: "volume_direct", group: "Volume", engines: ["CYCLES"] },
+  { key: "volume_indirect", group: "Volume", engines: ["CYCLES"] },
   // Cryptomatte
-  { key: "cryptomatte_object", label: "Object", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
-  { key: "cryptomatte_material", label: "Material", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
-  { key: "cryptomatte_asset", label: "Asset", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
+  { key: "cryptomatte_object", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
+  { key: "cryptomatte_material", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
+  { key: "cryptomatte_asset", group: "Cryptomatte", engines: ["CYCLES", "EEVEE"] },
   // Denoising (Cycles only; single bool enables Albedo + Normal + Depth)
-  { key: "denoising_data", label: "Denoising Data (Albedo + Normal + Depth)", group: "Denoising", engines: ["CYCLES"] },
+  { key: "denoising_data", group: "Denoising", engines: ["CYCLES"] },
 ];
 
 // True if ``pass`` supports the given engine string from the UI
@@ -212,7 +219,7 @@ export function prefillRenderPasses(parsed, viewLayerName) {
 
 export function formatSizeMb(bytes) {
   const n = Number(bytes);
-  if (!Number.isFinite(n) || n <= 0) return "Size unknown";
+  if (!Number.isFinite(n) || n <= 0) return i18n.t("createRender:display.sizeUnknown");
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
@@ -224,7 +231,7 @@ export function fileKindFromName(name) {
 }
 
 export function formatTimestamp(ts) {
-  if (!ts) return "Unknown";
+  if (!ts) return i18n.t("createRender:display.unknown");
   const now = new Date();
   if (ts.getFullYear() === now.getFullYear() && ts.getMonth() === now.getMonth() && ts.getDate() === now.getDate()) {
     return ts.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });

@@ -1,0 +1,249 @@
+{
+  "status": {
+    "pending": "保留中",
+    "uploading": "アップロード中",
+    "running": "レンダリング中",
+    "done": "完了",
+    "cancelled": "キャンセル済み",
+    "failed": "失敗"
+  },
+  "untitled": "無題",
+  "output": {
+    "exrMultilayer": "EXR（マルチ）"
+  },
+  "summarize": {
+    "empty": "完了"
+  },
+  "machineCount_one": "{{count}} 台",
+  "machineCount_other": "{{count}} 台",
+  "time": {
+    "justNow": "たった今",
+    "minutesAgo": "{{count}}分前",
+    "hoursAgo": "{{count}}時間前",
+    "daysAgo": "{{count}}日前"
+  },
+  "deleteError": {
+    "title": "レンダーを削除できませんでした",
+    "message": "サーバーが削除リクエストを拒否しました。"
+  },
+  "card": {
+    "queued": "キュー待ち",
+    "deleteJob": "ジョブを削除"
+  },
+  "errors": {
+    "loadFramesFailed": "フレームの読み込みに失敗しました",
+    "loadFrameFailed": "フレームの読み込みに失敗しました"
+  },
+  "cost": {
+    "approx": "~{{credits}} $t(common:tokens)",
+    "exact": "{{credits}} $t(common:tokens)",
+    "estTokens": "~{{credits}} $t(common:tokens)（見積もり）",
+    "liveTokens": "{{credits}} $t(common:tokens)（ライブ）",
+    "actualTokens": "{{credits}} $t(common:tokens)（実績）"
+  },
+  "page": {
+    "title": "マイジョブ",
+    "cancelAll": "すべてキャンセル",
+    "cancellingAll": "キャンセル中...",
+    "stats": {
+      "active": "実行中",
+      "queued": "キュー待ち",
+      "completed": "完了",
+      "creditsSpent": "消費トークン"
+    },
+    "filters": {
+      "all": "すべて",
+      "rendering": "レンダリング中",
+      "queued": "キュー待ち",
+      "done": "完了"
+    },
+    "searchPlaceholder": "ジョブを検索…",
+    "emptyNoRenders": "レンダーはまだありません — 「レンダー作成」から始めましょう。",
+    "emptyNoMatch": "このフィルターに一致するジョブはありません。"
+  },
+  "detail": {
+    "allJobs": "すべてのジョブ",
+    "complete": "完了",
+    "frames": "フレーム",
+    "machines": "マシン",
+    "outputFiles": "出力ファイル",
+    "failed": "失敗",
+    "estimatedCost": "見積もりコスト",
+    "latestFrame": "最新のレンダリング済みフレーム",
+    "stopRender": "レンダリングを停止",
+    "stopping": "停止中...",
+    "downloadAll": "すべてダウンロード",
+    "downloadAvailable": "利用可能分をダウンロード",
+    "download": "ダウンロード",
+    "downloading": "ダウンロード中...",
+    "renderedFrames": "レンダリング済みフレーム",
+    "refreshFrames": "フレームを更新",
+    "instancesEmpty": "終了したマシンがここに表示されます。",
+    "costsEmpty": "見積もりはまだありません — チャンクが割り当てられるとコストが表示されます。",
+    "unassigned": "未割り当て",
+    "accruedCostTitle": "このレンダーの累計コスト",
+    "priority": {
+      "low": "低",
+      "high": "高"
+    },
+    "cost": {
+      "estimated": "見積もり",
+      "actual": "実績"
+    },
+    "costLabel": {
+      "total": "合計コスト",
+      "final": "最終コスト",
+      "live": "ライブコスト"
+    },
+    "drawers": {
+      "instances": "インスタンス",
+      "scene": "シーン",
+      "costs": "コスト"
+    },
+    "dock": {
+      "ariaLabel": "ドロワー",
+      "showInstances": "インスタンスを表示",
+      "hideInstances": "インスタンスを非表示",
+      "showScene": "シーン詳細を表示",
+      "hideScene": "シーン詳細を非表示",
+      "showCosts": "コストを表示",
+      "hideCosts": "コストを非表示"
+    }
+  },
+  "instance": {
+    "cancelFailed": "キャンセルに失敗しました",
+    "cancelling": "キャンセル中…",
+    "cancelChunk": "このチャンクをキャンセル",
+    "showAllowedStallTimes": "許容ストール時間を表示",
+    "frames": "{{value}} フレーム",
+    "showLogs": "ログを表示",
+    "hideLogs": "ログを非表示",
+    "completed": "完了",
+    "activeCount": "{{count}}件実行中",
+    "doneCount": "{{count}}件完了",
+    "failedCount": "{{count}}件失敗",
+    "stallRuleTitle": "ストールルール: {{rule}}",
+    "actualCostTitle": "実績コスト（price_per_hour × elapsed）",
+    "stallRules": {
+      "loading_stall": "読み込みストール",
+      "bytes_stall": "バイトストール",
+      "download_ceiling": "ダウンロード上限",
+      "cpu_stall": "CPUストール",
+      "hard_ceiling": "ハード上限"
+    }
+  },
+  "providers": {
+    "vast": "Vast インスタンス",
+    "modal": "Modal インスタンス",
+    "community": "コミュニティ"
+  },
+  "scene": {
+    "title": "シーン詳細",
+    "unavailable": "このレンダーのシーン詳細は利用できません。",
+    "none": "なし",
+    "sections": {
+      "render": "レンダー",
+      "geometry": "ジオメトリ",
+      "assets": "アセット",
+      "heavyFeatures": "重い機能",
+      "file": "ファイル"
+    },
+    "rows": {
+      "engine": "エンジン",
+      "resolution": "解像度",
+      "effectivePixels": "実効ピクセル",
+      "samples": "サンプル",
+      "vertices": "頂点",
+      "objects": "オブジェクト",
+      "meshes": "メッシュ",
+      "materials": "マテリアル",
+      "textures": "テクスチャ",
+      "textureSize": "テクスチャサイズ",
+      "shaderNodes": "シェーダーノード",
+      "blendSize": "Blend サイズ"
+    },
+    "features": {
+      "uses_subdivision": "サブディビジョン",
+      "uses_displacement": "ディスプレイスメント",
+      "uses_particles": "パーティクル",
+      "uses_geometry_nodes": "ジオメトリノード",
+      "uses_subsurface_scattering": "SSS",
+      "uses_volumetrics": "ボリューメトリック"
+    }
+  },
+  "stall": {
+    "title": "許容ストール時間",
+    "loading": "読み込み中…",
+    "noData": "このチャンクの期限データはありません。",
+    "keys": {
+      "startup_timeout_sec": { "label": "起動", "when": "保留中" },
+      "in_queue_timeout_sec": { "label": "キュー内", "when": "保留中" },
+      "loading_stall_sec": { "label": "読み込みストール", "when": "最初のフレーム前" },
+      "download_phase_max_sec": { "label": "ダウンロード最大", "when": "ダウンロード段階" },
+      "download_bytes_stall_sec": { "label": "バイトストール", "when": "ダウンロード段階" },
+      "frame_progress_stale_sec": { "label": "フレーム停滞", "when": "実行中" },
+      "hard_ceiling_sec": { "label": "ハード上限", "when": "常時" }
+    }
+  },
+  "failedChunks": {
+    "title": "失敗したチャンク",
+    "retryFailed": "再試行に失敗しました",
+    "chunk": "チャンク",
+    "chunkN": "チャンク {{index}}",
+    "retriedConfirm": "{{label}}を再試行しました — 新しいインスタンスがまもなく表示されます。"
+  },
+  "pendingChunks": {
+    "title": "保留中のチャンク",
+    "retry": "再試行",
+    "queued": "キュー待ち",
+    "empty": "保留中の項目はありません。",
+    "stopped": "ポーリングを停止しました — チャンクが失われた可能性があります。更新で再試行してください。",
+    "checking": "確認中...",
+    "waiting": "キューを待機中...",
+    "refreshTitle": "保留キューを更新"
+  },
+  "frames": {
+    "empty": "レンダリング済みフレームはまだありません — マシンが完了すると順次ここに表示されます。",
+    "frameN": "フレーム {{n}}",
+    "unparsed": "未解析",
+    "fileCount_one": "{{count}} ファイル",
+    "fileCount_other": "{{count}} ファイル",
+    "caching": "キャッシュ中..."
+  },
+  "viewer": {
+    "frameFallback": "フレーム",
+    "reset": "リセット",
+    "downloading": "フル解像度フレームをダウンロード中...",
+    "altRenderedFrame": "レンダリング済みフレーム"
+  },
+  "frameThumb": {
+    "file": "ファイル"
+  },
+  "thumbnail": {
+    "renderPreview": "レンダープレビュー"
+  },
+  "view": {
+    "mode": "表示モード",
+    "list": "リスト表示",
+    "grid": "グリッド表示"
+  },
+  "search": {
+    "placeholderDefault": "ファイル名で検索…",
+    "clear": "クリア"
+  },
+  "table": {
+    "name": "ジョブ",
+    "status": "ステータス",
+    "progress": "進捗",
+    "frames": "フレーム",
+    "gpus": "GPU",
+    "resolution": "解像度",
+    "samples": "サンプル",
+    "engine": "エンジン",
+    "output": "出力",
+    "scene": "シーン",
+    "submitted": "送信日時",
+    "duration": "所要時間",
+    "cost": "コスト"
+  }
+}

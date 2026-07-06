@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { listRenderGroups, getRenderGroup, deleteRenderGroup } from "../services/api";
+import i18n from "../i18n/i18n";
 
 const POLL_INTERVAL = 3000;
 const PAGE_SIZE = 4;
@@ -31,7 +32,7 @@ function normalizeRenderGroup(group) {
   const filename =
     (typeof group?.input_filename === "string" && group.input_filename.trim()) ||
     (typeof group?.filename === "string" && group.filename.trim()) ||
-    "Untitled";
+    i18n.t("shared:job.untitled");
 
   return {
     ...group,
@@ -301,8 +302,8 @@ export function useJobs(backendUrl) {
       {
         group_id: groupId,
         id: groupId,
-        filename: filename || "Untitled",
-        input_filename: filename || "Untitled",
+        filename: filename || i18n.t("shared:job.untitled"),
+        input_filename: filename || i18n.t("shared:job.untitled"),
         status: "pending",
         submitted_at: new Date().toISOString(),
         completed_at: null,
@@ -375,7 +376,7 @@ export function useJobs(backendUrl) {
     const updated = {
       status: "cancelled",
       completed_at: new Date().toISOString(),
-      error: "Cancelled by user",
+      error: i18n.t("shared:job.cancelledByUser"),
     };
     transitionToPast(groupId, updated);
   }, [transitionToPast]);

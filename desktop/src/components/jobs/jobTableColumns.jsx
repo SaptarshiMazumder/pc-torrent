@@ -33,7 +33,7 @@ import JobProgressCell from "./JobProgressCell";
 export const JOB_TABLE_COLUMNS = [
   {
     key: "name",
-    label: "Job",
+    labelKey: "table.name",
     sortable: true,
     align: "left",
     sortValue: (job) => resolveJobFilename(job).toLowerCase(),
@@ -43,7 +43,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "status",
-    label: "Status",
+    labelKey: "table.status",
     sortable: true,
     align: "left",
     sortValue: (job) => statusRank(job?.status),
@@ -51,7 +51,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "progress",
-    label: "Progress",
+    labelKey: "table.progress",
     sortable: true,
     align: "left",
     sortValue: (job) => jobProgressPct(job),
@@ -59,7 +59,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "frames",
-    label: "Frames",
+    labelKey: "table.frames",
     sortable: true,
     align: "right",
     sortValue: (job) => jobTotalFrames(job),
@@ -67,7 +67,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "gpus",
-    label: "GPUs",
+    labelKey: "table.gpus",
     sortable: true,
     align: "right",
     sortValue: (job) => jobGpuCount(job),
@@ -75,7 +75,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "resolution",
-    label: "Resolution",
+    labelKey: "table.resolution",
     sortable: true,
     align: "right",
     sortValue: (job) => jobPixels(job),
@@ -83,7 +83,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "samples",
-    label: "Samples",
+    labelKey: "table.samples",
     sortable: true,
     align: "right",
     sortValue: (job) => jobSamples(job) ?? -1,
@@ -91,7 +91,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "engine",
-    label: "Engine",
+    labelKey: "table.engine",
     sortable: true,
     align: "left",
     sortValue: (job) => jobEngineLabel(job),
@@ -99,7 +99,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "output",
-    label: "Output",
+    labelKey: "table.output",
     sortable: true,
     align: "left",
     sortValue: (job) => jobOutputFormat(job),
@@ -107,7 +107,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "size",
-    label: "Scene",
+    labelKey: "table.scene",
     sortable: true,
     align: "right",
     sortValue: (job) => jobFileSizeBytes(job),
@@ -115,7 +115,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "submitted",
-    label: "Submitted",
+    labelKey: "table.submitted",
     sortable: true,
     align: "left",
     sortValue: (job) => jobSubmittedMs(job),
@@ -123,7 +123,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "duration",
-    label: "Duration",
+    labelKey: "table.duration",
     sortable: true,
     align: "right",
     sortValue: (job) => jobDurationSec(job),
@@ -131,7 +131,7 @@ export const JOB_TABLE_COLUMNS = [
   },
   {
     key: "cost",
-    label: "Cost",
+    labelKey: "table.cost",
     sortable: true,
     align: "right",
     sortValue: (job) => jobCostCredits(job),

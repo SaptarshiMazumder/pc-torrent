@@ -1,9 +1,11 @@
+import { useTranslation } from "react-i18next";
 import { pauseAgent, resumeAgent, stopJob } from "../../services/sidecar";
 
 /* Decorative render viewport from the Aurora Glass prototype — grid floor,
    spinning ember cube, scan sweep.  Pure CSS chrome; the HUD chips carry the
    real state. */
 function RenderViewport({ rendering, hudRight, hudBottom }) {
+  const { t } = useTranslation(["dashboard", "common"]);
   return (
     <div className="dash-viewport">
       <div className="dash-viewport-grid" />
@@ -19,7 +21,7 @@ function RenderViewport({ rendering, hudRight, hudBottom }) {
       {rendering && <div className="dash-viewport-sweep" />}
       <div className="dash-viewport-hud dash-viewport-hud-tl">
         <span className={`dash-hud-dot${rendering ? " live" : ""}`} />
-        {rendering ? "RENDERING" : "IDLE"}
+        {rendering ? t("job.rendering") : t("job.idle")}
       </div>
       {hudRight && <div className="dash-viewport-hud dash-viewport-hud-tr">{hudRight}</div>}
       {hudBottom && <div className="dash-viewport-hud dash-viewport-hud-bl">{hudBottom}</div>}
@@ -28,6 +30,8 @@ function RenderViewport({ rendering, hudRight, hudBottom }) {
 }
 
 export default function JobCard({ currentJob, status }) {
+  const { t } = useTranslation(["dashboard", "common"]);
+
   if (!currentJob) {
     if (status === "connected") {
       return (
@@ -35,14 +39,13 @@ export default function JobCard({ currentJob, status }) {
           <div className="dash-hero-chips">
             <span className="dash-chip dash-chip-soft">
               <span className="dash-chip-dot" />
-              STANDING BY
+              {t("job.standingBy")}
             </span>
-            <span className="dash-chip dash-chip-hair">WAITING FOR RENDER JOBS</span>
+            <span className="dash-chip dash-chip-hair">{t("job.waitingChip")}</span>
           </div>
-          <RenderViewport rendering={false} hudBottom="viewport preview" />
+          <RenderViewport rendering={false} hudBottom={t("job.viewportPreview")} />
           <p className="dash-hero-idle-note">
-            Waiting for render jobs — your machine is registered and will pick
-            up work automatically.
+            {t("job.idleNote")}
           </p>
         </div>
       );
@@ -66,9 +69,9 @@ export default function JobCard({ currentJob, status }) {
       <div className="dash-hero-chips">
         <span className="dash-chip dash-chip-soft">
           <span className={`dash-chip-dot${paused ? "" : " live"}`} />
-          {paused ? "PAUSED" : "LIVE RENDER"}
+          {paused ? t("job.paused") : t("job.liveRender")}
         </span>
-        <span className="dash-chip dash-chip-hair">JOB {currentJob.job_id}</span>
+        <span className="dash-chip dash-chip-hair">{t("job.jobId", { jobId: currentJob.job_id })}</span>
       </div>
 
       <div className="dash-hero-headline">
@@ -80,8 +83,8 @@ export default function JobCard({ currentJob, status }) {
           <div className="dash-hero-filename">{currentJob.filename}</div>
           <div className="dash-hero-meta">
             {hasTotalFrames
-              ? `FRAME ${Math.min(renderedFrames, totalFrames)} / ${totalFrames}`
-              : "PREPARING RENDER…"}
+              ? t("job.frameProgress", { current: Math.min(renderedFrames, totalFrames), total: totalFrames })
+              : t("job.preparing")}
           </div>
         </div>
       </div>
@@ -97,37 +100,37 @@ export default function JobCard({ currentJob, status }) {
         rendering={!paused}
         hudRight={
           typeof currentJob.current_frame === "number"
-            ? `FRAME ${currentJob.current_frame}`
+            ? t("job.frame", { frame: currentJob.current_frame })
             : null
         }
-        hudBottom="viewport preview"
+        hudBottom={t("job.viewportPreview")}
       />
 
       <div className="dash-hero-foot">
         <div className="dash-hero-stat">
-          <div className="dash-hero-stat-label">RENDERED</div>
+          <div className="dash-hero-stat-label">{t("job.rendered")}</div>
           <div className="dash-hero-stat-value">
             {hasTotalFrames ? `${Math.min(renderedFrames, totalFrames)} / ${totalFrames}` : "—"}
           </div>
         </div>
         {typeof currentJob.current_frame === "number" && (
           <div className="dash-hero-stat">
-            <div className="dash-hero-stat-label">CURRENT FRAME</div>
+            <div className="dash-hero-stat-label">{t("job.currentFrame")}</div>
             <div className="dash-hero-stat-value">{currentJob.current_frame}</div>
           </div>
         )}
         <div className="dash-hero-actions">
           {paused ? (
             <button className="btn-hero-outline" onClick={resumeAgent}>
-              Resume
+              {t("job.resume")}
             </button>
           ) : (
             <button className="btn-hero-outline" onClick={pauseAgent}>
-              Pause
+              {t("job.pause")}
             </button>
           )}
           <button className="btn btn-danger" onClick={stopJob}>
-            Stop
+            {t("job.stop")}
           </button>
         </div>
       </div>

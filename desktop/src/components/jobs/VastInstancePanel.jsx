@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { getVastInstances } from "../../services/api";
 import { formatCredits } from "../../utils/creditsFormat";
+import i18n from "../../i18n/i18n";
 import InstancePanel from "./InstancePanel";
 
 const VAST_ICON = (
@@ -16,7 +17,7 @@ function gpuShortName(name) {
 }
 
 const vastProvider = {
-  title: "Vast Instances",
+  titleKey: "providers.vast",
   icon: VAST_ICON,
 
   filterTask(task) {
@@ -44,7 +45,7 @@ const vastProvider = {
       rangeLabel,
       elapsedSec: live?.elapsed_sec ?? null,
       cost: task.estimated_cost_credits != null
-        ? `~${formatCredits(Number(task.estimated_cost_credits))} tokens est.`
+        ? i18n.t("myJobs:cost.estTokens", { credits: formatCredits(Number(task.estimated_cost_credits)) })
         : null,
       error: live?.error || (task.status === "failed" ? task.error : "") || "",
       stallRule: task.stall_rule || null,

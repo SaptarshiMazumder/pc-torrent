@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { getFirebaseToken } from "../../services/api";
 import { getCachedFramePreview } from "../../services/frameCache";
 import { isPreviewableExtension } from "../../utils/jobUtils";
 import openexrIcon from "../../assets/openexr-icon-color.svg";
 
+// Returns the uppercased file extension, or "" when the name has none
+// (the caller substitutes a localized "FILE" fallback badge).
 function fileExtLabel(name) {
   const dot = typeof name === "string" ? name.lastIndexOf(".") : -1;
-  return dot >= 0 ? name.slice(dot + 1).toUpperCase() : "FILE";
+  return dot >= 0 ? name.slice(dot + 1).toUpperCase() : "";
 }
 
 function isExrFilename(name) {
@@ -18,6 +21,7 @@ function isTiffFilename(name) {
 }
 
 export default function FrameThumb({ file, backendUrl, className }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const [src, setSrc] = useState("");
   const mountedRef = useRef(true);
   const previewable = isPreviewableExtension(file?.filename);
@@ -96,7 +100,7 @@ export default function FrameThumb({ file, backendUrl, className }) {
         title={file?.filename}
         style={{ background: "var(--bg-secondary, #1a1a1a)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-secondary, #888)", fontSize: "0.7rem", fontWeight: 600, letterSpacing: "0.05em" }}
       >
-        {fileExtLabel(file?.filename)}
+        {fileExtLabel(file?.filename) || t("frameThumb.file")}
       </div>
     );
   }

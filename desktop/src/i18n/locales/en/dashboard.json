@@ -1,0 +1,116 @@
+{
+  "title": "Dashboard",
+  "machine": "Machine",
+  "machineId": "Machine ID: <code>{{id}}</code>",
+  "checking": "Checking...",
+  "loading": "Loading",
+  "kpi": {
+    "status": "Status",
+    "gpuVram": "GPU VRAM",
+    "cpuCores": "CPU Cores",
+    "memory": "Memory"
+  },
+  "kpiStatus": {
+    "checking": "Checking",
+    "settingUp": "Setting up",
+    "downloading": "Downloading",
+    "installing": "Installing",
+    "registering": "Registering",
+    "removing": "Removing",
+    "reboot": "Reboot"
+  },
+  "statusMap": {
+    "checkingSystem": "Checking System",
+    "settingUpDocker": "Setting Up Docker",
+    "downloadingImage": "Downloading Image",
+    "installingImage": "Installing Image",
+    "registering": "Registering",
+    "removingImage": "Removing Image",
+    "rebootRequired": "Reboot Required"
+  },
+  "connect": {
+    "connect": "Connect",
+    "disconnect": "Disconnect",
+    "connecting": "Connecting...",
+    "pickerAria": "Choose availability window",
+    "pickerHeading": "How long will your PC be available?",
+    "preset": "{{hours}}h",
+    "availableUntil": "Available until",
+    "errPickDateTime": "Pick a date and time.",
+    "errInvalid": "Invalid date/time.",
+    "errTooSoon": "Pick a time at least 15 minutes from now.",
+    "errFailed": "Failed: {{error}}"
+  },
+  "system": {
+    "title": "System Info",
+    "connectPrompt": "Connect to detect system specs",
+    "gpu": "GPU",
+    "cpu": "CPU",
+    "ram": "RAM",
+    "os": "OS",
+    "driver": "Driver",
+    "notDetected": "Not detected",
+    "unknown": "Unknown",
+    "na": "N/A",
+    "vram": "({{vram}} GB VRAM)",
+    "cores": "{{cores}} cores",
+    "ramValue": "{{ram}} GB"
+  },
+  "job": {
+    "standingBy": "STANDING BY",
+    "waitingChip": "WAITING FOR RENDER JOBS",
+    "idleNote": "Waiting for render jobs — your machine is registered and will pick up work automatically.",
+    "viewportPreview": "viewport preview",
+    "rendering": "RENDERING",
+    "idle": "IDLE",
+    "paused": "PAUSED",
+    "liveRender": "LIVE RENDER",
+    "jobId": "JOB {{jobId}}",
+    "preparing": "PREPARING RENDER…",
+    "frameProgress": "FRAME {{current}} / {{total}}",
+    "frame": "FRAME {{frame}}",
+    "rendered": "RENDERED",
+    "currentFrame": "CURRENT FRAME",
+    "resume": "Resume",
+    "pause": "Pause",
+    "stop": "Stop"
+  },
+  "runtime": {
+    "title": "Render Runtime",
+    "subtitle": "Local requirements, Docker state, and cached render image.",
+    "deleteImage": "Delete Render Image",
+    "deleting": "Deleting...",
+    "working": "Working...",
+    "notChecked": "Not checked",
+    "failedPreflight": "Failed to run preflight: {{error}}",
+    "failedDelete": "Failed to delete render image: {{error}}",
+    "disconnectHint": "Disconnect the agent before deleting the local render image.",
+    "progressPct": "{{pct}}%",
+    "label": {
+      "requirements": "Requirements",
+      "docker": "Docker",
+      "gpuInDocker": "GPU in Docker",
+      "renderImage": "Render Image"
+    },
+    "value": {
+      "ready": "Ready",
+      "issuesFound": "Issues found",
+      "notInstalled": "Not installed",
+      "running": "Running",
+      "installedNotRunning": "Installed, not running",
+      "dockerRequired": "Docker required",
+      "startDocker": "Start Docker",
+      "cpuOnly": "CPU only",
+      "downloading": "Downloading",
+      "installing": "Installing",
+      "removing": "Removing",
+      "installed": "Installed",
+      "missing": "Missing"
+    }
+  },
+  "preflight": {
+    "actionNeeded": "Action needed:",
+    "uac": "Windows will ask for permission to install software — please click Yes to continue.",
+    "reboot": "Your PC needs a restart to finish setup. After restarting, open the app again and setup will continue automatically."
+  }
+}

@@ -1,0 +1,249 @@
+{
+  "status": {
+    "pending": "Pending",
+    "uploading": "Uploading",
+    "running": "Rendering",
+    "done": "Done",
+    "cancelled": "Cancelled",
+    "failed": "Failed"
+  },
+  "untitled": "Untitled",
+  "output": {
+    "exrMultilayer": "EXR (multi)"
+  },
+  "summarize": {
+    "empty": "done"
+  },
+  "machineCount_one": "{{count}} machine",
+  "machineCount_other": "{{count}} machines",
+  "time": {
+    "justNow": "just now",
+    "minutesAgo": "{{count}}m ago",
+    "hoursAgo": "{{count}}h ago",
+    "daysAgo": "{{count}}d ago"
+  },
+  "deleteError": {
+    "title": "Couldn't delete render",
+    "message": "Server rejected the delete request."
+  },
+  "card": {
+    "queued": "Queued",
+    "deleteJob": "Delete job"
+  },
+  "errors": {
+    "loadFramesFailed": "Failed to load frames",
+    "loadFrameFailed": "Failed to load frame"
+  },
+  "cost": {
+    "approx": "~{{credits}} $t(common:tokens)",
+    "exact": "{{credits}} $t(common:tokens)",
+    "estTokens": "~{{credits}} $t(common:tokens) est.",
+    "liveTokens": "{{credits}} $t(common:tokens) live",
+    "actualTokens": "{{credits}} $t(common:tokens) actual"
+  },
+  "page": {
+    "title": "My Jobs",
+    "cancelAll": "Cancel All",
+    "cancellingAll": "Cancelling...",
+    "stats": {
+      "active": "ACTIVE",
+      "queued": "QUEUED",
+      "completed": "COMPLETED",
+      "creditsSpent": "CREDITS SPENT"
+    },
+    "filters": {
+      "all": "All",
+      "rendering": "Rendering",
+      "queued": "Queued",
+      "done": "Done"
+    },
+    "searchPlaceholder": "Search jobs…",
+    "emptyNoRenders": "No renders yet — start one from Create Render.",
+    "emptyNoMatch": "No jobs match this filter."
+  },
+  "detail": {
+    "allJobs": "All Jobs",
+    "complete": "COMPLETE",
+    "frames": "Frames",
+    "machines": "Machines",
+    "outputFiles": "Output Files",
+    "failed": "Failed",
+    "estimatedCost": "Estimated cost",
+    "latestFrame": "Latest Rendered Frame",
+    "stopRender": "Stop Render",
+    "stopping": "Stopping...",
+    "downloadAll": "Download All",
+    "downloadAvailable": "Download Available",
+    "download": "Download",
+    "downloading": "Downloading...",
+    "renderedFrames": "Rendered Frames",
+    "refreshFrames": "Refresh frames",
+    "instancesEmpty": "Terminated machines will be displayed here.",
+    "costsEmpty": "No estimates yet — costs will appear once chunks are dispatched.",
+    "unassigned": "Unassigned",
+    "accruedCostTitle": "Accrued cost for this render",
+    "priority": {
+      "low": "LOW",
+      "high": "HIGH"
+    },
+    "cost": {
+      "estimated": "Estimated",
+      "actual": "Actual"
+    },
+    "costLabel": {
+      "total": "Total cost",
+      "final": "Final cost",
+      "live": "Live cost"
+    },
+    "drawers": {
+      "instances": "Instances",
+      "scene": "Scene",
+      "costs": "Costs"
+    },
+    "dock": {
+      "ariaLabel": "Drawers",
+      "showInstances": "Show instances",
+      "hideInstances": "Hide instances",
+      "showScene": "Show scene details",
+      "hideScene": "Hide scene details",
+      "showCosts": "Show costs",
+      "hideCosts": "Hide costs"
+    }
+  },
+  "instance": {
+    "cancelFailed": "Cancel failed",
+    "cancelling": "Cancelling…",
+    "cancelChunk": "Cancel this chunk",
+    "showAllowedStallTimes": "Show allowed stall times",
+    "frames": "{{value}} frames",
+    "showLogs": "Show logs",
+    "hideLogs": "Hide logs",
+    "completed": "Completed",
+    "activeCount": "{{count}} active",
+    "doneCount": "{{count}} done",
+    "failedCount": "{{count}} failed",
+    "stallRuleTitle": "Stall rule: {{rule}}",
+    "actualCostTitle": "Actual cost (price_per_hour × elapsed)",
+    "stallRules": {
+      "loading_stall": "loading stall",
+      "bytes_stall": "bytes stall",
+      "download_ceiling": "download ceiling",
+      "cpu_stall": "cpu stall",
+      "hard_ceiling": "hard ceiling"
+    }
+  },
+  "providers": {
+    "vast": "Vast Instances",
+    "modal": "Modal Instances",
+    "community": "Community"
+  },
+  "scene": {
+    "title": "Scene Details",
+    "unavailable": "Scene details unavailable for this render.",
+    "none": "None",
+    "sections": {
+      "render": "Render",
+      "geometry": "Geometry",
+      "assets": "Assets",
+      "heavyFeatures": "Heavy features",
+      "file": "File"
+    },
+    "rows": {
+      "engine": "Engine",
+      "resolution": "Resolution",
+      "effectivePixels": "Effective pixels",
+      "samples": "Samples",
+      "vertices": "Vertices",
+      "objects": "Objects",
+      "meshes": "Meshes",
+      "materials": "Materials",
+      "textures": "Textures",
+      "textureSize": "Texture size",
+      "shaderNodes": "Shader nodes",
+      "blendSize": "Blend size"
+    },
+    "features": {
+      "uses_subdivision": "Subdivision",
+      "uses_displacement": "Displacement",
+      "uses_particles": "Particles",
+      "uses_geometry_nodes": "Geometry Nodes",
+      "uses_subsurface_scattering": "SSS",
+      "uses_volumetrics": "Volumetrics"
+    }
+  },
+  "stall": {
+    "title": "Allowed stall times",
+    "loading": "Loading…",
+    "noData": "No deadline data for this chunk.",
+    "keys": {
+      "startup_timeout_sec": { "label": "Startup", "when": "while pending" },
+      "in_queue_timeout_sec": { "label": "In-queue", "when": "while pending" },
+      "loading_stall_sec": { "label": "Loading stall", "when": "before first frame" },
+      "download_phase_max_sec": { "label": "Download max", "when": "download phase" },
+      "download_bytes_stall_sec": { "label": "Bytes stall", "when": "download phase" },
+      "frame_progress_stale_sec": { "label": "Frame stale", "when": "while running" },
+      "hard_ceiling_sec": { "label": "Hard ceiling", "when": "always" }
+    }
+  },
+  "failedChunks": {
+    "title": "Failed Chunks",
+    "retryFailed": "Retry failed",
+    "chunk": "Chunk",
+    "chunkN": "Chunk {{index}}",
+    "retriedConfirm": "{{label}} retried — new instance will appear shortly."
+  },
+  "pendingChunks": {
+    "title": "Pending Chunks",
+    "retry": "retry",
+    "queued": "queued",
+    "empty": "No items pending.",
+    "stopped": "Stopped polling — chunk likely lost. Use Refresh to try again.",
+    "checking": "Checking...",
+    "waiting": "Waiting for queue...",
+    "refreshTitle": "Refresh pending queue"
+  },
+  "frames": {
+    "empty": "No frames rendered yet — they'll appear here as machines complete them.",
+    "frameN": "Frame {{n}}",
+    "unparsed": "Unparsed",
+    "fileCount_one": "{{count}} file",
+    "fileCount_other": "{{count}} files",
+    "caching": "Caching..."
+  },
+  "viewer": {
+    "frameFallback": "Frame",
+    "reset": "Reset",
+    "downloading": "Downloading full-resolution frame...",
+    "altRenderedFrame": "Rendered frame"
+  },
+  "frameThumb": {
+    "file": "FILE"
+  },
+  "thumbnail": {
+    "renderPreview": "Render preview"
+  },
+  "view": {
+    "mode": "View mode",
+    "list": "List view",
+    "grid": "Grid view"
+  },
+  "search": {
+    "placeholderDefault": "Search by file name…",
+    "clear": "Clear"
+  },
+  "table": {
+    "name": "Job",
+    "status": "Status",
+    "progress": "Progress",
+    "frames": "Frames",
+    "gpus": "GPUs",
+    "resolution": "Resolution",
+    "samples": "Samples",
+    "engine": "Engine",
+    "output": "Output",
+    "scene": "Scene",
+    "submitted": "Submitted",
+    "duration": "Duration",
+    "cost": "Cost"
+  }
+}

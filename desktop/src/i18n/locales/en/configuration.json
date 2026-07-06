@@ -1,0 +1,81 @@
+{
+  "title": "Configuration",
+  "loading": "Loading…",
+  "badge": {
+    "unsaved": "Unsaved changes",
+    "saved": "Saved"
+  },
+  "status": {
+    "label": "Status",
+    "unsaved": "Unsaved",
+    "synced": "Synced"
+  },
+  "lastSaved": "Last saved",
+  "actions": {
+    "reload": "Reload",
+    "reloading": "Reloading…",
+    "save": "Save",
+    "saving": "Saving…"
+  },
+  "hint": "Changes take effect on the next planning tick. vast_instances / modal_instances are deploy-time only and are preserved untouched.",
+  "errors": {
+    "loadFallback": "Failed to load config",
+    "loadTitle": "Couldn't load configuration",
+    "saveFallback": "Save failed",
+    "saveTitle": "Couldn't save configuration"
+  },
+  "sections": {
+    "frameAllocation": {
+      "title": "Frame allocation",
+      "subtitle": "planner tuning"
+    },
+    "weights": {
+      "title": "Weights"
+    },
+    "fleetTargetShare": {
+      "title": "Fleet target share",
+      "subtitle": "per-fleet share of the serverless slots; renormalized over the fleets that have supply"
+    },
+    "vramFleetBoost": {
+      "title": "VRAM fleet boost",
+      "subtitle": "multiplier on machine VRAM during eligibility"
+    },
+    "startupBuffer": {
+      "title": "Startup buffer (sec)",
+      "subtitle": "per-fleet additive on planning startup"
+    },
+    "failureRate": {
+      "title": "Failure rate",
+      "subtitle": "per-fleet expected failure prob (0–1)"
+    },
+    "renderTimeCalibration": {
+      "title": "Render time calibration"
+    },
+    "cyclesFactors": {
+      "title": "Cycles factors"
+    },
+    "eeveeFactors": {
+      "title": "EEVEE factors"
+    },
+    "sceneScalingCycles": {
+      "title": "Scene scaling — Cycles",
+      "subtitle": "pixel + sample curves: factor = max(min, (value/baseline)^exponent)"
+    },
+    "sceneScalingEevee": {
+      "title": "Scene scaling — EEVEE",
+      "subtitle": "EEVEE TAA + raster scale sublinearly; defaults pixel=0.5, sample=0.4"
+    },
+    "startupSecBreakdown": {
+      "title": "Startup sec breakdown"
+    },
+    "stallWatchdog": {
+      "title": "Stall watchdog"
+    },
+    "monitor": {
+      "title": "Monitor"
+    },
+    "orchestrator": {
+      "title": "Orchestrator"
+    }
+  }
+}

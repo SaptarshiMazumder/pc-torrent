@@ -1,0 +1,45 @@
+{
+  "loading": "読み込み中...",
+  "actions": {
+    "dismiss": "閉じる"
+  },
+  "error": {
+    "title": "エラー",
+    "fallbackMessage": "問題が発生しました。"
+  },
+  "updateRequired": {
+    "title": "アップデートが必要です",
+    "body": "続行するには Forge v{{minVersion}} が必要です。現在 v{{currentVersion}} を使用しています。",
+    "sub": "下のボタンから最新のインストーラーをダウンロードして実行し、Forge を再度開いてください。",
+    "download": "v{{minVersion}} をダウンロード"
+  },
+  "agent": {
+    "preflightNotRun": "プリフライトはまだ実行されていません。",
+    "notCheckedYet": "まだ確認されていません。",
+    "ready": "準備完了",
+    "uacFallback": "Windows がソフトウェアのインストール許可を求めます。続行するには「はい」をクリックしてください。",
+    "jobLog": "ジョブ {{jobId}} {{status}}: {{detail}}",
+    "jobCompleted": "完了"
+  },
+  "job": {
+    "untitled": "無題",
+    "cancelledByUser": "ユーザーによりキャンセルされました"
+  },
+  "api": {
+    "backendUrlNotConfigured": "バックエンド URL が設定されていません",
+    "requestFailed": "リクエストに失敗しました ({{status}})",
+    "networkError": "{{url}} への接続でネットワークエラーが発生しました: {{detail}}",
+    "authRefreshFailed": "認証トークンの更新に失敗しました: {{detail}}",
+    "uploadFailed": "アップロードに失敗しました",
+    "uploadAborted": "アップロードが中止されました",
+    "uploadFailedStatus": "アップロードに失敗しました (ステータス {{status}})",
+    "missingEtag": "マルチパートのパートレスポンスに ETag がありません",
+    "partUploadFailed": "パートのアップロードに失敗しました",
+    "partUploadFailedStatus": "パートのアップロードに失敗しました (ステータス {{status}})",
+    "missingPartUrl": "パート {{n}} のアップロード URL がありません"
+  },
+  "google": {
+    "notConfigured": "Google サインインが設定されていません。",
+    "noIdToken": "Google が ID トークンを返しませんでした。"
+  }
+}

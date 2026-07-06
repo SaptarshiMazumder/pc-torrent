@@ -1,20 +1,21 @@
 import { useState } from "react";
-import { STATUS_LABELS, resolveJobFilename, jobKey } from "../../utils/jobUtils";
+import { useTranslation } from "react-i18next";
+import { jobStatusLabel, resolveJobFilename, jobKey } from "../../utils/jobUtils";
 import JobThumbnail from "./JobThumbnail";
 import { useError } from "../../contexts/ErrorContext";
 
-function formatRelativeDate(isoString) {
+function formatRelativeDate(isoString, t) {
   if (!isoString) return "";
   const date = new Date(isoString);
   const now = Date.now();
   const diff = now - date.getTime();
   const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 1) return t("time.justNow");
+  if (minutes < 60) return t("time.minutesAgo", { count: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return t("time.hoursAgo", { count: hours });
   const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
+  if (days < 7) return t("time.daysAgo", { count: days });
   return date.toLocaleDateString();
 }
 
@@ -37,6 +38,7 @@ function formatDuration(startIso, endIso) {
 }
 
 export default function JobGridCard({ job, authToken, backendUrl, onClick, onRemove }) {
+  const { t } = useTranslation(["myJobs", "common"]);
   const [removing, setRemoving] = useState(false);
   const id = jobKey(job);
   const displayName = resolveJobFilename(job);
@@ -51,8 +53,8 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
       await onRemove(id);
     } catch (err) {
       showError({
-        title: "Couldn't delete render",
-        message: err?.message || "Server rejected the delete request.",
+        title: t("deleteError.title"),
+        message: err?.message || t("deleteError.message"),
         detail: err?.body || null,
       });
     } finally {
@@ -75,9 +77,9 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
   const isTerminal = ["done", "failed", "cancelled"].includes(status);
   const machineLabel = job?.group_id
     ? (taskCount === 0 && !isTerminal
-        ? "Queued"
-        : `${taskCount} machine${taskCount !== 1 ? "s" : ""}`)
-    : job?.machine_gpu || "1 machine";
+        ? t("card.queued")
+        : t("machineCount", { count: taskCount }))
+    : job?.machine_gpu || t("machineCount", { count: 1 });
 
   return (
     <button
@@ -95,7 +97,7 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
           className={`job-grid-delete-btn${removing ? " removing" : ""}`}
           onClick={handleRemove}
           onKeyDown={(e) => e.key === "Enter" && handleRemove(e)}
-          title="Delete job"
+          title={t("card.deleteJob")}
         >
           {removing ? (
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.5" strokeDasharray="8 6" strokeLinecap="round"><animateTransform attributeName="transform" type="rotate" from="0 7 7" to="360 7 7" dur="0.7s" repeatCount="indefinite"/></circle></svg>
@@ -106,7 +108,7 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
 
         <span className={`job-grid-status-pill status-${status}`}>
           {status === "running" && <span className="status-badge-dot" />}
-          {STATUS_LABELS[status] || status}
+          {jobStatusLabel(status)}
         </span>
       </div>
 
@@ -118,7 +120,7 @@ export default function JobGridCard({ job, authToken, backendUrl, onClick, onRem
           <span className="job-grid-meta-item">
             {formatDuration(job?.submitted_at, job?.completed_at)}
           </span>
-          <span className="job-grid-meta-date">{formatRelativeDate(job?.submitted_at)}</span>
+          <span className="job-grid-meta-date">{formatRelativeDate(job?.submitted_at, t)}</span>
         </div>
       </div>
     </button>

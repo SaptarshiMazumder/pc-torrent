@@ -1,11 +1,11 @@
-export const STATUS_LABELS = {
-  pending: "Pending",
-  uploading: "Uploading",
-  running: "Rendering",
-  done: "Done",
-  cancelled: "Cancelled",
-  failed: "Failed",
-};
+import i18n from "../i18n/i18n";
+
+// Display label for a job status.  The status codes are the source of
+// truth; the human label is looked up per-render so it follows the
+// active language.  Unknown codes fall back to the raw status.
+export function jobStatusLabel(status) {
+  return i18n.t(`myJobs:status.${status}`, { defaultValue: status });
+}
 
 export const TERMINAL_STATUSES = new Set(["done", "cancelled", "failed"]);
 
@@ -34,7 +34,7 @@ export function terminalFallbackPct(status) {
 export function resolveJobFilename(job) {
   if (typeof job?.filename === "string" && job.filename.trim()) return job.filename.trim();
   if (typeof job?.input_filename === "string" && job.input_filename.trim()) return job.input_filename.trim();
-  return "Untitled";
+  return i18n.t("myJobs:untitled");
 }
 
 export function buildDownloadFolderName(jobFilename, id) {
@@ -104,10 +104,10 @@ export function buildAuthenticatedUrl(baseUrl, path, token, cacheBuster = null) 
 
 export function summarizeDownloadActions(actions) {
   const parts = [];
-  if (actions.downloaded) parts.push(`${actions.downloaded} downloaded`);
-  if (actions.skipped) parts.push(`${actions.skipped} already had`);
-  if (actions.failed) parts.push(`${actions.failed} failed`);
-  return parts.join(", ") || "done";
+  if (actions.downloaded) parts.push(i18n.t("downloads:summary.downloaded", { count: actions.downloaded }));
+  if (actions.skipped) parts.push(i18n.t("downloads:summary.skipped", { count: actions.skipped }));
+  if (actions.failed) parts.push(i18n.t("downloads:summary.failed", { count: actions.failed }));
+  return parts.join(i18n.t("downloads:summarySeparator")) || i18n.t("myJobs:summarize.empty");
 }
 
 // Finds the task in a render group with the highest-index output frame
@@ -251,7 +251,7 @@ export function jobOutputFormat(job) {
 export function jobOutputLabel(job) {
   const f = jobOutputFormat(job);
   if (!f) return "—";
-  if (/EXR/i.test(f)) return /MULTILAYER/i.test(f) ? "EXR (multi)" : "EXR";
+  if (/EXR/i.test(f)) return /MULTILAYER/i.test(f) ? i18n.t("myJobs:output.exrMultilayer") : "EXR";
   return f;
 }
 

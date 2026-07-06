@@ -24,9 +24,9 @@ function fmtSpeed(v) {
 // gets a config-driven flat value; Vast gets the bundle's `duration`;
 // Community computes commitment_end_at - now() at row-read time.  Null
 // means "unbounded / unknown" -- planner skips its time check there.
-function fmtAvailability(seconds) {
+function fmtAvailability(seconds, t) {
   if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "—";
-  if (seconds <= 0) return "Expired";
+  if (seconds <= 0) return t("availability.expired");
   const totalSec = Math.floor(seconds);
   if (totalSec < 60) return `${totalSec}s`;
   const days = Math.floor(totalSec / 86400);
@@ -51,36 +51,37 @@ function availabilityClass(seconds) {
 }
 
 function CommunityCard({ m }) {
+  const { t } = useTranslation(["availableMachines", "common"]);
   return (
     <div className="card machine-card" style={{ cursor: "default" }}>
       <div className="machine-card-body">
         <div className="machine-card-header">
           <div className="machine-gpu-name">{m.gpu_model || "Unknown GPU"}</div>
-          <span className="status-badge status-done">Desktop Worker</span>
+          <span className="status-badge status-done">{t("badge.desktopWorker")}</span>
         </div>
         <div className="machine-specs">
           <div className="info-item">
-            <span className="info-label">VRAM</span>
+            <span className="info-label">{t("label.vram")}</span>
             <span className="info-value">{m.vram_gb} GB</span>
           </div>
           <div className="info-item">
-            <span className="info-label">CPU</span>
-            <span className="info-value">{m.cpu_cores} cores</span>
+            <span className="info-label">{t("label.cpu")}</span>
+            <span className="info-value">{t("value.cores", { count: m.cpu_cores })}</span>
           </div>
           <div className="info-item">
-            <span className="info-label">RAM</span>
+            <span className="info-label">{t("label.ram")}</span>
             <span className="info-value">{m.ram_gb} GB</span>
           </div>
           {fmtSpeed(m.render_speed) && (
             <div className="info-item">
-              <span className="info-label">Speed</span>
+              <span className="info-label">{t("label.speed")}</span>
               <span className="info-value">{fmtSpeed(m.render_speed)}</span>
             </div>
           )}
           <div className="info-item">
-            <span className="info-label">Available for</span>
+            <span className="info-label">{t("label.availableFor")}</span>
             <span className={`info-value ${availabilityClass(m.available_seconds)}`}>
-              {fmtAvailability(m.available_seconds)}
+              {fmtAvailability(m.available_seconds, t)}
             </span>
           </div>
         </div>
@@ -90,6 +91,7 @@ function CommunityCard({ m }) {
 }
 
 function VastCard({ c }) {
+  const { t } = useTranslation(["availableMachines", "common"]);
   const chips = [];
   if (c.cuda_version) chips.push(`CUDA ${c.cuda_version}`);
   if (c.host_os) chips.push(c.host_os);
@@ -102,25 +104,25 @@ function VastCard({ c }) {
         </div>
         <div className="machine-specs">
           <div className="info-item">
-            <span className="info-label">VRAM</span>
+            <span className="info-label">{t("label.vram")}</span>
             <span className="info-value">{c.vram_gb} GB</span>
           </div>
           {fmtSpeed(c.render_speed) && (
             <div className="info-item">
-              <span className="info-label">Speed</span>
+              <span className="info-label">{t("label.speed")}</span>
               <span className="info-value">{fmtSpeed(c.render_speed)}</span>
             </div>
           )}
           {fmtPrice(c.price_per_hour) && (
             <div className="info-item">
-              <span className="info-label">Price</span>
+              <span className="info-label">{t("label.price")}</span>
               <span className="info-value">{fmtPrice(c.price_per_hour)}</span>
             </div>
           )}
           <div className="info-item">
-            <span className="info-label">Available for</span>
+            <span className="info-label">{t("label.availableFor")}</span>
             <span className={`info-value ${availabilityClass(c.available_seconds)}`}>
-              {fmtAvailability(c.available_seconds)}
+              {fmtAvailability(c.available_seconds, t)}
             </span>
           </div>
         </div>
@@ -139,6 +141,7 @@ function VastCard({ c }) {
 }
 
 function ModalCard({ c }) {
+  const { t } = useTranslation(["availableMachines", "common"]);
   return (
     <div className="card machine-card" style={{ cursor: "default" }}>
       <div className="machine-card-body">
@@ -148,25 +151,25 @@ function ModalCard({ c }) {
         </div>
         <div className="machine-specs">
           <div className="info-item">
-            <span className="info-label">VRAM</span>
+            <span className="info-label">{t("label.vram")}</span>
             <span className="info-value">{c.vram_gb} GB</span>
           </div>
           {fmtSpeed(c.render_speed) && (
             <div className="info-item">
-              <span className="info-label">Speed</span>
+              <span className="info-label">{t("label.speed")}</span>
               <span className="info-value">{fmtSpeed(c.render_speed)}</span>
             </div>
           )}
           {fmtPrice(c.price_per_hour) && (
             <div className="info-item">
-              <span className="info-label">Price</span>
+              <span className="info-label">{t("label.price")}</span>
               <span className="info-value">{fmtPrice(c.price_per_hour)}</span>
             </div>
           )}
           <div className="info-item">
-            <span className="info-label">Available for</span>
+            <span className="info-label">{t("label.availableFor")}</span>
             <span className={`info-value ${availabilityClass(c.available_seconds)}`}>
-              {fmtAvailability(c.available_seconds)}
+              {fmtAvailability(c.available_seconds, t)}
             </span>
           </div>
         </div>
@@ -176,14 +179,15 @@ function ModalCard({ c }) {
 }
 
 function FleetSection({ title, count, inFlight, items, emptyMsg, renderCard }) {
+  const { t } = useTranslation(["availableMachines", "common"]);
   return (
     <section style={{ marginBottom: 24 }}>
       <div className="page-header" style={{ paddingBottom: 8, borderBottom: "1px solid var(--hair)", marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>{title}</h3>
-        <span className="log-count">{count} available</span>
+        <span className="log-count">{t("available", { count })}</span>
         {typeof inFlight === "number" && inFlight > 0 && (
           <span className="job-detail-meta-chip" style={{ marginLeft: 8 }}>
-            {inFlight} in flight
+            {t("inFlight", { count: inFlight })}
           </span>
         )}
       </div>
@@ -201,7 +205,7 @@ function FleetSection({ title, count, inFlight, items, emptyMsg, renderCard }) {
 }
 
 export default function AvailableMachinesPage({ backendUrl }) {
-  const { t } = useTranslation("common");
+  const { t } = useTranslation(["availableMachines", "common"]);
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -218,12 +222,12 @@ export default function AvailableMachinesPage({ backendUrl }) {
         serverless_in_flight: data?.serverless_in_flight || {},
       });
     } catch (err) {
-      setError(err?.message || "Failed to load available machines");
+      setError(err?.message || t("loadError"));
       setSnapshot(EMPTY_SNAPSHOT);
     } finally {
       setLoading(false);
     }
-  }, [backendUrl]);
+  }, [backendUrl, t]);
 
   useEffect(() => {
     void load();
@@ -237,13 +241,13 @@ export default function AvailableMachinesPage({ backendUrl }) {
     <div className="page">
       <div className="page-header">
         <div className="page-header-title">
-          <div className="page-eyebrow">{t("eyebrow.marketplace")}</div>
-          <h2>Available Machines</h2>
+          <div className="page-eyebrow">{t("common:eyebrow.marketplace")}</div>
+          <h2>{t("title")}</h2>
         </div>
-        <span className="log-count">{total} total</span>
+        <span className="log-count">{t("total", { count: total })}</span>
         <div className="page-header-actions" style={{ marginLeft: "auto" }}>
           <button className="btn btn-secondary" onClick={() => { void load(); }} disabled={loading}>
-            {loading ? "Refreshing..." : "Refresh"}
+            {loading ? t("common:actions.refreshing") : t("common:actions.refresh")}
           </button>
         </div>
       </div>
@@ -252,31 +256,31 @@ export default function AvailableMachinesPage({ backendUrl }) {
 
       {loading && total === 0 ? (
         <div className="empty-state">
-          <p>Loading available machines...</p>
+          <p>{t("loading")}</p>
         </div>
       ) : (
         <>
           <FleetSection
-            title="Desktop Workers"
+            title={t("section.desktopWorkers")}
             count={snapshot.community.length}
             items={snapshot.community}
-            emptyMsg="No desktop workers online right now."
+            emptyMsg={t("empty.desktop")}
             renderCard={(m) => <CommunityCard key={m.id} m={m} />}
           />
           <FleetSection
-            title="Vast.ai Offers"
+            title={t("section.vastOffers")}
             count={snapshot.vast.length}
             inFlight={vastInFlight}
             items={snapshot.vast}
-            emptyMsg="No Vast.ai offers available right now."
+            emptyMsg={t("empty.vast")}
             renderCard={(c, i) => <VastCard key={c.offer_id ?? `${c.gpu_type}-${i}`} c={c} />}
           />
           <FleetSection
-            title="Modal Endpoints"
+            title={t("section.modalEndpoints")}
             count={snapshot.modal.length}
             inFlight={modalInFlight}
             items={snapshot.modal}
-            emptyMsg="No Modal endpoints with headroom right now."
+            emptyMsg={t("empty.modal")}
             renderCard={(c) => <ModalCard key={c.gpu_type} c={c} />}
           />
         </>

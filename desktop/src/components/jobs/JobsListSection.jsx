@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import JobsTable from "./JobsTable";
 import JobGrid from "./JobGrid";
 import { JOB_TABLE_COLUMNS } from "./jobTableColumns";
@@ -19,6 +20,7 @@ export default function JobsListSection({
   loadingMore,
   onLoadMore,
 }) {
+  const { t } = useTranslation("common");
   const rows = view.deriveRows(jobs, search, JOB_TABLE_COLUMNS);
 
   if (viewMode === "grid") {
@@ -53,7 +55,7 @@ export default function JobsListSection({
           className="btn btn-secondary jobs-load-more"
           onClick={onLoadMore}
         >
-          Load more
+          {t("actions.loadMore")}
         </button>
       ) : null}
     </>

@@ -1,4 +1,5 @@
 import { open } from "@tauri-apps/plugin-shell";
+import { useTranslation } from "react-i18next";
 
 /**
  * UpdateRequiredModal — full-screen blocker shown when the user's
@@ -10,6 +11,7 @@ import { open } from "@tauri-apps/plugin-shell";
  * matches the minimum and this modal stops mounting.
  */
 export default function UpdateRequiredModal({ currentVersion, minVersion, latestUrl }) {
+  const { t } = useTranslation("shared");
   const handleDownload = async () => {
     if (!latestUrl) return;
     try {
@@ -30,13 +32,15 @@ export default function UpdateRequiredModal({ currentVersion, minVersion, latest
             <path d="M3 13a9 9 0 1 0 18 0" />
           </svg>
         </div>
-        <h2>Update Required</h2>
+        <h2>{t("updateRequired.title")}</h2>
         <p className="update-required-body">
-          Forge v{minVersion || "?"} is required to continue. You're running
-          v{currentVersion || "an older version"}.
+          {t("updateRequired.body", {
+            minVersion: minVersion || "?",
+            currentVersion: currentVersion || "an older version",
+          })}
         </p>
         <p className="update-required-sub">
-          Download the latest installer below, run it, and reopen Forge.
+          {t("updateRequired.sub")}
         </p>
         <button
           className="btn btn-primary update-required-btn"
@@ -44,7 +48,7 @@ export default function UpdateRequiredModal({ currentVersion, minVersion, latest
           onClick={handleDownload}
           disabled={!latestUrl}
         >
-          Download v{minVersion || "Latest"}
+          {t("updateRequired.download", { minVersion: minVersion || "Latest" })}
         </button>
       </div>
     </div>

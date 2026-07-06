@@ -1,3 +1,5 @@
+import i18n from "../i18n/i18n";
+
 // Track per-phase analyze durations in localStorage so the next run can
 // compute an honest overall percent (weighted by average phase wall-time)
 // and ETA (remaining-phase averages minus elapsed-in-current-phase time).
@@ -32,38 +34,15 @@ export const ANALYZE_PHASES = [
   "finalizing",
 ];
 
-export const PHASE_LABELS = {
-  loading_blend: "Loading Blender",
-  scene_report: "Reading scene",
-  fix_output: "Normalizing output format",
-  relative_paths: "Remapping paths",
-  deep_search: "Searching for missing files",
-  relink_libs: "Relinking libraries",
-  enable_addons: "Enabling addons",
-  pack_images: "Packing textures",
-  pack_fonts: "Packing fonts",
-  pack_sounds: "Packing sounds",
-  check_external: "Checking external refs",
-  bake_drivers: "Baking drivers",
-  validate: "Validating cameras",
-  save: "Writing packed .blend",
-  analyze_scene: "Inspecting scene",
-  analyze_heaviness: "Computing heaviness",
-  finalizing: "Finalizing",
-};
+// Phase labels (PHASE_LABELS) and indeterminate-phase help texts
+// (PHASE_HINTS) are user-facing and now live in the ``createRender``
+// locale namespace under ``phase.<key>`` / ``phaseHint.<key>``.  They are
+// resolved at call time via ``i18n.t`` so the current language wins.
 
 // Phases with no sub-progress AND unknown duration -- we can't compute
 // a meaningful percent or ETA, so the UI shows an indeterminate stripe
 // + an elapsed-time counter instead of a lying countdown.
 const INDETERMINATE_PHASES = new Set(["loading_blend", "finalizing"]);
-
-// Human-readable explanation rendered under the bar for indeterminate
-// phases so the user understands why the wait is non-zero and isn't
-// confused that "nothing is happening".
-export const PHASE_HINTS = {
-  loading_blend: "Blender is reading the .blend and unpacking assets into memory. Heavy scenes (multi-GB textures, complex graphs) can take several minutes — nothing's stuck.",
-  finalizing: "Blender is releasing memory and shutting down. Usually under a minute, but heavy scenes can take longer. Forge has already captured everything it needs.",
-};
 
 // Fallback durations (seconds) used when we have no history yet.  These
 // reflect what a small-to-medium scene typically takes -- the relative
@@ -175,8 +154,8 @@ export function computeOverall(state) {
     return {
       percent: 0,
       etaSeconds: null,
-      label: PHASE_LABELS.loading_blend,
-      hint: PHASE_HINTS.loading_blend,
+      label: i18n.t("createRender:phase.loading_blend"),
+      hint: i18n.t("createRender:phaseHint.loading_blend"),
       indeterminate: true,
       elapsedSeconds: elapsedInPhase,
     };
@@ -192,8 +171,8 @@ export function computeOverall(state) {
     return {
       percent: 0,
       etaSeconds: null,
-      label: PHASE_LABELS[phase] || phase,
-      hint: PHASE_HINTS[phase] || null,
+      label: i18n.t("createRender:phase." + phase),
+      hint: i18n.t("createRender:phaseHint." + phase),
       indeterminate: true,
       elapsedSeconds: elapsedInPhase,
     };
@@ -239,7 +218,7 @@ export function computeOverall(state) {
   return {
     percent,
     etaSeconds,
-    label: PHASE_LABELS[phase] || phase,
+    label: i18n.t("createRender:phase." + phase),
     hint: null,
     indeterminate: false,
   };
@@ -247,26 +226,26 @@ export function computeOverall(state) {
 
 /** Format elapsed seconds the same shape as formatEta, without the "left" suffix. */
 export function formatElapsed(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 1) return "0s";
+  if (!Number.isFinite(seconds) || seconds < 1) return i18n.t("createRender:eta.zero");
   const s = Math.round(seconds);
-  if (s < 60) return `${s}s elapsed`;
+  if (s < 60) return i18n.t("createRender:eta.elapsed.seconds", { n: s });
   const m = Math.floor(s / 60);
   const rem = s % 60;
-  if (m < 60) return rem ? `${m}m ${rem}s elapsed` : `${m}m elapsed`;
+  if (m < 60) return rem ? i18n.t("createRender:eta.elapsed.minutesSeconds", { m, s: rem }) : i18n.t("createRender:eta.elapsed.minutes", { m });
   const h = Math.floor(m / 60);
   const mrem = m % 60;
-  return mrem ? `${h}h ${mrem}m elapsed` : `${h}h elapsed`;
+  return mrem ? i18n.t("createRender:eta.elapsed.hoursMinutes", { h, m: mrem }) : i18n.t("createRender:eta.elapsed.hours", { h });
 }
 
 /** Human-friendly ETA string. */
 export function formatEta(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 1) return "less than a second";
+  if (!Number.isFinite(seconds) || seconds <= 1) return i18n.t("createRender:eta.lessThanSecond");
   const s = Math.round(seconds);
-  if (s < 60) return `${s}s left`;
+  if (s < 60) return i18n.t("createRender:eta.left.seconds", { n: s });
   const m = Math.floor(s / 60);
   const rem = s % 60;
-  if (m < 60) return rem ? `${m}m ${rem}s left` : `${m}m left`;
+  if (m < 60) return rem ? i18n.t("createRender:eta.left.minutesSeconds", { m, s: rem }) : i18n.t("createRender:eta.left.minutes", { m });
   const h = Math.floor(m / 60);
   const mrem = m % 60;
-  return mrem ? `${h}h ${mrem}m left` : `${h}h left`;
+  return mrem ? i18n.t("createRender:eta.left.hoursMinutes", { h, m: mrem }) : i18n.t("createRender:eta.left.hours", { h });
 }

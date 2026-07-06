@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { clearLogs as clearLogsCommand, getAgentState, runPreflight } from "../services/sidecar";
+import i18n from "../i18n/i18n";
 
 const INITIAL_RUNTIME_INFO = {
   preflight_complete: false,
   preflight_passed: null,
-  preflight_message: "Preflight has not run yet.",
+  preflight_message: i18n.t("shared:agent.preflightNotRun"),
   requirements_checked: false,
   requirements_ready: null,
   requirement_issues: [],
@@ -17,14 +18,14 @@ const INITIAL_RUNTIME_INFO = {
   image_downloaded_bytes: null,
   image_total_bytes: null,
   image_progress_pct: null,
-  image_status: "Not checked yet.",
+  image_status: i18n.t("shared:agent.notCheckedYet"),
   awaiting_uac: false,
   uac_message: "",
 };
 
 const INITIAL_STATE = {
   status: "disconnected",
-  message: "Ready",
+  message: i18n.t("shared:agent.ready"),
   machineId: "",
   systemInfo: null,
   runtimeInfo: INITIAL_RUNTIME_INFO,
@@ -129,7 +130,7 @@ export function useAgent(backendUrl) {
                 typeof data.preflight_passed === "boolean"
                   ? data.preflight_passed
                   : null,
-              preflight_message: data.preflight_message || "Preflight has not run yet.",
+              preflight_message: data.preflight_message || i18n.t("shared:agent.preflightNotRun"),
               requirements_checked: data.requirements_checked || false,
               requirements_ready:
                 typeof data.requirements_ready === "boolean"
@@ -179,7 +180,7 @@ export function useAgent(backendUrl) {
             runtimeInfo: {
               ...prev.runtimeInfo,
               awaiting_uac: true,
-              uac_message: data.message || "Windows will ask for permission to install software — please click Yes to continue.",
+              uac_message: data.message || i18n.t("shared:agent.uacFallback"),
             },
           }));
           break;
@@ -215,7 +216,11 @@ export function useAgent(backendUrl) {
           addLog({
             level: "info",
             source: "agent",
-            message: `Job ${data.job_id} ${data.status}: ${data.error || "completed"}`,
+            message: i18n.t("shared:agent.jobLog", {
+              jobId: data.job_id,
+              status: data.status,
+              detail: data.error || i18n.t("shared:agent.jobCompleted"),
+            }),
           });
           break;
       }
@@ -228,7 +233,7 @@ export function useAgent(backendUrl) {
             logsRef.current = data.logs || [];
             setState({
               status: data.status || "disconnected",
-              message: data.message || "Ready",
+              message: data.message || i18n.t("shared:agent.ready"),
               machineId: data.machine_id || "",
               systemInfo: data.system_info || null,
               runtimeInfo: data.runtime_info || INITIAL_RUNTIME_INFO,

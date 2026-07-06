@@ -146,6 +146,32 @@ pub fn get_file_size(file_path: String) -> Result<u64, String> {
     Ok(metadata.len())
 }
 
+/// Open the OS file manager at `path` (a folder).  Bypasses the shell
+/// plugin's URL-only `open` scope, which rejects local filesystem paths.
+/// Trailing separators are trimmed so Windows doesn't choke on a quoted
+/// path ending in a backslash.  Fire-and-forget: `explorer` returns a
+/// non-zero exit code even on success, so we don't inspect it.
+#[tauri::command]
+pub fn reveal_path(path: String) -> Result<(), String> {
+    let target = path.trim_end_matches(|c| c == '\\' || c == '/');
+    if target.is_empty() {
+        return Err("Empty path.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+
+    command
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Failed to open file manager: {err}"))
+}
+
 #[tauri::command]
 pub fn read_file_head_base64(file_path: String, max_bytes: u64) -> Result<String, String> {
     let path = Path::new(&file_path);

@@ -1,4 +1,5 @@
 import { auth } from "../firebase/config";
+import i18n from "../i18n/i18n";
 
 function normalizeBaseUrl(baseUrl) {
   return String(baseUrl || "").trim().replace(/\/+$/, "");
@@ -10,7 +11,7 @@ async function authHeaders(forceRefresh = false) {
     return token ? { Authorization: `Bearer ${token}` } : {};
   } catch (error) {
     const detail = error?.message || String(error);
-    throw new Error(`Auth token refresh failed: ${detail}`);
+    throw new Error(i18n.t("shared:api.authRefreshFailed", { detail }));
   }
 }
 
@@ -39,7 +40,7 @@ async function readErrorDetail(response, fallbackMessage) {
 async function apiFetch(baseUrl, path, options = {}, _retry = false) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   if (!normalizedBase) {
-    throw new Error("Backend URL is not configured");
+    throw new Error(i18n.t("shared:api.backendUrlNotConfigured"));
   }
 
   const headers = {
@@ -55,7 +56,7 @@ async function apiFetch(baseUrl, path, options = {}, _retry = false) {
     // from a genuine network failure.
     if (error?.name === "AbortError") throw error;
     const detail = error?.message || String(error);
-    throw new Error(`Network error reaching ${normalizedBase}${path}: ${detail}`);
+    throw new Error(i18n.t("shared:api.networkError", { url: `${normalizedBase}${path}`, detail }));
   }
 
   // On first 401, force-refresh the Firebase token and retry once.
@@ -64,7 +65,7 @@ async function apiFetch(baseUrl, path, options = {}, _retry = false) {
   }
 
   if (!response.ok) {
-    const detail = await readErrorDetail(response, `Request failed (${response.status})`);
+    const detail = await readErrorDetail(response, i18n.t("shared:api.requestFailed", { status: response.status }));
     const err = new Error(detail);
     err.status = response.status;
     err.body = detail;
@@ -95,7 +96,7 @@ async function uploadFileToPresignedUrl(uploadUrl, file, onProgress, signal = nu
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
 
     if (signal?.aborted) {
-      reject(new DOMException("Upload aborted", "AbortError"));
+      reject(new DOMException(i18n.t("shared:api.uploadAborted"), "AbortError"));
       return;
     }
 
@@ -126,15 +127,15 @@ async function uploadFileToPresignedUrl(uploadUrl, file, onProgress, signal = nu
     xhr.onload = () => {
       cleanupAbortListener();
       if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed with status ${xhr.status}`));
+      else reject(new Error(i18n.t("shared:api.uploadFailedStatus", { status: xhr.status })));
     };
     xhr.onabort = () => {
       cleanupAbortListener();
-      reject(new DOMException("Upload aborted", "AbortError"));
+      reject(new DOMException(i18n.t("shared:api.uploadAborted"), "AbortError"));
     };
     xhr.onerror = () => {
       cleanupAbortListener();
-      reject(new Error(aborted ? "Upload aborted" : "Upload failed"));
+      reject(new Error(aborted ? i18n.t("shared:api.uploadAborted") : i18n.t("shared:api.uploadFailed")));
     };
     xhr.send(file);
   });
@@ -151,7 +152,7 @@ async function uploadBlobPart(partUrl, blob, signal = null, onBytes = null) {
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
 
     if (signal?.aborted) {
-      reject(new DOMException("Upload aborted", "AbortError"));
+      reject(new DOMException(i18n.t("shared:api.uploadAborted"), "AbortError"));
       return;
     }
 
@@ -182,22 +183,22 @@ async function uploadBlobPart(partUrl, blob, signal = null, onBytes = null) {
       if (xhr.status >= 200 && xhr.status < 300) {
         const etag = xhr.getResponseHeader("etag") || xhr.getResponseHeader("ETag");
         if (!etag) {
-          reject(new Error("Missing ETag in multipart part response"));
+          reject(new Error(i18n.t("shared:api.missingEtag")));
           return;
         }
         resolve(etag);
         return;
       }
-      reject(new Error(`Part upload failed with status ${xhr.status}`));
+      reject(new Error(i18n.t("shared:api.partUploadFailedStatus", { status: xhr.status })));
     };
 
     xhr.onabort = () => {
       cleanup();
-      reject(new DOMException("Upload aborted", "AbortError"));
+      reject(new DOMException(i18n.t("shared:api.uploadAborted"), "AbortError"));
     };
     xhr.onerror = () => {
       cleanup();
-      reject(new Error(aborted ? "Upload aborted" : "Part upload failed"));
+      reject(new Error(aborted ? i18n.t("shared:api.uploadAborted") : i18n.t("shared:api.partUploadFailed")));
     };
     xhr.send(blob);
   });
@@ -256,7 +257,7 @@ async function uploadMultipartInput(baseUrl, kind, id, file, onProgress, signal 
       }
 
       const partUrl = partUrlCache.get(partNumber);
-      if (!partUrl) throw new Error(`Missing upload URL for part ${partNumber}`);
+      if (!partUrl) throw new Error(i18n.t("shared:api.missingPartUrl", { n: partNumber }));
       partUrlCache.delete(partNumber);
 
       const start = (partNumber - 1) * partSize;

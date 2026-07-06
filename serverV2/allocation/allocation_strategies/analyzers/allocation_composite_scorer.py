@@ -25,13 +25,16 @@ Composite shape::
     speed_factor  = REF_SECONDS / max(chunk_seconds, 1.0)
     cuda_factor   = 0..1 from cuda_max_good (None = trust = 1.0)
     os_factor     = 0..1 from host_os + engine (None = trust = 1.0)
-    cost_factor   = REF_COST / chunk_cost  (price <= 0 -> 1.0, neutral)
+    cost_factor   = REF_COST / (REF_COST + chunk_cost)  in 0..1 (price <= 0 -> 1.0)
     score         = w.speed*speed_factor + w.cuda*cuda_factor + w.os*os_factor + w.cost*cost_factor
 
 Speed dominates because its factor scales with chunk wall time (often
-many multiples of 1.0 for fast chunks).  CUDA and OS factors live in
-0..1 and act as tiebreakers among similar-speed targets -- e.g. two RTX
-4090 offers with identical render_speed but different driver vintage.
+many multiples of 1.0 for fast chunks).  CUDA, OS and cost factors all
+live in 0..1 and act as tiebreakers among similar-speed targets -- e.g.
+two RTX 4090 offers with identical render_speed but a different driver
+vintage, or a slightly cheaper offer of the same card.  Because cost is
+bounded to 0..1 it nudges the ranking without ever burying speed, so a
+dirt-cheap-but-weak card can't win on price alone.
 
 The reference value normalises the speed factor so a baseline scene on
 baseline hardware yields ~1.0.
@@ -54,14 +57,14 @@ from serverV2.allocation.allocation_strategies.analyzers.allocation_time_analyze
 # yields speed_factor = 1.0; faster -> >1.0.
 REF_SECONDS = 300.0
 
-# Reference chunk cost (USD).  A chunk costing $0.10 yields cost_factor =
-# 1.0; cheaper -> >1.0, pricier -> <1.0.  Parallel to REF_SECONDS; tune
-# the scale here, tune the influence via weights.cost_weight.
+# Reference chunk cost (USD).  Sets the midpoint of the bounded 0..1 cost
+# factor: a chunk costing $0.10 scores 0.5, cheaper -> toward 1.0, pricier
+# -> toward 0.  Tune the midpoint here, tune the influence via
+# weights.cost_weight.
 REF_COST = 0.10
 
-# Floors to avoid divide-by-zero / runaway scores on misconfigured inputs.
+# Floor to avoid divide-by-zero on a zero-length chunk.
 _MIN_CHUNK_SECONDS = 1.0
-_MIN_CHUNK_COST = 0.001
 
 _EEVEE_ENGINES = frozenset({"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"})
 
@@ -108,19 +111,21 @@ def os_factor(host_os: str | None, engine: str | None) -> float:
 
 
 def cost_factor(chunk_seconds: float, price_per_hour: float) -> float:
-    """Cost-efficiency score: ``REF_COST / chunk_cost`` where
-    ``chunk_cost = chunk_seconds/3600 * price_per_hour``.  Cheaper-to-render
-    the chunk -> higher score (a slow-cheap card beats a fast-pricey one).
+    """Bounded 0..1 cost-efficiency score: ``REF_COST / (REF_COST + chunk_cost)``
+    where ``chunk_cost = chunk_seconds/3600 * price_per_hour``.  Cheaper-to-
+    render -> higher, but bounded: a chunk costing REF_COST ($0.10) scores
+    0.5, dirt-cheap approaches 1.0, pricey approaches 0.  Bounding keeps cost
+    on the same 0..1 scale as cuda/os -- it nudges the ranking without ever
+    burying the (unbounded) speed factor, so a dirt-cheap-but-weak card can
+    no longer win on price alone.
 
-    ``price <= 0`` (unknown / free, e.g. community) -> 1.0 (neutral): a free
-    target isn't given a runaway boost -- it's already handled
-    community-first by the planner, and "None means trust" matches the
-    cuda/os factors.
+    ``price <= 0`` (unknown / free, e.g. community) -> 1.0: a free target is
+    the cheapest possible, and "None means trust" matches the cuda/os factors.
     """
     if not price_per_hour or price_per_hour <= 0:
         return 1.0
     chunk_cost = (max(0.0, chunk_seconds) / 3600.0) * float(price_per_hour)
-    return REF_COST / max(chunk_cost, _MIN_CHUNK_COST)
+    return REF_COST / (REF_COST + chunk_cost)
 
 
 # ---------------------------------------------------------------------

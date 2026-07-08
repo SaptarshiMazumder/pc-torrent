@@ -20,6 +20,13 @@
     "emptyNoFiles": "No saved files yet.",
     "emptyNoMatches": "No matches.",
     "clear": "Clear",
+    "browseFiles": "Browse files",
+    "cancelSelection": "Cancel selection",
+    "dropTitle": "Drop a .blend or .zip",
+    "dropSubtitle": "We'll analyze the scene, cameras & frame range",
+    "readyToAnalyze": "ready to analyze",
+    "selectedBadge": "SELECTED",
+    "sizeReadyHint": "{{size}} · ready — click to choose a different file",
     "columns": {
       "name": "Name",
       "date": "Date",
@@ -34,7 +41,8 @@
   },
   "fileBar": {
     "noFileSelected": "No file selected",
-    "changeFile": "Change File"
+    "changeFile": "Change File",
+    "changeFileTitle": "Change file (discards these settings)"
   },
   "savedGroup": {
     "today": "Today",
@@ -206,6 +214,13 @@
     "low": "LOW",
     "waitNote": "Wait depends on what's ahead of your priority."
   },
+  "estimate": {
+    "title": "Estimate",
+    "eyebrow": "Estimated",
+    "recalcTitle": "Re-fetch the cost / wall-time estimate",
+    "wallTime": "Wall time",
+    "credits": "Credits"
+  },
   "analysisReport": {
     "title": "Analysis Report",
     "errorTag": "[ERROR]",
@@ -321,5 +336,18 @@
   "prompts": {
     "renameSaved": "Rename saved file",
     "deleteConfirm": "Delete \"{{name}}\"?"
+  },
+  "done": {
+    "title": "Render submitted",
+    "yourRender": "Your render",
+    "subtitle": "is now in the queue. Track its progress in My Jobs.",
+    "viewInMyJobs": "View in My Jobs",
+    "createAnother": "Create another render"
+  },
+  "confirmChange": {
+    "title": "Change file?",
+    "body": "All the render settings you've configured for <0>{{file}}</0> will be lost. You'll start over from file selection.",
+    "keepEditing": "Keep editing",
+    "discard": "Discard & change file"
   }
 }

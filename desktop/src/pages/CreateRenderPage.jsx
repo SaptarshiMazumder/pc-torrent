@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { useTranslation, Trans } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
@@ -60,26 +60,26 @@ const STAGE = {
 };
 
 const CAMERA_MODES = [
-  { value: "auto_markers", label: "Auto (Scene Camera + Marker Cuts)" },
-  { value: "force_camera", label: "Force Single Camera" },
-  { value: "camera_ranges", label: "Camera Ranges (Editable)" },
+  { value: "auto_markers", labelKey: "sceneCamera.cameraModeOption.auto_markers" },
+  { value: "force_camera", labelKey: "sceneCamera.cameraModeOption.force_camera" },
+  { value: "camera_ranges", labelKey: "sceneCamera.cameraModeOption.camera_ranges" },
 ];
 
 const SAVED_GROUPS = [
-  { key: "today", label: "Today" },
-  { key: "previous7", label: "Previous 7 days" },
-  { key: "previous30", label: "Previous 30 days" },
-  { key: "earlier", label: "Earlier" },
+  { key: "today", labelKey: "savedGroup.today" },
+  { key: "previous7", labelKey: "savedGroup.previous7" },
+  { key: "previous30", labelKey: "savedGroup.previous30" },
+  { key: "earlier", labelKey: "savedGroup.earlier" },
 ];
 
-const HEAVY_FEATURE_LABELS = {
-  uses_subdivision: "Subdivision",
-  uses_displacement: "Displacement",
-  uses_particles: "Particles",
-  uses_geometry_nodes: "Geometry Nodes",
-  uses_subsurface_scattering: "SSS",
-  uses_volumetrics: "Volumetrics",
-};
+const HEAVY_FEATURE_FLAGS = [
+  "uses_subdivision",
+  "uses_displacement",
+  "uses_particles",
+  "uses_geometry_nodes",
+  "uses_subsurface_scattering",
+  "uses_volumetrics",
+];
 
 function formatStatNumber(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "—";
@@ -96,9 +96,7 @@ function formatStatBytes(bytes) {
 }
 
 function heavyFeatureChips(heaviness) {
-  return Object.entries(HEAVY_FEATURE_LABELS)
-    .filter(([flag]) => Boolean(heaviness?.[flag]))
-    .map(([, label]) => label);
+  return HEAVY_FEATURE_FLAGS.filter((flag) => Boolean(heaviness?.[flag]));
 }
 
 // ─── Reducer ────────────────────────────────────────────────
@@ -220,7 +218,7 @@ function reducer(state, action) {
 // ─── Component ──────────────────────────────────────────────
 
 export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigate }) {
-  const { t } = useTranslation("common");
+  const { t } = useTranslation(["createRender", "common"]);
   const { showError } = useError();
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const {
@@ -281,7 +279,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
       const data = await listInputFiles(backendUrl);
       savedInputsDispatch({ type: "LOADED", items: Array.isArray(data?.files) ? data.files : [] });
     } catch (err) {
-      savedInputsDispatch({ type: "ERROR", message: err?.message || "Failed to load saved files" });
+      savedInputsDispatch({ type: "ERROR", message: err?.message || t("errors.loadSavedFailed") });
     }
   }, [backendUrl]);
 
@@ -606,8 +604,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
         setQueueDepth(null);
         setCostEstimateLoading(false);
         showError({
-          title: "Couldn't compute cost estimate",
-          message: err?.message || "Backend cost-estimate call failed.",
+          title: t("errors.costEstimate.title"),
+          message: err?.message || t("errors.costEstimate.message"),
           detail: err?.body || null,
         });
       });
@@ -704,7 +702,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
     try {
       const selected = await dialogOpen({
         multiple: false,
-        filters: [{ name: "Blender project", extensions: ["blend", "zip"] }],
+        filters: [{ name: t("filePicker.dialogFilterName"), extensions: ["blend", "zip"] }],
       });
       if (!selected) return;
       const filePath = typeof selected === "string" ? selected : selected.path;
@@ -715,7 +713,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
       if (groupId && stage !== STAGE.DONE) discardPendingGroupId(groupId);
       dispatch({ type: "PICK_FILE", file: { name, path: filePath, size } });
     } catch (err) {
-      dispatch({ type: "ERROR", message: `Could not open file picker: ${err}` });
+      dispatch({ type: "ERROR", message: t("errors.filePickerOpen", { error: err }) });
     }
   };
 
@@ -727,12 +725,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
     const name = String(dropped.name || "").trim();
     const ext = name.toLowerCase().split(".").pop() || "";
     if (ext !== "blend" && ext !== "zip") {
-      dispatch({ type: "ERROR", message: "Only .blend or .zip files are supported" });
+      dispatch({ type: "ERROR", message: t("errors.unsupportedFile") });
       return;
     }
     const filePath = dropped.path || null;
     if (!filePath) {
-      dispatch({ type: "ERROR", message: "Dropped file path unavailable. Use the file picker instead." });
+      dispatch({ type: "ERROR", message: t("errors.droppedPathUnavailable") });
       return;
     }
     let size = Number.isFinite(dropped.size) && dropped.size > 0 ? dropped.size : 0;
@@ -762,7 +760,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
       return;
     }
     if (!file) {
-      dispatch({ type: "ERROR", message: "Select a .blend or .zip file first" });
+      dispatch({ type: "ERROR", message: t("errors.selectFileFirst") });
       return;
     }
 
@@ -803,11 +801,11 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
     const runId = ++runIdRef.current;
 
     if (!blenderBinRef.current) {
-      dispatch({ type: "ANALYZE_SKIP", note: "Blender not found — analysis skipped. You can still upload and set frame range manually." });
+      dispatch({ type: "ANALYZE_SKIP", note: t("notes.blenderNotFound") });
       return;
     }
     if (!file.path) {
-      dispatch({ type: "ANALYZE_SKIP", note: "File path unavailable — re-select with file picker to enable analysis." });
+      dispatch({ type: "ANALYZE_SKIP", note: t("notes.filePathUnavailable") });
       return;
     }
 
@@ -836,10 +834,10 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
 
       let note = "";
       if (!analysisPayload) {
-        note = "Analysis metadata not returned. Set frame range manually.";
+        note = t("notes.noMetadata");
       } else if (!prep.prep_done) {
-        const detail = prep.prepare_errors.length ? prep.prepare_errors.join(" | ") : "Preparation incomplete";
-        note = `Prepare: ${detail}. Upload will use original file.`;
+        const detail = prep.prepare_errors.length ? prep.prepare_errors.join(" | ") : t("notes.preparationIncomplete");
+        note = t("notes.prepareFailed", { detail });
       }
 
       // Only cache the cheap default analyze.  Deep-search results are
@@ -870,7 +868,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
       });
     } catch (err) {
       if (runId !== runIdRef.current) return;
-      dispatch({ type: "ANALYZE_SKIP", note: `Analysis failed: ${err?.message || err}. You can still upload.` });
+      dispatch({ type: "ANALYZE_SKIP", note: t("notes.analysisFailed", { error: err?.message || err }) });
     }
   };
 
@@ -883,9 +881,9 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
   // user picks Analyze and then walks away.
   const handleUseSavedInput = () => {
     const assetId = savedInputId;
-    if (!assetId) { dispatch({ type: "ERROR", message: "Select a saved file first" }); return; }
+    if (!assetId) { dispatch({ type: "ERROR", message: t("errors.selectSavedFirst") }); return; }
     const asset = resolvedSavedAsset;
-    if (!asset) { dispatch({ type: "ERROR", message: "Saved file metadata unavailable" }); return; }
+    if (!asset) { dispatch({ type: "ERROR", message: t("errors.savedMetadataUnavailable") }); return; }
 
     const { settings, analysis: snap } = applySavedAssetSettings(asset);
     dispatch({
@@ -900,8 +898,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
 
   // ── Upload ──────────────────────────────────────────────
   const handleUpload = async () => {
-    if (!file) { dispatch({ type: "ERROR", message: "No file selected" }); return; }
-    if (!file.path) { dispatch({ type: "ERROR", message: "File path unavailable. Re-select with the file picker." }); return; }
+    if (!file) { dispatch({ type: "ERROR", message: t("errors.noFileSelected") }); return; }
+    if (!file.path) { dispatch({ type: "ERROR", message: t("errors.filePathUnavailableReselect") }); return; }
 
     dispatch({ type: "START_UPLOAD" });
 
@@ -925,7 +923,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
         try {
           await packagingPromiseRef.current;
         } catch (err) {
-          dispatch({ type: "ERROR", message: `Preparing upload failed: ${err?.message || err}` });
+          dispatch({ type: "ERROR", message: t("errors.preparingUploadFailed", { error: err?.message || err }) });
           return;
         }
       }
@@ -952,17 +950,17 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
           : 0;
         dispatch({ type: "UPLOAD_PROGRESS", pct });
         if (snap?.status === "completed") { dispatch({ type: "UPLOAD_PROGRESS", pct: 100 }); break; }
-        if (snap?.status === "cancelled") throw new DOMException(snap?.error || "Upload cancelled", "AbortError");
-        if (snap?.status === "failed") throw new Error(snap?.error || "Upload failed");
+        if (snap?.status === "cancelled") throw new DOMException(snap?.error || t("errors.uploadCancelled"), "AbortError");
+        if (snap?.status === "failed") throw new Error(snap?.error || t("errors.uploadFailedGeneric"));
       }
 
       dispatch({ type: "UPLOAD_DONE", groupId: createdGroupId });
     } catch (err) {
       if (err?.name === "AbortError") {
         if (createdGroupId) cancelRenderGroup(backendUrl, createdGroupId).catch(() => {});
-        dispatch({ type: "ERROR", message: "Upload cancelled", returnTo: STAGE.CONFIGURING });
+        dispatch({ type: "ERROR", message: t("errors.uploadCancelled"), returnTo: STAGE.CONFIGURING });
       } else {
-        dispatch({ type: "ERROR", message: `Upload failed: ${err?.message || err}`, returnTo: STAGE.CONFIGURING });
+        dispatch({ type: "ERROR", message: t("errors.uploadFailed", { error: err?.message || err }), returnTo: STAGE.CONFIGURING });
       }
     } finally {
       if (uploadTaskId) {
@@ -975,7 +973,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
 
   // ── Start render ────────────────────────────────────────
   const handleStartRender = async () => {
-    if (!groupId && !savedInputId) { dispatch({ type: "ERROR", message: "Upload must complete first" }); return; }
+    if (!groupId && !savedInputId) { dispatch({ type: "ERROR", message: t("errors.uploadMustComplete") }); return; }
     if (cameraMode === "camera_ranges" && !cameraValidation.ok) {
       dispatch({ type: "ERROR", message: cameraValidation.error });
       return;
@@ -994,10 +992,10 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
       try {
         const created = await createDistributedRenderGroup(backendUrl, null, null, null, savedInputId);
         activeGroupId = created.group_id || "";
-        if (!activeGroupId) throw new Error("Server did not return a group_id");
+        if (!activeGroupId) throw new Error(t("errors.noGroupId"));
         dispatch({ type: "SET_FIELD", field: "groupId", value: activeGroupId });
       } catch (err) {
-        dispatch({ type: "ERROR", message: err?.message || "Failed to create render group", returnTo: STAGE.CONFIGURING });
+        dispatch({ type: "ERROR", message: err?.message || t("errors.createGroupFailed"), returnTo: STAGE.CONFIGURING });
         abortRef.current = null;
         return;
       }
@@ -1038,7 +1036,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
         backendUrl, activeGroupId, null, frameRange, overrides, null, analysis, null, priority, controller.signal,
       );
       if (result.needs_frame_input) {
-        dispatch({ type: "ERROR", message: result.parse_error || "Server requires manual frame range", returnTo: STAGE.CONFIGURING });
+        dispatch({ type: "ERROR", message: result.parse_error || t("errors.serverNeedsFrames"), returnTo: STAGE.CONFIGURING });
         return;
       }
 
@@ -1046,7 +1044,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
       onJobSubmitted(result.group_id, file?.name || result.input_filename || "input.blend", result.tasks || [], result.total_frames);
       void loadSavedInputs();
     } catch (err) {
-      dispatch({ type: "ERROR", message: err?.name === "AbortError" ? "Cancelled" : (err?.message || "Failed to start render"), returnTo: STAGE.CONFIGURING });
+      dispatch({ type: "ERROR", message: err?.name === "AbortError" ? t("errors.cancelled") : (err?.message || t("errors.startRenderFailed")), returnTo: STAGE.CONFIGURING });
     } finally {
       abortRef.current = null;
     }
@@ -1084,19 +1082,19 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
 
   // ── Saved file management ──────────────────────────────
   const handleRenameSaved = async (asset) => {
-    const next = window.prompt("Rename saved file", asset?.display_name || asset?.input_filename || "");
+    const next = window.prompt(t("prompts.renameSaved"), asset?.display_name || asset?.input_filename || "");
     if (!next?.trim()) return;
     try { await renameInputFile(backendUrl, asset.id, next.trim()); await loadSavedInputs(); }
-    catch (err) { dispatch({ type: "ERROR", message: err?.message || "Rename failed" }); }
+    catch (err) { dispatch({ type: "ERROR", message: err?.message || t("errors.renameFailed") }); }
   };
 
   const handleDeleteSaved = async (asset) => {
-    if (!window.confirm(`Delete "${asset?.display_name || asset?.input_filename}"?`)) return;
+    if (!window.confirm(t("prompts.deleteConfirm", { name: asset?.display_name || asset?.input_filename }))) return;
     try {
       await deleteInputFile(backendUrl, asset.id);
       if (savedInputId === asset.id) dispatch({ type: "CLEAR_SOURCE" });
       await loadSavedInputs();
-    } catch (err) { dispatch({ type: "ERROR", message: err?.message || "Delete failed" }); }
+    } catch (err) { dispatch({ type: "ERROR", message: err?.message || t("errors.deleteFailed") }); }
   };
 
   // ── Camera range editing ────────────────────────────────
@@ -1115,12 +1113,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
 
   // ── Derived UI labels ───────────────────────────────────
   const stageLabel = {
-    [STAGE.IDLE]: "Select a file",
-    [STAGE.ANALYZING]: "Analyzing...",
-    [STAGE.CONFIGURING]: groupId ? "Ready to render" : "Configure & upload",
-    [STAGE.UPLOADING]: `Uploading... ${Math.min(100, uploadProgress).toFixed(0)}%`,
-    [STAGE.CONFIRMING]: "Starting render...",
-    [STAGE.DONE]: "Submitted",
+    [STAGE.IDLE]: t("stage.selectFile"),
+    [STAGE.ANALYZING]: t("stage.analyzing"),
+    [STAGE.CONFIGURING]: groupId ? t("stage.readyToRender") : t("stage.configureUpload"),
+    [STAGE.UPLOADING]: t("stage.uploading", { pct: Math.min(100, uploadProgress).toFixed(0) }),
+    [STAGE.CONFIRMING]: t("stage.startingRender"),
+    [STAGE.DONE]: t("stage.submitted"),
   }[stage] || "";
 
   const showSettings = stage === STAGE.CONFIGURING || stage === STAGE.UPLOADING || stage === STAGE.CONFIRMING;
@@ -1146,23 +1144,23 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
   const formatCost = (entry) => {
     if (!entry) return null;
     const c = entry.cost_credits ?? 0;
-    return `${formatCredits(c)} tokens`;
+    return `${formatCredits(c)} ${t("common:tokens")}`;
   };
   const formatTime = (entry) => {
     if (!entry?.wall_time_seconds) return null;
     const s = entry.wall_time_seconds;
-    if (s < 60) return `${s}s`;
-    if (s < 3600) return `${Math.round(s / 60)} min`;
+    if (s < 60) return t("time.seconds", { n: s });
+    if (s < 3600) return t("time.minutes", { n: Math.round(s / 60) });
     const h = Math.floor(s / 3600);
     const m = Math.round((s % 3600) / 60);
-    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    return m > 0 ? t("time.hoursMinutes", { h, m }) : t("time.hours", { h });
   };
 
   return (
     <div className="page cr-page">
       <div className="cr-header">
         <div className="page-header-title">
-          <h2>Create Render</h2>
+          <h2>{t("heading")}</h2>
         </div>
       </div>
 
@@ -1182,21 +1180,21 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
           >
             {file ? (
               <>
-                <button type="button" className="cr-dropzone-clear" aria-label="Clear" onClick={(e) => { e.stopPropagation(); dispatch({ type: "CLEAR_SOURCE" }); }}>
+                <button type="button" className="cr-dropzone-clear" aria-label={t("filePicker.clear")} onClick={(e) => { e.stopPropagation(); dispatch({ type: "CLEAR_SOURCE" }); }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6L6 18M6 6l12 12" /></svg>
                 </button>
                 <span className={`cr-dropzone-icon file-kind ${fileKind}`}><FileKindIcon kind={fileKind} /></span>
                 <div className="cr-dropzone-title">{file.name}</div>
-                <div className="cr-dropzone-sub">{formatSizeMb(file.size)} · ready — click to choose a different file</div>
+                <div className="cr-dropzone-sub">{t("filePicker.sizeReadyHint", { size: formatSizeMb(file.size) })}</div>
               </>
             ) : (
               <>
                 <span className="cr-dropzone-icon">
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 9l5-5 5 5M12 4v12" /></svg>
                 </span>
-                <div className="cr-dropzone-title">Drop a .blend or .zip</div>
-                <div className="cr-dropzone-sub">We&apos;ll analyze the scene, cameras &amp; frame range</div>
-                <span className="cr-dropzone-browse">Browse files</span>
+                <div className="cr-dropzone-title">{t("filePicker.dropTitle")}</div>
+                <div className="cr-dropzone-sub">{t("filePicker.dropSubtitle")}</div>
+                <span className="cr-dropzone-browse">{t("filePicker.browseFiles")}</span>
               </>
             )}
           </div>
@@ -1204,24 +1202,24 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
           {/* Saved files */}
           <div className="saved-picker-panel">
             <div className="saved-picker-head">
-              <strong>Recent Files</strong>
+              <strong>{t("filePicker.recentFiles")}</strong>
               <div className="saved-picker-tools">
-                <input type="text" className="saved-picker-search" placeholder="Search files..." value={savedSearch} onChange={(e) => setSavedSearch(e.target.value)} />
+                <input type="text" className="saved-picker-search" placeholder={t("filePicker.searchPlaceholder")} value={savedSearch} onChange={(e) => setSavedSearch(e.target.value)} />
                 <button className="btn btn-secondary" type="button" onClick={loadSavedInputs} disabled={savedInputs.loading}>
-                  {savedInputs.loading ? "..." : "Refresh"}
+                  {savedInputs.loading ? "..." : t("common:actions.refresh")}
                 </button>
               </div>
             </div>
             <div className="saved-picker-body">
-              <div className="saved-picker-columns"><span>Name</span><span>Date</span><span>Type</span><span>Size</span></div>
+              <div className="saved-picker-columns"><span>{t("filePicker.columns.name")}</span><span>{t("filePicker.columns.date")}</span><span>{t("filePicker.columns.type")}</span><span>{t("filePicker.columns.size")}</span></div>
               {savedInputs.error && <p className="error-text">{savedInputs.error}</p>}
-              {savedInputs.loading && <p className="muted">Loading...</p>}
+              {savedInputs.loading && <p className="muted">{t("filePicker.loading")}</p>}
               {!savedInputs.loading && filteredSaved.length === 0 && (
-                <p className="saved-picker-empty">{savedInputs.items.length === 0 ? "No saved files yet." : "No matches."}</p>
+                <p className="saved-picker-empty">{savedInputs.items.length === 0 ? t("filePicker.emptyNoFiles") : t("filePicker.emptyNoMatches")}</p>
               )}
               {savedSections.map((section) => (
                 <div key={section.key} className="saved-picker-section">
-                  <div className="saved-picker-section-label">{section.label}</div>
+                  <div className="saved-picker-section-label">{t(section.labelKey)}</div>
                   {section.items.map(({ asset, timestamp }) => {
                     const kind = fileKindFromName(asset.input_filename);
                     const display = asset.display_name || asset.input_filename;
@@ -1242,12 +1240,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                           {savedInputId === asset.id && (
                             <span className="saved-picker-selected-badge">
                               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-                              SELECTED
+                              {t("filePicker.selectedBadge")}
                             </span>
                           )}
                         </div>
                         <span className="saved-picker-date">{formatTimestamp(timestamp)}</span>
-                        <span className="saved-picker-type">{kind === "blend" ? "Blend" : kind === "zip" ? "Zip" : "File"}</span>
+                        <span className="saved-picker-type">{kind === "blend" ? t("filePicker.kind.blend") : kind === "zip" ? t("filePicker.kind.zip") : t("filePicker.kind.file")}</span>
                         <span className="saved-picker-size">{formatSizeMb(asset?.size_bytes)}</span>
                       </div>
                     );
@@ -1266,16 +1264,16 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                   <FileKindIcon kind={file ? fileKind : fileKindFromName(sourceLabel || "")} />
                 </span>
                 <span className="cr-action-text">
-                  <b>{sourceLabel || (file ? file.name : "File")}</b> ready to analyze
+                  <b>{sourceLabel || (file ? file.name : t("filePicker.kind.file"))}</b> {t("filePicker.readyToAnalyze")}
                 </span>
               </div>
               <div className="cr-action-btns">
-                <button className="cr-action-cancel-x" type="button" onClick={() => dispatch({ type: "CLEAR_SOURCE" })} disabled={isBusy} title="Cancel selection" aria-label="Cancel selection">
+                <button className="cr-action-cancel-x" type="button" onClick={() => dispatch({ type: "CLEAR_SOURCE" })} disabled={isBusy} title={t("filePicker.cancelSelection")} aria-label={t("filePicker.cancelSelection")}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                 </button>
                 <button className="btn btn-primary cr-analyze-btn" type="button" onClick={() => handleAnalyze()} disabled={isBusy}>
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
-                  Analyze &amp; Continue →
+                  {t("filePicker.analyzeContinue")} →
                 </button>
               </div>
             </div>
@@ -1306,10 +1304,10 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
           || isPackaging;
         const fillPct = isUploading ? uploadProgress : isAnalyzing ? analyzeOverall.percent : 40;
         let phaseLabel;
-        if (isPackaging) phaseLabel = "Packaging file for upload";
+        if (isPackaging) phaseLabel = t("progress.packaging");
         else if (isAnalyzing) phaseLabel = analyzeOverall.label;
-        else if (isUploading) phaseLabel = "Uploading";
-        else phaseLabel = "Starting";
+        else if (isUploading) phaseLabel = t("progress.uploading");
+        else phaseLabel = t("progress.starting");
         const sub = analyzeProgress.subProgress;
         const subText = isAnalyzing && sub && sub.total > 1
           ? ` · ${sub.current}/${sub.total}${sub.label ? ` (${sub.label})` : ""}`
@@ -1326,11 +1324,11 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
             rightSide = `${analyzeOverall.percent.toFixed(0)}% · ${formatEta(analyzeOverall.etaSeconds)}`;
           }
         } else {
-          rightSide = "Working...";
+          rightSide = t("progress.working");
         }
         let hint = null;
         if (isPackaging) {
-          hint = "Blender packed your assets while you were configuring; we're now zipping the prepared bundle for upload. Heavy inputs (multi-GB textures + Alembic/VDB caches) can take a couple of minutes.";
+          hint = t("progress.packagingHint");
         } else if (isAnalyzing && analyzeOverall.hint) {
           hint = analyzeOverall.hint;
         }
@@ -1361,7 +1359,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
           <div className="cr-card cr-card-form">
             <div className="cr-card-header">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--th)" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-              <span>Render Settings</span>
+              <span>{t("renderSetup.title")}</span>
               {sourceLabel && (
                 <span className="cr-file-pill" title={sourceLabel}>
                   <span className="cr-file-pill-icon"><FileKindIcon kind={file ? fileKindFromName(file.name) : fileKindFromName(sourceLabel)} /></span>
@@ -1371,8 +1369,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                     className="cr-file-pill-x"
                     onClick={() => setConfirmChangeFile(true)}
                     disabled={isBusy}
-                    title="Change file (discards these settings)"
-                    aria-label="Change file"
+                    title={t("fileBar.changeFileTitle")}
+                    aria-label={t("fileBar.changeFile")}
                   >
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                   </button>
@@ -1382,11 +1380,11 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
 
             {/* Output ----------------------------------------------------- */}
             <section className="cr-form-section">
-              <div className="cr-form-section-title">Output</div>
+              <div className="cr-form-section-title">{t("output.title")}</div>
               <div className="cr-form-section-body">
                 <div className="cr-field-row">
                   <label className="cr-field">
-                    <span className="cr-field-label">Render Engine</span>
+                    <span className="cr-field-label">{t("output.renderEngine")}</span>
                     <select value={renderEngine} onChange={(e) => dispatch({ type: "SET_FIELD", field: "renderEngine", value: e.target.value })} className="cr-input">
                       {renderEngine && !["BLENDER_EEVEE", "CYCLES", "BLENDER_WORKBENCH"].includes(renderEngine) && (
                         <option value={renderEngine}>{renderEngine}</option>
@@ -1397,7 +1395,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                     </select>
                   </label>
                   <label className="cr-field">
-                    <span className="cr-field-label">Samples</span>
+                    <span className="cr-field-label">{t("output.samples")}</span>
                     <input
                       type="number" min="1"
                       value={cyclesSamples ?? ""}
@@ -1407,7 +1405,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                   </label>
                 </div>
                 <div className="cr-field">
-                  <span className="cr-field-label">Resolution</span>
+                  <span className="cr-field-label">{t("output.resolution")}</span>
                   <div className="cr-resolution-row">
                     <input
                       type="number" min="1"
@@ -1430,32 +1428,32 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                       className="cr-input cr-input-pct"
                     />
                     <span className="cr-resolution-suffix">%</span>
-                    {effMpPreview && <span className="cr-resolution-mp">{effMpPreview} MP effective</span>}
+                    {effMpPreview && <span className="cr-resolution-mp">{t("output.mpEffective", { mp: effMpPreview })}</span>}
                   </div>
                 </div>
                 <div className="cr-field-row">
                   <label className="cr-field">
-                    <span className="cr-field-label">Output format</span>
+                    <span className="cr-field-label">{t("output.outputFormat")}</span>
                     <select
                       value={outputFormat}
                       onChange={(e) => dispatch({ type: "SET_FIELD", field: "outputFormat", value: e.target.value })}
                       className="cr-input"
                     >
-                      <option value="PNG">PNG (single image)</option>
-                      <option value="TIFF">TIFF (single image)</option>
-                      <option value="OPEN_EXR_MULTILAYER">OpenEXR MultiLayer (render passes)</option>
+                      <option value="PNG">{t("output.format.png")}</option>
+                      <option value="TIFF">{t("output.format.tiff")}</option>
+                      <option value="OPEN_EXR_MULTILAYER">{t("output.format.exr")}</option>
                     </select>
                   </label>
                   {outputFormat === "OPEN_EXR_MULTILAYER" && (
                     <label className="cr-field">
-                      <span className="cr-field-label">Bit depth</span>
+                      <span className="cr-field-label">{t("output.bitDepth")}</span>
                       <select
                         value={exrColorDepth}
                         onChange={(e) => dispatch({ type: "SET_FIELD", field: "exrColorDepth", value: e.target.value })}
                         className="cr-input"
                       >
-                        <option value="16">16-bit half (smaller)</option>
-                        <option value="32">32-bit full (max precision)</option>
+                        <option value="16">{t("output.bitDepthOption.half")}</option>
+                        <option value="32">{t("output.bitDepthOption.full")}</option>
                       </select>
                     </label>
                   )}
@@ -1464,16 +1462,16 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                   <>
                     <div className="cr-field-row">
                       <label className="cr-field">
-                        <span className="cr-field-label">EXR codec</span>
+                        <span className="cr-field-label">{t("output.exrCodec")}</span>
                         <select
                           value={exrCodec}
                           onChange={(e) => dispatch({ type: "SET_FIELD", field: "exrCodec", value: e.target.value })}
                           className="cr-input"
                         >
-                          <option value="DWAA">DWAA (lossy, smallest)</option>
-                          <option value="ZIP">ZIP (lossless)</option>
-                          <option value="PIZ">PIZ (lossless)</option>
-                          <option value="NONE">None (uncompressed)</option>
+                          <option value="DWAA">{t("output.codec.dwaa")}</option>
+                          <option value="ZIP">{t("output.codec.zip")}</option>
+                          <option value="PIZ">{t("output.codec.piz")}</option>
+                          <option value="NONE">{t("output.codec.none")}</option>
                         </select>
                       </label>
                       <label className="cr-field cr-field-check">
@@ -1482,7 +1480,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                           checked={filmTransparent}
                           onChange={(e) => dispatch({ type: "SET_FIELD", field: "filmTransparent", value: e.target.checked })}
                         />
-                        <span className="cr-field-label">Transparent background (alpha)</span>
+                        <span className="cr-field-label">{t("output.transparentBackground")}</span>
                       </label>
                     </div>
                     <div className="cr-field">
@@ -1493,8 +1491,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                           onChange={(e) => dispatch({ type: "SET_FIELD", field: "passesUseFile", value: e.target.checked })}
                         />
                         <span className="cr-field-label">
-                          Use the .blend's own pass setup
-                          {passesUseFile && <span className="cr-pass-locked-note"> (controlled by .blend file)</span>}
+                          {t("output.usePassSetup")}
+                          {passesUseFile && <span className="cr-pass-locked-note">{t("output.controlledByFile")}</span>}
                         </span>
                       </label>
                       <div className={`cr-pass-groups ${passesUseFile ? "is-disabled" : ""}`}>
@@ -1505,7 +1503,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                           if (groupPasses.length === 0) return null;
                           return (
                             <div key={group} className="cr-pass-group">
-                              <div className="cr-pass-group-title">{group}</div>
+                              <div className="cr-pass-group-title">{t(`output.passGroup.${group}`)}</div>
                               <div className="cr-pass-grid">
                                 {groupPasses.map((p) => (
                                   <label key={p.key} className={`cr-pass-item ${passesUseFile ? "is-disabled" : ""}`}>
@@ -1515,7 +1513,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                                       checked={!!renderPasses[p.key]}
                                       onChange={() => dispatch({ type: "SET_FIELD", field: "renderPasses", value: { ...renderPasses, [p.key]: !renderPasses[p.key] } })}
                                     />
-                                    <span>{p.label}</span>
+                                    <span>{t(`output.pass.${p.key}`)}</span>
                                   </label>
                                 ))}
                               </div>
@@ -1531,13 +1529,13 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
 
             {/* Scene & camera -------------------------------------------- */}
             <section className="cr-form-section">
-              <div className="cr-form-section-title">Scene &amp; Camera</div>
+              <div className="cr-form-section-title">{t("sceneCamera.title")}</div>
               <div className="cr-form-section-body">
                 {showBlendPicker && (
                   <>
                     <div className="cr-field-row">
                       <label className="cr-field cr-field--full">
-                        <span className="cr-field-label">Blend file (bundle contains {blendCandidates.length} candidates)</span>
+                        <span className="cr-field-label">{t("sceneCamera.blendFileLabel", { count: blendCandidates.length })}</span>
                         <select
                           value={pickedBlend || ""}
                           onChange={(e) => setPickedBlend(e.target.value)}
@@ -1547,7 +1545,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                           {blendCandidates.map((c) => (
                             <option key={c.relative_path} value={c.relative_path}>
                               {c.relative_path}
-                              {c.relative_path === analyzeBaseline ? " · (analyzed)" : ""}
+                              {c.relative_path === analyzeBaseline ? ` · ${t("sceneCamera.analyzedSuffix")}` : ""}
                               {c.size_bytes ? ` · ${(c.size_bytes / (1024 * 1024)).toFixed(1)} MB` : ""}
                             </option>
                           ))}
@@ -1556,9 +1554,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                     </div>
                     {blendChangedFromAnalyze && (
                       <div className="cr-note cr-note--warn" style={{ marginTop: 6 }}>
-                        <strong>Analysis was based on <code>{analyzeBaseline}</code>.</strong>{" "}
-                        The frame range, cameras, and cost estimate below reflect that file.
-                        If <code>{pickedBlend}</code> has different scene settings, re-analyze so those stay accurate.{" "}
+                        <Trans
+                          t={t}
+                          i18nKey="sceneCamera.reanalyzeWarn.text"
+                          values={{ baseline: analyzeBaseline, picked: pickedBlend }}
+                          components={[<strong key="0" />, <code key="1" />, <code key="2" />]}
+                        />{" "}
                         <button
                           type="button"
                           className="btn btn-secondary"
@@ -1566,7 +1567,7 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                           onClick={() => handleAnalyze(false, pickedBlend)}
                           disabled={isBusy}
                         >
-                          Re-analyze with this file
+                          {t("sceneCamera.reanalyzeWarn.reanalyzeButton")}
                         </button>
                       </div>
                     )}
@@ -1574,67 +1575,67 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                 )}
                 <div className="cr-field-row">
                   <label className="cr-field">
-                    <span className="cr-field-label">Scene</span>
+                    <span className="cr-field-label">{t("sceneCamera.scene")}</span>
                     <select value={sceneName} onChange={(e) => handleSceneChange(e.target.value)} className="cr-input">
                       {(scenes.length ? scenes : [{ name: "" }]).map((s) => (
-                        <option key={s.name || "default"} value={s.name || ""}>{s.name || "Default Scene"}</option>
+                        <option key={s.name || "default"} value={s.name || ""}>{s.name || t("sceneCamera.defaultScene")}</option>
                       ))}
                     </select>
                   </label>
                   <label className="cr-field">
-                    <span className="cr-field-label">View Layer</span>
+                    <span className="cr-field-label">{t("sceneCamera.viewLayer")}</span>
                     <select value={viewLayerName} onChange={(e) => dispatch({ type: "SET_FIELD", field: "viewLayerName", value: e.target.value })} className="cr-input">
-                      {viewLayers.length > 0 ? viewLayers.map((l) => <option key={l} value={l}>{l}</option>) : <option value="">Default</option>}
+                      {viewLayers.length > 0 ? viewLayers.map((l) => <option key={l} value={l}>{l}</option>) : <option value="">{t("sceneCamera.defaultViewLayer")}</option>}
                     </select>
                   </label>
                 </div>
                 <div className="cr-field-row">
                   <label className="cr-field">
-                    <span className="cr-field-label">Camera Mode</span>
+                    <span className="cr-field-label">{t("sceneCamera.cameraMode")}</span>
                     <select value={cameraMode} onChange={(e) => dispatch({ type: "SET_FIELD", field: "cameraMode", value: e.target.value })} className="cr-input">
-                      {CAMERA_MODES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      {CAMERA_MODES.map((o) => <option key={o.value} value={o.value}>{t(o.labelKey)}</option>)}
                     </select>
                   </label>
                   <label className="cr-field">
-                    <span className="cr-field-label">Camera</span>
+                    <span className="cr-field-label">{t("sceneCamera.camera")}</span>
                     <select value={forceCameraName} onChange={(e) => dispatch({ type: "SET_FIELD", field: "forceCameraName", value: e.target.value })} className="cr-input" disabled={cameraMode !== "force_camera" || cameras.length === 0}>
-                      {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
+                      {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">{t("sceneCamera.noCameras")}</option>}
                     </select>
                   </label>
                 </div>
                 {cameraMode === "camera_ranges" && (
                   <div className="camera-ranges-panel">
                     <div className="camera-ranges-head">
-                      <div className="manual-range-subtitle camera-ranges-subtitle">Edit camera-to-frame mappings.</div>
+                      <div className="manual-range-subtitle camera-ranges-subtitle">{t("sceneCamera.editMappings")}</div>
                       <div className="camera-ranges-actions">
-                        <button type="button" className="btn btn-secondary" onClick={autoFillRanges}>Use Marker Cuts</button>
-                        <button type="button" className="btn btn-secondary" onClick={addRange}>Add Range</button>
+                        <button type="button" className="btn btn-secondary" onClick={autoFillRanges}>{t("sceneCamera.useMarkerCuts")}</button>
+                        <button type="button" className="btn btn-secondary" onClick={addRange}>{t("sceneCamera.addRange")}</button>
                       </div>
                     </div>
                     <div className="camera-ranges-table-wrap">
                       <table className="camera-ranges-table">
-                        <thead><tr><th>Use</th><th>Camera</th><th>Start</th><th>End</th><th>Step</th><th>Frames</th><th /></tr></thead>
+                        <thead><tr><th>{t("sceneCamera.rangeTable.use")}</th><th>{t("sceneCamera.rangeTable.camera")}</th><th>{t("sceneCamera.rangeTable.start")}</th><th>{t("sceneCamera.rangeTable.end")}</th><th>{t("sceneCamera.rangeTable.step")}</th><th>{t("sceneCamera.rangeTable.frames")}</th><th /></tr></thead>
                         <tbody>
                           {cameraRanges.map((row) => (
                             <tr key={row.id}>
                               <td><input type="checkbox" checked={row.enabled !== false} onChange={(e) => updateRange(row.id, { enabled: e.target.checked })} /></td>
                               <td>
                                 <select value={row.camera_name || ""} onChange={(e) => updateRange(row.id, { camera_name: e.target.value })} className="cr-input camera-ranges-input">
-                                  {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">No cameras</option>}
+                                  {cameras.length > 0 ? cameras.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">{t("sceneCamera.noCameras")}</option>}
                                 </select>
                               </td>
                               <td><input type="number" min="1" value={row.frame_start ?? ""} onChange={(e) => updateRange(row.id, { frame_start: e.target.value })} className="cr-input camera-ranges-input" /></td>
                               <td><input type="number" min="1" value={row.frame_end ?? ""} onChange={(e) => updateRange(row.id, { frame_end: e.target.value })} className="cr-input camera-ranges-input" /></td>
                               <td><input type="number" min="1" value={row.frame_step ?? 1} onChange={(e) => updateRange(row.id, { frame_step: e.target.value })} className="cr-input camera-ranges-input" /></td>
                               <td><span className="camera-ranges-count">{rangeCounts.get(row.id) || 0}</span></td>
-                              <td><button type="button" className="btn btn-secondary camera-ranges-remove" onClick={() => removeRange(row.id)}>Remove</button></td>
+                              <td><button type="button" className="btn btn-secondary camera-ranges-remove" onClick={() => removeRange(row.id)}>{t("common:actions.remove")}</button></td>
                             </tr>
                           ))}
-                          {cameraRanges.length === 0 && <tr><td colSpan={7} className="camera-ranges-empty">No ranges. Add one to continue.</td></tr>}
+                          {cameraRanges.length === 0 && <tr><td colSpan={7} className="camera-ranges-empty">{t("sceneCamera.noRanges")}</td></tr>}
                         </tbody>
                       </table>
                     </div>
-                    {frameRange && <div className="manual-range-subtitle camera-ranges-subtitle">{countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step)} frames after step filtering.</div>}
+                    {frameRange && <div className="manual-range-subtitle camera-ranges-subtitle">{t("sceneCamera.framesAfterStep", { count: countFrames(frameRange.frame_start, frameRange.frame_end, frameRange.frame_step) })}</div>}
                     {!cameraValidation.ok && <p className="error-text camera-ranges-error">{cameraValidation.error}</p>}
                   </div>
                 )}
@@ -1644,21 +1645,21 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
             {/* Frames ---------------------------------------------------- */}
             <section className="cr-form-section">
               <div className="cr-form-section-title">
-                Frames
-                {totalFrameCount != null && <span className="cr-form-section-badge">{totalFrameCount} frames</span>}
+                {t("frames.title")}
+                {totalFrameCount != null && <span className="cr-form-section-badge">{t("frames.count", { count: totalFrameCount })}</span>}
               </div>
               <div className="cr-form-section-body">
                 <div className="cr-frame-fields">
                   <label className="cr-field">
-                    <span className="cr-field-label">Start</span>
+                    <span className="cr-field-label">{t("frames.start")}</span>
                     <input type="number" min="1" value={frameStart} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStart", value: e.target.value })} className="cr-input" />
                   </label>
                   <label className="cr-field">
-                    <span className="cr-field-label">End</span>
+                    <span className="cr-field-label">{t("frames.end")}</span>
                     <input type="number" min="1" value={frameEnd} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameEnd", value: e.target.value })} className="cr-input" />
                   </label>
                   <label className="cr-field">
-                    <span className="cr-field-label">Step</span>
+                    <span className="cr-field-label">{t("frames.step")}</span>
                     <input type="number" min="1" value={frameStep} onChange={(e) => dispatch({ type: "SET_FIELD", field: "frameStep", value: e.target.value })} className="cr-input" />
                   </label>
                 </div>
@@ -1667,26 +1668,26 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
             {/* Scene Stats (read-only -- analyzer metadata) -------------- */}
             {analysis?.heaviness && (
               <section className="cr-form-section">
-                <div className="cr-form-section-title">Scene Stats</div>
+                <div className="cr-form-section-title">{t("sceneStats.title")}</div>
                 <div className="cr-form-section-body">
                   <div className="cr-stat-grid">
-                    <div className="cr-stat"><span className="cr-stat-label">Vertices</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.vertex_count_total)}</span></div>
-                    <div className="cr-stat"><span className="cr-stat-label">Objects</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.object_count)}</span></div>
-                    <div className="cr-stat"><span className="cr-stat-label">Meshes</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.mesh_count)}</span></div>
-                    <div className="cr-stat"><span className="cr-stat-label">Materials</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.material_count)}</span></div>
-                    <div className="cr-stat"><span className="cr-stat-label">Textures</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.texture_count)}</span></div>
-                    <div className="cr-stat"><span className="cr-stat-label">Texture size</span><span className="cr-stat-value">{formatStatBytes(analysis.heaviness.texture_total_bytes)}</span></div>
-                    <div className="cr-stat"><span className="cr-stat-label">Shader nodes</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.shader_node_count_total)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">{t("sceneStats.vertices")}</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.vertex_count_total)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">{t("sceneStats.objects")}</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.object_count)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">{t("sceneStats.meshes")}</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.mesh_count)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">{t("sceneStats.materials")}</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.material_count)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">{t("sceneStats.textures")}</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.texture_count)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">{t("sceneStats.textureSize")}</span><span className="cr-stat-value">{formatStatBytes(analysis.heaviness.texture_total_bytes)}</span></div>
+                    <div className="cr-stat"><span className="cr-stat-label">{t("sceneStats.shaderNodes")}</span><span className="cr-stat-value">{formatStatNumber(analysis.heaviness.shader_node_count_total)}</span></div>
                     {typeof analysis.heaviness.file_size_bytes === "number" && analysis.heaviness.file_size_bytes > 0 && (
-                      <div className="cr-stat"><span className="cr-stat-label">Blend size</span><span className="cr-stat-value">{formatStatBytes(analysis.heaviness.file_size_bytes)}</span></div>
+                      <div className="cr-stat"><span className="cr-stat-label">{t("sceneStats.blendSize")}</span><span className="cr-stat-value">{formatStatBytes(analysis.heaviness.file_size_bytes)}</span></div>
                     )}
                   </div>
                   {heavyFeatureChips(analysis.heaviness).length > 0 && (
                     <div className="cr-stat-features">
-                      <span className="cr-stat-label">Heavy features</span>
+                      <span className="cr-stat-label">{t("sceneStats.heavyFeatures")}</span>
                       <div className="cr-stat-chips">
-                        {heavyFeatureChips(analysis.heaviness).map((label) => (
-                          <span key={label} className="cr-stat-chip">{label}</span>
+                        {heavyFeatureChips(analysis.heaviness).map((flag) => (
+                          <span key={flag} className="cr-stat-chip">{t(`sceneStats.heavyFeature.${flag}`)}</span>
                         ))}
                       </div>
                     </div>
@@ -1717,28 +1718,28 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                 <div className="cr-card cr-card-queue">
                   <div className="cr-card-header">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--th)" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
-                    <span>Queue Status</span>
+                    <span>{t("queuePanel.title")}</span>
                   </div>
                   <ul className="cr-queue-list">
                     {[
-                      { key: "high",   label: "HIGH" },
-                      { key: "normal", label: "NORMAL" },
-                      { key: "low",    label: "LOW" },
+                      { key: "high",   label: t("queuePanel.high") },
+                      { key: "normal", label: t("queuePanel.normal") },
+                      { key: "low",    label: t("queuePanel.low") },
                     ].map((row) => {
-                      const t = totals[row.key];
+                      const cell = totals[row.key];
                       return (
                         <li key={row.key} className={`cr-queue-row cr-queue-row--${row.key}`}>
                           <span className="cr-queue-row-label">{row.label}</span>
-                          <span className="cr-queue-row-jobs">{t.jobs}</span>
-                          {t.jobs > 0 && (
-                            <span className="cr-queue-row-frames">{t.frames} frames</span>
+                          <span className="cr-queue-row-jobs">{cell.jobs}</span>
+                          {cell.jobs > 0 && (
+                            <span className="cr-queue-row-frames">{t("frames.count", { count: cell.frames })}</span>
                           )}
                         </li>
                       );
                     })}
                   </ul>
                   <div className="cr-queue-note">
-                    Wait depends on what&apos;s ahead of your priority.
+                    {t("queuePanel.waitNote")}
                   </div>
                 </div>
               );
@@ -1749,17 +1750,17 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
             <div className="cr-card cr-launch-card">
               <div className="cr-card-header">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--th)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5 19 19M19 5l-2.5 2.5M7.5 16.5 5 19" /><circle cx="12" cy="12" r="3.2" /></svg>
-                <span>Estimate</span>
+                <span>{t("estimate.title")}</span>
               </div>
 
               <section className="cr-form-section cr-launch-section">
-                <div className="cr-form-section-title">Queue Priority</div>
+                <div className="cr-form-section-title">{t("queuePriority.title")}</div>
                 <div className="cr-form-section-body">
-                  <div className="cr-priority-group" role="radiogroup" aria-label="Queue priority">
+                  <div className="cr-priority-group" role="radiogroup" aria-label={t("queuePriority.ariaLabel")}>
                     {[
-                      { value: 0, label: "Low",    hint: "100% cost · runs last" },
-                      { value: 1, label: "Normal", hint: "110% cost · default" },
-                      { value: 2, label: "High",   hint: "120% cost · runs first" },
+                      { value: 0, labelKey: "queuePriority.option.low",    hintKey: "queuePriority.hint.low" },
+                      { value: 1, labelKey: "queuePriority.option.normal", hintKey: "queuePriority.hint.normal" },
+                      { value: 2, labelKey: "queuePriority.option.high",   hintKey: "queuePriority.hint.high" },
                     ].map((opt) => (
                       <button
                         key={opt.value}
@@ -1769,8 +1770,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                         onClick={() => setPriority(opt.value)}
                         className={`cr-priority-option${priority === opt.value ? " cr-priority-option--active" : ""}`}
                       >
-                        <span className="cr-priority-option-label">{opt.label}</span>
-                        <span className="cr-priority-option-hint">{opt.hint}</span>
+                        <span className="cr-priority-option-label">{t(opt.labelKey)}</span>
+                        <span className="cr-priority-option-hint">{t(opt.hintKey)}</span>
                       </button>
                     ))}
                   </div>
@@ -1783,20 +1784,20 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                 return (
                   <div className="cr-estimate">
                     <div className="cr-estimate-head">
-                      <span className="cr-estimate-eyebrow">Estimated</span>
-                      <button type="button" className="cr-estimate-recalc" onClick={refreshCostEstimate} disabled={costEstimateLoading} title="Re-fetch the cost / wall-time estimate">
+                      <span className="cr-estimate-eyebrow">{t("estimate.eyebrow")}</span>
+                      <button type="button" className="cr-estimate-recalc" onClick={refreshCostEstimate} disabled={costEstimateLoading} title={t("estimate.recalcTitle")}>
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
-                        {costEstimateLoading ? "Recalculating…" : "Recalculate"}
+                        {costEstimateLoading ? t("header.recalculating") : t("header.recalculate")}
                       </button>
                     </div>
                     <div className="cr-estimate-figs">
                       <div className="cr-estimate-fig">
                         <div className="cr-estimate-val">{time || "—"}</div>
-                        <div className="cr-estimate-lbl">Wall time</div>
+                        <div className="cr-estimate-lbl">{t("estimate.wallTime")}</div>
                       </div>
                       <div className="cr-estimate-fig">
                         <div className="cr-estimate-val cr-estimate-val--cost">{(costEstimateLoading && !costEstimate) ? "…" : (cost || "—")}</div>
-                        <div className="cr-estimate-lbl">Credits</div>
+                        <div className="cr-estimate-lbl">{t("estimate.credits")}</div>
                       </div>
                     </div>
                   </div>
@@ -1810,20 +1811,20 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                     type="button"
                     onClick={handleUpload}
                     disabled={isBusy || !!packagingWait.startedAt}
-                    title={packagingWait.startedAt ? "Waiting for background packaging to finish…" : undefined}
+                    title={packagingWait.startedAt ? t("header.waitingPackaging") : undefined}
                   >
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
-                    Upload
+                    {t("header.upload")}
                   </button>
                 )}
                 {canStart && (
                   <button className="btn btn-primary cr-launch-btn" type="button" onClick={handleStartRender}>
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                    Start Rendering
+                    {t("header.startRendering")}
                   </button>
                 )}
                 {isBusy && (
-                  <button className="btn btn-danger cr-launch-btn" type="button" onClick={handleStop}>Stop</button>
+                  <button className="btn btn-danger cr-launch-btn" type="button" onClick={handleStop}>{t("header.stop")}</button>
                 )}
               </div>
             </div>
@@ -1836,19 +1837,19 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                 <div className="cr-card cr-card-warnings">
                   <div className="cr-card-header">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
-                    <span>Analysis Report</span>
+                    <span>{t("analysisReport.title")}</span>
                   </div>
                   {[...(prepResult.analysis_errors || []), ...(prepResult.prepare_errors || [])].map((msg, i) => (
-                    <div key={`err-${i}`} className="prep-result-item prep-result-error"><span className="prep-result-tag">[ERROR]</span> {msg}</div>
+                    <div key={`err-${i}`} className="prep-result-item prep-result-error"><span className="prep-result-tag">{t("analysisReport.errorTag")}</span> {msg}</div>
                   ))}
                   {allWarnings.map((msg, i) => (
-                    <div key={`warn-${i}`} className="prep-result-item prep-result-warning"><span className="prep-result-tag">[WARNING]</span> {msg}</div>
+                    <div key={`warn-${i}`} className="prep-result-item prep-result-warning"><span className="prep-result-tag">{t("analysisReport.warningTag")}</span> {msg}</div>
                   ))}
                   {hasMissingFileIssue && (
                     <div className="prep-result-action">
                       {prepResult.deep_search_ran ? (
                         <span className="prep-result-action-note">
-                          Already searched every fixed drive — these files aren't on this machine. Get them from the .blend's source or upload as a .zip with the assets alongside.
+                          {t("analysisReport.deepSearchDone")}
                         </span>
                       ) : (
                         <>
@@ -1858,10 +1859,10 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
                             onClick={() => handleAnalyze(true)}
                             disabled={isBusy}
                           >
-                            {stage === STAGE.ANALYZING ? "Searching this machine…" : "Search this machine for missing files"}
+                            {stage === STAGE.ANALYZING ? t("analysisReport.searching") : t("analysisReport.searchButton")}
                           </button>
                           <span className="prep-result-action-note">
-                            Walks every fixed drive looking for the missing files by filename. Up to ~90 seconds.
+                            {t("analysisReport.searchHint")}
                           </span>
                         </>
                       )}
@@ -1881,17 +1882,17 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
           <div className="cr-done-icon">
             <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
           </div>
-          <div className="cr-done-title">Render submitted</div>
+          <div className="cr-done-title">{t("done.title")}</div>
           <div className="cr-done-sub">
-            <b>{sourceLabel || "Your render"}</b> is now in the queue. Track its progress in My Jobs.
+            <b>{sourceLabel || t("done.yourRender")}</b> {t("done.subtitle")}
           </div>
           <div className="cr-done-actions">
             <button className="btn btn-secondary" type="button" onClick={() => onNavigate?.("myjobs")}>
-              View in My Jobs
+              {t("done.viewInMyJobs")}
             </button>
             <button className="btn btn-primary cr-done-new" type="button" onClick={handleReset}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
-              Create another render
+              {t("done.createAnother")}
             </button>
           </div>
         </div>
@@ -1904,17 +1905,21 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigat
             <div className="cr-confirm-icon">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
             </div>
-            <div className="cr-confirm-title">Change file?</div>
+            <div className="cr-confirm-title">{t("confirmChange.title")}</div>
             <div className="cr-confirm-body">
-              All the render settings you&apos;ve configured for <b>{sourceLabel}</b> will be lost.
-              You&apos;ll start over from file selection.
+              <Trans
+                t={t}
+                i18nKey="confirmChange.body"
+                values={{ file: sourceLabel }}
+                components={[<b key="0" />]}
+              />
             </div>
             <div className="cr-confirm-actions">
               <button className="btn btn-secondary" type="button" onClick={() => setConfirmChangeFile(false)}>
-                Keep editing
+                {t("confirmChange.keepEditing")}
               </button>
               <button className="btn btn-danger" type="button" onClick={() => { setConfirmChangeFile(false); handleReset(); }}>
-                Discard &amp; change file
+                {t("confirmChange.discard")}
               </button>
             </div>
           </div>

@@ -13,7 +13,10 @@ import {
 // data-viz violet — orange stays reserved for the brand.
 const VIOLET = "rgb(139, 108, 240)";
 const GRID = "rgba(154, 141, 123, 0.28)";
-const TICK = "#9a8d7b";
+// Theme token — the concrete color is applied via the
+// `.recharts-cartesian-axis-tick-value` CSS rule (see App.css), so ticks stay
+// legible in light mode and flip with the theme instead of a fixed grey.
+const TICK = "var(--muted)";
 
 const TOOLTIP = {
   contentStyle: {

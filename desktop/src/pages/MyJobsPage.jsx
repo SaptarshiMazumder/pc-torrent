@@ -507,19 +507,21 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
                   : "No jobs match this filter."}
               </div>
             ) : (
-              <JobsListSection
-                jobs={filteredJobs}
-                view={view}
-                viewMode={viewMode}
-                search={search}
-                onSelect={handleSelectJob}
-                onRemove={removeJob}
-                backendUrl={backendUrl}
-                authToken={authToken}
-                hasMore={(statusFilter === "all" || statusFilter === "done") && hasMorePast}
-                loadingMore={loadingMorePast}
-                onLoadMore={loadMorePast}
-              />
+              <div className="jobs-list-scroll">
+                <JobsListSection
+                  jobs={filteredJobs}
+                  view={view}
+                  viewMode={viewMode}
+                  search={search}
+                  onSelect={handleSelectJob}
+                  onRemove={removeJob}
+                  backendUrl={backendUrl}
+                  authToken={authToken}
+                  hasMore={(statusFilter === "all" || statusFilter === "done") && hasMorePast}
+                  loadingMore={loadingMorePast}
+                  onLoadMore={loadMorePast}
+                />
+              </div>
             )}
             {loadingMorePast && (
               <div className="myjobs-section-loader">

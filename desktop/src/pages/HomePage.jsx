@@ -1,4 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "../contexts/AuthContext";
 import { getFirebaseToken } from "../services/api";
@@ -13,6 +22,7 @@ import {
   jobEngineLabel,
   jobSamples,
   resolveJobFilename,
+  jobResolutionLabel,
   formatDurationLabel,
   formatDateTimeLabel,
   formatCompactNumber,
@@ -95,6 +105,32 @@ function IconServer() {
   );
 }
 
+// Decorative render viewport — grid floor + spinning ember cube + scan sweep.
+// Purely a "rendering" animation; the real frame lives in the NOW tile beside it.
+function CubeViewport({ rendering, topRight, bottomLeft }) {
+  return (
+    <div className="dash-viewport dash-viewport--cube">
+      <div className="dash-viewport-grid" />
+      <div className="dash-viewport-shadow" />
+      <div className="dash-cube">
+        <div className="dash-cube-face dash-cube-front" />
+        <div className="dash-cube-face dash-cube-back" />
+        <div className="dash-cube-face dash-cube-right" />
+        <div className="dash-cube-face dash-cube-left" />
+        <div className="dash-cube-face dash-cube-top" />
+        <div className="dash-cube-face dash-cube-bottom" />
+      </div>
+      {rendering && <div className="dash-viewport-sweep" />}
+      <div className="dash-viewport-hud dash-viewport-hud-tl">
+        <span className={`dash-hud-dot${rendering ? " live" : ""}`} />
+        {rendering ? "RENDERING" : "PAUSED"}
+      </div>
+      {topRight && <div className="dash-viewport-hud dash-viewport-hud-tr">{topRight}</div>}
+      {bottomLeft && <div className="dash-viewport-hud dash-viewport-hud-bl">{bottomLeft}</div>}
+    </div>
+  );
+}
+
 // One unified stat card — centered, icon has no background fill.
 function StatCard({ tone, Icon, value, label }) {
   return (
@@ -137,6 +173,86 @@ function greeting() {
   if (h < 12) return "Good morning";
   if (h < 18) return "Good afternoon";
   return "Good evening";
+}
+
+const ACTIVITY_PERIODS = [7, 30, 90];
+
+// Render activity over a selectable window — frames delivered per day, from the
+// lifetime day-buckets the app already derives.
+function RenderActivity({ overTime }) {
+  const [days, setDays] = useState(30);
+  const data = useMemo(() => {
+    const cutoff = Date.now() - days * 86400000;
+    return overTime.filter((b) => b.ts >= cutoff);
+  }, [overTime, days]);
+  const totalFrames = data.reduce((s, b) => s + (b.frames || 0), 0);
+  const totalLabel = formatCompactNumber(totalFrames);
+
+  return (
+    <div className="card dash-activity-card">
+      <div className="dash-panel-head">
+        <span className="dash-panel-title">Render activity</span>
+        <div className="dash-period-tabs">
+          {ACTIVITY_PERIODS.map((d) => (
+            <button
+              key={d}
+              type="button"
+              className={`dash-period-tab${days === d ? " active" : ""}`}
+              onClick={() => setDays(d)}
+            >
+              {d}D
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="dash-activity-metric">
+        <span className="dash-activity-value">{totalLabel === "—" ? "0" : totalLabel}</span>
+        <span className="dash-activity-unit">frames · last {days}d</span>
+      </div>
+      {data.length === 0 ? (
+        <div className="dash-activity-empty">No render activity in the last {days} days.</div>
+      ) : (
+        <ResponsiveContainer width="100%" height={158}>
+          <AreaChart data={data} margin={{ top: 6, right: 6, left: -18, bottom: 0 }}>
+            <defs>
+              <linearGradient id="dash-act-grad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="rgb(238, 90, 41)" stopOpacity={0.32} />
+                <stop offset="100%" stopColor="rgb(238, 90, 41)" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid stroke="rgba(154, 141, 123, 0.28)" strokeWidth={0.6} vertical={false} />
+            <XAxis
+              dataKey="label"
+              tick={{ fill: "var(--muted)", fontSize: 9, fontFamily: "IBM Plex Mono, monospace", fontWeight: 600 }}
+              axisLine={{ stroke: "rgba(154, 141, 123, 0.28)" }}
+              tickLine={false}
+              minTickGap={30}
+            />
+            <YAxis
+              tick={{ fill: "var(--muted)", fontSize: 9, fontFamily: "IBM Plex Mono, monospace", fontWeight: 600 }}
+              axisLine={false}
+              tickLine={false}
+              width={30}
+            />
+            <Tooltip
+              contentStyle={{ background: "var(--bg-primary)", border: "1px solid var(--gbrd)", borderRadius: 12, fontSize: 12, boxShadow: "var(--card-shadow)" }}
+              labelStyle={{ color: "var(--muted)", fontFamily: "IBM Plex Mono, monospace", fontSize: 10 }}
+              itemStyle={{ color: "rgb(238, 90, 41)" }}
+            />
+            <Area
+              type="monotone"
+              dataKey="frames"
+              name="Frames"
+              stroke="rgb(238, 90, 41)"
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              fill="url(#dash-act-grad)"
+            />
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
 }
 
 export default function HomePage({
@@ -211,8 +327,26 @@ export default function HomePage({
     : "";
   const heroEngine = heroJob ? jobEngineLabel(heroJob) : "";
   const heroSamples = heroJob ? jobSamples(heroJob) : null;
+  const heroRes = heroJob ? jobResolutionLabel(heroJob) : "";
   const heroGpus = heroJob ? (live.gpuUsage.length || null) : null;
   const hasLiveFleet = live.gpuUsage.length > 0;
+
+  // Recent-frames filmstrip.  Fixed-width slots so a single frame never
+  // stretches the whole row: we reserve up to FILM_MAX slots and fill the ones
+  // that have rendered (the rest are dashed "upcoming" placeholders).  Only
+  // shown when the job is big enough to warrant it (>= FILM_MIN_TOTAL frames);
+  // otherwise the strip is left blank.
+  const FILM_MAX = 6;
+  const FILM_MIN_TOTAL = 5;
+  const filmSlots = [];
+  if (heroTotal >= FILM_MIN_TOTAL && heroRendered > 0) {
+    const slots = Math.min(FILM_MAX, heroTotal);
+    const end = Math.min(heroTotal, Math.max(slots, heroRendered));
+    const start = end - slots + 1;
+    for (let f = start; f <= end; f += 1) {
+      filmSlots.push({ frame: f, filled: f <= heroRendered });
+    }
+  }
 
   return (
     <div className="page dashboard-page">
@@ -267,12 +401,44 @@ export default function HomePage({
               <div className="dash-hero-bar-fill" style={{ width: `${heroPct}%` }} />
             </div>
 
-            <div className="dash-hero-preview">
-              <JobThumbnail job={heroJob} authToken={authToken} backendUrl={backendUrl} />
-              <span className="dash-preview-tag">
-                <span className={`dash-hud-dot${heroRunning ? " live" : ""}`} />
-                {heroRendered > 0 ? `LATEST · FRAME ${String(heroRendered).padStart(4, "0")}` : "AWAITING FIRST FRAME"}
-              </span>
+            {/* Render graphic: decorative cube viewport + real latest frame + filmstrip */}
+            <div className="dash-media">
+              <div className="dash-media-row">
+                <CubeViewport
+                  rendering={heroRunning}
+                  topRight={heroSamples ? `${heroSamples} SPP` : (heroEngine !== "—" ? heroEngine : null)}
+                  bottomLeft={heroEngine !== "—" ? `preview · ${heroEngine}` : "preview"}
+                />
+                <div className="dash-now-tile">
+                  <JobThumbnail job={heroJob} authToken={authToken} backendUrl={backendUrl} />
+                  <span className="dash-now-badge">NOW</span>
+                  <div className="dash-now-label">
+                    <div className="dash-now-frame">
+                      {heroRendered > 0 ? `FRAME ${String(heroRendered).padStart(4, "0")}` : "AWAITING FRAME"}
+                    </div>
+                    <div className="dash-now-sub">
+                      latest{heroRes && heroRes !== "—" ? ` · ${heroRes}` : ""}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {filmSlots.length > 0 && (
+                <div
+                  className="dash-filmstrip"
+                  style={{ gridTemplateColumns: `repeat(${filmSlots.length}, 1fr)` }}
+                >
+                  {filmSlots.map((slot) => (
+                    <div
+                      key={slot.frame}
+                      className={`dash-film-tile${slot.filled ? "" : " dash-film-tile--empty"}`}
+                    >
+                      {slot.filled && (
+                        <span className="dash-film-num">{String(slot.frame).padStart(4, "0")}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="dash-hero-foot">
@@ -291,18 +457,28 @@ export default function HomePage({
           </div>
         ) : (
           <div className="card dash-hero dash-hero--idle">
-            <div className="dash-idle-viewport">
-              <div className="dash-viewport-grid" />
-              <div className="dash-idle-inner">
-                <span className="dash-idle-icon"><IconMoon /></span>
-                <div className="dash-idle-title">Nothing rendering right now</div>
-                <div className="dash-idle-sub">
-                  Your fleet is idle. Drop a .blend or .zip and start a render — live
-                  progress will show up here.
+            <div className="dash-hero-chips">
+              <span className="dash-chip dash-chip-hair">
+                <span className="dash-chip-dot" style={{ background: "var(--muted)" }} />
+                NO ACTIVE RENDER
+              </span>
+            </div>
+            {/* The checkered viewport box only wraps the "screen" — the hero
+                card itself stays glass. No cube, just a sleeping state. */}
+            <div className="dash-media dash-media--idle">
+              <div className="dash-viewport dash-viewport--idle">
+                <div className="dash-viewport-grid" />
+                <div className="dash-idle-inner">
+                  <span className="dash-idle-icon"><IconMoon /></span>
+                  <div className="dash-idle-title">Fleet idle — nothing rendering</div>
+                  <div className="dash-idle-sub">
+                    Drop a .blend or .zip and start a render — the live preview
+                    and frames will show up here.
+                  </div>
+                  <button className="btn btn-primary" onClick={() => onNavigate?.("create")}>
+                    Create render →
+                  </button>
                 </div>
-                <button className="btn btn-primary" onClick={() => onNavigate?.("create")}>
-                  Create render →
-                </button>
               </div>
             </div>
           </div>
@@ -386,54 +562,43 @@ export default function HomePage({
         <StatCard tone="green" Icon={IconCoins} value={lifetime.creditsSpent > 0 ? formatCredits(lifetime.creditsSpent) : "0"} label="Credits spent" />
       </div>
 
-      {/* ============ RECENT JOBS ============ */}
-      <div className="card dash-recent-card">
-        <div className="dash-panel-head">
-          <span className="dash-panel-title">Recent jobs</span>
-          <button className="dash-recent-all" onClick={() => onNavigate?.("myjobs")}>View all →</button>
-        </div>
+      {/* ============ ACTIVITY + RECENT JOBS ============ */}
+      <div className="dash-bottom-row">
+        <RenderActivity overTime={lifetime.overTime} />
 
-        {recentJobs.length === 0 ? (
-          <p className="dash-fleet-empty">
-            {loadingOngoing || loadingPast ? "Loading your renders…" : "No renders yet — your jobs will show up here."}
-          </p>
-        ) : (
-          <div className="dash-recent-table">
-            <div className="dash-recent-head">
-              <span className="dr-col-job">JOB</span>
-              <span className="dr-col-progress">PROGRESS</span>
-              <span className="dr-col-frames">FRAMES</span>
-              <span className="dr-col-cost">COST</span>
-              <span className="dr-col-date">SUBMITTED</span>
-              <span className="dr-col-status">STATUS</span>
-            </div>
-            {recentJobs.map((job) => {
-              const done = job.status === "done";
-              const pct = done ? 100 : Math.round(jobProgressPct(job));
-              const total = jobTotalFrames(job);
-              const rendered = jobRenderedFrames(job);
-              const cost = jobCostCredits(job);
-              const engine = jobEngineLabel(job);
-              const samples = jobSamples(job);
-              const sub = engine !== "—" ? (samples ? `${engine} · ${samples} spp` : engine) : "";
-              return (
-                <button
-                  key={jobKey(job)}
-                  type="button"
-                  className="dash-recent-row2"
-                  onClick={() => onNavigate?.("myjobs")}
-                >
-                  <span className="dr-col-job dash-recent-job">
+        <div className="card dash-recent-card">
+          <div className="dash-panel-head">
+            <span className="dash-panel-title">Recent jobs</span>
+            <button className="dash-recent-all" onClick={() => onNavigate?.("myjobs")}>View all →</button>
+          </div>
+
+          {recentJobs.length === 0 ? (
+            <p className="dash-fleet-empty">
+              {loadingOngoing || loadingPast ? "Loading your renders…" : "No renders yet — your jobs will show up here."}
+            </p>
+          ) : (
+            <div className="dash-recent-compact">
+              {recentJobs.map((job) => {
+                const done = job.status === "done";
+                const pct = done ? 100 : Math.round(jobProgressPct(job));
+                const engine = jobEngineLabel(job);
+                const samples = jobSamples(job);
+                const sub = engine !== "—" ? (samples ? `${engine} · ${samples} spp` : engine) : "";
+                return (
+                  <button
+                    key={jobKey(job)}
+                    type="button"
+                    className="dash-rc-row"
+                    onClick={() => onNavigate?.("myjobs")}
+                  >
                     <span className="dash-recent-thumb">
                       <JobThumbnail job={job} authToken={authToken} backendUrl={backendUrl} />
                     </span>
-                    <span className="dash-recent-jobtext">
+                    <span className="dash-rc-info">
                       <span className="dash-recent-name">{resolveJobFilename(job)}</span>
                       {sub && <span className="dash-recent-sub">{sub}</span>}
                     </span>
-                  </span>
-                  <span className="dr-col-progress dash-recent-prog">
-                    <span className="dash-recent-bar">
+                    <span className="dash-rc-bar">
                       <span
                         style={{
                           width: `${pct}%`,
@@ -441,21 +606,16 @@ export default function HomePage({
                         }}
                       />
                     </span>
-                    <span className="dash-recent-pct">{total > 0 || done ? `${pct}%` : "—"}</span>
-                  </span>
-                  <span className="dr-col-frames dash-recent-mono">{total > 0 ? `${rendered}/${total}` : "—"}</span>
-                  <span className="dr-col-cost dash-recent-mono">{cost > 0 ? `${formatCredits(cost)} cr` : "—"}</span>
-                  <span className="dr-col-date dash-recent-mono">{formatDateTimeLabel(job.submitted_at)}</span>
-                  <span className="dr-col-status">
+                    <span className="dash-rc-date">{formatDateTimeLabel(job.submitted_at)}</span>
                     <span className={`job-status-badge ${STATUS_TO_BADGE[job.status] || "status-pending"}`}>
                       {STATUS_BADGE_LABELS[job.status] || job.status}
                     </span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

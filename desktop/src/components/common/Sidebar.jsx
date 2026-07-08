@@ -1,3 +1,4 @@
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "../../contexts/AuthContext";
 import { useUserProfile } from "../../contexts/UserProfileContext";
@@ -29,6 +30,32 @@ function BrandMark() {
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path d="M12 3l7 4v6l-7 4-7-4V7z" fill="#fff" fillOpacity=".92" />
       <path d="M12 9l3 1.7v3L12 15l-3-1.7v-3z" fill="var(--th)" />
+    </svg>
+  );
+}
+
+function CollapseIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <path d="M9 4v16" />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="4.2" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z" />
     </svg>
   );
 }
@@ -182,11 +209,23 @@ export default function Sidebar({
   mode,
   onModeChange,
   activeDownloadCount = 0,
+  theme = "light",
+  onToggleTheme,
 }) {
   const { t } = useTranslation("common");
   const { user, signOut } = useAuth();
   const { profile } = useUserProfile();
   const isAdmin = profile?.role === "admin";
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem("pcrent_sidebar_collapsed") === "1"
+  );
+  const toggleCollapsed = useCallback(() => {
+    setCollapsed((c) => {
+      const next = !c;
+      try { localStorage.setItem("pcrent_sidebar_collapsed", next ? "1" : "0"); } catch { /* storage unavailable */ }
+      return next;
+    });
+  }, []);
   const pages = (mode === "renter" ? RENTER_PAGES : RENTEE_PAGES).filter(
     (p) => p.id !== "configuration" || isAdmin
   );
@@ -198,12 +237,21 @@ export default function Sidebar({
   const displayName = user?.email || user?.displayName || t("user.signedIn");
 
   return (
-    <nav className="sidebar">
+    <nav className={`sidebar${collapsed ? " collapsed" : ""}`}>
       <div className="sidebar-brand">
         <span className="sidebar-brand-mark">
           <BrandMark />
         </span>
         <span className="sidebar-brand-text">Forge</span>
+        <button
+          type="button"
+          className="sidebar-collapse-btn"
+          onClick={toggleCollapsed}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          <CollapseIcon />
+        </button>
       </div>
 
       <div className="sidebar-nav">
@@ -216,6 +264,7 @@ export default function Sidebar({
               type="button"
               className={`nav-item${active ? " nav-item-active" : ""}`}
               onClick={() => onNavigate(page.id)}
+              title={collapsed ? t(page.labelKey) : undefined}
             >
               <span className="nav-icon"><Icon /></span>
               <span className="nav-label">{t(page.labelKey)}</span>
@@ -275,7 +324,18 @@ export default function Sidebar({
         )}
 
         <div className="sidebar-meta-row">
-          <LanguageSelector />
+          <div className="sidebar-meta-controls">
+            <LanguageSelector />
+            <button
+              type="button"
+              className="sidebar-theme-toggle"
+              onClick={onToggleTheme}
+              title={theme === "dark" ? "Light mode" : "Dark mode"}
+              aria-label="Toggle theme"
+            >
+              {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+            </button>
+          </div>
           <div className="sidebar-version">v1.0.0</div>
         </div>
       </div>

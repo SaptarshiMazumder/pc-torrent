@@ -219,7 +219,7 @@ function reducer(state, action) {
 
 // ─── Component ──────────────────────────────────────────────
 
-export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
+export default function CreateRenderPage({ backendUrl, onJobSubmitted, onNavigate }) {
   const { t } = useTranslation("common");
   const { showError } = useError();
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
@@ -264,6 +264,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
   // 2 = HIGH.  Default NORMAL so the queue ordering is unchanged for
   // anyone who never touches the selector.
   const [priority, setPriority] = useState(1);
+  // Confirm dialog before discarding the analyzed file + its render settings.
+  const [confirmChangeFile, setConfirmChangeFile] = useState(false);
 
   // ── Blender detection ───────────────────────────────────
   useEffect(() => {
@@ -1160,98 +1162,43 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
     <div className="page cr-page">
       <div className="cr-header">
         <div className="page-header-title">
-          <div className="page-eyebrow">{t("eyebrow.rentee")}</div>
           <h2>Create Render</h2>
         </div>
-        {showSettings && (
-          <div className="cr-header-actions">
-            {needsUpload && (
-              <button
-                className="btn btn-primary cr-start-btn"
-                type="button"
-                onClick={handleUpload}
-                disabled={isBusy || !!packagingWait.startedAt}
-                title={packagingWait.startedAt ? "Waiting for background packaging to finish…" : undefined}
-              >
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
-                Upload
-              </button>
-            )}
-            {canStart && (
-              <button
-                className="btn btn-ghost cr-cost-recalc-btn"
-                type="button"
-                onClick={refreshCostEstimate}
-                disabled={costEstimateLoading}
-                title="Re-fetch the cost / wall-time estimate from the backend (useful while tuning the analyzer constants)"
-                style={{
-                  padding: "6px 12px",
-                  fontSize: 12,
-                  marginRight: 8,
-                  opacity: costEstimateLoading ? 0.6 : 1,
-                }}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ marginRight: 5, verticalAlign: "middle" }}>
-                  <polyline points="23 4 23 10 17 10" />
-                  <polyline points="1 20 1 14 7 14" />
-                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                </svg>
-                {costEstimateLoading ? "Recalculating…" : "Recalculate"}
-              </button>
-            )}
-            {canStart && (() => {
-              const cost = formatCost(costEstimate);
-              const time = formatTime(costEstimate);
-              return (
-                <span className="cr-cost-pill" title="Estimated cost range and wall-clock time for this render">
-                  {costEstimateLoading && !costEstimate ? "…" : cost || "—"}
-                  {time ? ` • ${time}` : ""}
-                </span>
-              );
-            })()}
-            {canStart && (
-              <button className="btn btn-primary cr-start-btn" type="button" onClick={handleStartRender}>
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                Start Rendering
-              </button>
-            )}
-            {isBusy && (
-              <button className="btn btn-danger cr-start-btn" type="button" onClick={handleStop}>Stop</button>
-            )}
-          </div>
-        )}
       </div>
 
       {/* ── Source picker (IDLE stage) ── */}
       {showSourcePicker && (
         <div className="cr-source-section">
-          {/* File drop zone */}
-          <div className="cr-source-top">
-            <button
-              type="button"
-              className={`cr-drop-zone ${file ? "cr-drop-zone--has-file" : ""}`}
-              onClick={handlePickFile}
-              onDragOver={(e) => { e.preventDefault(); }}
-              onDrop={handleDrop}
-            >
-              {file && (
-                <button type="button" className="cr-drop-clear" aria-label="Clear" onClick={(e) => { e.stopPropagation(); dispatch({ type: "CLEAR_SOURCE" }); }}>
+          {/* Drop zone — centered card (from the Aurora Glass design).  A div
+              (not a button) so the has-file "clear" button can nest legally. */}
+          <div
+            className={`cr-dropzone ${file ? "cr-dropzone--has-file" : ""}`}
+            role="button"
+            tabIndex={0}
+            onClick={handlePickFile}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handlePickFile(); } }}
+            onDragOver={(e) => { e.preventDefault(); }}
+            onDrop={handleDrop}
+          >
+            {file ? (
+              <>
+                <button type="button" className="cr-dropzone-clear" aria-label="Clear" onClick={(e) => { e.stopPropagation(); dispatch({ type: "CLEAR_SOURCE" }); }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6L6 18M6 6l12 12" /></svg>
                 </button>
-              )}
-              <span className={`cr-drop-icon ${file ? `file-kind ${fileKind}` : ""}`}>
-                {file ? <FileKindIcon kind={fileKind} /> : (
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
-                )}
-              </span>
-              <span className="cr-drop-label">{file ? file.name : "Choose or drop file"}</span>
-              <span className="cr-drop-hint">{file ? formatSizeMb(file.size) : ".blend or .zip"}</span>
-            </button>
-
-            <button className="btn btn-primary cr-analyze-btn" type="button" onClick={() => handleAnalyze()} disabled={!hasSource}>
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
-              Analyze &amp; Continue
-            </button>
+                <span className={`cr-dropzone-icon file-kind ${fileKind}`}><FileKindIcon kind={fileKind} /></span>
+                <div className="cr-dropzone-title">{file.name}</div>
+                <div className="cr-dropzone-sub">{formatSizeMb(file.size)} · ready — click to choose a different file</div>
+              </>
+            ) : (
+              <>
+                <span className="cr-dropzone-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 9l5-5 5 5M12 4v12" /></svg>
+                </span>
+                <div className="cr-dropzone-title">Drop a .blend or .zip</div>
+                <div className="cr-dropzone-sub">We&apos;ll analyze the scene, cameras &amp; frame range</div>
+                <span className="cr-dropzone-browse">Browse files</span>
+              </>
+            )}
           </div>
 
           {/* Saved files */}
@@ -1292,6 +1239,12 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                             <span className="saved-picker-display-name">{display}</span>
                             {display !== asset.input_filename && <span className="saved-picker-original-name">{asset.input_filename}</span>}
                           </span>
+                          {savedInputId === asset.id && (
+                            <span className="saved-picker-selected-badge">
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                              SELECTED
+                            </span>
+                          )}
                         </div>
                         <span className="saved-picker-date">{formatTimestamp(timestamp)}</span>
                         <span className="saved-picker-type">{kind === "blend" ? "Blend" : kind === "zip" ? "Zip" : "File"}</span>
@@ -1303,22 +1256,30 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
               ))}
             </div>
           </div>
-        </div>
-      )}
 
-      {/* ── Active file bar (when configuring) ── */}
-      {!showSourcePicker && (
-        <div className="cr-file-bar">
-          <div className="cr-file-bar-icon">
-            <FileKindIcon kind={file ? fileKindFromName(file.name) : "blend"} />
-          </div>
-          <div className="cr-file-bar-info">
-            <span className="cr-file-bar-name">{sourceLabel || "No file selected"}</span>
-            <span className="cr-file-bar-status">{stageLabel}</span>
-          </div>
-          <button type="button" className="btn btn-secondary" onClick={handleReset} disabled={isBusy}>
-            Change File
-          </button>
+          {/* Sticky action bar — appears once a source is chosen (dropped or
+              picked). Stays pinned near the content so the next step is obvious. */}
+          {hasSource && (
+            <div className="cr-action-bar">
+              <div className="cr-action-file">
+                <span className="cr-action-icon">
+                  <FileKindIcon kind={file ? fileKind : fileKindFromName(sourceLabel || "")} />
+                </span>
+                <span className="cr-action-text">
+                  <b>{sourceLabel || (file ? file.name : "File")}</b> ready to analyze
+                </span>
+              </div>
+              <div className="cr-action-btns">
+                <button className="cr-action-cancel-x" type="button" onClick={() => dispatch({ type: "CLEAR_SOURCE" })} disabled={isBusy} title="Cancel selection" aria-label="Cancel selection">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                </button>
+                <button className="btn btn-primary cr-analyze-btn" type="button" onClick={() => handleAnalyze()} disabled={isBusy}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
+                  Analyze &amp; Continue →
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1399,8 +1360,24 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         <div className="cr-settings-grid">
           <div className="cr-card cr-card-form">
             <div className="cr-card-header">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-              <span>Render Setup</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--th)" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+              <span>Render Settings</span>
+              {sourceLabel && (
+                <span className="cr-file-pill" title={sourceLabel}>
+                  <span className="cr-file-pill-icon"><FileKindIcon kind={file ? fileKindFromName(file.name) : fileKindFromName(sourceLabel)} /></span>
+                  <span className="cr-file-pill-name">{sourceLabel}</span>
+                  <button
+                    type="button"
+                    className="cr-file-pill-x"
+                    onClick={() => setConfirmChangeFile(true)}
+                    disabled={isBusy}
+                    title="Change file (discards these settings)"
+                    aria-label="Change file"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                  </button>
+                </span>
+              )}
             </div>
 
             {/* Output ----------------------------------------------------- */}
@@ -1686,31 +1663,6 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                 </div>
               </div>
             </section>
-            {/* Queue priority ------------------------------------------- */}
-            <section className="cr-form-section">
-              <div className="cr-form-section-title">Queue Priority</div>
-              <div className="cr-form-section-body">
-                <div className="cr-priority-group" role="radiogroup" aria-label="Queue priority">
-                  {[
-                    { value: 0, label: "Low",    hint: "100% cost · runs last" },
-                    { value: 1, label: "Normal", hint: "110% cost · default" },
-                    { value: 2, label: "High",   hint: "120% cost · runs first" },
-                  ].map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      role="radio"
-                      aria-checked={priority === opt.value}
-                      onClick={() => setPriority(opt.value)}
-                      className={`cr-priority-option${priority === opt.value ? " cr-priority-option--active" : ""}`}
-                    >
-                      <span className="cr-priority-option-label">{opt.label}</span>
-                      <span className="cr-priority-option-hint">{opt.hint}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </section>
             {/* Scene Stats (read-only -- analyzer metadata) -------------- */}
             {analysis?.heaviness && (
               <section className="cr-form-section">
@@ -1745,6 +1697,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
 
           {/* ── Right column: queue panel + (optional) analysis report ── */}
           <aside className="cr-aside">
+            {/* Queue Status — shown first so you can gauge the queue before
+                choosing a priority below. */}
             {queueDepth && (() => {
               const FLEETS = ["vast", "modal", "community"];
               const totals = ["high", "normal", "low"].reduce((acc, level) => {
@@ -1761,8 +1715,8 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
               return (
                 <div className="cr-card cr-card-queue">
                   <div className="cr-card-header">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
-                    <span>Queue right now</span>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--th)" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
+                    <span>Queue Status</span>
                   </div>
                   <ul className="cr-queue-list">
                     {[
@@ -1783,11 +1737,95 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
                     })}
                   </ul>
                   <div className="cr-queue-note">
-                    Wait depends on what's ahead of your priority.
+                    Wait depends on what&apos;s ahead of your priority.
                   </div>
                 </div>
               );
             })()}
+
+            {/* Estimate card — queue priority, cost/time estimate, and the
+                render actions (moved out of the page header). */}
+            <div className="cr-card cr-launch-card">
+              <div className="cr-card-header">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--th)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5 19 19M19 5l-2.5 2.5M7.5 16.5 5 19" /><circle cx="12" cy="12" r="3.2" /></svg>
+                <span>Estimate</span>
+              </div>
+
+              <section className="cr-form-section cr-launch-section">
+                <div className="cr-form-section-title">Queue Priority</div>
+                <div className="cr-form-section-body">
+                  <div className="cr-priority-group" role="radiogroup" aria-label="Queue priority">
+                    {[
+                      { value: 0, label: "Low",    hint: "100% cost · runs last" },
+                      { value: 1, label: "Normal", hint: "110% cost · default" },
+                      { value: 2, label: "High",   hint: "120% cost · runs first" },
+                    ].map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={priority === opt.value}
+                        onClick={() => setPriority(opt.value)}
+                        className={`cr-priority-option${priority === opt.value ? " cr-priority-option--active" : ""}`}
+                      >
+                        <span className="cr-priority-option-label">{opt.label}</span>
+                        <span className="cr-priority-option-hint">{opt.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              {canStart && (() => {
+                const cost = formatCost(costEstimate);
+                const time = formatTime(costEstimate);
+                return (
+                  <div className="cr-estimate">
+                    <div className="cr-estimate-head">
+                      <span className="cr-estimate-eyebrow">Estimated</span>
+                      <button type="button" className="cr-estimate-recalc" onClick={refreshCostEstimate} disabled={costEstimateLoading} title="Re-fetch the cost / wall-time estimate">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
+                        {costEstimateLoading ? "Recalculating…" : "Recalculate"}
+                      </button>
+                    </div>
+                    <div className="cr-estimate-figs">
+                      <div className="cr-estimate-fig">
+                        <div className="cr-estimate-val">{time || "—"}</div>
+                        <div className="cr-estimate-lbl">Wall time</div>
+                      </div>
+                      <div className="cr-estimate-fig">
+                        <div className="cr-estimate-val cr-estimate-val--cost">{(costEstimateLoading && !costEstimate) ? "…" : (cost || "—")}</div>
+                        <div className="cr-estimate-lbl">Credits</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="cr-launch-actions">
+                {needsUpload && (
+                  <button
+                    className="btn btn-primary cr-launch-btn"
+                    type="button"
+                    onClick={handleUpload}
+                    disabled={isBusy || !!packagingWait.startedAt}
+                    title={packagingWait.startedAt ? "Waiting for background packaging to finish…" : undefined}
+                  >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
+                    Upload
+                  </button>
+                )}
+                {canStart && (
+                  <button className="btn btn-primary cr-launch-btn" type="button" onClick={handleStartRender}>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                    Start Rendering
+                  </button>
+                )}
+                {isBusy && (
+                  <button className="btn btn-danger cr-launch-btn" type="button" onClick={handleStop}>Stop</button>
+                )}
+              </div>
+            </div>
 
             {prepResult && (prepResult.analysis_warnings?.length > 0 || prepResult.prepare_warnings?.length > 0 || prepResult.analysis_errors?.length > 0 || prepResult.prepare_errors?.length > 0) && (() => {
               const allWarnings = [...(prepResult.analysis_warnings || []), ...(prepResult.prepare_warnings || [])];
@@ -1835,18 +1873,50 @@ export default function CreateRenderPage({ backendUrl, onJobSubmitted }) {
         </div>
       )}
 
-      {/* Action row when in source picker */}
-      {showSourcePicker && (
-        <div className="submit-action-row">
-          {needsUpload && (
-            <button
-              className="btn btn-primary submit-primary-btn"
-              type="button"
-              onClick={handleUpload}
-              disabled={isBusy || !!packagingWait.startedAt}
-              title={packagingWait.startedAt ? "Waiting for background packaging to finish…" : undefined}
-            >Upload</button>
-          )}
+      {/* ── Submitted (DONE) — success state so the page is never blank and a
+             new render can always be started. ── */}
+      {stage === STAGE.DONE && (
+        <div className="cr-done">
+          <div className="cr-done-icon">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+          </div>
+          <div className="cr-done-title">Render submitted</div>
+          <div className="cr-done-sub">
+            <b>{sourceLabel || "Your render"}</b> is now in the queue. Track its progress in My Jobs.
+          </div>
+          <div className="cr-done-actions">
+            <button className="btn btn-secondary" type="button" onClick={() => onNavigate?.("myjobs")}>
+              View in My Jobs
+            </button>
+            <button className="btn btn-primary cr-done-new" type="button" onClick={handleReset}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
+              Create another render
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm before changing the file — discards the analyzed settings. */}
+      {confirmChangeFile && (
+        <div className="cr-confirm-overlay" onClick={() => setConfirmChangeFile(false)}>
+          <div className="cr-confirm-dialog" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <div className="cr-confirm-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+            </div>
+            <div className="cr-confirm-title">Change file?</div>
+            <div className="cr-confirm-body">
+              All the render settings you&apos;ve configured for <b>{sourceLabel}</b> will be lost.
+              You&apos;ll start over from file selection.
+            </div>
+            <div className="cr-confirm-actions">
+              <button className="btn btn-secondary" type="button" onClick={() => setConfirmChangeFile(false)}>
+                Keep editing
+              </button>
+              <button className="btn btn-danger" type="button" onClick={() => { setConfirmChangeFile(false); handleReset(); }}>
+                Discard &amp; change file
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

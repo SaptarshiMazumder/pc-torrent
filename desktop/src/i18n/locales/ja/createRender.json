@@ -30,11 +30,19 @@
       "blend": "Blend",
       "zip": "Zip",
       "file": "ファイル"
-    }
+    },
+    "dropTitle": ".blend または .zip をドロップ",
+    "dropSubtitle": "シーン・カメラ・フレーム範囲を解析します",
+    "browseFiles": "ファイルを選択",
+    "cancelSelection": "選択をキャンセル",
+    "readyToAnalyze": "解析の準備完了",
+    "selectedBadge": "選択済み",
+    "sizeReadyHint": "{{size}} · 準備完了 — クリックして別のファイルを選択"
   },
   "fileBar": {
     "noFileSelected": "ファイルが選択されていません",
-    "changeFile": "ファイルを変更"
+    "changeFile": "ファイルを変更",
+    "changeFileTitle": "ファイルを変更（この設定は破棄されます）"
   },
   "savedGroup": {
     "today": "今日",
@@ -321,5 +329,25 @@
   "prompts": {
     "renameSaved": "保存されたファイルの名前を変更",
     "deleteConfirm": "「{{name}}」を削除しますか？"
+  },
+  "estimate": {
+    "title": "見積もり",
+    "eyebrow": "推定",
+    "recalcTitle": "コスト・所要時間の見積もりを再取得",
+    "wallTime": "所要時間",
+    "credits": "クレジット"
+  },
+  "done": {
+    "title": "レンダーを送信しました",
+    "yourRender": "あなたのレンダー",
+    "subtitle": "がキューに追加されました。進行状況は「マイジョブ」で確認できます。",
+    "viewInMyJobs": "マイジョブで表示",
+    "createAnother": "別のレンダーを作成"
+  },
+  "confirmChange": {
+    "title": "ファイルを変更しますか？",
+    "body": "<0>{{file}}</0> に設定したレンダー設定はすべて失われます。ファイル選択からやり直しになります。",
+    "keepEditing": "編集を続ける",
+    "discard": "破棄してファイルを変更"
   }
 }

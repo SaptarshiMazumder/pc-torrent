@@ -70,6 +70,33 @@ function StatTile({ icon, label, value }) {
   );
 }
 
+// 108px progress ring for the render-group gauge card (ember arc over a hair
+// track, rounded cap + glow). Purely presentational — pct/color are passed in.
+function GroupGauge({ pct, color, label }) {
+  const size = 108;
+  const sw = 9;
+  const r = (size - sw) / 2;
+  const c = 2 * Math.PI * r;
+  const val = pct ?? 0;
+  return (
+    <div className="jd-ring" style={{ width: size, height: size }}>
+      <svg width={size} height={size}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--hair)" strokeWidth={sw} />
+        <circle
+          cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={sw} strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c - (val / 100) * c}
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+          style={{ filter: `drop-shadow(0 0 6px ${color}55)`, transition: "stroke-dashoffset 0.5s ease" }}
+        />
+      </svg>
+      <div className="jd-ring-center">
+        <b style={{ color }}>{pct != null ? `${pct}%` : "—"}</b>
+        <span>{label}</span>
+      </div>
+    </div>
+  );
+}
+
 function RenderGroupDetail({
   job, backendUrl, authToken, tasksLoading, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
@@ -147,30 +174,20 @@ function RenderGroupDetail({
     <div className="jd-body jd-body-split">
       <div className="jd-detail-grid">
         <div className="jd-left-col">
-          <div className="jd-headline">
-            <div className="jd-headline-main">
-              <div className="jd-headline-value" style={{ color: gaugeColor }}>
-                {overallPct != null ? `${overallPct}%` : "—"}
+          <div className="card jd-gauge-card">
+            <GroupGauge pct={overallPct} color={gaugeColor} label={t("detail.complete")} />
+            <div className="jd-gauge-info">
+              <div className="jd-gauge-frames-lbl">{t("detail.frames")}</div>
+              <div className="jd-gauge-frames-val">
+                {total != null ? `${rendered} / ${total}` : `${rendered}`}
               </div>
-              <div className="jd-headline-label">{t("detail.complete")}</div>
-            </div>
-            <div className="jd-headline-progress">
-              <div className="jd-headline-frames">
-                <span className="jd-headline-frames-label">{t("detail.frames")}</span>
-                <span className="jd-headline-frames-value">
-                  {total != null ? `${rendered} / ${total}` : `${rendered}`}
-                </span>
-              </div>
-              <div className="jd-headline-bar">
-                <div
-                  className="jd-headline-bar-fill"
-                  style={{ width: `${overallPct ?? 0}%`, background: gaugeColor }}
-                />
+              <div className="jd-gauge-bar">
+                <div className="jd-gauge-bar-fill" style={{ width: `${overallPct ?? 0}%`, background: gaugeColor }} />
               </div>
               {totalEstimatedCost > 0 && (
-                <div className="jd-headline-cost">
-                  <span className="jd-headline-cost-label">{t("detail.estimatedCost")}</span>
-                  <span className="jd-headline-cost-value">{t("cost.approx", { credits: formatCredits(totalEstimatedCost) })}</span>
+                <div className="jd-gauge-cost">
+                  <span className="jd-gauge-cost-lbl">{t("detail.estimatedCost")}</span>
+                  <span className="jd-gauge-cost-val">{t("cost.approx", { credits: formatCredits(totalEstimatedCost) })}</span>
                 </div>
               )}
             </div>
@@ -195,7 +212,7 @@ function RenderGroupDetail({
                 label={t("detail.outputFiles")} value={availableOutputCount}
               />
             </div>
-            <div className="jd-stat-tile-card">
+            <div className="jd-stat-tile-card jd-stat-tile-card--fail">
               <StatTile
                 icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01" /></svg>}
                 label={t("detail.failed")} value={tasksLoading ? "…" : (tasksList.filter((task) => task.status === "failed")).length}
@@ -207,13 +224,26 @@ function RenderGroupDetail({
             <div className="jd-preview-card">
               <div className="jd-preview-thumb">
                 <JobThumbnail job={job} authToken={authToken} backendUrl={backendUrl} />
+                {!["done", "failed", "cancelled"].includes(job.status) && <div className="jd-preview-sweep" />}
               </div>
               <div className="jd-preview-meta">
                 <span className="jd-preview-name">{latestOutputFile}</span>
                 <span className="jd-preview-tag">{t("detail.latestFrame")}</span>
               </div>
             </div>
+          ) : isTerminalStatus(job.status) ? (
+            // Terminal before any frame landed — nothing will ever load, so show
+            // an empty state instead of a spinner that would hang forever.
+            <div className="jd-preview-empty">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="9" cy="9" r="2" />
+                <path d="M21 15l-5-5L5 21" />
+              </svg>
+              <span>{t("detail.noPreview")}</span>
+            </div>
           ) : (
+            // Still rendering, first frame not in yet — a genuine wait, so spin.
             <div className="jd-preview-loader-wrap">
               <Loader />
             </div>
@@ -340,7 +370,7 @@ function RenderGroupDetail({
               <HeavinessPanel
                 heaviness={job.heaviness ?? null}
                 overrides={job.resolved_render_settings?.render ?? null}
-                loading={!job.heaviness}
+                loading={tasksLoading}
               />
             )}
             {costsOpen && (
@@ -644,11 +674,14 @@ export default function JobDetailView({
                   {new Date(job.submitted_at).toLocaleDateString()} {new Date(job.submitted_at).toLocaleTimeString()}
                 </span>
               )}
-              <span className="jd-live-cost" title={t("detail.accruedCostTitle")}>
-                <span className="jd-live-cost-label">{costLabel}</span>
-                <span className="jd-live-cost-value">{t("cost.exact", { credits: formatCredits(liveCost) })}</span>
-              </span>
             </div>
+          </div>
+          <div className="jd-live-cost" title={t("detail.accruedCostTitle")}>
+            <span className="jd-live-cost-label">
+              {!["done", "failed", "cancelled"].includes(status) && <span className="jd-live-cost-dot" />}
+              {costLabel}
+            </span>
+            <span className="jd-live-cost-value">{t("cost.exact", { credits: formatCredits(liveCost) })}</span>
           </div>
         </div>
       </div>

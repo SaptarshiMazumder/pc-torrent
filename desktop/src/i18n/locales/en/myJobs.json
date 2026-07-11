@@ -70,6 +70,7 @@
     "failed": "Failed",
     "estimatedCost": "Estimated cost",
     "latestFrame": "Latest Rendered Frame",
+    "noPreview": "No preview",
     "stopRender": "Stop Render",
     "stopping": "Stopping...",
     "downloadAll": "Download All",

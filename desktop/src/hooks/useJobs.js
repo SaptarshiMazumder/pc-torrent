@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { listRenderGroups, getRenderGroup, deleteRenderGroup } from "../services/api";
+import { auth } from "../firebase/config";
 import i18n from "../i18n/i18n";
 
 const POLL_INTERVAL = 3000;
@@ -9,7 +10,19 @@ const TERMINAL_STATUSES = new Set(["done", "failed", "cancelled"]);
 // Past renders never change once terminal -- cache them in module scope so
 // the first list endpoint hit per session is the only one.  Survives hook
 // remount / navigation; cleared only when the app reloads.
-let _pastCache = null; // { jobs, offset, hasMore } | null
+let _pastCache = null; // { uid, jobs, offset, hasMore } | null
+
+// Only reuse the cached past renders if they belong to the currently signed-in
+// user — belt-and-braces against a cross-user leak if a clear is ever missed.
+// (AuthContext also clears it outright whenever the user changes.)
+function pastCacheForUser() {
+  return _pastCache && _pastCache.uid === (auth.currentUser?.uid ?? null) ? _pastCache : null;
+}
+
+// Cleared by clearUserScopedCaches() on any authenticated-user change.
+export function resetPastCache() {
+  _pastCache = null;
+}
 
 function isTerminal(status) {
   return TERMINAL_STATUSES.has(status);
@@ -88,19 +101,19 @@ function dedupeAppend(prev, incoming) {
 
 export function useJobs(backendUrl) {
   const [ongoingJobs, setOngoingJobs] = useState([]);
-  const [pastJobs, setPastJobs] = useState(() => _pastCache?.jobs?.slice() || []);
+  const [pastJobs, setPastJobs] = useState(() => pastCacheForUser()?.jobs?.slice() || []);
   const [loadingOngoing, setLoadingOngoing] = useState(false);
   const [loadingPast, setLoadingPast] = useState(false);
   const [loadingMoreOngoing, setLoadingMoreOngoing] = useState(false);
   const [loadingMorePast, setLoadingMorePast] = useState(false);
   const [hasMoreOngoing, setHasMoreOngoing] = useState(false);
-  const [hasMorePast, setHasMorePast] = useState(_pastCache?.hasMore ?? false);
+  const [hasMorePast, setHasMorePast] = useState(pastCacheForUser()?.hasMore ?? false);
 
   const backendUrlRef = useRef(backendUrl);
   const ongoingRef = useRef(ongoingJobs);
   const pastRef = useRef(pastJobs);
   const ongoingOffsetRef = useRef(0);
-  const pastOffsetRef = useRef(_pastCache?.offset ?? 0);
+  const pastOffsetRef = useRef(pastCacheForUser()?.offset ?? 0);
   const ongoingControllerRef = useRef(null);
   const pastControllerRef = useRef(null);
   const loadingMoreOngoingRef = useRef(false);
@@ -114,6 +127,7 @@ export function useJobs(backendUrl) {
   // identical state.  Cache mirrors what the user has seen.
   const writePastCache = useCallback(() => {
     _pastCache = {
+      uid: auth.currentUser?.uid ?? null,
       jobs: pastRef.current.slice(),
       offset: pastOffsetRef.current,
       hasMore: hasMorePast,
@@ -235,9 +249,20 @@ export function useJobs(backendUrl) {
 
   // Initial load -- ongoing always; past only if cache miss this session.
   useEffect(() => {
-    if (!backendUrl) return;
+    if (!backendUrl) {
+      // Logged out (backendUrl is null when there's no user): drop any
+      // in-memory rows so the next user never sees the previous user's
+      // renders before their own fetch lands.
+      setOngoingJobs([]);
+      setPastJobs([]);
+      ongoingOffsetRef.current = 0;
+      pastOffsetRef.current = 0;
+      setHasMoreOngoing(false);
+      setHasMorePast(false);
+      return;
+    }
     fetchOngoingFirstPage(backendUrl);
-    if (!_pastCache) {
+    if (!pastCacheForUser()) {
       fetchPastFirstPage(backendUrl);
     }
     return () => {

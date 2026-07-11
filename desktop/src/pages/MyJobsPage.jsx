@@ -141,6 +141,10 @@ export default function MyJobsPage({
   // — fetch the full DTO via /render-groups/{id} when one is selected,
   // and cache it in localStorage forever (terminal data never changes).
   const [terminalDetailJob, setTerminalDetailJob] = useState(null);
+  // True ONLY while the /render-groups/{id} detail fetch is actually in flight
+  // (not merely "we have no data") — so a failed/empty fetch stops the loaders
+  // instead of spinning forever.
+  const [detailFetching, setDetailFetching] = useState(false);
   const { downloads, startDownload } = useDownloads();
   const { showError } = useError();
   const { t } = useTranslation(["myJobs", "common", "downloads"]);
@@ -297,9 +301,11 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
   useEffect(() => {
     if (!selectedJobId || !isTerminalSelection || cachedTerminalJob) {
       setTerminalDetailJob(null);
+      setDetailFetching(false);
       return;
     }
     setTerminalDetailJob(null);
+    setDetailFetching(true);
     let cancelled = false;
     getRenderGroup(backendUrl, selectedJobId)
       .then((data) => {
@@ -311,6 +317,11 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
         // Network error -- terminal data stays unfilled.  The detail view
         // already renders off the slim list DTO so the user just doesn't
         // get the rich panels until they hit Refresh.
+      })
+      .finally(() => {
+        // Settle the loading flag whether the fetch succeeded or failed, so the
+        // panels drop their spinners and show real (possibly empty) state.
+        if (!cancelled) setDetailFetching(false);
       });
     return () => {
       cancelled = true;
@@ -337,7 +348,7 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
   // the list endpoint; cache hits land synchronously.  The detail view
   // uses this to render the page immediately off the slim list DTO and
   // show inline loaders on the panels that need the full tasks array.
-  const tasksLoading = !!selectedJob && isTerminalSelection && !terminalData;
+  const tasksLoading = detailFetching;
 
   const handleSelectJob = useCallback((id) => {
     setSelectedJobId(id);

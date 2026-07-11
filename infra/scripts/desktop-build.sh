@@ -54,11 +54,19 @@ mkdir -p "$BUILD_ROOT" "$DIST_DIR"
 echo "==> Cleaning $BUILD_DIR"
 rm -rf "$BUILD_DIR"
 
-echo "==> Temp-copying desktop/ -> $BUILD_DIR"
-# rsync would be cleaner, but Git Bash on Windows ships cp.  Excludes
-# node_modules + cargo target so the copy is fast.
-cp -r "$PROJECT_ROOT/desktop" "$BUILD_DIR"
-rm -rf "$BUILD_DIR/node_modules" "$BUILD_DIR/src-tauri/target" "$BUILD_DIR/dist"
+echo "==> Temp-copying desktop/ -> $BUILD_DIR (excluding node_modules + target)"
+# Stream-copy with tar so node_modules + the multi-GB Rust target dir are
+# excluded UP FRONT.  A plain ``cp -r "$PROJECT_ROOT/desktop"`` copies them
+# first and only deletes after, which on Windows/Git Bash is brutally slow
+# (tens of thousands of tiny files).  rsync isn't shipped with Git Bash; tar
+# is.  The build runs a fresh ``npm install`` + Tauri build in the copy, so
+# those dirs are regenerated anyway.
+mkdir -p "$BUILD_DIR"
+tar -C "$PROJECT_ROOT/desktop" \
+    --exclude='./node_modules' \
+    --exclude='./src-tauri/target' \
+    --exclude='./dist' \
+    -cf - . | tar -C "$BUILD_DIR" -xf -
 
 echo "==> Writing $ENV config into $BUILD_DIR"
 python - "$CONFIG_FILE" "$BUILD_DIR" <<'PY'

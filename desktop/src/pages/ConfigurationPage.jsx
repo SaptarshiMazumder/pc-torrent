@@ -117,6 +117,7 @@ export default function ConfigurationPage({ backendUrl }) {
           <VastSection draft={draft} update={update} />
           <CommunitySection draft={draft} update={update} />
           <OrchestratorSection draft={draft} update={update} />
+          <VersionGateSection draft={draft} update={update} />
         </div>
 
         <aside className="cfg-side">
@@ -461,6 +462,35 @@ function OrchestratorSection({ draft, update }) {
       <div className="cfg-grid">
         <NumberField label="max_retries" value={o.max_retries} step={1}
           onChange={(v) => update(["orchestrator", "max_retries"], v)} />
+      </div>
+    </SectionCard>
+  );
+}
+
+// Desktop force-update gate.  ``min_version`` + ``latest_url`` are handed to
+// running desktops by GET /app/min-version; a desktop below min_version is
+// hard-blocked with UpdateRequiredModal, whose Download button opens
+// latest_url.  Both are per-env (this edits the current env's config), so
+// point latest_url at that env's uploaded installer.
+function VersionGateSection({ draft, update }) {
+  const d = draft.desktop || {};
+  return (
+    <SectionCard title="Version gate (desktop update)" defaultOpen={false}>
+      <div className="cfg-grid">
+        <TextField
+          label="min_version"
+          value={d.min_version}
+          placeholder="1.0.0"
+          hint="Desktops below this are hard-blocked with the update modal. Raise it above a running build to force-update."
+          onChange={(v) => update(["desktop", "min_version"], v)}
+        />
+        <TextField
+          label="latest_url"
+          value={d.latest_url}
+          placeholder="https://github.com/.../releases/download/dev-v1.0.2/forge-dev-setup.exe"
+          hint="Public installer URL the update modal downloads from (this env)."
+          onChange={(v) => update(["desktop", "latest_url"], v)}
+        />
       </div>
     </SectionCard>
   );

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getGroupPreviewUrl, getSingleJobPreviewUrl } from "../../utils/jobUtils";
-import { getCachedFramePreview } from "../../services/frameCache";
+import { getCachedFramePreview, getResolvedFramePreview } from "../../services/frameCache";
 import openexrIcon from "../../assets/openexr-icon-color.svg";
 
 function BlenderLogo() {
@@ -79,7 +79,10 @@ export default function JobThumbnail({ job, authToken, backendUrl, className }) 
   const outputName = latestOutputFilename(job);
   const isExr = isExrFilename(outputName);
 
-  const [src, setSrc] = useState("");
+  // Seed from the session's resolved-URL map so remounts (list ↔ detail
+  // navigation, polling re-renders) show the image immediately instead of
+  // flashing the placeholder while the async cache lookup round-trips.
+  const [src, setSrc] = useState(() => (cacheKey ? getResolvedFramePreview(cacheKey) : ""));
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;

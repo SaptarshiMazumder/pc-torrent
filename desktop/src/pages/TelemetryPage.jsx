@@ -41,7 +41,7 @@ export default function TelemetryPage({
       <div className="page-header">
         <div className="page-header-title">
           <div className="page-eyebrow">{t("eyebrow.rentee")}</div>
-          <h2>Telemetry</h2>
+          <h2>{t("nav.stats")}</h2>
         </div>
         {loadingHistory && (
           <span className="tele-loading">

@@ -281,10 +281,12 @@ body::after {
   opacity: 0.28;
 }
 
+/* Dark theme: the art is black ink on WHITE paper — every blend that makes
+   it visible on a black backdrop requires inverting it, which reads as a
+   photo-negative of the wallpaper.  So the painting is a light-theme-only
+   accent; dark mode keeps its clean black gradient. */
 [data-theme="dark"] body::after {
-  filter: invert(1) hue-rotate(180deg) saturate(1.05);
-  mix-blend-mode: screen;
-  opacity: 0.2;
+  opacity: 0;
 }
 
 /* App Layout */
@@ -2436,7 +2438,7 @@ body::after {
   background: var(--glass);
   border-radius: 12px;
   color: var(--text-primary);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--card-shadow);
 }
 
 .connect-commitment-head {
@@ -2482,7 +2484,7 @@ body::after {
 .connect-commitment-input {
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--hair);
   color: var(--text-primary);
   font-size: 13px;
   font-family: inherit;
@@ -2491,7 +2493,7 @@ body::after {
 }
 
 .connect-commitment-input:focus {
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--fill-strong);
 }
 
 .connect-commitment-error {
@@ -3060,11 +3062,13 @@ body::after {
   box-shadow: 0 2px 12px rgba(239, 68, 68, 0.3);
 }
 
-/* Log Viewer */
+/* Log Viewer — fills the visible viewport minus main-content's padding
+   (78px top + 30px bottom) so the log panel's bottom edge doesn't run
+   past the window. */
 .logs-page {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 48px);
+  height: calc(100vh - 108px);
 }
 
 .page-header {
@@ -3093,17 +3097,14 @@ body::after {
 /* The fixed corner chrome (credits chip + theme toggle) floats over the
    content's top-right; header action rows reserve space so their own
    buttons never land underneath it. */
-.page-header,
+/* Scoped to the page's OWN top header row (direct child of .page) so
+   nested section headers that reuse .page-header (e.g. fleet sections)
+   don't inherit a 264px dead gutter on their right. */
+.page > .page-header,
 .cr-header,
 .dl-header,
 .jd-header-top {
   padding-right: 264px;
-}
-
-body:has(.job-detail) .page-header,
-body:has(.job-detail) .jd-header-top {
-  /* credits chip is hidden on job detail — only the 44px toggle remains */
-  padding-right: 64px;
 }
 
 .log-count {
@@ -4854,7 +4855,7 @@ body:has(.job-detail) .jd-header-top {
   margin-right: 6px;
   color: var(--text-muted);
   opacity: 1;
-  font-family: "Consolas", "Monaco", "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
 }
 
@@ -4938,7 +4939,7 @@ body:has(.job-detail) .jd-header-top {
   border-radius: 22px;
   padding: 32px 28px;
   text-align: center;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--card-shadow);
 }
 
 .update-required-icon {
@@ -5186,7 +5187,7 @@ body:has(.job-detail) .jd-header-top {
 
 .rentee-job-success code {
   color: var(--text-primary);
-  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
   word-break: break-all;
 }
 
@@ -5201,7 +5202,7 @@ body:has(.job-detail) .jd-header-top {
 .output-file-list li {
   font-size: 12px;
   color: var(--text-secondary);
-  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
 }
 
 /* (old frame gallery / latest frame styles removed — see new rules below) */
@@ -6462,7 +6463,7 @@ body:has(.job-detail) .jd-header-top {
 .job-detail-id {
   font-size: 11px;
   color: var(--text-muted);
-  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
   background: var(--hair);
   padding: 3px 8px;
   border-radius: 6px;
@@ -6500,7 +6501,10 @@ body:has(.job-detail) .jd-header-top {
 .jd-dock {
   position: fixed;
   top: 50%;
-  right: 16px;
+  /* Track the centered content column's right edge (same formula as
+     .app-corner-controls) so the dock stays visually attached to the page
+     content instead of drifting to the viewport edge on wide windows. */
+  right: max(16px, calc((100vw - var(--sidebar-w) - var(--content-max)) / 2));
   transform: translateY(-50%);
   z-index: 50;
   display: flex;
@@ -6512,15 +6516,17 @@ body:has(.job-detail) .jd-header-top {
   background: var(--glass);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  border: 1px solid var(--hair);
+  border: 1px solid var(--gbrd);
   border-radius: 28px;
-  box-shadow:
-    0 8px 24px rgba(0, 0, 0, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow: var(--card-shadow);
   transition: right 0.22s ease-out;
 }
 
-.jd-dock-shifted { right: 396px; }
+/* Drawer open: never sit under the 380px drawer, but on wide windows keep
+   tracking the content edge if that already clears it. */
+.jd-dock-shifted {
+  right: max(396px, calc((100vw - var(--sidebar-w) - var(--content-max)) / 2));
+}
 
 .jd-dock-btn {
   width: 40px;
@@ -6575,6 +6581,9 @@ body:has(.job-detail) .jd-header-top {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-left: 1px solid var(--hair);
+  box-shadow: -8px 0 32px rgba(90, 55, 20, 0.16);
+}
+[data-theme="dark"] .jd-drawer-panel {
   box-shadow: -8px 0 32px rgba(0, 0, 0, 0.45);
   display: flex;
   flex-direction: column;
@@ -7254,6 +7263,49 @@ body:has(.job-detail) .jd-header-top {
   overflow: hidden;
 }
 
+/* Clickable variant (opens the latest frame in the viewer) — resets the
+   button chrome, keeps the exact same box as the plain div version. */
+.jd-preview-thumb--click {
+  padding: 0;
+  border: none;
+  cursor: pointer;
+  text-align: inherit;
+  font: inherit;
+  color: inherit;
+}
+.jd-preview-thumb--click:disabled { cursor: default; }
+
+/* Expand-icon hint — appears on hover so the thumb reads as openable. */
+.jd-preview-open-hint {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  color: #fff;
+  opacity: 0;
+  transform: scale(0.92);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+.jd-preview-thumb--click:hover:not(:disabled) .jd-preview-open-hint,
+.jd-preview-thumb--click:focus-visible .jd-preview-open-hint {
+  opacity: 1;
+  transform: scale(1);
+}
+.jd-preview-thumb--click:hover:not(:disabled) .job-thumb-img {
+  transform: scale(1.02);
+}
+.jd-preview-thumb--click .job-thumb-img {
+  transition: transform 0.25s ease;
+}
+
 .jd-preview-sweep {
   position: absolute;
   left: 0;
@@ -7446,7 +7498,7 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .jd-frames-toggle:hover {
-  background: rgba(30, 33, 42, 0.6);
+  background: var(--soft);
 }
 
 .jd-frames-refresh {
@@ -7615,7 +7667,7 @@ body:has(.job-detail) .jd-header-top {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--hair);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -7652,7 +7704,7 @@ body:has(.job-detail) .jd-header-top {
   font-weight: 600;
   padding: 3px 8px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--hair);
 }
 .inst-chip--active { color: var(--success); }
 .inst-chip--done   { color: var(--success); }
@@ -7675,7 +7727,7 @@ body:has(.job-detail) .jd-header-top {
 .inst-active-card {
   display: flex;
   gap: 14px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--hair);
   border-radius: 14px;
   padding: 16px;
   position: relative;
@@ -7694,7 +7746,7 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .inst-active-card:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--soft);
 }
 
 .inst-active-left {
@@ -7764,7 +7816,7 @@ body:has(.job-detail) .jd-header-top {
   font-size: 11px;
   color: var(--text-secondary);
   padding: 3px 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--hair);
   border-radius: 6px;
 }
 
@@ -7778,7 +7830,7 @@ body:has(.job-detail) .jd-header-top {
 .inst-mini-bar {
   height: 3px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--hair);
   overflow: hidden;
 }
 
@@ -7822,7 +7874,7 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .inst-fin-row:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--soft);
 }
 
 .inst-fin-main {
@@ -7860,7 +7912,7 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .inst-fin-range {
-  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
 }
 
@@ -7937,7 +7989,7 @@ body:has(.job-detail) .jd-header-top {
 .inst-timeline-time {
   color: var(--text-muted);
   opacity: 0.4;
-  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 9px;
 }
 
@@ -7978,7 +8030,7 @@ body:has(.job-detail) .jd-header-top {
   white-space: pre-wrap;
   word-break: break-all;
   color: var(--muted);
-  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   line-height: 1.5;
 }
 
@@ -8063,7 +8115,7 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .job-frame-group-label {
-  color: #ffffff;
+  color: var(--text);
 }
 
 .job-frame-group-count {
@@ -8158,7 +8210,7 @@ body:has(.job-detail) .jd-header-top {
   bottom: 0;
   padding: 22px 12px 10px;
   font-size: 11px;
-  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
   color: #ffffff;
   white-space: nowrap;
   overflow: hidden;
@@ -8218,13 +8270,14 @@ body:has(.job-detail) .jd-header-top {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 20px;
-  max-width: 720px;
 }
 
+/* Title follows the canonical .page h2 scale (27px/700) so Downloads
+   doesn't read smaller than every other page. */
 .dl-header h2 {
   margin: 0;
-  font-size: 20px;
-  font-weight: 800;
+  font-size: 27px;
+  font-weight: 700;
   color: var(--text-primary);
 }
 
@@ -8289,7 +8342,7 @@ body:has(.job-detail) .jd-header-top {
 
 /* Individual download entry */
 .dl-entry {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--hair);
   border: 1px solid var(--glass-border);
   border-radius: 12px;
   padding: 14px 16px;
@@ -8297,8 +8350,8 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .dl-entry:hover {
-  background: rgba(255, 255, 255, 0.03);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: var(--soft);
+  border-color: var(--line);
 }
 
 .dl-entry--done {
@@ -8384,7 +8437,7 @@ body:has(.job-detail) .jd-header-top {
 
 .dl-entry-dismiss:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--hair);
 }
 
 /* Progress bar */
@@ -8399,7 +8452,7 @@ body:has(.job-detail) .jd-header-top {
   flex: 1;
   height: 4px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--hair);
   overflow: hidden;
 }
 
@@ -8448,14 +8501,14 @@ body:has(.job-detail) .jd-header-top {
 
 .dl-entry-path:hover {
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--hair);
 }
 
 .dl-entry-path span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   flex: 1;
   min-width: 0;
@@ -8641,12 +8694,19 @@ body:has(.job-detail) .jd-header-top {
 
 .cfg-side {
   position: sticky;
-  top: 12px;
+  /* Match main-content's 78px top padding so the pinned panel doesn't
+     slide under the fixed corner credits chip. */
+  top: 78px;
 }
 
+/* Sticky save panel — same frosted glass card recipe as the rest of the app. */
 .cfg-side-card {
-  background: var(--hair);
-  border-radius: 12px;
+  background: var(--glass);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid var(--gbrd);
+  box-shadow: var(--card-shadow);
+  border-radius: 16px;
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -8662,7 +8722,7 @@ body:has(.job-detail) .jd-header-top {
 
 .cfg-side-label { color: var(--text-muted); }
 .cfg-side-value { font-weight: 700; color: var(--text); }
-.cfg-side-value.dirty { color: #f59e0b; }
+.cfg-side-value.dirty { color: var(--warning); }
 
 .cfg-side-actions {
   display: flex;
@@ -8679,9 +8739,16 @@ body:has(.job-detail) .jd-header-top {
   margin: 0;
 }
 
+/* Top-level section cards — frosted glass like every other page's cards.
+   (The old translucent --hair fill stacked darker at each nesting level,
+   which is why the cards read as weird muddy blocks.) */
 .cfg-card {
-  background: var(--hair);
-  border-radius: 12px;
+  background: var(--glass);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid var(--gbrd);
+  box-shadow: var(--card-shadow);
+  border-radius: 16px;
   overflow: hidden;
 }
 
@@ -8699,7 +8766,7 @@ body:has(.job-detail) .jd-header-top {
   transition: background 0.15s;
 }
 
-.cfg-card-header:hover { background: var(--hair); }
+.cfg-card-header:hover { background: var(--soft); }
 
 .cfg-card-title-wrap {
   display: flex;
@@ -8737,9 +8804,17 @@ body:has(.job-detail) .jd-header-top {
   border-top: 1px solid var(--hair);
 }
 
-/* Nested cards inside a parent body */
+/* Nested section cards — bordered, not filled, so the tint doesn't
+   accumulate at each nesting depth (sections nest up to 3 levels).
+   The glass recipe stays on top-level cards only: stacked backdrop
+   blurs are expensive and read as murky patches. */
 .cfg-card-body .cfg-card {
-  background: rgba(0, 0, 0, 0.18);
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 1px solid var(--hair);
+  box-shadow: none;
+  border-radius: 12px;
 }
 
 .cfg-grid {
@@ -8763,16 +8838,19 @@ body:has(.job-detail) .jd-header-top {
   letter-spacing: 0.04em;
 }
 
+/* Same recipe as .cr-input (the app's canonical text input). */
 .cfg-field-input {
   width: 100%;
-  padding: 6px 10px;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--hair);
-  border-radius: 6px;
+  height: 34px;
+  padding: 0 10px;
+  background: var(--hair);
+  border: 1px solid transparent;
+  border-radius: 9px;
   color: var(--text);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   font-family: inherit;
+  transition: border-color 0.15s;
 }
 
 .cfg-field-input:focus {
@@ -8862,7 +8940,8 @@ body:has(.job-detail) .jd-header-top {
   left: 2px;
   width: 16px;
   height: 16px;
-  background: #fff;
+  background: var(--knob);
+  box-shadow: var(--knob-shadow);
   border-radius: 50%;
   transition: left 0.15s;
 }
@@ -8894,7 +8973,7 @@ body:has(.job-detail) .jd-header-top {
   background: var(--glass);
   border: 1px solid rgba(239, 68, 68, 0.4);
   border-radius: 14px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--card-shadow);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -8935,7 +9014,7 @@ body:has(.job-detail) .jd-header-top {
 .error-dialog-detail {
   margin: 0;
   padding: 10px 12px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--hair);
   border: 1px solid var(--hair);
   border-radius: 8px;
   font-size: 11px;
@@ -8944,7 +9023,7 @@ body:has(.job-detail) .jd-header-top {
   word-break: break-word;
   max-height: 220px;
   overflow-y: auto;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .error-dialog-actions {
@@ -8953,7 +9032,7 @@ body:has(.job-detail) .jd-header-top {
   gap: 8px;
   padding: 12px 18px;
   border-top: 1px solid var(--hair);
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--hair);
 }
 
 /* ── Toast notifications ────────────────────────── */
@@ -8974,7 +9053,9 @@ body:has(.job-detail) .jd-header-top {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  background: rgba(28, 30, 38, 0.96);
+  background: var(--glass);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
   border: 1px solid var(--glass-border);
   border-radius: 10px;
   color: var(--text-primary);
@@ -8983,11 +9064,11 @@ body:has(.job-detail) .jd-header-top {
   line-height: 1.35;
   text-align: left;
   cursor: pointer;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--card-shadow);
   animation: toast-slide-in 0.18s ease-out;
   max-width: 100%;
 }
-.toast:hover { background: var(--glass); }
+.toast:hover { background: var(--soft); }
 .toast--success { border-left: 3px solid var(--success); padding-left: 12px; }
 .toast--error   { border-left: 3px solid #ef4444; padding-left: 12px; color: var(--danger); }
 .toast--info    { border-left: 3px solid var(--viz-blue); padding-left: 12px; }
@@ -9003,11 +9084,16 @@ body:has(.job-detail) .jd-header-top {
 /* ── Accrued / total cost (detail-page meta-row chip) ──
    Sits inline among the other header labels (status, machines,
    id, date) so it never covers the frames grid or the dock. */
+/* Compact inline pill matching the sibling meta chips (status, machines,
+   id, date) — the old two-line block visually collided with the global
+   corner token chip sitting right above it. */
 .jd-live-cost {
   margin-left: auto;
-  text-align: right;
-  padding: 8px 16px;
-  border-radius: 14px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 3px 11px;
+  border-radius: 999px;
   background: var(--soft);
   border: 1px solid var(--line);
   flex-shrink: 0;
@@ -9015,7 +9101,6 @@ body:has(.job-detail) .jd-header-top {
   user-select: none;
 }
 .jd-live-cost-label {
-  display: block;
   font-family: var(--font-mono);
   font-size: 9px;
   font-weight: 700;
@@ -9033,11 +9118,9 @@ body:has(.job-detail) .jd-header-top {
   animation: emberpulse 1.6s infinite;
 }
 .jd-live-cost-value {
-  display: block;
-  margin-top: 2px;
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
   font-variant-numeric: tabular-nums;
   color: var(--text);
 }
@@ -9085,12 +9168,9 @@ body:has(.job-detail) .jd-header-top {
   color: var(--text-muted);
 }
 
-/* On the job-detail view the header already shows the balance
-   (``UserCreditsHeader``), so hide the global corner there to avoid
-   showing the same token balance twice.  Stays on every other page. */
-body:has(.job-detail) .user-credits-corner {
-  display: none;
-}
+/* The global corner chip is the single, consistent token-balance display
+   on every page — including job detail (the old per-page header pill was
+   removed; it duplicated this chip with a different style/position). */
 
 /* Corner chrome — credits chip + theme toggle pinned to the content's
    top-right, mirroring the prototype's top-bar controls. */

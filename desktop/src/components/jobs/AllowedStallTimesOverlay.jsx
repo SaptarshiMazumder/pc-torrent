@@ -111,14 +111,14 @@ export default function AllowedStallTimesOverlay({
         width: pos.width,
         zIndex: 1000,
         boxSizing: "border-box",
-        background: "rgba(255, 255, 255, 0.02)",
-        backdropFilter: "blur(6px)",
-        WebkitBackdropFilter: "blur(6px)",
+        background: "var(--glass)",
+        backdropFilter: "blur(16px) saturate(1.4)",
+        WebkitBackdropFilter: "blur(16px) saturate(1.4)",
         border: "1px solid var(--glass-border)",
         borderTop: "none",
         borderRadius: "0 0 14px 14px",
         padding: "14px 16px",
-        boxShadow: "0 8px 24px rgba(0, 0, 0, 0.25)",
+        boxShadow: "var(--card-shadow)",
         color: "var(--text-primary)",
         fontFamily: "inherit",
         fontSize: 12,
@@ -145,7 +145,7 @@ export default function AllowedStallTimesOverlay({
           right: 12,
           top: 0,
           height: 0,
-          borderTop: "1px dashed rgba(255, 255, 255, 0.06)",
+          borderTop: "1px dashed var(--hair)",
         }}
       />
 
@@ -228,7 +228,7 @@ export default function AllowedStallTimesOverlay({
                   justifyContent: "space-between",
                   gap: 8,
                   padding: "6px 10px",
-                  background: "rgba(255, 255, 255, 0.03)",
+                  background: "var(--hair)",
                   borderRadius: 6,
                   minWidth: 0,
                 }}

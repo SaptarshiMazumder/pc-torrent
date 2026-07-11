@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getFirebaseToken } from "../../services/api";
-import { getCachedFramePreview } from "../../services/frameCache";
+import { getCachedFramePreview, getResolvedFramePreview } from "../../services/frameCache";
 import { isPreviewableExtension } from "../../utils/jobUtils";
 import openexrIcon from "../../assets/openexr-icon-color.svg";
 
@@ -22,7 +22,10 @@ function isTiffFilename(name) {
 
 export default function FrameThumb({ file, backendUrl, className }) {
   const { t } = useTranslation(["myJobs", "common"]);
-  const [src, setSrc] = useState("");
+  const cacheKey = file?.filename ? `${file.job_id || "unknown"}/${file.filename}` : "";
+  // Seed from the session's resolved-URL map so a remounted gallery shows
+  // its tiles immediately instead of flashing blank placeholders.
+  const [src, setSrc] = useState(() => (cacheKey ? getResolvedFramePreview(cacheKey) : ""));
   const mountedRef = useRef(true);
   const previewable = isPreviewableExtension(file?.filename);
 

@@ -17,7 +17,6 @@ import HeavinessPanel from "./HeavinessPanel";
 import FailedChunksPanel from "./FailedChunksPanel";
 import PendingChunksPanel from "./PendingChunksPanel";
 import Loader from "../common/Loader";
-import UserCreditsHeader from "../profile/UserCreditsHeader";
 import { usePendingQueue } from "../../hooks/usePendingQueue";
 import { formatCredits } from "../../utils/creditsFormat";
 
@@ -38,7 +37,7 @@ function BigGauge({ pct, color, label }) {
   return (
     <div className="jd-gauge">
       <svg width={size} height={size}>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(180,175,220,0.08)" strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--hair)" strokeWidth={stroke} />
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color}
           strokeWidth={stroke} strokeLinecap="round"
           strokeDasharray={circ} strokeDashoffset={offset}
@@ -46,11 +45,11 @@ function BigGauge({ pct, color, label }) {
           style={{ transition: "stroke-dashoffset 0.5s ease", filter: `drop-shadow(0 0 6px ${color}44)` }}
         />
         <text x="50%" y="46%" textAnchor="middle" dominantBaseline="central"
-          fill="#eeedf5" fontSize="22" fontWeight="800" fontFamily="Inter,sans-serif">
+          fill="var(--text)" fontSize="22" fontWeight="800" fontFamily="var(--font-ui)">
           {pct != null ? `${pct}%` : "—"}
         </text>
         <text x="50%" y="66%" textAnchor="middle" dominantBaseline="central"
-          fill="#6e6893" fontSize="10" fontWeight="600">
+          fill="var(--muted)" fontSize="10" fontWeight="600">
           {label || "PERCENT"}
         </text>
       </svg>
@@ -100,7 +99,7 @@ function GroupGauge({ pct, color, label }) {
 function RenderGroupDetail({
   job, backendUrl, authToken, tasksLoading, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey,
-  onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
+  onDownload, onCancel, onToggleGallery, onOpenFrame, onOpenLatestFrame, onRemove,
   onRefresh, onRefreshFrames,
 }) {
   const { t } = useTranslation(["myJobs", "common"]);
@@ -222,10 +221,27 @@ function RenderGroupDetail({
 
           {latestOutputFile ? (
             <div className="jd-preview-card">
-              <div className="jd-preview-thumb">
+              {/* Clickable — opens the latest frame in the full-size viewer,
+                  same flow as clicking a tile in the frames gallery. */}
+              <button
+                type="button"
+                className="jd-preview-thumb jd-preview-thumb--click"
+                onClick={onOpenLatestFrame}
+                disabled={!onOpenLatestFrame || !!openingFrameKey}
+                title={latestOutputFile}
+                aria-label={t("detail.latestFrame")}
+              >
                 <JobThumbnail job={job} authToken={authToken} backendUrl={backendUrl} />
                 {!["done", "failed", "cancelled"].includes(job.status) && <div className="jd-preview-sweep" />}
-              </div>
+                <span className="jd-preview-open-hint" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 3h6v6" />
+                    <path d="M9 21H3v-6" />
+                    <path d="M21 3l-7 7" />
+                    <path d="M3 21l7-7" />
+                  </svg>
+                </span>
+              </button>
               <div className="jd-preview-meta">
                 <span className="jd-preview-name">{latestOutputFile}</span>
                 <span className="jd-preview-tag">{t("detail.latestFrame")}</span>
@@ -573,7 +589,7 @@ function SingleJobDetail({
 export default function JobDetailView({
   job, backendUrl, authToken, tasksLoading, downloadState, downloadingId, canceling,
   galleryOpen, galleryState, openingFrameKey, refreshing,
-  onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onRemove,
+  onBack, onDownload, onCancel, onToggleGallery, onOpenFrame, onOpenLatestFrame, onRemove,
   onRefresh, onRefreshFrames,
 }) {
   const { t } = useTranslation(["myJobs", "common"]);
@@ -631,9 +647,6 @@ export default function JobDetailView({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
             {refreshing ? t("common:actions.refreshing") : t("common:actions.refresh")}
           </button>
-          <div style={{ marginLeft: "auto" }}>
-            <UserCreditsHeader />
-          </div>
         </div>
 
         <div className="job-detail-hero">
@@ -692,7 +705,7 @@ export default function JobDetailView({
           downloadState={downloadState} downloadingId={downloadingId} canceling={canceling}
           galleryOpen={galleryOpen} galleryState={galleryState} openingFrameKey={openingFrameKey}
           onDownload={onDownload} onCancel={onCancel} onToggleGallery={onToggleGallery}
-          onOpenFrame={onOpenFrame} onRemove={onRemove}
+          onOpenFrame={onOpenFrame} onOpenLatestFrame={onOpenLatestFrame} onRemove={onRemove}
           onRefresh={onRefresh} onRefreshFrames={onRefreshFrames}
         />
       ) : (

@@ -26,6 +26,25 @@ function _limited(fn) {
 }
 // ──────────────────────────────────────────────────────────────────────────
 
+// ── In-memory layer over the disk cache ────────────────────────────────────
+// The disk cache alone still costs one Tauri IPC roundtrip per lookup, so
+// every remount of a thumbnail (list ↔ detail navigation, token refresh,
+// poll-driven re-renders) briefly flashed blank while awaiting it — and two
+// components asking for the same key concurrently double-fetched from the
+// network.  The promise map dedups in-flight work; the resolved map makes
+// repeat lookups synchronous for the session.
+const _inflight = new Map(); // cacheKey -> Promise<assetUrl>
+const _resolvedUrls = new Map(); // cacheKey -> assetUrl
+
+/**
+ * Synchronous lookup of an already-resolved preview URL for this session.
+ * Lets components seed their initial <img src> without a blank-frame flash;
+ * returns "" when the key hasn't been resolved yet.
+ */
+export function getResolvedFramePreview(cacheKey) {
+  return _resolvedUrls.get(cacheKey) || "";
+}
+
 /**
  * Returns a local asset:// URL for the cached JPEG preview of a frame.
  * On first call for a given key it fetches the remote preview URL, converts
@@ -36,7 +55,25 @@ function _limited(fn) {
  * @param {string} cacheKey   - Unique key for this frame, e.g. "{job_id}/{filename}"
  * @returns {Promise<string>} - asset:// URL suitable for <img src>
  */
-export async function getCachedFramePreview(previewUrl, cacheKey) {
+export function getCachedFramePreview(previewUrl, cacheKey) {
+  const resolved = _resolvedUrls.get(cacheKey);
+  if (resolved) return Promise.resolve(resolved);
+
+  const pending = _inflight.get(cacheKey);
+  if (pending) return pending;
+
+  const p = _loadFramePreview(previewUrl, cacheKey).then((url) => {
+    _resolvedUrls.set(cacheKey, url);
+    _inflight.delete(cacheKey);
+    return url;
+  });
+  // Failed loads must not poison the key — evict so a later call retries.
+  p.catch(() => _inflight.delete(cacheKey));
+  _inflight.set(cacheKey, p);
+  return p;
+}
+
+async function _loadFramePreview(previewUrl, cacheKey) {
   // Disk hit check runs OUTSIDE the limiter — it's a cheap IPC roundtrip
   // and gating it behind MAX_CONCURRENT meant a fully-cached gallery had
   // to serialize all its disk lookups behind the network throttle, even

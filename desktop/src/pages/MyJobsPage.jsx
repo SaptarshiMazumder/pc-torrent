@@ -266,6 +266,42 @@ export default function MyJobsPage({
     }
   }, [t]);
 
+  // Opens the job's LATEST rendered frame in the viewer (the preview card on
+  // the detail page).  The group DTO only carries the latest file's name —
+  // the viewer needs the file's `url` from the outputs listing, so resolve it
+  // against the already-fetched gallery files (or one outputs fetch).
+  const handleOpenLatestFrame = useCallback(async (job) => {
+    const id = jobKey(job);
+    const latestName = job?.latest_output_file
+      || (job?.tasks || []).map((t2) => t2?.latest_output_file).filter(Boolean).pop()
+      || null;
+    if (!id || !latestName) return;
+    // Open the viewer immediately in its loading state so the click has
+    // instant feedback while the outputs listing resolves.
+    setOpeningFrameKey(`${id}:latest`);
+    setFrameViewer({ title: latestName, loading: true, error: "", imageSrc: "", action: "" });
+    try {
+      let files = frameGalleries[id]?.files || [];
+      if (!files.length) {
+        const payload = await getRenderGroupOutputs(backendUrl, id);
+        files = Array.isArray(payload?.files) ? payload.files : [];
+      }
+      const latestJobId = job?.latest_output_job_id || null;
+      const match =
+        files.find((f) => f.filename === latestName && (!latestJobId || f.job_id === latestJobId))
+        || files.find((f) => f.filename === latestName);
+      if (!match) {
+        setFrameViewer({ title: latestName, loading: false, error: t("errors.loadFrameFailed"), imageSrc: "", action: "" });
+        return;
+      }
+      await handleOpenFrame(job, match);
+    } catch (error) {
+      setFrameViewer({ title: latestName, loading: false, error: error?.message || t("errors.loadFrameFailed"), imageSrc: "", action: "" });
+    } finally {
+      setOpeningFrameKey("");
+    }
+  }, [backendUrl, frameGalleries, handleOpenFrame, t]);
+
   const handleToggleFrameGallery = useCallback(
     (job) => {
       const id = jobKey(job);
@@ -427,6 +463,7 @@ const selectedJob = selectedJobId ? allJobs.find((j) => jobKey(j) === selectedJo
       onCancel: () => { void handleCancelRenderGroup(id); },
       onToggleGallery: () => handleToggleFrameGallery(job),
       onOpenFrame: (file) => { void handleOpenFrame(job, file); },
+      onOpenLatestFrame: () => { void handleOpenLatestFrame(job); },
       onRemove: async () => {
         try {
           await removeJob(id);

@@ -68,7 +68,7 @@ function CircleProgress({ pct, color, size = 48, stroke = 3.5 }) {
   return (
     <svg width={size} height={size} className="inst-ring">
       <circle cx={size / 2} cy={size / 2} r={r} fill="none"
-        stroke="rgba(255,255,255,0.04)" strokeWidth={stroke} />
+        stroke="var(--hair)" strokeWidth={stroke} />
       <circle cx={size / 2} cy={size / 2} r={r} fill="none"
         stroke={color} strokeWidth={stroke} strokeLinecap="round"
         strokeDasharray={circ} strokeDashoffset={offset}
@@ -76,7 +76,7 @@ function CircleProgress({ pct, color, size = 48, stroke = 3.5 }) {
         style={{ transition: "stroke-dashoffset 0.4s ease", filter: `drop-shadow(0 0 6px ${color}44)` }}
       />
       <text x="50%" y="50%" textAnchor="middle" dominantBaseline="central"
-        fill="#eaeaf1" fontSize="11" fontWeight="700" fontFamily="Inter, sans-serif">
+        fill="var(--text)" fontSize="11" fontWeight="700" fontFamily="var(--font-ui)">
         {pct}%
       </text>
     </svg>
@@ -211,17 +211,17 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
                 height: 22,
                 padding: 0,
                 borderRadius: "50%",
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: stallTimesOpen ? "rgba(255,255,255,0.08)" : "transparent",
-                color: stallTimesOpen ? "#eaeaf1" : "#9090a0",
+                border: "1px solid var(--hair)",
+                background: stallTimesOpen ? "var(--hair)" : "transparent",
+                color: stallTimesOpen ? "var(--text)" : "var(--muted)",
                 cursor: "pointer",
                 transition: "background 0.15s ease, color 0.15s ease",
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; e.currentTarget.style.color = "#eaeaf1"; }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--hair)"; e.currentTarget.style.color = "var(--text)"; }}
               onMouseLeave={(e) => {
                 if (!stallTimesOpen) {
                   e.currentTarget.style.background = "transparent";
-                  e.currentTarget.style.color = "#9090a0";
+                  e.currentTarget.style.color = "var(--muted)";
                 }
               }}
             >
@@ -257,9 +257,9 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
                 height: 22,
                 padding: 0,
                 borderRadius: "50%",
-                border: "1px solid rgba(255,255,255,0.12)",
+                border: "1px solid var(--hair)",
                 background: cancelling ? "rgba(239,68,68,0.25)" : "transparent",
-                color: "#ef4444",
+                color: "var(--danger)",
                 cursor: cancelling ? "default" : "pointer",
                 opacity: cancelling ? 0.6 : 1,
                 transition: "background 0.15s ease, border-color 0.15s ease",

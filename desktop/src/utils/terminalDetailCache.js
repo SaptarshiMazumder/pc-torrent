@@ -35,3 +35,16 @@ export function clearTerminalDetailFromCache(groupId) {
     // ignore
   }
 }
+
+// Remove every cached terminal detail (all groups). Called on a user change so
+// one account never reads another's cached job DTOs on a shared device.
+export function clearAllTerminalDetail() {
+  try {
+    for (let i = window.localStorage.length - 1; i >= 0; i--) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(KEY_PREFIX)) window.localStorage.removeItem(k);
+    }
+  } catch {
+    // ignore
+  }
+}

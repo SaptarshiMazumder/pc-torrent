@@ -70,6 +70,7 @@
     "failed": "失敗",
     "estimatedCost": "見積もりコスト",
     "latestFrame": "最新のレンダリング済みフレーム",
+    "noPreview": "プレビューなし",
     "stopRender": "レンダリングを停止",
     "stopping": "停止中...",
     "downloadAll": "すべてダウンロード",

@@ -151,3 +151,7 @@ Variants for `push-worker.sh`: `base-cycles`, `base-eevee`, `vast-cycles`, `vast
 - `config/cost_estimation` — LLM cost estimator settings.
 - `users/{uid}` — created lazily on first sign-in.
 - `allocation_cost_file_formulas` — LLM formula cache, built on demand.
+
+
+Bump desktop/src-tauri/tauri.conf.json version (e.g. 1.0.1 → 1.0.2), commit it.
+git tag desktop-v1.0.2 && git push origin desktop-v1.0.2

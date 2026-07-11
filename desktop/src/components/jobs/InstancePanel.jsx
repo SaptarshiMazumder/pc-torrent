@@ -46,6 +46,21 @@ function gpuShortName(name) {
   return name.replace(/nvidia\s+/i, "").replace(/geforce\s+/i, "").replace(/^Vast\s+/i, "").replace(/^Modal\s+/i, "").trim();
 }
 
+// GPU-tier accent colours for the machine badge (never orange — that's the app
+// accent). Maps a model name to an "r,g,b" colour; undefined when no known tier
+// (falls back to the neutral .gpu-badge styling).
+const GPU_TIERS = [
+  [/\b(4090|4080|ada)\b/i, "14, 165, 183"], // teal
+  [/\b(3090|3080|4070)\b/i, "63, 116, 255"], // blue
+  [/\ba(6000|5000|4000)\b/i, "139, 108, 240"], // violet
+];
+function gpuTierStyle(label) {
+  for (const [re, c] of GPU_TIERS) {
+    if (re.test(String(label || ""))) return { background: `rgba(${c}, 0.14)`, color: `rgb(${c})` };
+  }
+  return undefined;
+}
+
 function CircleProgress({ pct, color, size = 48, stroke = 3.5 }) {
   const r = (size - stroke) / 2;
   const circ = 2 * Math.PI * r;
@@ -179,7 +194,7 @@ function ActiveCard({ data, jobId, backendUrl, onCancel }) {
       </div>
       <div className="inst-active-right">
         <div className="inst-active-header">
-          <span className="inst-active-gpu">{data.gpuLabel}</span>
+          <span className="gpu-badge" style={gpuTierStyle(data.gpuLabel)}>{data.gpuLabel}</span>
           <span className="inst-active-pill" style={{ background: dot + "18", color: dot }}>{data.displayStatus}</span>
           <span style={{ marginLeft: "auto", display: "inline-flex" }}>
             <button
@@ -316,7 +331,7 @@ function FinishedRow({ data }) {
     <div className="inst-fin-row" style={{ "--inst-color": dot }}>
       <div className="inst-fin-main">
         <span className="inst-fin-dot" style={{ background: dot, boxShadow: `0 0 6px ${dot}55` }} />
-        <span className="inst-fin-gpu">{data.gpuLabel}</span>
+        <span className="gpu-badge" style={gpuTierStyle(data.gpuLabel)}>{data.gpuLabel}</span>
         <span className="inst-fin-pill" style={{ background: dot + "18", color: dot }}>{data.displayStatus}</span>
         {stallLabel && (
           <span

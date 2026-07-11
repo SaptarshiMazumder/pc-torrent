@@ -271,19 +271,20 @@ body::after {
      monitors). Width follows the art's aspect ratio and runs off the left
      edge — that region of the painting is empty paper, which the mask and the
      multiply blend remove anyway. */
-  background-size: auto min(86vh, 1060px);
+  background-size: auto min(74vh, 900px);
   /* Concentrate the art in the bottom-right; fully faded a little past the
-     centre of the screen on both axes. */
-  -webkit-mask-image: radial-gradient(118% 118% at 100% 100%, #000 0%, #000 18%, transparent 56%);
-          mask-image: radial-gradient(118% 118% at 100% 100%, #000 0%, #000 18%, transparent 56%);
+     centre of the screen on both axes. Kept a faint ambient wash so it never
+     competes with page content (matches the mock's subtle backdrop). */
+  -webkit-mask-image: radial-gradient(110% 110% at 100% 100%, #000 0%, #000 12%, transparent 52%);
+          mask-image: radial-gradient(110% 110% at 100% 100%, #000 0%, #000 12%, transparent 52%);
   mix-blend-mode: multiply;
-  opacity: 0.5;
+  opacity: 0.28;
 }
 
 [data-theme="dark"] body::after {
   filter: invert(1) hue-rotate(180deg) saturate(1.05);
   mix-blend-mode: screen;
-  opacity: 0.32;
+  opacity: 0.2;
 }
 
 /* App Layout */
@@ -6385,19 +6386,18 @@ body:has(.job-detail) .jd-header-top {
 
 .job-detail-hero {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 16px;
 }
 
 .job-detail-hero-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, var(--hair) 0%, rgba(63, 116, 255, 0.1) 100%);
-  border: 1px solid var(--hair);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--soft);
+  color: var(--th);
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
 }
 
@@ -6407,11 +6407,11 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .job-detail-title h2 {
-  font-size: 20px;
+  font-size: 26px;
   font-weight: 700;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   word-break: break-all;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.5px;
 }
 
 .job-detail-meta-row {
@@ -6634,33 +6634,34 @@ body:has(.job-detail) .jd-header-top {
 /* Cost drawer panel — summary row + per-task list. */
 .jd-cost-summary {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 12px 14px;
-  background: var(--hair);
-  border: 1px solid var(--hair);
-  border-radius: 10px;
+  flex-direction: row;
+  gap: 24px;
+  padding: 0 0 14px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--hair);
 }
 
 .jd-cost-summary-row {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
 }
 
 .jd-cost-summary-label {
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-muted);
+  color: var(--muted);
 }
 
 .jd-cost-summary-value {
-  font-size: 16px;
-  font-weight: 800;
-  color: var(--accent);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: var(--th);
   font-variant-numeric: tabular-nums;
 }
 
@@ -6676,40 +6677,31 @@ body:has(.job-detail) .jd-header-top {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 
 .jd-cost-item {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: 74px 1fr 62px 62px;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
-  background: var(--hair);
-  border: 1px solid var(--hair);
-  border-radius: 8px;
-  font-size: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--hair);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
-
-.jd-cost-item-est {
-  color: var(--text-muted) !important;
-  font-weight: 600 !important;
+.jd-cost-item:last-child {
+  border-bottom: none;
 }
 
 .jd-cost-item-range {
-  font-family: "Cascadia Code", "Fira Code", monospace;
-  font-weight: 700;
-  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
 .jd-cost-item-machine {
-  font-size: 10px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6717,10 +6709,17 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .jd-cost-item-value {
-  font-weight: 700;
-  color: var(--accent);
+  font-weight: 600;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  text-align: right;
+}
+
+.jd-cost-item-est {
+  color: var(--muted) !important;
+  font-weight: 400 !important;
+  text-align: right;
 }
 
 .jd-cost-empty {
@@ -6952,35 +6951,39 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .jd-stat-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
   background: var(--hair);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
   flex-shrink: 0;
 }
 
 .jd-stat-text {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .jd-stat-value {
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 700;
-  color: var(--text-primary);
+  letter-spacing: -0.4px;
+  color: var(--text);
   line-height: 1.2;
+  font-variant-numeric: tabular-nums;
 }
 
 .jd-stat-label {
-  font-size: 10px;
+  font-family: var(--font-mono);
+  font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-muted);
+  color: var(--muted);
+  margin-top: 1px;
 }
 
 /* -- Two-column detail grid (left summary | right activity) --
@@ -7108,6 +7111,92 @@ body:has(.job-detail) .jd-header-top {
   font-variant-numeric: tabular-nums;
 }
 
+/* -- Render-group progress gauge card: 108px SVG ring + frames/cost info -- */
+.jd-gauge-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.jd-ring {
+  position: relative;
+  flex-shrink: 0;
+}
+.jd-ring-center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+}
+.jd-ring-center b {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -1.5px;
+  font-variant-numeric: tabular-nums;
+}
+.jd-ring-center span {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-top: -2px;
+}
+.jd-gauge-info {
+  flex: 1;
+  min-width: 0;
+}
+.jd-gauge-frames-lbl {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.jd-gauge-frames-val {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  margin: 3px 0 12px;
+  font-variant-numeric: tabular-nums;
+}
+.jd-gauge-bar {
+  height: 9px;
+  background: var(--hair);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.jd-gauge-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.jd-gauge-cost {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hair);
+}
+.jd-gauge-cost-lbl {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.jd-gauge-cost-val {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
 /* -- 2x2 stat tile grid -- */
 .jd-stat-grid {
   display: grid;
@@ -7118,9 +7207,13 @@ body:has(.job-detail) .jd-header-top {
 .jd-stat-tile-card {
   display: flex;
   align-items: center;
-  padding: 12px 14px;
-  background: var(--hair);
-  border-radius: 12px;
+  padding: 14px 15px;
+  background: var(--glass);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid var(--gbrd);
+  box-shadow: var(--card-shadow);
+  border-radius: 16px;
   min-width: 0;
 }
 
@@ -7128,22 +7221,48 @@ body:has(.job-detail) .jd-header-top {
 .jd-stat-tile-card .jd-stat-text { min-width: 0; }
 .jd-stat-tile-card .jd-stat-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* Failed tile — danger-tinted icon + value */
+.jd-stat-tile-card--fail .jd-stat-icon {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+.jd-stat-tile-card--fail .jd-stat-value {
+  color: #ef4444;
+}
+
 /* -- Latest rendered preview card -- */
 .jd-preview-card {
   display: flex;
   flex-direction: column;
-  background: var(--hair);
-  border-radius: 12px;
+  background: var(--glass);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid var(--gbrd);
+  box-shadow: var(--card-shadow);
+  border-radius: 20px;
   overflow: hidden;
 }
 
 .jd-preview-thumb {
   position: relative;
-  aspect-ratio: 16 / 9;
+  height: 168px;
   width: 100%;
   background: var(--hair);
+  background-size: cover;
+  background-position: center;
   display: block;
   overflow: hidden;
+}
+
+.jd-preview-sweep {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(245, 114, 46, 0.85), transparent);
+  box-shadow: 0 0 12px rgba(245, 114, 46, 0.6);
+  animation: rendersweep 3.4s ease-in-out infinite;
+  pointer-events: none;
 }
 
 /* Pure-CSS bouncing-ball loader — shown in the left column slot when
@@ -7154,7 +7273,38 @@ body:has(.job-detail) .jd-header-top {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 60px 0 30px;
+  height: 168px;
+  background: var(--glass);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid var(--gbrd);
+  box-shadow: var(--card-shadow);
+  border-radius: 20px;
+}
+
+/* Terminal-with-no-frame preview: same card frame, neutral empty state (no
+   spinner — nothing will ever load). */
+.jd-preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 168px;
+  background: var(--glass);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid var(--gbrd);
+  box-shadow: var(--card-shadow);
+  border-radius: 20px;
+  color: var(--muted);
+}
+.jd-preview-empty span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .swapping-squares-spinner,
@@ -7234,15 +7384,15 @@ body:has(.job-detail) .jd-header-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border-top: 1px solid var(--hair);
+  gap: 10px;
+  padding: 12px 16px;
 }
 
 .jd-preview-name {
+  font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--text-primary);
-  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-weight: 600;
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7250,11 +7400,12 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .jd-preview-tag {
-  font-size: 10px;
+  font-family: var(--font-mono);
+  font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--accent);
+  color: var(--th);
   flex-shrink: 0;
 }
 
@@ -7375,7 +7526,21 @@ body:has(.job-detail) .jd-header-top {
 .jd-actions .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
+}
+
+/* Stop + Download are the primary pair — each takes half the row (reference). */
+.jd-actions .btn-danger,
+.jd-actions .btn-primary {
+  flex: 1;
+}
+
+/* Remove stays available but subtle so it doesn't compete with the pair. */
+.jd-actions .btn-secondary {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  opacity: 0.85;
 }
 
 /* Legacy compat */
@@ -7408,6 +7573,28 @@ body:has(.job-detail) .jd-header-top {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  background: var(--glass);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid var(--gbrd);
+  box-shadow: var(--card-shadow);
+  border-radius: 22px;
+  padding: 20px 22px;
+}
+
+/* Tier-coloured GPU badge (machine identity). Tier colour comes inline from
+   gpuTierStyle(); this is the neutral fallback + shared shape. */
+.gpu-badge {
+  display: inline-block;
+  width: fit-content;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: var(--hair);
+  color: var(--muted);
 }
 
 .inst-panel-header {
@@ -7435,14 +7622,15 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .inst-panel-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--text);
 }
 
 .inst-panel-count {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  background: var(--hair);
+  color: var(--muted);
   font-size: 10px;
   font-weight: 700;
   padding: 2px 7px;
@@ -7843,8 +8031,8 @@ body:has(.job-detail) .jd-header-top {
 
 .job-frame-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
 }
 
 .job-frame-groups {
@@ -7943,8 +8131,8 @@ body:has(.job-detail) .jd-header-top {
   position: relative;
   display: block;
   background: transparent;
-  border: none;
-  border-radius: 12px;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
   overflow: hidden;
   cursor: pointer;
   padding: 0;
@@ -8308,27 +8496,29 @@ body:has(.job-detail) .jd-header-top {
 
 .hp-section-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 8px 16px;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 18px;
 }
 
 .hp-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 0;
-  border-bottom: 1px dashed var(--hair);
+  flex-direction: column;
+  gap: 2px;
 }
 
 .hp-row-label {
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
   color: var(--muted);
 }
 
 .hp-row-value {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
@@ -8390,11 +8580,11 @@ body:has(.job-detail) .jd-header-top {
 }
 
 .hp-chip {
-  background: rgba(238, 90, 41, 0.12);
-  border: 1px solid rgba(238, 90, 41, 0.3);
-  color: var(--th);
+  background: var(--hair);
+  border: 1px solid var(--hair);
+  color: var(--text);
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: 8px;
   font-size: 11px;
   font-weight: 600;
 }
@@ -8814,29 +9004,42 @@ body:has(.job-detail) .jd-header-top {
    Sits inline among the other header labels (status, machines,
    id, date) so it never covers the frames grid or the dock. */
 .jd-live-cost {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: rgba(238, 90, 41, 0.10);
-  border: 1px solid rgba(238, 90, 41, 0.28);
+  margin-left: auto;
+  text-align: right;
+  padding: 8px 16px;
+  border-radius: 14px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
   cursor: default;
   user-select: none;
 }
 .jd-live-cost-label {
-  font-size: 10px;
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: var(--th);
+}
+.jd-live-cost-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--th);
+  margin-right: 5px;
+  animation: emberpulse 1.6s infinite;
 }
 .jd-live-cost-value {
-  font-size: 13px;
-  font-weight: 800;
+  display: block;
+  margin-top: 2px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
   font-variant-numeric: tabular-nums;
-  color: var(--accent);
-  line-height: 1.0;
+  color: var(--text);
 }
 
 .user-credits-header {

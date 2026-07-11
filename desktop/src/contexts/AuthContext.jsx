@@ -13,9 +13,14 @@ import {
 } from "firebase/auth";
 import { auth } from "../firebase/config";
 import { acquireGoogleIdToken, cancelGoogleSignIn } from "../services/googleAuth/googleIdTokenProvider";
+import { clearUserScopedCaches } from "../lib/clearUserScopedCaches";
 
 const AuthContext = createContext(null);
 const REMEMBER_ME_KEY = "pcrent_remember_me";
+// Last authenticated uid seen on this device. Used to detect a user change
+// (login / logout / account switch) and wipe the previous user's client caches,
+// while preserving the same user's caches across a plain reload.
+const LAST_UID_KEY = "pcrent_last_uid";
 
 function readRememberPreference() {
   try {
@@ -57,6 +62,21 @@ export function AuthProvider({ children }) {
       } catch {}
       if (cancelled) return;
       unsub = onAuthStateChanged(auth, (u) => {
+        // Detect a user change vs. the last uid seen on this device. On any
+        // change (incl. logout -> null), wipe the previous user's client-side
+        // caches BEFORE the new session reads anything, so one account never
+        // sees another's cached renders. A same-user reload matches and keeps
+        // its caches.
+        const nextUid = u?.uid ?? null;
+        let lastUid = null;
+        try { lastUid = localStorage.getItem(LAST_UID_KEY); } catch {}
+        if (nextUid !== lastUid) {
+          clearUserScopedCaches();
+          try {
+            if (nextUid) localStorage.setItem(LAST_UID_KEY, nextUid);
+            else localStorage.removeItem(LAST_UID_KEY);
+          } catch {}
+        }
         setUser(u);
         setLoading(false);
         // UserProfileProvider fetches /me when ``user`` becomes

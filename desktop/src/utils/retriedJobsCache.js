@@ -32,3 +32,13 @@ export function markJobRetried(jobId) {
     // polling" behavior, no correctness impact.
   }
 }
+
+// Drop the retried-jobs memory. Called on a user change so it never carries
+// across accounts on a shared device.
+export function clearRetriedJobs() {
+  try {
+    window.localStorage.removeItem(KEY);
+  } catch {
+    // ignore
+  }
+}

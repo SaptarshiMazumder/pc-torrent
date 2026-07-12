@@ -118,6 +118,20 @@ textarea {
   font-family: inherit;
 }
 
+/* Native control theming — make <select> option popups follow the theme.
+   Without color-scheme (and explicit option colours) the dark-theme dropdown
+   rendered a white popup with inherited light text = white-on-white. */
+:root { color-scheme: light; }
+[data-theme="dark"] { color-scheme: dark; }
+select option {
+  background-color: #ffffff;
+  color: #211a15;
+}
+[data-theme="dark"] select option {
+  background-color: #1a1a1a;
+  color: #f3ece4;
+}
+
 p,
 li {
   text-wrap: pretty;

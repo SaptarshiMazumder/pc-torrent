@@ -153,5 +153,8 @@ Variants for `push-worker.sh`: `base-cycles`, `base-eevee`, `vast-cycles`, `vast
 - `allocation_cost_file_formulas` — LLM formula cache, built on demand.
 
 
-Bump desktop/src-tauri/tauri.conf.json version (e.g. 1.0.1 → 1.0.2), commit it.
-git tag desktop-v1.0.2 && git push origin desktop-v1.0.2
+Your manual release flow (per env)
+Build the working installer: bash infra/scripts/desktop-build.sh dev → infra/dist/forge-dev-setup.exe.
+Upload it publicly: GitHub → Releases → Draft a new release → new tag (e.g. dev-v1.0.2) → drag in forge-dev-setup.exe → Publish. Copy the asset URL: https://github.com/SaptarshiMazumder/pc-torrent/releases/download/dev-v1.0.2/forge-dev-setup.exe
+Point the app at it: run that env's app as admin → Configuration → Version gate → set latest_url = that URL, min_version = the version you want to enforce → Save.
+Test: run an older build of that env → blocked → Download pulls your uploaded installer.

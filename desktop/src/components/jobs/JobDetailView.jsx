@@ -277,7 +277,7 @@ function RenderGroupDetail({
                 {isDownloading ? (downloadState?.progress || t("detail.downloading")) : job.status === "done" ? t("detail.downloadAll") : t("detail.downloadAvailable")}
               </button>
             )}
-            <button className="btn btn-secondary" onClick={onRemove}>{t("common:actions.remove")}</button>
+            <button className="btn btn-secondary jd-remove" onClick={onRemove} title={t("common:actions.remove")} aria-label={t("common:actions.remove")}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6" /><path d="M10 11v6M14 11v6" /></svg></button>
           </div>
         </div>
 
@@ -580,7 +580,7 @@ function SingleJobDetail({
             {downloadingId === id ? t("detail.downloading") : job.status === "done" ? t("detail.download") : t("detail.downloadAvailable")}
           </button>
         )}
-        <button className="btn btn-secondary" onClick={onRemove}>{t("common:actions.remove")}</button>
+        <button className="btn btn-secondary jd-remove" onClick={onRemove} title={t("common:actions.remove")} aria-label={t("common:actions.remove")}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6" /><path d="M10 11v6M14 11v6" /></svg></button>
       </div>
     </div>
   );

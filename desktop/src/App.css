@@ -6515,10 +6515,10 @@ body::after {
 .jd-dock {
   position: fixed;
   top: 50%;
-  /* Track the centered content column's right edge (same formula as
-     .app-corner-controls) so the dock stays visually attached to the page
-     content instead of drifting to the viewport edge on wide windows. */
-  right: max(16px, calc((100vw - var(--sidebar-w) - var(--content-max)) / 2));
+  /* Pinned to the viewport's right edge (16px gap = the runway the page
+     content already reserves via padding-right) so it sits at the edge on
+     wide windows instead of drifting inward with the content column. */
+  right: 16px;
   transform: translateY(-50%);
   z-index: 50;
   display: flex;
@@ -6536,10 +6536,10 @@ body::after {
   transition: right 0.22s ease-out;
 }
 
-/* Drawer open: never sit under the 380px drawer, but on wide windows keep
-   tracking the content edge if that already clears it. */
+/* Drawer open: shift left to sit just clear of the ~380px Instances drawer
+   (380 + 16px gap). */
 .jd-dock-shifted {
-  right: max(396px, calc((100vw - var(--sidebar-w) - var(--content-max)) / 2));
+  right: 396px;
 }
 
 .jd-dock-btn {
@@ -6596,14 +6596,17 @@ body::after {
   -webkit-backdrop-filter: blur(12px);
   border-left: 1px solid var(--hair);
   box-shadow: -8px 0 32px rgba(90, 55, 20, 0.16);
-}
-[data-theme="dark"] .jd-drawer-panel {
-  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.45);
+  /* Flex column so the header stays put and the body scrolls.  These MUST
+     live on the base rule (not the dark-theme override) or light mode won't
+     scroll — the panel isn't a flex column and the body can't shrink. */
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
   animation: jd-drawer-slide-in 0.22s ease-out;
+}
+[data-theme="dark"] .jd-drawer-panel {
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.45);
 }
 
 @keyframes jd-drawer-slide-in {
@@ -6646,6 +6649,7 @@ body::after {
 }
 
 .jd-drawer-panel-body {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -9186,16 +9190,13 @@ body::after {
    on every page — including job detail (the old per-page header pill was
    removed; it duplicated this chip with a different style/position). */
 
-/* Corner chrome — credits chip + theme toggle pinned to the content's
-   top-right, mirroring the prototype's top-bar controls. */
+/* Corner chrome — credits chip pinned to the bottom-right corner so it
+   stays clear of the important content along the top of every page. */
 .app-corner-controls {
   position: fixed;
-  top: 74px;
-  /* Align with the centered content's right edge (28px padding on narrow
-     screens; grows to sit inside the max-width column on wide ones). */
-  right: max(28px, calc((100vw - var(--sidebar-w) - var(--content-max)) / 2));
+  bottom: 22px;
+  right: 22px;
   z-index: 50;
-  /* keeps the credits chip centered on the page-title row */
   display: flex;
   align-items: center;
   gap: 9px;
@@ -9628,3 +9629,15 @@ body::after {
   font-size: 11px; color: var(--muted); margin-top: 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* Job-detail Remove -> compact trashcan icon button.  Was a text button that
+   cluttered the Stop / Download action row; now a square icon (same height)
+   that reads muted and turns danger-red on hover. */
+.jd-remove {
+  padding: 9px 11px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.jd-remove:hover:not(:disabled) { color: var(--danger); }

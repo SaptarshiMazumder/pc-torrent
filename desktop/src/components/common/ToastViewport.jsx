@@ -7,15 +7,15 @@ export default function ToastViewport() {
   if (!toasts.length) return null;
   return (
     <div className="toast-viewport" role="status" aria-live="polite">
-      {toasts.map((t) => (
+      {toasts.map((toast) => (
         <button
-          key={t.id}
+          key={toast.id}
           type="button"
-          className={`toast toast--${t.kind}`}
-          onClick={() => dismissToast(t.id)}
+          className={`toast toast--${toast.kind}`}
+          onClick={() => dismissToast(toast.id)}
           aria-label={t("actions.dismiss")}
         >
-          <span className="toast-message">{t.message}</span>
+          <span className="toast-message">{toast.message}</span>
         </button>
       ))}
     </div>

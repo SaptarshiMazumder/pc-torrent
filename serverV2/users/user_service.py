@@ -17,15 +17,30 @@ log = logging.getLogger(__name__)
 
 class UserService:
 
-    def __init__(self, get_credits_per_usd: Callable[[], float]) -> None:
-        # Live Firestore knob (matches the get_max_retries pattern): read on
-        # every call so admin edits to billing.credits_per_usd take effect
-        # without a redeploy.
+    def __init__(
+        self,
+        get_credits_per_usd: Callable[[], float],
+        get_signup_grant_credits: Callable[[], float],
+    ) -> None:
+        # Live Firestore knobs (match the get_max_retries pattern): read on
+        # every call so admin edits take effect without a redeploy.
         self._get_credits_per_usd = get_credits_per_usd
+        self._get_signup_grant_credits = get_signup_grant_credits
 
     @property
     def credits_per_usd(self) -> float:
         return float(self._get_credits_per_usd())
+
+    def signup_grant_credits(self) -> float:
+        """Credit grant for a newly created profile, read live from
+        ``config/user_config``.
+
+        A method (not a property) so the facade can hand it to
+        ``create_if_missing`` by reference -- the Firestore read is then
+        deferred to the actual creation branch and never fires for an
+        already-existing profile.
+        """
+        return float(self._get_signup_grant_credits())
 
     def compute_credit_debit(self, actual_cost_usd: float | None) -> float:
         """Return the credit amount to debit for a task's final cost.

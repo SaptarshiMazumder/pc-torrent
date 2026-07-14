@@ -112,6 +112,7 @@ from serverV2.allocation.allocation_engine_resolver import (
 from serverV2.config.render_config_repository import (
     RenderConfigRepository,
 )
+from serverV2.config.user_config_repository import UserConfigRepository
 from serverV2.config.render_config_redis_mirror import (
     RenderConfigRedisMirror,
 )
@@ -901,7 +902,15 @@ def build(
     # ``RenderOrchestrator`` facade needs the client at construction
     # time so terminal callbacks debit the user atomically.
     user_profile_repo = UserProfileRepository()
-    user_service = UserService(get_credits_per_usd=_get_credits_per_usd)
+    user_config_repo = UserConfigRepository()
+
+    def _get_signup_grant_credits() -> float:
+        return user_config_repo.get().signup_grant_credits
+
+    user_service = UserService(
+        get_credits_per_usd=_get_credits_per_usd,
+        get_signup_grant_credits=_get_signup_grant_credits,
+    )
     user_facade = UserFacade(
         repository=user_profile_repo,
         service=user_service,

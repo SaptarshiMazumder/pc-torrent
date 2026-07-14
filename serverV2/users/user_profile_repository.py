@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from firebase_admin import firestore
 
@@ -81,17 +81,23 @@ class UserProfileRepository:
         data = self.get(uid)
         return UserRole.from_value((data or {}).get("role"))
 
-    def create_if_missing(self, uid: str, email: str | None) -> dict[str, Any]:
+    def create_if_missing(
+        self, uid: str, email: str | None,
+        initial_credits_provider: Callable[[], float],
+    ) -> dict[str, Any]:
         existing = self.get(uid)
         if existing is not None:
             return existing
+        # Provider is invoked ONLY here, on the create branch -- an
+        # existing profile returns above, so the config/user_config read
+        # never fires for a returning user.
         ts = now_iso()
         profile = {
             "display_name": (email or "").split("@")[0] if email else "",
             "email": email or "",
             "tier": "free",
             "role": UserRole.USER.value,
-            "credits": 0.0,
+            "credits": initial_credits_provider(),
             "created_at": ts,
             "updated_at": ts,
         }

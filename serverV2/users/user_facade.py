@@ -34,7 +34,10 @@ class UserFacade:
     def get_profile(
         self, uid: str, email: str | None = None,
     ) -> dict[str, Any]:
-        return self._repository.create_if_missing(uid, email)
+        return self._repository.create_if_missing(
+            uid, email,
+            initial_credits_provider=self._service.signup_grant_credits,
+        )
 
     def update_profile(self, uid: str, updates: dict[str, Any]) -> None:
         self._repository.update(uid, updates)

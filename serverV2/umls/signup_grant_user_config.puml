@@ -1,0 +1,182 @@
+@startuml signup_grant_user_config
+title Signup grant — new-user profiles credited from config/user_config (dedicated repo)
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam classBackgroundColor #fafafa
+skinparam packageStyle rectangle
+skinparam linetype polyline
+
+legend top right
+  | <#fef3c7> | EXISTING (unchanged) |
+  | <#fde68a> | EXISTING (signature / body changes) |
+  | <#bbf7d0> | NEW |
+  | <#fecaca> | Firestore doc |
+endlegend
+
+' ===========================================================
+' FIRESTORE (collection: config)
+' ===========================================================
+package "Firestore  (collection: config)" <<Database>> #fecaca {
+
+  class "config/global\n<<existing doc — unchanged>>" as GlobalDoc #fef3c7 {
+    field json : string   ' whole render/allocation blob
+    --
+    Read via RenderConfigRepository.get()
+    Redis-mirrored (key config:render, 30s TTL)
+  }
+
+  class "config/user_config\n<<NEW doc>>" as UserConfigDoc #bbf7d0 {
+    signup_grant_credits : number   ' the ONLY source of the 20000
+    --
+    Read via UserConfigRepository.get()
+    DIRECT read — NO Redis mirror.
+    Field / doc absent -> 0.0  (NO grant, NO hard-coded default)
+    20000 lives ONLY here in Firestore — never in code.
+    => must be seeded for the grant to happen.
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/config
+'   No facade exists in this module — repositories ARE the
+'   public API (RenderConfigRepository is injected by type
+'   into 6+ consumers). UserConfigRepository follows suit.
+' ===========================================================
+package "serverV2/config" <<Frame>> #e0f2fe {
+
+  package "(existing — UNCHANGED)" <<Rectangle>> #fef3c7 {
+    class RenderConfigRepository {
+      + get() : RenderConfig     ' config/global, mirror-first — untouched
+      - _mirror : RenderConfigRedisMirror
+    }
+  }
+
+  package "(new — dedicated user-config repo)" <<Rectangle>> #bbf7d0 {
+
+    class UserConfigRepository {
+      + get() : UserConfig                        <<NEW>>
+        ' init_firebase(); read config/user_config DIRECT
+        ' snap.to_dict() -> _user_config(data)
+        ' NO Redis mirror — cold path, only caller is profile creation
+    }
+
+    class "UserConfig\n<<frozen dataclass>>" as UserConfig {
+      + signup_grant_credits : float
+    }
+
+    class "_user_config(d : dict) : UserConfig\n<<parser>>" as ParseUserConfig {
+      ' signup_grant_credits =
+      '   float(d["signup_grant_credits"]) if present else 0.0
+      ' NO hard-coded 20000, NO defensive fallback
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/bootstrap.py   (composition root)
+'   The ONLY place that touches UserConfigRepository.
+' ===========================================================
+package "serverV2/bootstrap.py" <<Frame>> #e0f2fe {
+
+  package "(existing — minor add)" <<Rectangle>> #fde68a {
+    class "bootstrap()" as Bootstrap {
+      ... existing knob closures (_get_credits_per_usd, ...) ...
+      --
+      user_config_repo = UserConfigRepository()          <<NEW>>
+      def _get_signup_grant_credits() -> float:          <<NEW>>
+        ' return user_config_repo.get().signup_grant_credits
+      --
+      user_service = UserService(                        <<CHANGED>>
+        get_credits_per_usd=_get_credits_per_usd,
+        get_signup_grant_credits=_get_signup_grant_credits)
+    }
+  }
+}
+
+' ===========================================================
+' MODULE: serverV2/users
+'   Depends ONLY on Callable[[], float] — never imports config.
+' ===========================================================
+package "serverV2/users" <<Frame>> #e0f2fe {
+
+  package "(existing — signature change)" <<Rectangle>> #fde68a {
+
+    class UserService {
+      + credits_per_usd : float          ' existing property
+      + signup_grant_credits() : float               <<NEW — method (thunk), not property>>
+        ' returns float(self._get_signup_grant_credits())
+        ' passed BY REFERENCE so the read is DEFERRED to create-time
+      --
+      - _get_credits_per_usd : ()->float
+      - _get_signup_grant_credits : ()->float        <<NEW — injected Callable, NOT a repo ref>>
+    }
+
+    class UserProfileRepository {
+      + get(uid) : dict?
+      + create_if_missing(uid, email, initial_credits_provider) : dict   <<SIGNATURE CHANGED>>
+        ' existing = get(uid)
+        ' if existing: return existing      <- provider NOT called, 0 config reads
+        ' credits = initial_credits_provider()   <- read fires HERE, create branch ONLY
+        ' set {..., "credits": credits}          (was hard-coded 0.0)
+      + update / record_spend / list_all / get_role   ' UNCHANGED
+    }
+  }
+
+  package "(existing — minor add)" <<Rectangle>> #fde68a {
+    class UserFacade {
+      + get_profile(uid, email) : dict               <<CHANGED body>>
+        ' return repo.create_if_missing(
+        '     uid, email,
+        '     initial_credits_provider = service.signup_grant_credits)
+      + update_profile / get_role / record_spend / list_profiles   ' UNCHANGED
+    }
+  }
+}
+
+' ===========================================================
+' Compile-time dependencies (who imports / holds whom)
+' ===========================================================
+Bootstrap --> UserConfigRepository : constructs (ONLY toucher of the repo)
+Bootstrap --> UserService : injects get_signup_grant_credits : Callable[[], float]
+UserConfigRepository --> UserConfigDoc : get()  [DIRECT, no mirror]
+UserConfigRepository ..> ParseUserConfig : builds
+ParseUserConfig ..> UserConfig : returns
+RenderConfigRepository --> GlobalDoc : get()  [mirror-first, unchanged]
+
+UserFacade --> UserService
+UserFacade --> UserProfileRepository
+
+' ===========================================================
+' Runtime create path — read fires ONLY on first-time creation
+'   (NOTE: NO users -> config edge. The users side calls a
+'    Callable; bootstrap bound that Callable to the repo.)
+' ===========================================================
+UserFacade --> UserProfileRepository : create_if_missing(uid, email, provider = service.signup_grant_credits)
+UserProfileRepository ..> UserService : provider()  ==  signup_grant_credits()   [create branch only]
+UserService ..> Bootstrap : invokes injected closure (which calls user_config_repo.get())
+
+' ===========================================================
+' Notes
+' ===========================================================
+note bottom of UserProfileRepository
+  Read is on demand, once, at REAL creation.
+  Existing profile short-circuits before the provider is
+  ever called — /me for returning users = ZERO reads.
+  Total config/user_config reads ~= number of signups.
+end note
+
+note right of UserService
+  Layer boundary held: serverV2/users has NO import of and
+  NO reference to UserConfigRepository. It holds a plain
+  Callable[[], float] — identical to get_credits_per_usd.
+  bootstrap (composition root) is the sole binder + toucher.
+end note
+
+note right of UserConfigRepository
+  Config module has no facade anywhere — repositories are its
+  public API by convention. Deliberately NO Redis mirror:
+  only caller is first-time creation (cold path).
+end note
+
+@enduml

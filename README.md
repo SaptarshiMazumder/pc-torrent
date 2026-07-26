@@ -1,6 +1,6 @@
-# PC Rent
 
-Peer-to-peer distributed rendering network. Providers share idle PCs; renters submit Blender jobs.
+
+# Peer-to-peer distributed rendering network. Providers share idle PCs; renters submit Blender jobs.
 
 ## Structure
 

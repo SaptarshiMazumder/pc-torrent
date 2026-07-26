@@ -1,4 +1,4 @@
-# Forge multi-env infra
+# Forge multi-env deploiyment
 
 Test env still runs off root `deploy.sh` / `push-worker.sh` / `serverV2/.env` — untouched. Everything below is for `dev` / `staging` / `prod`.
 

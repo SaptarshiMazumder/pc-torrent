@@ -1,0 +1,130 @@
+@startuml render_groups_layered_structure
+title Render Groups -- clean architecture layers (target)\nThe feature slice is only the middle rings (domain + application + ports).\nPresentation and Infrastructure are SHARED outer rings. jobs / allocation / fleets are PEERS reached through ports.\nEvery source dependency points INWARD toward the domain; outer rings IMPLEMENT inner ports (DIP).
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam packageStyle rectangle
+skinparam classBackgroundColor #fafafa
+skinparam linetype ortho
+skinparam nodesep 25
+skinparam ranksep 45
+
+' ===================== PRESENTATION (delivery ring, adapters IN) =====================
+package "PRESENTATION  --  shared delivery ring (adapters IN)" as PRES #c7d2fe {
+  class "routers/render_groups_router" as R_RG {
+    thin controllers only
+    create confirm cancel delete
+    list status outputs zip
+  }
+  class "routers/jobs_router + internal_router" as R_JOB {
+    worker callbacks
+    each maps to one use-case
+  }
+  class "presenters/render_group_presenter" as PRESENTER {
+    entity to response DTO
+  }
+  class "schemas" as SCHEMA {
+    request and response pydantic
+  }
+}
+
+' ===================== APPLICATION (use cases) =====================
+package "APPLICATION  --  render_groups use cases (orchestration)" as APP #d8f5d0 {
+  package "commands" as CMD #eafbe4 {
+    class CreateRenderGroup
+    class ConfirmUpload
+    class CancelGroup
+    class DeleteGroup
+  }
+  package "transitions" as TRN #eafbe4 {
+    class ReconcileGroupStatus
+    class HandleChunkSucceeded
+    class HandleChunkFailed
+    class RetryChunk
+  }
+  package "queries" as QRY #eafbe4 {
+    class GetGroupStatus
+    class ListGroups
+    class GetOutputs
+    class EstimateGroupCost
+  }
+}
+
+' ===================== DOMAIN (innermost, pure) =====================
+package "DOMAIN  --  render_groups (pure, no I/O)" as DOM #fef3c7 {
+  class "RenderGroup -- entity + invariants" as ENT
+  class "GroupStatusPolicy -- compute_group_status" as POLICY
+  class "TerminalCostRollup" as COST
+  class "core kernel -- RenderJob / JobCounts / GroupStatus" as KERNEL
+}
+
+' ===================== PORTS (owned by domain, implemented outward) =====================
+package "PORTS  --  owned inward, implemented outward" as PORTS #ede9fe {
+  interface IRenderGroupRepository
+  interface IOutputFrameReader
+  interface IJobReader
+  interface IAllocationPlanner
+  interface IFleetDispatcher
+  interface IStorage
+  interface IGroupStatusNotifier
+}
+
+' ===================== INFRASTRUCTURE (drivers, adapters OUT) =====================
+package "INFRASTRUCTURE  --  shared drivers (adapters OUT)" as INFRA #fecaca {
+  class "db/render_group_repository" as I_RGR
+  class "db/output_frame_repository" as I_OFR
+  class "storage/s3_storage" as I_S3
+  class "cache/redis_group_mirror" as I_REDIS
+}
+
+' ===================== PEER CONTEXTS =====================
+package "PEER CONTEXTS  --  own domain + application + ports" as PEERS #e5e7eb {
+  class "jobs" as P_JOB {
+    chunk lifecycle
+  }
+  class "allocation" as P_ALLOC {
+    planning cost queues
+  }
+  class "fleets" as P_FLEET {
+    Vast Modal community
+  }
+}
+
+' ---- dependency rule: source deps point INWARD (toward domain) ----
+PRES --> APP : calls use-cases
+APP --> DOM : applies rules
+APP --> PORTS : depends on abstractions
+PRESENTER ..> DOM : reads entity
+DOM ..> KERNEL
+
+' ---- DIP: outer rings IMPLEMENT inner ports (arrowhead at the interface) ----
+I_RGR ..|> IRenderGroupRepository
+I_OFR ..|> IOutputFrameReader
+I_S3 ..|> IStorage
+I_REDIS ..|> IGroupStatusNotifier
+P_JOB ..|> IJobReader
+P_ALLOC ..|> IAllocationPlanner
+P_FLEET ..|> IFleetDispatcher
+
+note as NROOT #eef2ff
+  bootstrap.py = composition root
+  ==
+  The ONE place concretes meet interfaces.
+  Binds each PORT to its adapter and injects
+  them into the use-cases. Nothing else names
+  a concrete type.
+end note
+
+note as NRULE #fff7ed
+  Why this is clean architecture
+  ==
+  * render_groups owns domain + application + ports ONLY.
+  * presentation + infrastructure are SHARED rings, not per-feature
+    (one DB serves everyone -- infra is not duplicated per slice).
+  * jobs / allocation / fleets are PEERS reached through ports
+    (like Inventory -> Products): referenced, never contained.
+  * Mock IAllocationPlanner + IJobReader and the whole confirm /
+    reconcile flow runs with no DB, no fleet, no HTTP.
+end note
+
+@enduml

@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicbarker/tauri/tauri-v2/crates/tauri-config-schema/schema.json",
   "productName": "Forge (dev)",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "identifier": "com.pcrent.desktop.dev",
   "build": {
     "frontendDist": "../dist",

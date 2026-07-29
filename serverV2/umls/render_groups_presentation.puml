@@ -1,0 +1,120 @@
+@startuml render_groups_presentation
+title Render Groups -- presentation / delivery surface\nFour kinds of source trigger group state; each should be a thin adapter over ONE use-case.\nGroup status is never set directly -- it is a ROLLUP recomputed at one chokepoint: ReconcileGroupStatus.
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam packageStyle rectangle
+skinparam classBackgroundColor #fafafa
+skinparam linetype ortho
+skinparam nodesep 40
+skinparam ranksep 70
+left to right direction
+
+' =================== SOURCES : who triggers group state ===================
+package "1 - User commands   (desktop app -> HTTP)" as USER #c7d2fe {
+  class "api/routers/render_groups.py" as RGR {
+    POST /render-groups/create
+    POST /render-groups/ID/confirm-upload
+    POST /render-groups/ID/cancel
+    POST /render-groups/cancel-all
+    DELETE /render-groups/ID
+    POST /render-groups/ID/multipart-upload/*
+  }
+  class "api/routers/jobs.py  (user)" as JRU {
+    POST /jobs/ID/retry
+  }
+}
+
+package "2 - Worker callbacks   (render machines -> HTTP)" as WORK #fde2c7 {
+  class "api/routers/jobs.py  (worker)" as JRW {
+    PUT  /jobs/ID/worker-start
+    PUT  /jobs/ID/status      (running or failed)
+    PUT  /jobs/ID/progress
+    POST /jobs/ID/register-outputs
+    PUT  /jobs/ID/heartbeat
+    PUT  /jobs/ID/telemetry
+    POST /jobs/ID/agent-failure
+  }
+}
+
+package "3 - System daemons   (in-process trigger, NOT http)" as SYS #fbcfe8 {
+  class "FleetMonitor tick" as MON {
+    detects JobCounts.is_complete
+    natural terminal -> reconcile
+  }
+  class "api/routers/internal.py" as INT {
+    POST /internal/orphan/ID
+    backup monitor -- dead heartbeat
+  }
+}
+
+package "4 - Queries   (reads, no state change)" as READ #d1fae5 {
+  class "render_groups.py  (read side)" as RGRr {
+    GET /render-groups           list
+    GET /render-groups/ID        + /status
+    GET /render-groups/ID/outputs
+    GET /render-groups/ID/download-zip
+    GET /render-groups/ID/cost/estimate
+    GET /render-groups/ID/pending-queue
+  }
+  class "api/routers/admin_dashboard.py" as ADM {
+    GET /render-groups/active
+    GET /jobs/active
+  }
+}
+
+' =================== USE CASES : the application boundary ===================
+package "Use Cases   (application layer)" as UC #d8f5d0 {
+  class "RenderGroupService" as SVC {
+    create()  confirm_upload()
+    cancel()  delete()
+    get_status()  list_with_status_page()
+    get_outputs()  download_all_as_zip()
+  }
+  class "JobService" as JSVC {
+    worker_start()  update_status()
+    update_progress()  register_outputs()
+    heartbeat()  retry()
+  }
+  class "Lifecycle = ReconcileGroupStatus\nthe ONE state-transition chokepoint" as LIFE {
+    reconcile_group_status()
+    write_terminal_snapshot()
+  }
+}
+
+' =================== adapter -> use-case ===================
+RGR  --> SVC   : command
+JRU  --> JSVC  : command
+JRW  --> JSVC  : chunk callback
+INT  --> JSVC  : fail chunk
+MON  --> LIFE  : reconcile
+RGRr --> SVC   : read
+ADM  --> SVC   : read
+
+' =================== the rollup : chunk change -> group reconcile ===================
+JSVC ..> LIFE  : chunk state changes;\nmonitor rolls up into group
+SVC  ..> LIFE  : cancel / terminal ->\nwrite snapshot
+
+note as NKEY #eef2ff
+  The reframe
+  ==
+  * "Presentation" is NOT "HTTP". The FleetMonitor tick is a
+    presentation-layer TRIGGER too -- a non-HTTP delivery
+    mechanism into the same use-case (ReconcileGroupStatus).
+  * No source sets group.status directly. A worker changes a
+    CHUNK; a daemon reconciles the group. State is derived and
+    eventually-consistent -- that is where the complexity lives.
+end note
+
+note as NLEAK #fee2e2
+  Presentation leaks to close (render groups)
+  ==
+  * POST /render-groups/cancel-all runs a raw SQL query INSIDE
+    the controller -> move to RenderGroupService.cancel_all_active().
+  * GET .../cost/estimate and .../pending-queue shape the
+    response DTO inline in the router -> use a presenter.
+  * jobs.py worker callbacks do multi-step orchestration inline
+    -> each should delegate to exactly one use-case.
+end note
+
+@enduml

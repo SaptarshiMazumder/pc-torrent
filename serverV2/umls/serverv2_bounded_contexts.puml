@@ -1,0 +1,141 @@
+@startuml serverv2_bounded_contexts
+title serverV2 -- three bounded contexts, each layered (modular monolith)\nRendering reaches Billing and Identity through PORTS (forward) and reacts to EVENTS (reverse).\nNo context imports another's domain. bootstrap.py is the ONLY place they are wired together.
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam packageStyle rectangle
+skinparam classBackgroundColor #fafafa
+skinparam linetype ortho
+skinparam nodesep 22
+skinparam ranksep 42
+
+' ============================================================
+' SHARED KERNEL -- everyone may depend on this; keep it TINY
+' ============================================================
+package "shared_kernel" as SK #e5e7eb {
+  class "UserId" as UID
+  class "Money / Credits" as MONEY
+  interface "IEventBus" as BUS
+}
+
+' ============================================================
+' RENDERING CONTEXT
+' ============================================================
+package "RENDERING context" as REN #dbeafe {
+  package "presentation" as REN_P #eff6ff {
+    class "routers/render_groups" as REN_R
+  }
+  package "application" as REN_A #eff6ff {
+    class "HandleChunkSucceeded\nReconcileGroupStatus" as REN_UC
+    class "OnCreditsExhausted\n(event handler)" as REN_EV
+    interface "ICreditsService  (port)" as PORT_CS
+    interface "IUserDirectory  (port)" as PORT_UD
+  }
+  package "domain" as REN_D #eff6ff {
+    class "RenderGroup\nChunkCostRule" as REN_ENT
+  }
+  package "infrastructure" as REN_I #eff6ff {
+    class "CreditsServiceAdapter" as ADPT_CS
+    class "UserDirectoryAdapter" as ADPT_UD
+    class "RenderGroupRepository" as REN_REPO
+  }
+}
+
+' ============================================================
+' BILLING CONTEXT
+' ============================================================
+package "BILLING context" as BIL #dcfce7 {
+  package "presentation" as BIL_P #f0fdf4 {
+    class "routers/credits" as BIL_R
+  }
+  package "application" as BIL_A #f0fdf4 {
+    class "ChargeCredits  (public)\nGrantCredits   GetBalance" as BIL_UC
+  }
+  package "domain" as BIL_D #f0fdf4 {
+    class "CreditBalance\nUsdToCreditsRule" as BIL_ENT
+    class "CreditsExhausted\n(domain event)" as BIL_EVT
+  }
+  package "infrastructure" as BIL_I #f0fdf4 {
+    class "LedgerRepository" as BIL_REPO
+  }
+}
+
+' ============================================================
+' IDENTITY CONTEXT
+' ============================================================
+package "IDENTITY context" as IDN #fef9c3 {
+  package "presentation" as IDN_P #fefce8 {
+    class "routers/users" as IDN_R
+  }
+  package "application" as IDN_A #fefce8 {
+    class "GetUserProfile  (public)\nRegisterUser" as IDN_UC
+  }
+  package "domain" as IDN_D #fefce8 {
+    class "User" as IDN_ENT
+  }
+  package "infrastructure" as IDN_I #fefce8 {
+    class "UserRepository" as IDN_REPO
+  }
+}
+
+' ============================================================
+' COMPOSITION ROOT
+' ============================================================
+class "bootstrap.py\ncomposition root" as BOOT #ffffff
+
+' ---------- INSIDE rendering : normal layered deps, all inward ----------
+REN_R --> REN_UC
+REN_UC --> REN_ENT
+REN_UC --> PORT_CS : (1) charge per tick
+REN_UC --> PORT_UD
+ADPT_CS ..|> PORT_CS : (2) implements
+ADPT_UD ..|> PORT_UD
+REN_REPO ..> REN_ENT
+
+' ---------- INSIDE billing / identity : layered deps ----------
+BIL_R --> BIL_UC
+BIL_UC --> BIL_ENT
+BIL_REPO ..> BIL_ENT
+IDN_R --> IDN_UC
+IDN_UC --> IDN_ENT
+IDN_REPO ..> IDN_ENT
+
+' ---------- CROSS-CONTEXT : FORWARD  (rendering -> billing / identity) ----------
+ADPT_CS --> BIL_UC : (3) calls billing PUBLIC use-case
+ADPT_UD --> IDN_UC : calls identity PUBLIC use-case
+
+' ---------- CROSS-CONTEXT : REVERSE  (billing -> rendering) via event, NO import ----------
+BIL_EVT ..> BUS : (4) publish CreditsExhausted
+BUS ..> REN_EV : (5) deliver
+REN_EV --> REN_UC : (6) rendering cancels itself
+
+' ---------- shared kernel usage ----------
+REN_ENT ..> UID
+BIL_ENT ..> UID
+BIL_ENT ..> MONEY
+
+' ---------- wiring (composition root) ----------
+BOOT ..> ADPT_CS : binds port to adapter
+BOOT ..> ADPT_UD
+
+note as NFLOW #eef2ff
+  Cross-context communication -- the whole story
+  ==
+  FORWARD  (rendering needs billing) = a synchronous PORT call:
+  (1) a render use-case calls its OWN port, ICreditsService.charge
+  (2) an adapter in rendering.infrastructure implements that port
+  (3) the adapter calls billing's PUBLIC application use-case (ChargeCredits)
+      -- never billing's domain or tables
+  Identity works the same way through IUserDirectory.
+
+  REVERSE  (billing affects rendering) = a decoupled EVENT:
+  (4) billing publishes CreditsExhausted on the shared IEventBus
+  (5) the bus delivers it to a rendering event-handler
+  (6) rendering cancels the group using its OWN use-case
+      -- billing never imports or calls rendering
+
+  So the graph is ACYCLIC: forward = port, reverse = event.
+  bootstrap.py is the ONLY place a port meets a concrete adapter.
+end note
+
+@enduml

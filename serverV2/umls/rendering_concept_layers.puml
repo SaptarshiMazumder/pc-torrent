@@ -1,0 +1,88 @@
+@startuml rendering_concept_layers
+title rendering context -- layer-first, CONCEPT as the separator inside each layer\nThe SAME four concepts (render_group, job, allocation, fleet) appear in every layer -- trace any one straight down.\nOne bounded context; concepts collaborate INSIDE it. Only identity + billing are separate contexts, reached via ports.
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam packageStyle rectangle
+skinparam classBackgroundColor #fafafa
+skinparam linetype ortho
+skinparam nodesep 18
+skinparam ranksep 42
+
+package "serverV2" as SV #f7f7f7 {
+
+  package "rendering   (render-pipeline context)" as REN #ffffff {
+
+    package "domain" as DOM #fef3c7 {
+      class "render_group\ngroup_status_policy\nterminal_cost_rollup\ninvariants" as D_RG
+      class "job\njob_counts\nretry_policy\nchunk_actual_cost" as D_JOB
+      class "allocation\ntiers\ncomposite_scorer\nanalyzers" as D_ALLOC
+      class "fleet\nstrategy_rules\nfleet_capability" as D_FLEET
+    }
+
+    package "application" as APP #d8f5d0 {
+      class "render_group\ncreate confirm_upload cancel delete\nreconcile queries" as A_RG
+      class "job\nworker_start status progress outputs\nsuccess failure retry handlers" as A_JOB
+      class "allocation\nplan submit estimate_cost\npending dispatch queues" as A_ALLOC
+      class "fleet\ndispatch monitor_tick\ncancel_at_fleet" as A_FLEET
+      class "ports\nEXTERNAL edges only\nIUserService  ICreditsService" as A_PORTS #ede9fe
+    }
+
+    package "presentation" as PRES #dbeafe {
+      class "render_group\nrouters + presenters" as P_RG
+      class "job\nworker-callback routers" as P_JOB
+      class "allocation\nmachines + pending-queue routers" as P_ALLOC
+      class "fleet\ncommunity + docker + instance routers" as P_FLEET
+    }
+
+    package "infrastructure" as INFRA #fee2e2 {
+      class "render_group\nRenderGroupRepository" as I_RG
+      class "job\nJob Repo · InProgress · OutputFrame · Telemetry" as I_JOB
+      class "allocation\nPending/Dispatch repos · Machine · AllocationClient" as I_ALLOC
+      class "fleet\nFleetRegistry · Vast/Modal/community clients" as I_FLEET
+    }
+
+    class "bootstrap.py\none build per concept, composed" as BOOT #eef2ff
+  }
+
+  package "identity   (context)" as IDN #e5e7eb {
+    class "users\nprofile · auth · signup" as U_USERS
+  }
+
+  package "billing   (context)" as BIL #e5e7eb {
+    class "credits\nledger · charge · grant · balance" as B_CREDITS
+  }
+
+  package "core   (shared kernel)" as CORE #e5e7eb {
+    class "RenderGroup · RenderJob\nGroupStatusResult · enums" as KERNEL
+  }
+}
+
+' ---- external cross-context edges (the only ports that leave rendering) ----
+A_PORTS --> U_USERS : IUserService
+A_PORTS --> B_CREDITS : ICreditsService
+
+' ---- everyone depends inward on the shared kernel ----
+DOM ..> CORE
+
+note as NTRACE #eef2ff
+  Concept traceability
+  ==
+  Every layer is split by the SAME four concepts, colour-matched by layer.
+  Read a column top-to-bottom to see one concept whole:
+  render_group  domain -> application -> presentation -> infrastructure.
+end note
+
+note as NRULES #fff7ed
+  The rules this encodes
+  ==
+  * Layers depend INWARD: presentation / infrastructure -> application -> domain.
+  * job / allocation / fleet are concepts INSIDE this context -- they
+    collaborate directly, NOT through cross-context ports.
+  * Each concept co-locates its own repository interface at the infra
+    boundary; application/ports/ holds ONLY the external edges.
+  * Only identity + billing are separate contexts (their own 4 layers),
+    reached via IUserService / ICreditsService and, in reverse, events.
+end note
+
+@enduml

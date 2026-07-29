@@ -1,0 +1,119 @@
+@startuml reconcile_group_status_flow
+title reconcile_group_status -- functional flow, grouped by REAL folders under serverV2/\nEvery box is a directory; nesting is the path to the serverV2 root. Solid = runtime flow, dashed = implements (DIP).\nSame FUNCTION as serverV2 RenderLifecycle.reconcile_group_status -- without the god-class, closures, or globals.
+
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam packageStyle rectangle
+skinparam classBackgroundColor #fafafa
+skinparam linetype ortho
+skinparam nodesep 22
+skinparam ranksep 55
+left to right direction
+
+package "serverV2" as SV #f7f7f7 {
+
+  package "rendering" as REN #ffffff {
+
+    package "presentation" as PRES #dbeafe {
+      package "routers" as ROUT #c7d2fe {
+        class "render_groups_router\nworker callback controller" as ROUTER
+      }
+    }
+
+    package "application" as APP #ecfdf3 {
+      package "callbacks" as CB #d8f5d0 {
+        class "SuccessHandler\nexecute(job_id)" as SUCC
+        class "FailureHandler\nexecute(job_id, error)" as FAIL
+      }
+      package "orchestration" as ORCH #d8f5d0 {
+        class "ReconcileRenderGroupStatus\nexecute(group_id)" as REC {
+          1 load group + chunk statuses
+          2 load rendered count + in-flight allocation
+          3 decide via compute_group_status
+          4 persist status only if it changed
+          5 on terminal, freeze snapshot
+          6 notify group changed
+        }
+      }
+      package "ports" as PORTS #ede9fe {
+        interface "IRenderGroupRepository" as P_GRP {
+          get_by_id
+          update_status
+          write_terminal_snapshot
+        }
+        interface "IJobRepository" as P_JOB {
+          get_by_group
+        }
+        interface "IOutputFrameRepository" as P_OUT {
+          count_for_group
+          preview_for_group
+        }
+        interface "IAllocationService" as P_ALLOC {
+          has_work_in_flight
+        }
+        interface "IGroupStatusGateway" as P_NOTIF {
+          group_changed
+        }
+      }
+    }
+
+    package "domain" as DOM #fef3c7 {
+      class "group_status_policy\ncompute_group_status" as POLICY
+      class "terminal_cost_rollup\nroll_up_terminal_cost" as COST
+    }
+
+    package "infrastructure" as INFRA #fee2e2 {
+      package "repositories" as REPO #fecaca {
+        class "RenderGroupRepository" as I_GRP
+        class "JobRepository" as I_JOB
+        class "OutputFrameRepository" as I_OUT
+      }
+      package "services" as SVC #fecaca {
+        class "AllocationServiceAdapter" as I_ALLOC
+      }
+      package "gateways" as GW #fecaca {
+        class "GroupStatusGateway" as I_NOTIF
+      }
+    }
+
+    package "bootstrap.py" as BOOT #eef2ff {
+      class "build_rendering" as BUILD
+    }
+
+  }
+
+  package "fleets   (peer concern)" as FLEETS #e5e7eb {
+    class "fleet monitor tick\n+ audit sweep daemon" as MON
+  }
+
+}
+
+' ---- runtime flow (solid) ----
+MON --> SUCC : chunk complete
+MON --> FAIL : chunk failed
+MON --> REC : running / audit
+ROUTER --> FAIL : agent-failure / orphan
+SUCC --> REC : reconcile
+FAIL --> REC : reconcile (gated)
+REC --> POLICY : step 3
+REC --> COST : step 5
+REC --> P_GRP : load / persist / snapshot
+REC --> P_JOB : load chunk states
+REC --> P_OUT : rendered count + preview
+REC --> P_ALLOC : in-flight guard
+REC --> P_NOTIF : notify
+
+' ---- implements (DIP, dashed) ----
+I_GRP ..|> P_GRP
+I_JOB ..|> P_JOB
+I_OUT ..|> P_OUT
+I_ALLOC ..|> P_ALLOC
+I_NOTIF ..|> P_NOTIF
+
+note bottom of BOOT #eef2ff
+  build_rendering constructs every box in rendering/ ONCE
+  and injects the ports into the use-cases by constructor --
+  the single place concretes meet interfaces.
+end note
+
+@enduml
